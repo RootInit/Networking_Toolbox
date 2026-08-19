@@ -1,0 +1,220 @@
+{
+  "Topology": [
+    {
+      "DeviceIP": "10.55.1.1",
+      "Hostname": "CORE-SW-01.local",
+      "JunosVersion": "21.4R3-S4.18",
+      "Gateway": "10.55.0.1",
+      "StackMembers": [
+        {
+          "FPC": "0",
+          "Model": "ex4600-40f",
+          "Serial": "SYN99887766",
+          "Role": "Standalone"
+        }
+      ],
+      "Neighbors": [
+        {
+          "LocalPort": "xe-0/0/0",
+          "RemotePort": "ge-0/2/0",
+          "Hostname": "ACCESS-SW-01.local",
+          "MacAddress": "02:11:22:33:44:55",
+          "ManagementIP": "10.55.2.1",
+          "Description": "Juniper Networks, Inc. ex3400-24p"
+        },
+        {
+          "LocalPort": "xe-0/0/1",
+          "RemotePort": "ge-0/2/0",
+          "Hostname": "ACCESS-SW-02.local",
+          "MacAddress": "02:11:22:33:44:66",
+          "ManagementIP": "10.55.2.2",
+          "Description": "Juniper Networks, Inc. ex3400-48p"
+        }
+      ],
+      "Clients": [],
+      "Interfaces": [
+        {
+          "Port": "xe-0/0/0",
+          "Admin": "up",
+          "Link": "up",
+          "Desc": "TRUNK to ACCESS-SW-01",
+          "STP": "FWD",
+          "PoE": "not-applicable"
+        },
+        {
+          "Port": "xe-0/0/1",
+          "Admin": "up",
+          "Link": "up",
+          "Desc": "TRUNK to ACCESS-SW-02",
+          "STP": "FWD",
+          "PoE": "not-applicable"
+        }
+      ]
+    },
+    {
+      "DeviceIP": "10.55.2.1",
+      "Hostname": "ACCESS-SW-01.local",
+      "JunosVersion": "22.4R3.25",
+      "Gateway": "10.55.1.1",
+      "StackMembers": [
+        {
+          "FPC": "0",
+          "Model": "ex3400-24p",
+          "Serial": "SYN11223344",
+          "Role": "Standalone"
+        }
+      ],
+      "Neighbors": [
+        {
+          "LocalPort": "ge-0/2/0",
+          "RemotePort": "xe-0/0/0",
+          "Hostname": "CORE-SW-01.local",
+          "MacAddress": "02:AA:BB:CC:DD:EE",
+          "ManagementIP": "10.55.1.1",
+          "Description": "Juniper Networks, Inc. ex4600-40f"
+        }
+      ],
+      "Clients": [
+        {
+          "IP": "10.66.10.15",
+          "MAC": "00:1a:2b:3c:4d:5e",
+          "Port": "ge-0/0/5.0",
+          "PortDesc": "WORKSTATION-A",
+          "VLAN_Name": "VLAN_USERS",
+          "VLAN_Tag": "110",
+          "Type": "Dynamic",
+          "Dot1x_User": "host/WS-1122.test.local",
+          "Dot1x_State": "Authenticated"
+        },
+        {
+          "IP": "10.66.10.16",
+          "MAC": "00:1a:2b:3c:4d:5f",
+          "Port": "ge-0/0/6.0",
+          "PortDesc": "WORKSTATION-B",
+          "VLAN_Name": "VLAN_USERS",
+          "VLAN_Tag": "110",
+          "Type": "Dynamic",
+          "Dot1x_User": "host/WS-3344.test.local",
+          "Dot1x_State": "Authenticated"
+        },
+        {
+          "IP": "10.66.20.50",
+          "MAC": "aa:bb:cc:dd:ee:11",
+          "Port": "ge-0/0/12.0",
+          "PortDesc": "NETWORK-PRINTER",
+          "VLAN_Name": "VLAN_PRINTERS",
+          "VLAN_Tag": "198",
+          "Type": "Dynamic",
+          "Dot1x_User": "Unknown",
+          "Dot1x_State": "Unknown"
+        }
+      ],
+      "Interfaces": [
+        {
+          "Port": "ge-0/0/5",
+          "Admin": "up",
+          "Link": "up",
+          "Desc": "WORKSTATION-A",
+          "STP": "FWD",
+          "PoE": "OFF (0.0W)"
+        },
+        {
+          "Port": "ge-0/0/12",
+          "Admin": "up",
+          "Link": "up",
+          "Desc": "NETWORK-PRINTER",
+          "STP": "FWD",
+          "PoE": "OFF (0.0W)"
+        },
+        {
+          "Port": "ge-0/2/0",
+          "Admin": "up",
+          "Link": "up",
+          "Desc": "TRUNK to CORE-SW-01",
+          "STP": "ROOT",
+          "PoE": "not-applicable"
+        }
+      ]
+    },
+    {
+      "DeviceIP": "10.55.2.2",
+      "Hostname": "ACCESS-SW-02.local",
+      "JunosVersion": "22.4R3.25",
+      "Gateway": "10.55.1.1",
+      "StackMembers": [
+        {
+          "FPC": "0",
+          "Model": "ex3400-48p",
+          "Serial": "SYN55667788",
+          "Role": "Master"
+        },
+        {
+          "FPC": "1",
+          "Model": "ex3400-48p",
+          "Serial": "SYN55667789",
+          "Role": "Backup"
+        }
+      ],
+      "Neighbors": [
+        {
+          "LocalPort": "ge-0/2/0",
+          "RemotePort": "xe-0/0/1",
+          "Hostname": "CORE-SW-01.local",
+          "MacAddress": "02:AA:BB:CC:DD:EE",
+          "ManagementIP": "10.55.1.1",
+          "Description": "Juniper Networks, Inc. ex4600-40f"
+        }
+      ],
+      "Clients": [
+        {
+          "IP": "10.66.10.22",
+          "MAC": "00:11:22:33:44:aa",
+          "Port": "ge-1/0/15.0",
+          "PortDesc": "WORKSTATION-C",
+          "VLAN_Name": "VLAN_USERS",
+          "VLAN_Tag": "110",
+          "Type": "Dynamic",
+          "Dot1x_User": "host/WS-5566.test.local",
+          "Dot1x_State": "Authenticated"
+        },
+        {
+          "IP": "10.66.30.100",
+          "MAC": "cc:dd:ee:ff:11:22",
+          "Port": "ge-0/0/44.0",
+          "PortDesc": "AP-LOBBY",
+          "VLAN_Name": "VLAN_WIFI",
+          "VLAN_Tag": "300",
+          "Type": "Dynamic",
+          "Dot1x_User": "Unknown",
+          "Dot1x_State": "Unknown"
+        }
+      ],
+      "Interfaces": [
+        {
+          "Port": "ge-1/0/15",
+          "Admin": "up",
+          "Link": "up",
+          "Desc": "WORKSTATION-C",
+          "STP": "FWD",
+          "PoE": "OFF (0.0W)"
+        },
+        {
+          "Port": "ge-0/0/44",
+          "Admin": "up",
+          "Link": "up",
+          "Desc": "AP-LOBBY",
+          "STP": "FWD",
+          "PoE": "ON (15.4W)"
+        },
+        {
+          "Port": "ge-0/2/0",
+          "Admin": "up",
+          "Link": "up",
+          "Desc": "TRUNK to CORE-SW-01",
+          "STP": "ROOT",
+          "PoE": "not-applicable"
+        }
+      ]
+    }
+  ]
+}
