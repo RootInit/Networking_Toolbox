@@ -1,3 +1,6 @@
+import { computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors } from './graph-layout.js';
+import { computeLayout } from './elk-layout.js';
+
 /**
  * Global Error Catcher
  */
@@ -22,6 +25,26 @@ var allVlans = new Map();
 var currentSelectedNodeData = null;
 var searchHighlightQuery = "";
 var physicsEnabled = true;
+
+// Deterministic layout state (see graph-layout.js / elk-layout.js).
+var allNodeMeta = new Map();   // id -> {label, shape, isStack, vlanCache, scanned}
+var allEdges = [];             // {from, to}[]
+var graphRoot = null;
+var primaryTree = { parentOf: new Map(), childrenOf: new Map(), secondaryEdges: [] };
+var expandedNodes = new Set();
+var clusterThreshold = 8;
+
+// CDP/headless-browser verification needs to inspect internal state, but ES module
+// top-level vars aren't exposed on window the way classic-script globals were.
+window.__debug = {
+    get nodesDataset() { return nodesDataset; },
+    get edgesDataset() { return edgesDataset; },
+    get network() { return network; },
+    get expandedNodes() { return expandedNodes; },
+    get graphRoot() { return graphRoot; },
+    get primaryTree() { return primaryTree; },
+    get clusterThreshold() { return clusterThreshold; },
+};
 
 // Ensure Vis.js is ready before declaring DataSets
 document.addEventListener("DOMContentLoaded", function() {
@@ -121,11 +144,11 @@ window.forceLoadFile = function() {
     reader.onload = function(e) {
         window.showProgress("Processing Enterprise Topology...", 100);
         
-        setTimeout(function() {
+        setTimeout(async function() {
             try {
                 var data = JSON.parse(e.target.result);
                 if (!data.Topology) throw new Error("Missing 'Topology' array in JSON.");
-                
+
                 globalTopologyData = data.Topology;
 
                 // Clients arrive pre-correlated (MAC table + cross-device ARP enrichment
@@ -133,8 +156,8 @@ window.forceLoadFile = function() {
                 globalTopologyData.forEach(device => { device.TrueClients = device.Clients || []; });
 
                 window.extractVlans();
-                window.buildSwitchMap();
-                
+                await window.buildSwitchMap();
+
                 document.getElementById('physicsToggle').style.display = 'block';
                 document.getElementById('legend-group').style.display = 'block';
                 window.setStatus(`Success! Mapped ${globalTopologyData.length} nodes.`, "green");
@@ -173,12 +196,11 @@ window.extractVlans = function() {
     }
 };
 
-// 2. THE REPULSION GRAPH ENGINE
-window.buildSwitchMap = function() {
-    window.hideProgress(); 
-
-    nodesDataset.clear(); edgesDataset.clear();
-    var addedNodes = new Set(); var addedEdges = new Set();
+// 2. Topology data -> node/edge metadata (positions are computed separately by renderVisibleGraph)
+window.buildSwitchMap = async function() {
+    allNodeMeta.clear();
+    allEdges = [];
+    var addedEdges = new Set();
 
     // Pass 1: every device that was actually scanned gets a fully-styled node,
     // even if another device already referenced its IP as a neighbor below.
@@ -190,14 +212,11 @@ window.buildSwitchMap = function() {
         var isStack = !!(device.StackMembers && device.StackMembers.length > 1);
         var stackIcon = isStack ? `\n[VC: ${device.StackMembers.length} Node]` : "";
 
-        nodesDataset.add({
-            id: switchIp, label: `Switch\n${switchIp}\n(${hostname})${stackIcon}`,
-            shape: isStack ? 'database' : 'box', isStack: isStack,
-            color: { background: '#97C2FC', border: '#2B7CE9' }, font: { multi: true, bold: true, color: 'black' },
+        allNodeMeta.set(switchIp, {
+            label: `Switch\n${switchIp}\n(${hostname})${stackIcon}`,
+            shape: isStack ? 'database' : 'box', isStack: isStack, scanned: true,
             vlanCache: device.TrueClients ? device.TrueClients.map(c => String(c.VLAN_Tag)) : [],
-            x: Math.random() * 4000 - 2000, y: Math.random() * 4000 - 2000
         });
-        addedNodes.add(switchIp);
     });
 
     // Pass 2: neighbors mentioned via LLDP that were never themselves scanned
@@ -210,44 +229,97 @@ window.buildSwitchMap = function() {
             var neighborIp = String(neighbor.ManagementIP);
             if (!neighborIp || neighborIp === "Unknown" || neighborIp === "0.0.0.0") return;
 
-            if (!addedNodes.has(neighborIp)) {
-                nodesDataset.add({
-                    id: neighborIp, label: `Switch\n${neighborIp}\n(${neighbor.Hostname || "Unknown"})`,
-                    shape: 'box', isStack: false,
-                    color: { background: '#E8E8E8', border: '#B0B0B0' }, font: { multi: true, bold: true, color: '#666666' },
-                    vlanCache: [], x: Math.random() * 4000 - 2000, y: Math.random() * 4000 - 2000
+            if (!allNodeMeta.has(neighborIp)) {
+                allNodeMeta.set(neighborIp, {
+                    label: `Switch\n${neighborIp}\n(${neighbor.Hostname || "Unknown"})`,
+                    shape: 'box', isStack: false, scanned: false, vlanCache: [],
                 });
-                addedNodes.add(neighborIp);
             }
 
-            var edgeId = [switchIp, neighborIp].sort().join('-');
-            if (!addedEdges.has(edgeId)) {
-                edgesDataset.add({ id: edgeId, from: switchIp, to: neighborIp, width: 2, color: '#848484', smooth: { type: 'continuous', roundness: 0.2 } });
-                addedEdges.add(edgeId);
+            var edgeKey = [switchIp, neighborIp].sort().join('-');
+            if (!addedEdges.has(edgeKey)) {
+                allEdges.push({ from: switchIp, to: neighborIp });
+                addedEdges.add(edgeKey);
             }
         });
     });
 
-    if (network !== null) { network.destroy(); }
-    
-    var container = document.getElementById('mynetwork');
-    var options = {
-        layout: { hierarchical: false }, 
-        physics: {
-            enabled: true,
-            solver: 'forceAtlas2Based',
-            forceAtlas2Based: { gravitationalConstant: -300, centralGravity: 0.005, springLength: 350, springConstant: 0.05, avoidOverlap: 1 },
-            maxVelocity: 50, minVelocity: 0.1, stabilization: false 
-        }, 
-        interaction: { navigationButtons: true, keyboard: true, hover: true }
-    };
-    
-    network = new vis.Network(container, { nodes: nodesDataset, edges: edgesDataset }, options);
-    physicsEnabled = true;
+    var nodeIds = Array.from(allNodeMeta.keys());
+    graphRoot = computeGraphRoot(nodeIds, allEdges);
+    primaryTree = buildPrimaryTree(nodeIds, allEdges, graphRoot);
+    expandedNodes = new Set();
 
-    network.on("selectNode", function (params) {
-        if (params.nodes.length > 0) window.openRightDrawer(params.nodes[0]);
+    if (network !== null) { network.destroy(); network = null; }
+    var container = document.getElementById('mynetwork');
+    network = new vis.Network(container, { nodes: nodesDataset, edges: edgesDataset }, {
+        layout: { hierarchical: false },
+        physics: { enabled: false },
+        interaction: { navigationButtons: true, keyboard: true, hover: true, dragNodes: true },
     });
+    network.on("selectNode", function (params) {
+        if (params.nodes.length === 0) return;
+        var id = params.nodes[0];
+        var meta = allNodeMeta.get(id);
+        if (meta) { window.openRightDrawer(id); return; }
+        // Not real device metadata - it's a cluster placeholder. Toggle expansion.
+        var clusterParentId = id.startsWith('cluster:') ? id.slice('cluster:'.length) : null;
+        if (clusterParentId) {
+            expandedNodes.add(clusterParentId);
+            window.renderVisibleGraph();
+        }
+    });
+
+    await window.renderVisibleGraph();
+};
+
+// 2b. Recompute the visible subgraph (clustering) and lay it out. Owns the
+// progress-bar lifecycle itself so every caller (initial load, cluster
+// expand/collapse, threshold change, search) gets covered automatically -
+// the ELK round-trip this awaits can take up to a few seconds on a large
+// visible set, and the canvas would otherwise sit blank with no indicator.
+window.renderVisibleGraph = async function() {
+    window.showProgress("Computing layout...", 100);
+    var visible = computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, clusterThreshold);
+    var positions = await computeLayout(visible.visibleNodeIds, visible.visibleEdges);
+
+    nodesDataset.clear(); edgesDataset.clear();
+
+    visible.visibleNodeIds.forEach(id => {
+        var pos = positions.get(id) || { x: 0, y: 0 };
+        var meta = allNodeMeta.get(id);
+        if (meta) {
+            nodesDataset.add({
+                id: id, label: meta.label, shape: meta.shape, isStack: meta.isStack,
+                color: meta.scanned
+                    ? (meta.isStack ? { background: '#D2E5FF', border: '#2B7CE9' } : { background: '#97C2FC', border: '#2B7CE9' })
+                    : { background: '#E8E8E8', border: '#B0B0B0' },
+                font: { multi: true, bold: true, color: meta.scanned ? 'black' : '#666666' },
+                vlanCache: meta.vlanCache, x: pos.x, y: pos.y, physics: false,
+            });
+        } else {
+            var cluster = visible.clusters.get(id);
+            nodesDataset.add({
+                id: id, label: `+${cluster.memberIds.length} devices`, shape: 'box', isCluster: true,
+                color: { background: '#fdf6e3', border: '#d9b34e' },
+                font: { bold: true, color: '#8a6d1a' },
+                borderWidth: 2, shapeProperties: { borderDashes: [6, 4] },
+                vlanCache: [], x: pos.x, y: pos.y, physics: false,
+            });
+        }
+    });
+
+    visible.visibleEdges.forEach((e, i) => {
+        edgesDataset.add({ id: `primary-${i}`, from: e.from, to: e.to, width: 2, color: '#848484', dashes: false });
+    });
+
+    var visibleSet = new Set(visible.visibleNodeIds);
+    primaryTree.secondaryEdges.forEach((e, i) => {
+        if (visibleSet.has(e.from) && visibleSet.has(e.to)) {
+            edgesDataset.add({ id: `secondary-${i}`, from: e.from, to: e.to, width: 1, color: '#c0c0c0', dashes: [4, 4] });
+        }
+    });
+
+    window.hideProgress();
 };
 
 // 3. Global Filters

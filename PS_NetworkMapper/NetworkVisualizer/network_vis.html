@@ -197,6 +197,22 @@
     </div>
 
     <!-- Load the Application Logic -->
-    <script src="app.js"></script>
+    <script>
+        // Module scripts fail silently under file:// (opaque-origin CORS restriction on
+        // ES module fetch) - before app.js even gets a chance to install its own
+        // window.onerror, this classic script guarantees a clear message instead of a
+        // blank page if that happens.
+        window.addEventListener('error', function (e) {
+            if (e.target && e.target.tagName === 'SCRIPT' && e.target.type === 'module') {
+                var modal = document.getElementById('fatal-error-modal');
+                var text = document.getElementById('fatal-error-text');
+                if (modal && text) {
+                    text.innerHTML = 'This page uses ES modules and cannot run when opened directly from disk (file://) due to browser security restrictions.<br><br>Serve this folder over a local web server instead, for example:<br><code>python3 -m http.server 8080</code><br>then open <code>http://localhost:8080/network_vis.html</code>.';
+                    modal.style.display = 'block';
+                }
+            }
+        }, true);
+    </script>
+    <script type="module" src="app.js"></script>
 </body>
 </html>
