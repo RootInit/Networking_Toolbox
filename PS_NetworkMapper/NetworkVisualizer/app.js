@@ -287,8 +287,13 @@ window.buildSwitchMap = async function() {
 // visible set, and the canvas would otherwise sit blank with no indicator.
 var renderChain = Promise.resolve();
 window.renderVisibleGraph = function() {
-    renderChain = renderChain.then(doRenderVisibleGraph).catch(err => { console.error('renderVisibleGraph failed:', err); throw err; });
-    return renderChain;
+    // renderChain.catch(() => {}) swallows a PRIOR call's rejection before chaining the
+    // next one, so one failed render doesn't permanently wedge every future call - only
+    // this call's own outcome (thisRender) is what callers actually see and can react to.
+    var thisRender = renderChain.catch(() => {}).then(doRenderVisibleGraph);
+    renderChain = thisRender;
+    thisRender.catch(err => { console.error('renderVisibleGraph failed:', err); });
+    return thisRender;
 };
 
 async function doRenderVisibleGraph() {
