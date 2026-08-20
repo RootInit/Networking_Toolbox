@@ -732,8 +732,28 @@ Replace with:
 
 ```html
     <!-- Load the Application Logic -->
+    <script>
+        // Module scripts fail silently under file:// (opaque-origin CORS restriction on
+        // ES module fetch) - before app.js even gets a chance to install its own
+        // window.onerror, this classic script guarantees a clear message instead of a
+        // blank page if that happens.
+        window.addEventListener('error', function (e) {
+            if (e.target && e.target.tagName === 'SCRIPT' && e.target.type === 'module') {
+                var modal = document.getElementById('fatal-error-modal');
+                var text = document.getElementById('fatal-error-text');
+                if (modal && text) {
+                    text.innerHTML = 'This page uses ES modules and cannot run when opened directly from disk (file://) due to browser security restrictions.<br><br>Serve this folder over a local web server instead, for example:<br><code>python3 -m http.server 8080</code><br>then open <code>http://localhost:8080/network_vis.html</code>.';
+                    modal.style.display = 'block';
+                }
+            }
+        }, true);
+    </script>
     <script type="module" src="app.js"></script>
 ```
+
+The `true` third argument (capture phase) is required — a module script's load failure fires a plain `error` Event on the `<script>` element, which only reaches a capturing listener on an ancestor (`window`), never `window.onerror` itself and never a bubbling listener.
+
+This is an accepted, permanent trade-off — real ES modules (needed so `graph-layout.js`/`elk-layout.js` stay Node-testable) cannot execute under `file://` at all, so double-click-to-open is no longer supported; the above turns that failure from a silent blank page into a clear, actionable message rather than restoring `file://` support itself.
 
 At the very top of `PS_NetworkMapper/NetworkVisualizer/app.js`, add:
 
@@ -764,6 +784,18 @@ var graphRoot = null;
 var primaryTree = { parentOf: new Map(), childrenOf: new Map(), secondaryEdges: [] };
 var expandedNodes = new Set();
 var clusterThreshold = 8;
+
+// CDP/headless-browser verification needs to inspect internal state, but ES module
+// top-level vars aren't exposed on window the way classic-script globals were.
+window.__debug = {
+    get nodesDataset() { return nodesDataset; },
+    get edgesDataset() { return edgesDataset; },
+    get network() { return network; },
+    get expandedNodes() { return expandedNodes; },
+    get graphRoot() { return graphRoot; },
+    get primaryTree() { return primaryTree; },
+    get clusterThreshold() { return clusterThreshold; },
+};
 ```
 
 - [ ] **Step 3: Rewrite `buildSwitchMap` to build metadata instead of rendering directly, then call `renderVisibleGraph`**
@@ -985,12 +1017,14 @@ Using the same static-server + headless-Chromium + CDP pattern as Task 5 Step 6,
   {"eval": "(async () => { const resp = await fetch('../TestMap.json'); const text = await resp.text(); const file = new File([text], 'TestMap.json', {type: 'application/json'}); const dt = new DataTransfer(); dt.items.add(file); document.getElementById('jsonUpload').files = dt.files; window.forceLoadFile(); })(); 'triggered'"},
   {"wait": 3000},
   {"eval": "document.getElementById('status-text').innerText"},
-  {"eval": "nodesDataset.length"},
-  {"eval": "nodesDataset.get().map(n => ({id: n.id, x: n.x, y: n.y, color: n.color}))"},
+  {"eval": "window.__debug.nodesDataset.length"},
+  {"eval": "window.__debug.nodesDataset.get().map(n => ({id: n.id, x: n.x, y: n.y, color: n.color}))"},
   {"eval": "window.openRightDrawer('10.55.2.1'); document.getElementById('drawer-title').innerText"},
   {"shot": "<scratchpad>/task6_regression.png"}
 ]
 ```
+
+(Uses `window.__debug.nodesDataset` rather than the bare `nodesDataset` name: once `app.js` is an ES module (Step 1), its top-level `var`s are module-scoped, not `window` properties, so a page-level `Runtime.evaluate` can't see them directly. Step 3's code below adds a small permanent `window.__debug` inspection object for exactly this reason.)
 
 Expected: status still reads `"Success! Mapped 3 nodes."`; `nodesDataset.length` is `4` (3 scanned + `10.55.2.3` unscanned placeholder); every node has distinct, non-NaN `x`/`y` (confirms ELK positions, not all stacked at `0,0`); `10.55.2.1`'s color is still the blue "scanned" color (confirms the Phase 1 two-pass fix carried over); the drawer still opens on click/selectNode; the loading bar was visible at some point during the wait rather than the canvas just sitting blank (confirms Step 4's await fix is wired correctly). Compare the screenshot's node layout against the Task 1 (`01_overview.png`) screenshot from Phase 1's manual verification — same 4 nodes, now laid out top-down in tree layers instead of physics-scattered.
 
@@ -1164,11 +1198,11 @@ Using the static-server + Chromium + CDP pattern from prior tasks:
   {"wait": 1000},
   {"eval": "(async () => { const resp = await fetch('/cluster_test.json'); const text = await resp.text(); const file = new File([text], 'cluster_test.json', {type: 'application/json'}); const dt = new DataTransfer(); dt.items.add(file); document.getElementById('jsonUpload').files = dt.files; window.forceLoadFile(); })(); 'triggered'"},
   {"wait": 2000},
-  {"eval": "nodesDataset.get().map(n => n.id)"},
+  {"eval": "window.__debug.nodesDataset.get().map(n => n.id)"},
   {"shot": "<scratchpad>/task7_clustered.png"},
-  {"eval": "window.applyVlanFilter(); nodesDataset.get().find(n => n.isCluster).color"},
+  {"eval": "window.applyVlanFilter(); window.__debug.nodesDataset.get().find(n => n.isCluster).color"},
   {"shot": "<scratchpad>/task7_cluster_survives_vlan_filter.png"},
-  {"eval": "(async () => { document.getElementById('globalSearch').value = 'leaf5'; window.performGlobalSearch(); await new Promise(r => setTimeout(r, 1500)); return nodesDataset.get().map(n => n.id); })()"},
+  {"eval": "(async () => { document.getElementById('globalSearch').value = 'leaf5'; window.performGlobalSearch(); await new Promise(r => setTimeout(r, 1500)); return window.__debug.nodesDataset.get().map(n => n.id); })()"},
   {"wait": 300},
   {"shot": "<scratchpad>/task7_expanded_via_search.png"}
 ]
@@ -1283,9 +1317,9 @@ Using the static-server + Chromium + CDP pattern from prior tasks (serve `/tmp/c
   {"eval": "(async () => { const resp = await fetch('../big-fixture.json'); const text = await resp.text(); const file = new File([text], 'big-fixture.json', {type: 'application/json'}); const dt = new DataTransfer(); dt.items.add(file); document.getElementById('jsonUpload').files = dt.files; window.forceLoadFile(); })(); 'triggered'"},
   {"wait": 15000},
   {"eval": "document.getElementById('status-text').innerText"},
-  {"eval": "nodesDataset.length"},
+  {"eval": "window.__debug.nodesDataset.length"},
   {"shot": "<scratchpad>/task8_large_topology_overview.png"},
-  {"eval": "(async () => { var clusterId = nodesDataset.get().find(n => n.isCluster).id; var parentId = clusterId.slice('cluster:'.length); expandedNodes.add(parentId); await window.renderVisibleGraph(); return nodesDataset.length; })()"},
+  {"eval": "(async () => { var clusterId = window.__debug.nodesDataset.get().find(n => n.isCluster).id; var parentId = clusterId.slice('cluster:'.length); window.__debug.expandedNodes.add(parentId); await window.renderVisibleGraph(); return window.__debug.nodesDataset.length; })()"},
   {"wait": 300},
   {"shot": "<scratchpad>/task8_after_expand.png"}
 ]
@@ -1309,3 +1343,4 @@ git commit -m "test: add synthetic ~500-node fixture generator for large-scale l
 - **Placeholder scan:** every step has concrete code or a concrete verification plan with expected output; no "add error handling" or "TBD" left in.
 - **Type consistency:** `visibleNodeIds`/`visibleEdges`/`clusters` shape from Task 3 is consumed as-is by Task 6's `renderVisibleGraph`; `parentOf`/`childrenOf` shape from Task 2 is consumed as-is by Task 3's tests and Task 7's `expandAncestors` call; `computeLayout`'s `Map<string,{x,y}>` return is consumed as-is in Task 6. Function names match their Task 1/2/3 export declarations everywhere they're called in later tasks.
 - **Cross-task interaction findings (added during SDD pre-flight scan, 2026-08-19):** two gaps found by tracing how Task 6/7's new code interacts with unmodified Phase 1 code sharing the same `nodesDataset`/`network` interface, both fixed in-plan before dispatch: (1) `buildSwitchMap` becoming `async` with `renderVisibleGraph` doing the real awaited work, but its only caller (`forceLoadFile`) not awaiting it, would have shown "Success!" and hidden the loading bar before layout actually finished — fixed by Task 6 Step 4 (await the call) plus moving the progress-bar show/hide into `renderVisibleGraph` itself. (2) Phase 1's `applyVlanFilter`, untouched by Tasks 1-6, colors nodes by `scannedIps.has(id)` — always false for a `cluster:*` id — so it would have clobbered Task 6's gold/dashed cluster styling the instant the VLAN dropdown was touched; fixed by Task 7 Step 3 (early-return for `isCluster` nodes), verified in Task 7 Step 5.
+- **Findings surfaced during Task 6 execution (not pre-flight, but fixed in-plan before Task 6's review, 2026-08-19):** the Task 6 implementer found two more issues converting `app.js` to a module actually causes: (1) ES module top-level `var`s (`nodesDataset`, `edgesDataset`, etc.) are module-scoped, not `window` properties — every remaining CDP verification step in Tasks 6/7/8 that evaluated them by bare name would fail with a `ReferenceError`. Fixed by adding a permanent `window.__debug` inspection object to Task 6 Step 2, and every later verification step updated to go through it (`window.__debug.nodesDataset` etc.). (2) A module script fails to load entirely under `file://` (opaque-origin CORS on ES module fetch), and since the failure happens before `app.js` runs at all, `window.onerror` never gets installed — the existing fatal-error-modal safety net doesn't fire, so the user gets a silent blank page instead of an error. `file://` support itself is an accepted, permanent trade-off (real ES modules are required for `graph-layout.js`/`elk-layout.js` to stay Node-testable, and there's no build step to work around it) — but the silent failure is fixed by an inline capture-phase error listener added to Task 6 Step 1, which shows the existing fatal-error modal with an explicit "serve this over HTTP" message instead of nothing.
