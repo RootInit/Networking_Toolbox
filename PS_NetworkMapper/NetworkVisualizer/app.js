@@ -16,7 +16,6 @@ window.onerror = function(message, source, lineno, colno, error) {
 // Protect Globals
 var network = null;
 var globalTopologyData = [];
-var globalArpMap = new Map();
 var nodesDataset = null;
 var edgesDataset = null;
 var allVlans = new Map(); 
@@ -37,6 +36,14 @@ document.addEventListener("DOMContentLoaded", function() {
         window.onerror(e.message, "app.js", 0, 0, e);
     }
 });
+
+// Escape device-supplied strings (hostnames, LLDP descriptions, etc. come from other
+// network devices, not from this app, before they're interpolated into innerHTML.
+var HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
+window.esc = function(val) {
+    if (val === null || val === undefined) return "";
+    return String(val).replace(/[&<>"']/g, c => HTML_ESCAPES[c]);
+};
 
 // UI Helpers
 window.setStatus = function(msg, color="blue") {
@@ -67,6 +74,7 @@ window.switchTab = function(tabId) {
     document.getElementById('btn-' + tabId).classList.add('active');
     
     if (currentSelectedNodeData) {
+        if (tabId === 'tab-neighbors') window.renderNeighbors();
         if (tabId === 'tab-interfaces') window.renderInterfaces();
         if (tabId === 'tab-clients') window.renderClients();
     }
@@ -119,71 +127,16 @@ window.forceLoadFile = function() {
                 if (!data.Topology) throw new Error("Missing 'Topology' array in JSON.");
                 
                 globalTopologyData = data.Topology;
-                
-                // Build Global ARP Correlation Map
-                globalArpMap.clear();
-                globalTopologyData.forEach(device => {
-                    if (device.ArpEntries) {
-                        device.ArpEntries.forEach(arp => {
-                            if(arp.MAC && arp.IP) globalArpMap.set(arp.MAC.toLowerCase(), arp.IP);
-                        });
-                    }
-                });
 
-                // Correlate Clients Safely
-                globalTopologyData.forEach(device => {
-                    device.TrueClients = [];
-                    
-                    // FIX: Fallback to directly using Clients if MacTable is not present
-                    if (!device.MacTable) {
-                        if (device.Clients) {
-                            device.TrueClients = device.Clients;
-                        }
-                        return;
-                    }
-                    
-                    // Safely extract trunk ports (ignore nulls)
-                    var trunkPorts = [];
-                    if (device.Neighbors) {
-                        device.Neighbors.forEach(n => {
-                            if (n && n.LocalPort && typeof n.LocalPort === 'string') {
-                                trunkPorts.push(n.LocalPort.split('.')[0]);
-                            }
-                        });
-                    }
-
-                    device.MacTable.forEach(macEntry => {
-                        // FIX: Safely check for valid Port strings before parsing
-                        if (!macEntry || !macEntry.Port || typeof macEntry.Port !== 'string') return;
-                        
-                        var physPort = macEntry.Port.split('.')[0];
-                        
-                        // Ignore Trunks, Lag (ae), Redundant Ethernet (reth), and IRB/VLAN interfaces
-                        if (trunkPorts.includes(physPort) || physPort.startsWith('ae') || physPort.startsWith('reth') || physPort.startsWith('vlan') || physPort.startsWith('irb')) return;
-
-                        var clientIP = globalArpMap.get(macEntry.MAC.toLowerCase()) || "Unknown IP";
-                        var dotUser = "Unknown", dotState = "Unknown";
-                        
-                        if (device.Clients) {
-                            var dotMatch = device.Clients.find(c => c.MAC && c.MAC.toLowerCase() === macEntry.MAC.toLowerCase());
-                            if (dotMatch) { 
-                                dotUser = dotMatch.Dot1x_User || "Unknown"; 
-                                dotState = dotMatch.Dot1x_State || "Unknown"; 
-                            }
-                        }
-
-                        device.TrueClients.push({
-                            IP: clientIP, MAC: macEntry.MAC, Port: macEntry.Port, PortDesc: macEntry.PortDesc || "Unknown",
-                            VLAN_Name: macEntry.VLAN_Name || "Unknown", VLAN_Tag: macEntry.VLAN_Tag || "Unknown",
-                            Type: macEntry.Type || "Unknown", Dot1x_User: dotUser, Dot1x_State: dotState
-                        });
-                    });
-                });
+                // Clients arrive pre-correlated (MAC table + cross-device ARP enrichment
+                // done server-side by Start-NetworkMapper.ps1); the visualizer just displays them.
+                globalTopologyData.forEach(device => { device.TrueClients = device.Clients || []; });
 
                 window.extractVlans();
                 window.buildSwitchMap();
                 
                 document.getElementById('physicsToggle').style.display = 'block';
+                document.getElementById('legend-group').style.display = 'block';
                 window.setStatus(`Success! Mapped ${globalTopologyData.length} nodes.`, "green");
             } catch (err) { 
                 window.setStatus("JSON Parse Error.", "red"); 
@@ -227,49 +180,52 @@ window.buildSwitchMap = function() {
     nodesDataset.clear(); edgesDataset.clear();
     var addedNodes = new Set(); var addedEdges = new Set();
 
+    // Pass 1: every device that was actually scanned gets a fully-styled node,
+    // even if another device already referenced its IP as a neighbor below.
     globalTopologyData.forEach(device => {
-        if (!device || !device.DeviceIP) return; 
-        
+        if (!device || !device.DeviceIP) return;
+
         var switchIp = String(device.DeviceIP);
         var hostname = device.Hostname || "Unknown";
-        var isStack = false; var stackIcon = "";
-        
-        if (device.StackMembers && device.StackMembers.length > 1) {
-            isStack = true; stackIcon = `\n[VC: ${device.StackMembers.length} Node]`;
-        }
+        var isStack = !!(device.StackMembers && device.StackMembers.length > 1);
+        var stackIcon = isStack ? `\n[VC: ${device.StackMembers.length} Node]` : "";
 
-        if (!addedNodes.has(switchIp)) {
-            nodesDataset.add({ 
-                id: switchIp, label: `Switch\n${switchIp}\n(${hostname})${stackIcon}`, 
-                shape: isStack ? 'database' : 'box', 
-                color: { background: '#97C2FC', border: '#2B7CE9' }, font: { multi: true, bold: true, color: 'black' }, 
-                vlanCache: device.TrueClients ? device.TrueClients.map(c => String(c.VLAN_Tag)) : [],
-                x: Math.random() * 4000 - 2000, y: Math.random() * 4000 - 2000
-            });
-            addedNodes.add(switchIp);
-        }
+        nodesDataset.add({
+            id: switchIp, label: `Switch\n${switchIp}\n(${hostname})${stackIcon}`,
+            shape: isStack ? 'database' : 'box', isStack: isStack,
+            color: { background: '#97C2FC', border: '#2B7CE9' }, font: { multi: true, bold: true, color: 'black' },
+            vlanCache: device.TrueClients ? device.TrueClients.map(c => String(c.VLAN_Tag)) : [],
+            x: Math.random() * 4000 - 2000, y: Math.random() * 4000 - 2000
+        });
+        addedNodes.add(switchIp);
+    });
 
-        if (device.Neighbors) {
-            device.Neighbors.forEach(neighbor => {
-                var neighborIp = String(neighbor.ManagementIP);
-                if (!neighborIp || neighborIp === "Unknown" || neighborIp === "0.0.0.0") return;
+    // Pass 2: neighbors mentioned via LLDP that were never themselves scanned
+    // get a placeholder node instead.
+    globalTopologyData.forEach(device => {
+        if (!device || !device.DeviceIP || !device.Neighbors) return;
+        var switchIp = String(device.DeviceIP);
 
-                if (!addedNodes.has(neighborIp)) {
-                    nodesDataset.add({ 
-                        id: neighborIp, label: `Switch\n${neighborIp}\n(${neighbor.Hostname || "Unknown"})`, 
-                        shape: 'box', color: { background: '#E8E8E8', border: '#B0B0B0' }, font: { multi: true, bold: true, color: '#666666' }, 
-                        vlanCache: [], x: Math.random() * 4000 - 2000, y: Math.random() * 4000 - 2000
-                    });
-                    addedNodes.add(neighborIp);
-                }
-                
-                var edgeId = [switchIp, neighborIp].sort().join('-');
-                if (!addedEdges.has(edgeId)) {
-                    edgesDataset.add({ id: edgeId, from: switchIp, to: neighborIp, width: 2, color: '#848484', smooth: { type: 'continuous', roundness: 0.2 } });
-                    addedEdges.add(edgeId);
-                }
-            });
-        }
+        device.Neighbors.forEach(neighbor => {
+            var neighborIp = String(neighbor.ManagementIP);
+            if (!neighborIp || neighborIp === "Unknown" || neighborIp === "0.0.0.0") return;
+
+            if (!addedNodes.has(neighborIp)) {
+                nodesDataset.add({
+                    id: neighborIp, label: `Switch\n${neighborIp}\n(${neighbor.Hostname || "Unknown"})`,
+                    shape: 'box', isStack: false,
+                    color: { background: '#E8E8E8', border: '#B0B0B0' }, font: { multi: true, bold: true, color: '#666666' },
+                    vlanCache: [], x: Math.random() * 4000 - 2000, y: Math.random() * 4000 - 2000
+                });
+                addedNodes.add(neighborIp);
+            }
+
+            var edgeId = [switchIp, neighborIp].sort().join('-');
+            if (!addedEdges.has(edgeId)) {
+                edgesDataset.add({ id: edgeId, from: switchIp, to: neighborIp, width: 2, color: '#848484', smooth: { type: 'continuous', roundness: 0.2 } });
+                addedEdges.add(edgeId);
+            }
+        });
     });
 
     if (network !== null) { network.destroy(); }
@@ -297,12 +253,17 @@ window.buildSwitchMap = function() {
 // 3. Global Filters
 window.applyVlanFilter = function() {
     var selectedVlan = document.getElementById('vlanFilter').value;
+    var scannedIps = new Set(globalTopologyData.filter(d => d && d.DeviceIP).map(d => String(d.DeviceIP)));
     var updates = [];
 
     nodesDataset.get().forEach(node => {
-        if (selectedVlan === "ALL" || (node.vlanCache && node.vlanCache.includes(selectedVlan.toString()))) {
-            var isStack = node.label.includes("[VC:");
-            updates.push({ id: node.id, color: isStack ? { background: '#D2E5FF', border: '#2B7CE9' } : { background: '#97C2FC', border: '#2B7CE9' }, font: { color: 'black' } });
+        var matchesVlan = selectedVlan === "ALL" || (node.vlanCache && node.vlanCache.includes(selectedVlan.toString()));
+
+        if (!scannedIps.has(String(node.id))) {
+            // Unscanned neighbor placeholders always stay gray; a VLAN filter can only dim them further.
+            updates.push({ id: node.id, color: { background: '#E8E8E8', border: '#B0B0B0' }, font: { color: matchesVlan ? '#666666' : '#dddddd' } });
+        } else if (matchesVlan) {
+            updates.push({ id: node.id, color: node.isStack ? { background: '#D2E5FF', border: '#2B7CE9' } : { background: '#97C2FC', border: '#2B7CE9' }, font: { color: 'black' } });
         } else {
             updates.push({ id: node.id, color: { background: '#f2f2f2', border: '#e6e6e6' }, font: { color: '#cccccc' } });
         }
@@ -354,6 +315,7 @@ window.openRightDrawer = function(ip) {
 
     window.renderSummary();
     window.renderStack();
+    window.renderNeighbors();
     window.renderInterfaces();
     window.renderClients();
     
@@ -363,10 +325,10 @@ window.openRightDrawer = function(ip) {
 window.renderSummary = function() {
     var d = currentSelectedNodeData;
     var html = `
-        <div class="summary-item"><label>Hostname</label><div>${d.Hostname || 'N/A'}</div></div>
-        <div class="summary-item"><label>IP Address</label><div>${d.DeviceIP || 'N/A'}</div></div>
-        <div class="summary-item"><label>Junos OS</label><div>${d.JunosVersion || 'N/A'}</div></div>
-        <div class="summary-item"><label>Gateway</label><div>${d.Gateway || 'N/A'}</div></div>
+        <div class="summary-item"><label>Hostname</label><div>${esc(d.Hostname) || 'N/A'}</div></div>
+        <div class="summary-item"><label>IP Address</label><div>${esc(d.DeviceIP) || 'N/A'}</div></div>
+        <div class="summary-item"><label>Junos OS</label><div>${esc(d.JunosVersion) || 'N/A'}</div></div>
+        <div class="summary-item"><label>Gateway</label><div>${esc(d.Gateway) || 'N/A'}</div></div>
         <div class="summary-item"><label>Connected Neighbors</label><div>${d.Neighbors ? d.Neighbors.length : 0} Switches</div></div>
     `;
     document.getElementById('summary-content').innerHTML = html;
@@ -379,14 +341,30 @@ window.renderStack = function() {
         currentSelectedNodeData.StackMembers.forEach(sm => {
             var roleBadge = String(sm.Role).includes("Master") ? "green" : (String(sm.Role).includes("Backup") ? "accent" : "gray");
             html += `<tr>
-                <td><b>${sm.FPC || "?"}</b></td>
-                <td><span class="badge ${roleBadge}">${sm.Role || "?"}</span></td>
-                <td>${sm.Model || "?"}</td>
-                <td style="font-family:monospace;">${sm.Serial || "?"}</td>
+                <td><b>${esc(sm.FPC) || "?"}</b></td>
+                <td><span class="badge ${roleBadge}">${esc(sm.Role) || "?"}</span></td>
+                <td>${esc(sm.Model) || "?"}</td>
+                <td style="font-family:monospace;">${esc(sm.Serial) || "?"}</td>
             </tr>`;
         });
     }
     tbody.innerHTML = html || `<tr><td colspan="4" style="text-align:center;">No hardware data</td></tr>`;
+};
+
+window.renderNeighbors = function() {
+    var tbody = document.getElementById('neighbors-tbody');
+    var html = "";
+    if (currentSelectedNodeData.Neighbors && currentSelectedNodeData.Neighbors.length > 0) {
+        currentSelectedNodeData.Neighbors.forEach(n => {
+            html += `<tr>
+                <td><b>${esc(n.LocalPort) || "?"}</b></td>
+                <td>${esc(n.Hostname) || "Unknown"}<br><span style="font-family:monospace; color:#666; font-size:0.75rem;">${esc(n.ManagementIP) || "Unknown"}</span></td>
+                <td>${esc(n.RemotePort) || "?"}</td>
+                <td style="font-style:italic; color:#666;">${esc(n.Description)}</td>
+            </tr>`;
+        });
+    }
+    tbody.innerHTML = html || `<tr><td colspan="4" style="text-align:center;">No LLDP neighbors found</td></tr>`;
 };
 
 window.renderInterfaces = function() {
@@ -405,11 +383,11 @@ window.renderInterfaces = function() {
             var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
             
             html += `<tr>
-                <td><b>${intf.Port}</b></td>
-                <td><span class="badge ${linkBadge}">${intf.Admin}/${intf.Link}</span></td>
-                <td><span class="badge ${stpBadge}">${intf.STP || "?"}</span></td>
-                <td>${poeTxt}</td>
-                <td style="font-style:italic; color:#666;">${intf.Desc || ""}</td>
+                <td><b>${esc(intf.Port)}</b></td>
+                <td><span class="badge ${linkBadge}">${esc(intf.Admin)}/${esc(intf.Link)}</span></td>
+                <td><span class="badge ${stpBadge}">${esc(intf.STP) || "?"}</span></td>
+                <td>${esc(poeTxt)}</td>
+                <td style="font-style:italic; color:#666;">${esc(intf.Desc)}</td>
             </tr>`;
         });
     }
@@ -439,14 +417,16 @@ window.renderClients = function() {
             var isHighlighted = searchHighlightQuery && ((c.IP && String(c.IP).toLowerCase().includes(searchHighlightQuery)) || (c.MAC && String(c.MAC).toLowerCase().includes(searchHighlightQuery)) || (c.Dot1x_User && String(c.Dot1x_User).toLowerCase().includes(searchHighlightQuery)));
             var rowClass = isHighlighted ? 'highlight' : '';
             
-            var dotUserStr = (c.Dot1x_User && c.Dot1x_User !== "Unknown") ? c.Dot1x_User : "None";
+            var dotUserStr = (c.Dot1x_User && c.Dot1x_User !== "Unknown") ? esc(c.Dot1x_User) : "None";
             var dotStateColor = (c.Dot1x_State && String(c.Dot1x_State).includes('Auth')) ? 'green' : (c.Dot1x_State !== "Unknown" ? 'red' : 'gray');
-            var dotStateStr = c.Dot1x_State !== "Unknown" ? `<br><span style="font-size:0.7rem; color:${dotStateColor};">(${c.Dot1x_State})</span>` : "";
-            var descStr = (c.PortDesc && c.PortDesc !== "Unknown") ? `<br><span style="font-size:0.75rem; color:#888;">${c.PortDesc}</span>` : "";
+            var dotStateStr = c.Dot1x_State !== "Unknown" ? `<br><span style="font-size:0.7rem; color:${dotStateColor};">(${esc(c.Dot1x_State)})</span>` : "";
+            var descStr = (c.PortDesc && c.PortDesc !== "Unknown") ? `<br><span style="font-size:0.75rem; color:#888;">${esc(c.PortDesc)}</span>` : "";
+            var typeClass = String(c.Type).toLowerCase().startsWith('dynamic') ? 'dynamic' : 'static';
+            var typeStr = (c.Type && c.Type !== "Unknown") ? `<span class="type-badge ${typeClass}">${esc(c.Type)}</span>` : "";
 
             html += `<tr class="${rowClass}">
-                <td><span style="font-weight:bold; color:#2B7CE9; font-size:1rem;">${c.IP}</span><br><span style="font-family:monospace; color:#666;">${String(c.MAC).toUpperCase()}</span></td>
-                <td><b>${c.Port}</b><br><span class="badge" style="background:#2c3e50;">VLAN ${c.VLAN_Tag}</span>${descStr}</td>
+                <td><span style="font-weight:bold; color:#2B7CE9; font-size:1rem;">${esc(c.IP)}</span><br><span style="font-family:monospace; color:#666;">${esc(String(c.MAC).toUpperCase())}</span></td>
+                <td><b>${esc(c.Port)}</b><br><span class="badge" style="background:#2c3e50;">VLAN ${esc(c.VLAN_Tag)}</span>${typeStr}${descStr}</td>
                 <td><b>${dotUserStr}</b>${dotStateStr}</td>
             </tr>`;
         });

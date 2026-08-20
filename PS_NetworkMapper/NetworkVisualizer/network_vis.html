@@ -5,8 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Enterprise Network Visualizer</title>
     
-    <!-- Load Vis.js -->
-    <script type="text/javascript" src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+    <!-- Load Vis.js (vendored: PS_NetworkMapper/NetworkVisualizer/vendor/vis-network.min.js, v9.1.9 pinned) -->
+    <script type="text/javascript" src="vendor/vis-network.min.js"></script>
     
     <style>
         :root { --primary: #2c3e50; --accent: #2B7CE9; --bg: #f4f6f9; --panel-bg: #ffffff; --border: #e0e0e0; }
@@ -70,6 +70,7 @@
         .badge.green { background-color: #27ae60; }
         .badge.red { background-color: #e74c3c; }
         .badge.gray { background-color: #7f8c8d; }
+        .badge.accent { background-color: var(--accent); }
         
         .highlight { background-color: #ffff99 !important; border-left: 3px solid #f39c12 !important;}
         
@@ -83,6 +84,12 @@
         .c-ip { font-weight: bold; color: #2B7CE9; font-size: 0.95rem; }
         .c-mac { color: #666; font-family: monospace; font-size: 0.75rem; }
         .c-vlan { display: inline-block; background: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 0.7rem; color: white; font-weight: bold; width: fit-content; margin-top: 5px;}
+
+        .legend-item { display: flex; align-items: center; font-size: 0.8rem; color: #555; margin-bottom: 8px; }
+        .legend-swatch { display: inline-block; width: 14px; height: 14px; border: 2px solid; margin-right: 8px; flex-shrink: 0; }
+        .type-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.65rem; font-weight: bold; color: white; margin-left: 6px; }
+        .type-badge.dynamic { background-color: #2B7CE9; }
+        .type-badge.static { background-color: #8e44ad; }
     </style>
 </head>
 <body>
@@ -116,6 +123,13 @@
             
             <button id="physicsToggle" class="btn-secondary" onclick="window.togglePhysics()" style="display:none;">Freeze Map Layout</button>
         </div>
+
+        <div class="control-group" id="legend-group" style="display:none; border-bottom: none; margin-bottom: 0;">
+            <h2>Legend</h2>
+            <div class="legend-item"><span class="legend-swatch" style="background:#97C2FC; border-color:#2B7CE9;"></span> Scanned switch</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#D2E5FF; border-color:#2B7CE9; border-radius:50%;"></span> Scanned virtual chassis / stack</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#E8E8E8; border-color:#B0B0B0;"></span> Unscanned neighbor</div>
+        </div>
     </div>
 
     <!-- CENTER PANEL: Map -->
@@ -137,6 +151,7 @@
         <div class="tabs">
             <div class="tab active" onclick="window.switchTab('tab-summary')" id="btn-tab-summary">Summary</div>
             <div class="tab" onclick="window.switchTab('tab-stack')" id="btn-tab-stack">Hardware</div>
+            <div class="tab" onclick="window.switchTab('tab-neighbors')" id="btn-tab-neighbors">Neighbors</div>
             <div class="tab" onclick="window.switchTab('tab-interfaces')" id="btn-tab-interfaces">Interfaces</div>
             <div class="tab" onclick="window.switchTab('tab-clients')" id="btn-tab-clients">Clients</div>
         </div>
@@ -150,6 +165,13 @@
                 <thead><tr>
                     <th>FPC</th><th>Role</th><th>Model</th><th>Serial</th></tr></thead>
                 <tbody id="stack-tbody"></tbody>
+            </table>
+        </div>
+
+        <div id="tab-neighbors" class="tab-content">
+            <table id="neighbors-table">
+                <thead><tr><th>Local Port</th><th>Neighbor</th><th>Remote Port</th><th>Description</th></tr></thead>
+                <tbody id="neighbors-tbody"></tbody>
             </table>
         </div>
 

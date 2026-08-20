@@ -11,7 +11,7 @@ param (
     [switch]$Log 
 )
 
-if (-not (Test-Path $AuthFile)) { throw "Auth file missing at $AuthFile!" }
+if (-not (Test-Path $AuthFile)) { throw "Auth file missing at $AuthFile! Copy Auth.example.json to Auth.json and fill in real credentials." }
 $AuthData = Get-Content $AuthFile -Raw | ConvertFrom-Json
 $Username = $AuthData.Username
 $Password = $AuthData.Password
@@ -20,6 +20,10 @@ $AskPassPath = Join-Path $env:TEMP "ssh_askpass_$($PID)_$([guid]::NewGuid().Guid
 $AskPassText = Join-Path $env:TEMP "ssh_pass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
 [System.IO.File]::WriteAllText($AskPassText, $Password)
 [System.IO.File]::WriteAllText($AskPassPath, "@type `"$AskPassText`"")
+
+# Everything below runs inside a try/finally so the plaintext askpass files
+# (containing the real switch password) are always removed, even on error or exit.
+try {
 
 $Logs = [System.Collections.Generic.List[string]]::new()
 function Write-LogMsg { param([string]$msg) $Logs.Add("[$TargetIP] $msg") }
@@ -70,9 +74,9 @@ function Invoke-InteractiveBatch {
     return @{ Output = $Output; Error = $Error }
 }
 
-$NodeData = @{ 
-    DeviceIP = $TargetIP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown"; 
-    StackMembers = @(); Neighbors = @(); Clients = @(); Interfaces = @{} 
+$NodeData = @{
+    DeviceIP = $TargetIP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
+    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{}
 }
 
 try {
@@ -214,7 +218,10 @@ try {
     # --- Parse VLANs ---
     $VlanDict = @{}
     foreach ($Line in ($DataDict["VLANS"] -split "`n")) {
-        if ($Line -match "^\S+\s+(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = $Matches.tag }
+        # "Name  Tag  Interfaces" - the trailing interface (if any) is never purely numeric,
+        # so anchoring the match on name+tag only (not a 3rd numeric field) is what actually
+        # matches real "show vlans" output.
+        if ($Line -match "^(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = $Matches.tag }
     }
 
     # --- Parse MAC Table ---
@@ -230,24 +237,37 @@ try {
         }
     }
 
-    # --- Parse ARP Table & Correlate ---
+    # --- Parse local ARP Table (used to enrich this node's own clients; also exported
+    # raw so the orchestrator can build a network-wide MAC->IP map. On L2-only access
+    # switches, ARP for downstream hosts usually lives on the L3 gateway instead, not
+    # here - that's what the orchestrator-side global enrichment pass is for.) ---
+    $ArpDict = @{}
     foreach ($Line in ($DataDict["ARP_TABLE"] -split "`n")) {
         if ($Line -match "(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)") {
             $macLower = $Matches.mac.ToLower()
-            $Client = @{ IP = $Matches.ip; MAC = $macLower; Port = "Unknown"; PortDesc = "Unknown"; VLAN_Name = "Unknown"; VLAN_Tag = "Unknown"; Type = "Unknown"; Dot1x_User = "Unknown"; Dot1x_State = "Unknown" }
-            
-            if ($RawMacs.ContainsKey($macLower)) {
-                $Client.Port = $RawMacs[$macLower].Port; $Client.VLAN_Name = $RawMacs[$macLower].VLAN_Name
-                $Client.VLAN_Tag = $RawMacs[$macLower].VLAN_Tag; $Client.Type = $RawMacs[$macLower].Type
-                
-                $physPort = $Client.Port -replace "\.\d+$",""
-                if ($NodeData.Interfaces.ContainsKey($physPort)) { $Client.PortDesc = $NodeData.Interfaces[$physPort].Desc }
-            }
-            if ($Dot1xDict.ContainsKey($macLower)) {
-                $Client.Dot1x_User = $Dot1xDict[$macLower].User; $Client.Dot1x_State = $Dot1xDict[$macLower].State
-            }
-            $NodeData.Clients += [PSCustomObject]$Client
+            $ArpDict[$macLower] = $Matches.ip
+            $NodeData.ArpEntries += [PSCustomObject]@{ MAC = $macLower; IP = $Matches.ip }
         }
+    }
+
+    # --- Build Clients from the MAC table (primary source - this is what a switch
+    # actually knows about its own connected devices). IP comes from local ARP when
+    # available; otherwise "Unknown" until the orchestrator's global enrichment pass. ---
+    foreach ($MacKey in $RawMacs.Keys) {
+        $Entry = $RawMacs[$MacKey]
+        $Client = @{
+            IP = if ($ArpDict.ContainsKey($MacKey)) { $ArpDict[$MacKey] } else { "Unknown" }
+            MAC = $MacKey; Port = $Entry.Port; PortDesc = "Unknown"
+            VLAN_Name = $Entry.VLAN_Name; VLAN_Tag = $Entry.VLAN_Tag; Type = $Entry.Type
+            Dot1x_User = "Unknown"; Dot1x_State = "Unknown"
+        }
+
+        $physPort = $Client.Port -replace "\.\d+$",""
+        if ($NodeData.Interfaces.ContainsKey($physPort)) { $Client.PortDesc = $NodeData.Interfaces[$physPort].Desc }
+        if ($Dot1xDict.ContainsKey($MacKey)) {
+            $Client.Dot1x_User = $Dot1xDict[$MacKey].User; $Client.Dot1x_State = $Dot1xDict[$MacKey].State
+        }
+        $NodeData.Clients += [PSCustomObject]$Client
     }
 
 } catch { 
@@ -292,7 +312,11 @@ if ($HumanReadable) {
         $PhysicalPorts | Select-Object Port, Admin, Link, STP, PoE, Desc -First 15 | Format-Table -AutoSize | Out-String | Write-Host
         Write-Host " (Showing first 15 interfaces of $($PhysicalPorts.Count) total...)`n" -ForegroundColor DarkGray
     }
-    exit 
+    exit
 }
 
 return @{ Node = $NodeData; Logs = $Logs }
+
+} finally {
+    Remove-Item -Path $AskPassPath, $AskPassText -Force -ErrorAction SilentlyContinue
+}

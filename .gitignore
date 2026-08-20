@@ -1,0 +1,8 @@
+# Real credentials - only Auth.example.json (placeholder template) is tracked
+PS_NetworkMapper/Auth.json
+
+# Scraper output - contains real internal topology/IP data, not fixtures
+PS_NetworkMapper/NetworkMap.json
+PS_NetworkMapper/NetworkMap.tmp.json
+PS_NetworkMapper/Mapper_Debug.log
+PS_NetworkMapper/RawDumps/

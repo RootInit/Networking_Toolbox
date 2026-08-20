@@ -23,6 +23,30 @@ if (-not (Test-Path $WorkerPath)) { Write-Host "Worker script missing at $Worker
 "=== Orchestrator Debug Log - $(Get-Date) ===" | Out-File -FilePath $DebugLog -Force
 function Write-DebugLog { param([string]$Message) "[$(Get-Date -Format 'HH:mm:ss')] $Message" | Out-File -FilePath $DebugLog -Append -Encoding utf8 }
 
+# A client's MAC often shows up in one switch's MAC table (the access switch it's plugged
+# into) but its ARP entry lives on a different device entirely (whichever box owns the L3
+# gateway/IRB for that VLAN - frequently the core, not the access switch). No single node's
+# local view is enough, so once per write we build one MAC->IP map across every node crawled
+# so far and use it to backfill any client still showing IP "Unknown".
+function Update-ClientIpCorrelation {
+    param([System.Collections.Generic.List[object]]$Topology)
+
+    $GlobalArpMap = @{}
+    foreach ($Device in $Topology) {
+        foreach ($Arp in $Device.ArpEntries) {
+            if ($Arp.MAC -and $Arp.IP) { $GlobalArpMap[$Arp.MAC] = $Arp.IP }
+        }
+    }
+
+    foreach ($Device in $Topology) {
+        foreach ($Client in $Device.Clients) {
+            if ($Client.IP -eq "Unknown" -and $GlobalArpMap.ContainsKey($Client.MAC)) {
+                $Client.IP = $GlobalArpMap[$Client.MAC]
+            }
+        }
+    }
+}
+
 $RunspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxConcurrent)
 $RunspacePool.Open()
 
@@ -120,6 +144,7 @@ try {
 
         # 4. Batch JSON Write (Only write if pending data exists AND 5 seconds have passed)
         if ($PendingWrites -gt 0 -and ((Get-Date) - $LastWriteTime).TotalSeconds -gt 5) {
+            Update-ClientIpCorrelation -Topology $TopologyList
             $ExportData = @{ Topology = $TopologyList }
             # Use Depth 100 to ensure deep dictionaries (like Interfaces) are never truncated
             $ExportData | ConvertTo-Json -Depth 100 | Out-File -FilePath $TempOutputFile -Encoding utf8
@@ -137,6 +162,7 @@ try {
 
     # Final Write Check
     if ($PendingWrites -gt 0) {
+        Update-ClientIpCorrelation -Topology $TopologyList
         $ExportData = @{ Topology = $TopologyList }
         $ExportData | ConvertTo-Json -Depth 100 | Out-File -FilePath $TempOutputFile -Encoding utf8
         Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
