@@ -229,6 +229,27 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     return r;
   }
 
+  // Only two children that actually end up NEXT TO EACH OTHER can ever collide - using
+  // 2*(the single largest extent among all children) as the required spacing for EVERY
+  // pair is only correct when the two biggest clusters happen to be adjacent, and is
+  // needlessly conservative otherwise (confirmed directly: reported as clusters sitting
+  // far apart with no risk of overlap). The real, tighter requirement is the worst actual
+  // adjacent pair's combined extent. Children are spread evenly in their existing array
+  // order, so "adjacent" means consecutive array entries - wrapping from last back to
+  // first only when the wedge is a full circle (root; a partial wedge's first and last
+  // child are on opposite ends, not touching).
+  function maxAdjacentPairExtentSum(extents, isFullCircle) {
+    const n = extents.length;
+    if (n < 2) return 0;
+    let maxSum = 0;
+    const pairCount = isFullCircle ? n : n - 1;
+    for (let i = 0; i < pairCount; i++) {
+      const j = (i + 1) % n;
+      maxSum = Math.max(maxSum, extents[i] + extents[j]);
+    }
+    return maxSum;
+  }
+
   // Bottom-up, cached: how far from its OWN position does nodeId's subtree extend?
   // Leaves: 0. Leaf-parents: their own cluster's radius. Everything else: however far out
   // its own single-ring child placement reaches, plus the largest extent among its
@@ -243,14 +264,16 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
       result = clusterRadius(childrenOf.get(nodeId).length);
     } else {
       const kids = childrenOf.get(nodeId);
-      const maxChildExtent = Math.max(0, ...kids.map(extent));
+      const extents = kids.map(extent);
+      const maxChildExtent = Math.max(0, ...extents);
       const n = kids.length;
-      // A center distance of just 2*maxChildExtent only guarantees the two DISCS don't
-      // overlap in area - a node sitting right on each disc's boundary, pointing directly
-      // at the other, could still land arbitrarily close to its counterpart (confirmed
-      // empirically: two adjacent large clusters landed nodes 76px apart with only the
-      // sum-of-radii margin). Adding nodeSpacing on top guarantees an actual gap.
-      const effSpacing = nodeSpacing + 2 * maxChildExtent;
+      // A center distance of just the adjacent-pair extent sum only guarantees the two
+      // DISCS don't overlap in area - a node sitting right on each disc's boundary,
+      // pointing directly at the other, could still land arbitrarily close to its
+      // counterpart (confirmed empirically: two adjacent large clusters landed nodes
+      // 76px apart with only that margin). Adding nodeSpacing on top guarantees an
+      // actual gap. This is root's OWN top-level ring, always a full circle.
+      const effSpacing = nodeSpacing + maxAdjacentPairExtentSum(extents, true);
       const childRadius = n > 1 ? effSpacing / (2 * Math.sin(Math.PI / n)) : 0;
       result = Math.max(minRadius, childRadius) + maxChildExtent;
     }
@@ -288,8 +311,10 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
       return; // leaves have no children of their own - nothing left to recurse into
     }
 
-    const maxChildExtent = Math.max(0, ...kids.map(extent));
-    const effSpacing = nodeSpacing + 2 * maxChildExtent; // see extent()'s comment above on why +nodeSpacing, not just 2x
+    const extents = kids.map(extent);
+    // isFullCircle: only root ever calls place() with the full 2*PI - see the matching
+    // wraparound comment on maxAdjacentPairExtentSum above.
+    const effSpacing = nodeSpacing + maxAdjacentPairExtentSum(extents, angleSpan >= 2 * Math.PI - 1e-9);
     const childSpan = angleSpan / n;
     // Straight-line (chord) distance between adjacent same-radius children is
     // 2*radius*sin(childSpan/2) - solving for the radius that keeps that >= effSpacing.
