@@ -24,7 +24,6 @@ var edgesDataset = null;
 var allVlans = new Map(); 
 var currentSelectedNodeData = null;
 var searchHighlightQuery = "";
-var physicsEnabled = true;
 
 // Deterministic layout state (see graph-layout.js / elk-layout.js).
 var allNodeMeta = new Map();   // id -> {label, shape, isStack, vlanCache, scanned}
@@ -103,13 +102,11 @@ window.switchTab = function(tabId) {
     }
 };
 
-window.togglePhysics = function() {
-    if (!network) return;
-    var btn = document.getElementById('physicsToggle');
-    physicsEnabled = !physicsEnabled;
-    network.setOptions({ physics: { enabled: physicsEnabled } });
-    btn.innerText = physicsEnabled ? "Freeze Map Layout" : "Unfreeze Map Layout";
-    btn.style.backgroundColor = physicsEnabled ? "#f39c12" : "#27ae60";
+window.setClusterThreshold = function(value) {
+    var n = parseInt(value, 10);
+    if (!Number.isFinite(n) || n < 2) return;
+    clusterThreshold = n;
+    window.renderVisibleGraph();
 };
 
 // 1. File Loading & Parsing
@@ -158,7 +155,6 @@ window.forceLoadFile = function() {
                 window.extractVlans();
                 await window.buildSwitchMap();
 
-                document.getElementById('physicsToggle').style.display = 'block';
                 document.getElementById('legend-group').style.display = 'block';
                 window.setStatus(`Success! Mapped ${globalTopologyData.length} nodes.`, "green");
             } catch (err) { 
@@ -329,6 +325,12 @@ window.applyVlanFilter = function() {
     var updates = [];
 
     nodesDataset.get().forEach(node => {
+        if (node.isCluster) {
+            // Collapsed groups have no VLAN data of their own (their members are hidden) -
+            // always keep the gold/dashed "collapsed group" styling regardless of filter.
+            return;
+        }
+
         var matchesVlan = selectedVlan === "ALL" || (node.vlanCache && node.vlanCache.includes(selectedVlan.toString()));
 
         if (!scannedIps.has(String(node.id))) {
@@ -366,10 +368,14 @@ window.performGlobalSearch = function() {
     }
 
     if (targetIp) {
-        network.selectNodes([targetIp]);
-        network.focus(targetIp, { scale: 1.0, animation: { duration: 500 } });
-        window.openRightDrawer(targetIp);
-        if (!targetIp.toLowerCase().includes(query)) { window.switchTab('tab-clients'); }
+        (async () => {
+            expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, clusterThreshold);
+            await window.renderVisibleGraph();
+            network.selectNodes([targetIp]);
+            network.focus(targetIp, { scale: 1.0, animation: { duration: 500 } });
+            window.openRightDrawer(targetIp);
+            if (!targetIp.toLowerCase().includes(query)) { window.switchTab('tab-clients'); }
+        })();
     }
 };
 

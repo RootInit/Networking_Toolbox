@@ -123,7 +123,8 @@
                 <option value="ALL">Show All VLANs</option>
             </select>
             
-            <button id="physicsToggle" class="btn-secondary" onclick="window.togglePhysics()" style="display:none;">Freeze Map Layout</button>
+            <label style="font-size: 0.85rem; font-weight: bold;">Max children before grouping:</label>
+            <input type="number" id="clusterThreshold" min="2" max="200" value="8" onchange="window.setClusterThreshold(this.value)">
         </div>
 
         <div class="control-group" id="legend-group" style="display:none; border-bottom: none; margin-bottom: 0;">
@@ -131,6 +132,7 @@
             <div class="legend-item"><span class="legend-swatch" style="background:#97C2FC; border-color:#2B7CE9;"></span> Scanned switch</div>
             <div class="legend-item"><span class="legend-swatch" style="background:#D2E5FF; border-color:#2B7CE9; border-radius:50%;"></span> Scanned virtual chassis / stack</div>
             <div class="legend-item"><span class="legend-swatch" style="background:#E8E8E8; border-color:#B0B0B0;"></span> Unscanned neighbor</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#fdf6e3; border-color:#d9b34e; border-style:dashed;"></span> Collapsed group (click to expand)</div>
         </div>
     </div>
 
