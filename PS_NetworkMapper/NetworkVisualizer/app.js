@@ -1,6 +1,3 @@
-import { computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors } from './graph-layout.js';
-import { computeLayout } from './elk-layout.js';
-
 /**
  * Global Error Catcher
  */
@@ -241,8 +238,8 @@ window.buildSwitchMap = async function() {
     });
 
     var nodeIds = Array.from(allNodeMeta.keys());
-    graphRoot = computeGraphRoot(nodeIds, allEdges);
-    primaryTree = buildPrimaryTree(nodeIds, allEdges, graphRoot);
+    graphRoot = window.GraphLayout.computeGraphRoot(nodeIds, allEdges);
+    primaryTree = window.GraphLayout.buildPrimaryTree(nodeIds, allEdges, graphRoot);
     expandedNodes = new Set();
 
     if (network !== null) { network.destroy(); network = null; }
@@ -275,8 +272,8 @@ window.buildSwitchMap = async function() {
 // visible set, and the canvas would otherwise sit blank with no indicator.
 window.renderVisibleGraph = async function() {
     window.showProgress("Computing layout...", 100);
-    var visible = computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, clusterThreshold);
-    var positions = await computeLayout(visible.visibleNodeIds, visible.visibleEdges);
+    var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, clusterThreshold);
+    var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges);
 
     nodesDataset.clear(); edgesDataset.clear();
 
@@ -369,7 +366,7 @@ window.performGlobalSearch = function() {
 
     if (targetIp) {
         (async () => {
-            expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, clusterThreshold);
+            window.GraphLayout.expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, clusterThreshold);
             await window.renderVisibleGraph();
             network.selectNodes([targetIp]);
             network.focus(targetIp, { scale: 1.0, animation: { duration: 500 } });

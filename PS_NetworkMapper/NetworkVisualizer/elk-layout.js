@@ -13,12 +13,18 @@ const LAYOUT_TIMEOUT_MS = 8000;
 let elkInstance = null;
 function getElk() {
   if (!elkInstance) {
-    elkInstance = new ELK({ workerUrl: 'vendor/elk-worker.min.js' });
+    // No workerUrl/workerFactory: constructing ELK this way runs layout on the main
+    // thread instead of a Web Worker. This is required, not just simpler - a Worker's
+    // script fetch is rejected under file:// ("cannot be accessed from origin 'null'",
+    // confirmed empirically), which this tool must support with no local web server
+    // available. Clustering (graph-layout.js) keeps the typically-visible subgraph to a
+    // few dozen nodes, so the main-thread cost here is not noticeable in normal use.
+    elkInstance = new ELK();
   }
   return elkInstance;
 }
 
-export function computeGridFallback(visibleNodeIds) {
+function computeGridFallback(visibleNodeIds) {
   const positions = new Map();
   const perRow = Math.ceil(Math.sqrt(visibleNodeIds.length)) || 1;
   visibleNodeIds.forEach((id, i) => {
@@ -30,7 +36,7 @@ export function computeGridFallback(visibleNodeIds) {
   return positions;
 }
 
-export async function computeLayout(visibleNodeIds, visibleEdges) {
+async function computeLayout(visibleNodeIds, visibleEdges) {
   if (visibleNodeIds.length === 0) return new Map();
 
   const graph = {
@@ -58,4 +64,11 @@ export async function computeLayout(visibleNodeIds, visibleEdges) {
     console.error('ELK layout failed, falling back to a grid:', err);
     return computeGridFallback(visibleNodeIds);
   }
+}
+
+// See graph-layout.js's matching footer for why this isn't `export`/`type="module"`.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { computeGridFallback, computeLayout };
+} else if (typeof window !== 'undefined') {
+    window.ElkLayout = { computeGridFallback, computeLayout };
 }

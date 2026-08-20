@@ -3,7 +3,7 @@
 
 // Splits a dotted-quad-shaped ID into comparable numeric octets; IDs that
 // aren't dotted-quads (e.g. "cluster:10.55.2.2") fall back to string compare.
-export function compareIpIds(a, b) {
+function compareIpIds(a, b) {
   const partsA = String(a).split('.');
   const partsB = String(b).split('.');
   if (partsA.length === 4 && partsB.length === 4 && partsA.every(p => /^\d+$/.test(p)) && partsB.every(p => /^\d+$/.test(p))) {
@@ -44,7 +44,7 @@ function bfsDistances(adj, startId) {
   return dist;
 }
 
-export function computeGraphRoot(nodeIds, edges) {
+function computeGraphRoot(nodeIds, edges) {
   if (nodeIds.length === 0) return null;
   if (nodeIds.length === 1) return nodeIds[0];
 
@@ -65,7 +65,7 @@ export function computeGraphRoot(nodeIds, edges) {
   return bestId;
 }
 
-export function buildPrimaryTree(nodeIds, edges, rootId) {
+function buildPrimaryTree(nodeIds, edges, rootId) {
   const adj = buildAdjacency(nodeIds, edges);
   const parentOf = new Map([[rootId, null]]);
   const childrenOf = new Map([[rootId, []]]);
@@ -109,7 +109,7 @@ function isExpanded(childrenOf, nodeId, expandedNodes, threshold) {
   return childCount <= threshold || expandedNodes.has(nodeId);
 }
 
-export function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold) {
+function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold) {
   const visibleNodeIds = [];
   const visibleEdges = [];
   const clusters = new Map();
@@ -139,11 +139,24 @@ export function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold)
   return { visibleNodeIds, visibleEdges, clusters };
 }
 
-export function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshold) {
+function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshold) {
   let current = parentOf.get(targetId);
   while (current != null) {
     const childCount = (childrenOf.get(current) || []).length;
     if (childCount > threshold) expandedNodes.add(current);
     current = parentOf.get(current);
   }
+}
+
+// Dual-mode export: node:test imports this file via ESM `import {...}` syntax, which
+// Node resolves against `module.exports` here through its built-in CJS/ESM interop
+// (confirmed working - no `export` keyword needed for named imports to work). The
+// browser loads this same file as a classic <script>, where `module` doesn't exist,
+// so it attaches to `window.GraphLayout` instead. Using `export` + `type="module"` here
+// was the original approach, but ES modules cannot fetch anything under file://, which
+// this tool must support with no local web server available.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors };
+} else if (typeof window !== 'undefined') {
+    window.GraphLayout = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors };
 }
