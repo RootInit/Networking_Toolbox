@@ -1682,31 +1682,40 @@ node -e "const d = require('/tmp/claude-1000/big-fixture.json'); console.log('de
 
 Expected: `devices:` prints a number close to 487 (1 core + 6 distribution + 480 access); edge count consistent with a mostly-tree topology plus the two secondary links.
 
-- [ ] **Step 3: Load it in the browser and verify the layout stays usable**
+- [ ] **Step 3: Load it in the browser via `file://` and verify the layout stays usable**
 
-Using the static-server + Chromium + CDP pattern from prior tasks (serve `/tmp/claude-1000/` alongside `PS_NetworkMapper/`, or copy the fixture into a location the server already roots — simplest is copying it to `PS_NetworkMapper/big-fixture.json` temporarily for this manual verification, then deleting it afterward since it's not meant to be committed):
+Task 8 made `file://` (no local web server) the actual target deployment environment, not just a nice-to-have — verify this large-scale case the same way, not over HTTP. Since there's no `fetch()` available under `file://` (confirmed in Task 8), inline the fixture's content into the eval expression the same way Task 8's Step 8 did: read it with Node, `JSON.stringify` the raw text into a safe JS string literal, build it into the `File`/`DataTransfer` trick. Don't hand-write the escaped JSON — generate the plan.json programmatically:
 
-```json
-[
-  {"nav": "http://localhost:<port>/NetworkVisualizer/network_vis.html"},
+```javascript
+// build-plan.mjs (throwaway, run once to produce the CDP plan.json - don't commit it)
+const fs = require('fs');
+const fixtureText = fs.readFileSync('/tmp/claude-1000/big-fixture.json', 'utf8');
+const loadEval = "(async () => { window.__FIXTURE_JSON = " + JSON.stringify(fixtureText) + "; const file = new File([window.__FIXTURE_JSON], 'big-fixture.json', {type: 'application/json'}); const dt = new DataTransfer(); dt.items.add(file); document.getElementById('jsonUpload').files = dt.files; window.forceLoadFile(); return 'triggered'; })()";
+const plan = [
+  {"nav": "file:///home/alexander/Documents/Programming/Networking_Toolbox/PS_NetworkMapper/NetworkVisualizer/network_vis.html"},
   {"wait": 1000},
-  {"eval": "(async () => { const resp = await fetch('../big-fixture.json'); const text = await resp.text(); const file = new File([text], 'big-fixture.json', {type: 'application/json'}); const dt = new DataTransfer(); dt.items.add(file); document.getElementById('jsonUpload').files = dt.files; window.forceLoadFile(); })(); 'triggered'"},
+  {"eval": loadEval},
   {"wait": 15000},
   {"eval": "document.getElementById('status-text').innerText"},
   {"eval": "window.__debug.nodesDataset.length"},
-  {"shot": "<scratchpad>/task8_large_topology_overview.png"},
+  {"shot": "<scratchpad>/task9_large_topology_overview.png"},
   {"eval": "(async () => { var clusterId = window.__debug.nodesDataset.get().find(n => n.isCluster).id; var parentId = clusterId.slice('cluster:'.length); window.__debug.expandedNodes.add(parentId); await window.renderVisibleGraph(); return window.__debug.nodesDataset.length; })()"},
   {"wait": 300},
-  {"shot": "<scratchpad>/task8_after_expand.png"}
-]
+  {"shot": "<scratchpad>/task9_after_expand.png"}
+];
+fs.writeFileSync('/tmp/claude-1000/task9-plan.json', JSON.stringify(plan, null, 2));
 ```
 
-Expected: status reads `"Success! Mapped 487 nodes."` (or whatever the actual generated count is); render completes without the tab hanging (bounded by the 15s wait plus ELK's own 8s internal timeout - if it's still not done, that's a real problem to investigate, not something to raise the wait past); `nodesDataset.length` after initial load is small (single digits to low tens — 1 core + 6 distribution + 6 cluster placeholders, since every distribution switch has 80 children, over the default threshold of 8) rather than 487, confirming clustering keeps the default view readable; the first screenshot shows a clean top-down tree of a manageable number of boxes; after expanding one cluster, `nodesDataset.length` grows by that cluster's member count and the second screenshot shows those newly-revealed leaves laid out sanely (not overlapping, not off-screen at extreme coordinates).
+Run it with `node build-plan.mjs`, then drive it with `node ~/.claude/tools/cdp.mjs <port> /tmp/claude-1000/task9-plan.json` against headless Chromium (no static server, no `nav` to a `localhost` URL — `file://` directly, same as Task 8's Step 8).
 
-- [ ] **Step 4: Clean up the temporary fixture copy and commit the generator**
+Expected: status reads `"Success! Mapped 487 nodes."` (or whatever the actual generated count is); render completes without the tab hanging (bounded by the 15s wait plus ELK's own 8s internal timeout - if it's still not done, that's a real problem to investigate, not something to raise the wait past); `nodesDataset.length` after initial load is small (single digits to low tens — 1 core + 6 distribution + 6 cluster placeholders, since every distribution switch has 80 children, over the default threshold of 8) rather than 487, confirming clustering keeps the default view readable; the first screenshot shows a clean top-down tree of a manageable number of boxes; after expanding one cluster, `nodesDataset.length` grows by that cluster's member count and the second screenshot shows those newly-revealed leaves laid out sanely (not overlapping, not off-screen at extreme coordinates). Since ELK now always runs on the main thread (Task 8), this is also the real-world worst case for that trade-off — note in your report roughly how long the full render took (visible in how much of the 15s wait was actually needed) so there's a concrete data point on it, not just "it worked."
+
+- [ ] **Step 4: Commit the generator**
+
+Nothing to clean up — Step 3's fixture stayed in `/tmp` and was loaded via the `file://`
+inline-content trick, never copied into the repo tree.
 
 ```bash
-rm -f /home/alexander/Documents/Programming/Networking_Toolbox/PS_NetworkMapper/big-fixture.json
 git add PS_NetworkMapper/NetworkVisualizer/test/generate-fixture.mjs
 git commit -m "test: add synthetic ~500-node fixture generator for large-scale layout verification"
 ```
