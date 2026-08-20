@@ -213,20 +213,47 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const isLeaf = id => !childrenOf.has(id) || childrenOf.get(id).length === 0;
   const allChildrenAreLeaves = kids => kids.every(isLeaf);
 
-  // Finds each of n children's own minimal radius from their shared center, given fixed
-  // angles 2*PI*i/n. Starts everyone at their own natural resting radius (just clears
+  // Each child's angular slice is proportional to its own natural size (minRadius +
+  // its extent), not an equal 1/n share - a child with a much bigger subtree than its
+  // siblings gets a wider slice. Without this, a single disproportionately large child
+  // (this network's sample data has two core switches; the second hangs off the first
+  // as an ordinary child with a whole distribution/access tree of its own) still forced
+  // its immediate angular neighbors out to nearly its own radius just to clear its disc
+  // from that close an angle, even though radius alone was already being relaxed
+  // per-child - confirmed directly (reported as two halves with a large gap between
+  // them) and then measured: the two children adjacent to the oversized one landed at
+  // radius ~9800 and ~11800, nearly as far as the oversized child's own ~12300, while
+  // children further away in angle stayed at ~2000-3000. A wider slice for the big
+  // child reduces how close its neighbors sit to it in angle, which directly reduces
+  // how far out radius alone has to push them to clear it.
+  function computeChildAngles(naturalMin) {
+    const n = naturalMin.length;
+    const total = naturalMin.reduce((a, b) => a + b, 0);
+    const angles = [];
+    let cumulative = 0;
+    for (let i = 0; i < n; i++) {
+      const width = (naturalMin[i] / total) * 2 * Math.PI;
+      angles.push(cumulative + width / 2);
+      cumulative += width;
+    }
+    return angles;
+  }
+
+  // Finds each of n children's own minimal radius from their shared center, given each
+  // child's fixed angle (see computeChildAngles above - proportional to size, not an
+  // equal share). Starts everyone at their own natural resting radius (just clears
   // their own extent from the center), then repeatedly checks every pair: if child i is
   // currently too close to child j (chord distance, from the law of cosines at their
-  // fixed angle gap, below the two extents' combined requirement), i is pushed out to
+  // angle gap, below the two extents' combined requirement), i is pushed out to
   // the minimum radius that clears j - never pulled back in below its own natural rest,
   // and never adjusted by moving j instead (j gets its own turn in the same sweep).
   function relaxRadii(extents, spacing) {
     const n = extents.length;
-    if (n === 0) return [];
+    if (n === 0) return { radii: [], angles: [] };
     const naturalMin = extents.map(e => minRadius + e);
-    if (n === 1) return naturalMin;
+    const angles = computeChildAngles(naturalMin);
+    if (n === 1) return { radii: naturalMin, angles };
 
-    const angleStep = (2 * Math.PI) / n;
     const radii = naturalMin.slice();
 
     for (let iter = 0; iter < relaxIterations; iter++) {
@@ -247,7 +274,7 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
         for (let j = 0; j < n; j++) {
           if (j === i) continue;
           const requiredDist = extents[i] + extents[j] + spacing;
-          const rawDiff = Math.abs(i - j) * angleStep;
+          const rawDiff = Math.abs(angles[i] - angles[j]);
           const angleDiff = Math.min(rawDiff, 2 * Math.PI - rawDiff);
           const rj = radii[j];
           const cosA = Math.cos(angleDiff);
@@ -274,20 +301,20 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
       }
       for (let i = 0; i < n; i++) radii[i] = next[i];
     }
-    return radii;
+    return { radii, angles };
   }
 
   const extentCache = new Map();
-  const radiiCache = new Map(); // nodeId -> relaxed radii for its children, same order as childrenOf.get(nodeId)
+  const layoutCache = new Map(); // nodeId -> {radii, angles} for its children, same order as childrenOf.get(nodeId)
 
   function childLayout(nodeId) {
-    if (radiiCache.has(nodeId)) return radiiCache.get(nodeId);
+    if (layoutCache.has(nodeId)) return layoutCache.get(nodeId);
     const kids = childrenOf.get(nodeId) || [];
     const extents = kids.map(extent);
     const spacing = allChildrenAreLeaves(kids) ? leafSpacing : nodeSpacing;
-    const radii = relaxRadii(extents, spacing);
-    radiiCache.set(nodeId, radii);
-    return radii;
+    const layout = relaxRadii(extents, spacing);
+    layoutCache.set(nodeId, layout);
+    return layout;
   }
 
   // Bottom-up, cached: how far from its OWN position does nodeId's subtree extend?
@@ -301,7 +328,7 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
       result = 0;
     } else {
       const kids = childrenOf.get(nodeId);
-      const radii = childLayout(nodeId);
+      const { radii } = childLayout(nodeId);
       let maxReach = 0;
       for (let i = 0; i < kids.length; i++) {
         maxReach = Math.max(maxReach, radii[i] + extent(kids[i]));
@@ -317,14 +344,12 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     const n = kids.length;
     if (n === 0) return;
     const parentPos = positions.get(nodeId);
-    const radii = childLayout(nodeId);
-    const angleStep = (2 * Math.PI) / n;
+    const { radii, angles } = childLayout(nodeId);
 
     kids.forEach((childId, i) => {
-      const angle = i * angleStep;
       positions.set(childId, {
-        x: parentPos.x + radii[i] * Math.cos(angle),
-        y: parentPos.y + radii[i] * Math.sin(angle),
+        x: parentPos.x + radii[i] * Math.cos(angles[i]),
+        y: parentPos.y + radii[i] * Math.sin(angles[i]),
       });
       place(childId);
     });
