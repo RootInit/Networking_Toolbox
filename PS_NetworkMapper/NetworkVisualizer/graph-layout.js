@@ -153,46 +153,35 @@ function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshol
   }
 }
 
-// Places every node in the visible tree recursively: a node's children fan out around
-// IT the same way root's children fan out around root. A "leaf-parent" (a node whose
-// children are all themselves leaves) is the one special case - instead of continuing
-// the wedge it inherited from ITS OWN parent, its children form a concentric-ring
-// cluster centered on itself, using a full circle, unconstrained by that wedge: "a
-// smaller version of the center node," literally the same ring-packing math root uses,
-// just a smaller radius. That's what keeps it compact (ring capacity grows with radius,
-// so packing scales roughly with sqrt(childCount) instead of linearly) without needing
-// the wedge angle a wide leaf-heavy branch would otherwise be forced to squeeze into.
+// Places every node in the visible tree recursively, with ONE rule applied uniformly at
+// every depth: a node's children fan out around IT in a full circle, unconstrained by
+// anything above it - "a smaller version of the center node," literally the same
+// ring-packing math root uses, just a smaller radius, at every single level. A node
+// whose children are all leaves uses leafSpacing for that circle's packing; every other
+// node uses nodeSpacing. That's the only thing that varies by depth - the placement rule
+// itself doesn't.
 //
-// Every node above a leaf-parent computes its OWN children's spacing as the larger of
-// the normal nodeSpacing and twice the largest cluster radius among those children (a
-// bottom-up "extent" pass, cached per node) - so if any one branch has an unusually
-// large leaf cluster, EVERY sibling at that level is spaced out to match, uniformly.
-// This was chosen deliberately over pushing just the oversized branch outward: pushing
-// individual branches is what produced "some nodes way too close together, some pushed
-// way too far" in an earlier version - a uniform spacing adjustment applied to a whole
-// ring never singles one branch out.
+// Earlier versions special-cased this: only a "leaf-parent" (a node whose children are
+// all themselves leaves) got a self-centered full circle: every other node continued a
+// wedge inherited from ITS OWN parent, wide enough at the top (root's own wedge is the
+// full circle) but narrower at every level down. That is wrong wherever the tree is
+// deeper than root -> branch -> leaf: a second-level branch (e.g. this network's sample
+// data has two core switches, the second one hanging off the first as an ordinary child,
+// with its own ~8 distribution switches under it) inherited a narrow wedge from root and
+// had to cram its own children's clusters into it, reproducing the exact "narrow wedge
+// forces a huge radius" problem that motivated centering leaf clusters on themselves in
+// the first place - confirmed directly (reported as visibly cramped), then measured: that
+// second core's own children landed at radius ~26000px from it, roughly 3.4x root's own
+// ring radius, on the real ~340-node sample. Dropping wedge inheritance for every level,
+// not just the leaf tier, removes the problem instead of chasing it level by level.
 //
-// This replaces an ELK-based approach (plain 'radial' for inner tiers + a hand-rolled
-// grid for the leaf tier): ELK computes one GLOBAL radius per depth level, weighted by
-// how many descendants that whole level has - confirmed via headless-browser screenshot
-// (not just reasoning about it) to visibly collapse the whole distribution-level ring
-// down near the root whenever the network's full leaf tier is exposed at once, since
-// that level's huge total descendant count dominates ELK's per-level radius choice for
-// every other level too, not just its own.
-//
-// A first attempt at a from-scratch replacement gave every node (not just leaf-parents)
-// a single ring, sized to its own local child count - "local" fixed the ELK bug, but a
-// leaf-heavy branch inheriting a narrow wedge from a parent with many siblings still
-// needed a huge radius to fit its children on one ring within that narrow wedge (~135000px
-// on the real ~340-node sample, confirmed by measuring it - worse than what it replaced).
-// A second attempt tried multiple rings within that inherited wedge to fix the blowup,
-// reusing the same angular columns across every ring; that's wrong for recursion - two
-// nodes sharing a column (one shallow, one a row further out) share an angle, and each
-// independently recurses its own descendants straight outward along that same angle,
-// which can land unrelated nodes on exactly identical coordinates (confirmed empirically,
-// not hypothesized). Centering each leaf-parent's own cluster on itself instead of on an
-// inherited wedge sidesteps the whole class of problem: it never needs to share angular
-// territory with anything outside its own subtree in the first place.
+// Every node computes its OWN children's spacing as the larger of the relevant spacing
+// constant and the worst actual ADJACENT pair's combined extent among its children (a
+// bottom-up "extent" pass, cached per node) - so if any one child has an unusually large
+// subtree, only the neighbors actually sitting next to it are spaced out to match, not
+// every sibling uniformly regardless of who's actually adjacent to whom (that was an
+// earlier, needlessly conservative version - reported directly as clusters sitting far
+// apart with no realistic risk of overlapping).
 function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const opts = options || {};
   // nodeSpacing governs structural (branch-to-branch) placement: how far apart sibling
@@ -210,127 +199,84 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   positions.set(rootId, { x: 0, y: 0 });
 
   const isLeaf = id => !childrenOf.has(id) || childrenOf.get(id).length === 0;
-  const isLeafParent = id => {
-    const kids = childrenOf.get(id);
-    return !!kids && kids.length > 0 && kids.every(isLeaf);
-  };
-
-  // How many concentric rings, each holding as many nodes as its own circumference
-  // allows (>= leafSpacing apart), does it take to fit n nodes around a point? Returns
-  // the outermost ring's radius - the cluster's overall extent from its own center.
-  function clusterRadius(n) {
-    let idx = 0, ring = 0, r = minRadius;
-    while (idx < n) {
-      r = minRadius + ring * leafSpacing;
-      const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / leafSpacing));
-      idx += Math.min(capacity, n - idx);
-      ring++;
-    }
-    return r;
-  }
+  const allChildrenAreLeaves = kids => kids.every(isLeaf);
 
   // Only two children that actually end up NEXT TO EACH OTHER can ever collide - using
   // 2*(the single largest extent among all children) as the required spacing for EVERY
   // pair is only correct when the two biggest clusters happen to be adjacent, and is
-  // needlessly conservative otherwise (confirmed directly: reported as clusters sitting
-  // far apart with no risk of overlap). The real, tighter requirement is the worst actual
-  // adjacent pair's combined extent. Children are spread evenly in their existing array
-  // order, so "adjacent" means consecutive array entries - wrapping from last back to
-  // first only when the wedge is a full circle (root; a partial wedge's first and last
-  // child are on opposite ends, not touching).
-  function maxAdjacentPairExtentSum(extents, isFullCircle) {
+  // needlessly conservative otherwise. The real, tighter requirement is the worst actual
+  // adjacent pair's combined extent. Children are spread evenly in array order around a
+  // full circle, so every child (including the pair wrapping from last back to first) has
+  // exactly two neighbors.
+  function maxAdjacentPairExtentSum(extents) {
     const n = extents.length;
     if (n < 2) return 0;
     let maxSum = 0;
-    const pairCount = isFullCircle ? n : n - 1;
-    for (let i = 0; i < pairCount; i++) {
+    for (let i = 0; i < n; i++) {
       const j = (i + 1) % n;
       maxSum = Math.max(maxSum, extents[i] + extents[j]);
     }
     return maxSum;
   }
 
+  // Given n children each needing `spacing` clearance from their neighbors, the radius
+  // of the single ring that fits them evenly around a full circle - solved from the
+  // straight-line (chord) distance between adjacent same-radius points,
+  // 2*radius*sin(PI/n), which must be >= spacing.
+  function ringRadius(n, spacing) {
+    return n > 1 ? spacing / (2 * Math.sin(Math.PI / n)) : 0;
+  }
+
   // Bottom-up, cached: how far from its OWN position does nodeId's subtree extend?
-  // Leaves: 0. Leaf-parents: their own cluster's radius. Everything else: however far out
-  // its own single-ring child placement reaches, plus the largest extent among its
-  // children (since that child's own subtree continues from there).
+  // Leaves: 0. Everything else: however far out its own child-placement ring reaches,
+  // plus the largest extent among its children (since that child's own subtree
+  // continues from there).
   const extentCache = new Map();
   function extent(nodeId) {
     if (extentCache.has(nodeId)) return extentCache.get(nodeId);
     let result;
     if (isLeaf(nodeId)) {
       result = 0;
-    } else if (isLeafParent(nodeId)) {
-      result = clusterRadius(childrenOf.get(nodeId).length);
     } else {
       const kids = childrenOf.get(nodeId);
       const extents = kids.map(extent);
       const maxChildExtent = Math.max(0, ...extents);
-      const n = kids.length;
+      const spacing = allChildrenAreLeaves(kids) ? leafSpacing : nodeSpacing;
       // A center distance of just the adjacent-pair extent sum only guarantees the two
       // DISCS don't overlap in area - a node sitting right on each disc's boundary,
       // pointing directly at the other, could still land arbitrarily close to its
       // counterpart (confirmed empirically: two adjacent large clusters landed nodes
-      // 76px apart with only that margin). Adding nodeSpacing on top guarantees an
-      // actual gap. This is root's OWN top-level ring, always a full circle.
-      const effSpacing = nodeSpacing + maxAdjacentPairExtentSum(extents, true);
-      const childRadius = n > 1 ? effSpacing / (2 * Math.sin(Math.PI / n)) : 0;
-      result = Math.max(minRadius, childRadius) + maxChildExtent;
+      // 76px apart with only that margin). Adding the spacing constant on top
+      // guarantees an actual gap.
+      const effSpacing = spacing + maxAdjacentPairExtentSum(extents);
+      result = Math.max(minRadius, ringRadius(kids.length, effSpacing)) + maxChildExtent;
     }
     extentCache.set(nodeId, result);
     return result;
   }
 
-  function placeClusterAround(centerPos, kids) {
-    const n = kids.length;
-    let idx = 0, ring = 0;
-    while (idx < n) {
-      const r = minRadius + ring * leafSpacing;
-      const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / leafSpacing));
-      const count = Math.min(capacity, n - idx);
-      for (let i = 0; i < count; i++) {
-        const angle = (2 * Math.PI * i) / count;
-        positions.set(kids[idx], {
-          x: centerPos.x + r * Math.cos(angle),
-          y: centerPos.y + r * Math.sin(angle),
-        });
-        idx++;
-      }
-      ring++;
-    }
-  }
-
-  function place(nodeId, angleHint, angleSpan) {
+  function place(nodeId) {
     const kids = childrenOf.get(nodeId) || [];
     const n = kids.length;
     if (n === 0) return;
     const parentPos = positions.get(nodeId);
 
-    if (isLeafParent(nodeId)) {
-      placeClusterAround(parentPos, kids);
-      return; // leaves have no children of their own - nothing left to recurse into
-    }
-
     const extents = kids.map(extent);
-    // isFullCircle: only root ever calls place() with the full 2*PI - see the matching
-    // wraparound comment on maxAdjacentPairExtentSum above.
-    const effSpacing = nodeSpacing + maxAdjacentPairExtentSum(extents, angleSpan >= 2 * Math.PI - 1e-9);
-    const childSpan = angleSpan / n;
-    // Straight-line (chord) distance between adjacent same-radius children is
-    // 2*radius*sin(childSpan/2) - solving for the radius that keeps that >= effSpacing.
-    const radius = Math.max(minRadius, n > 1 ? effSpacing / (2 * Math.sin(childSpan / 2)) : 0);
+    const spacing = allChildrenAreLeaves(kids) ? leafSpacing : nodeSpacing;
+    const effSpacing = spacing + maxAdjacentPairExtentSum(extents);
+    const radius = Math.max(minRadius, ringRadius(n, effSpacing));
 
     kids.forEach((childId, i) => {
-      const angle = angleHint - angleSpan / 2 + (i + 0.5) * childSpan;
+      const angle = (2 * Math.PI * i) / n;
       positions.set(childId, {
         x: parentPos.x + radius * Math.cos(angle),
         y: parentPos.y + radius * Math.sin(angle),
       });
-      place(childId, angle, childSpan);
+      place(childId);
     });
   }
 
-  place(rootId, 0, 2 * Math.PI);
+  place(rootId);
   return positions;
 }
 

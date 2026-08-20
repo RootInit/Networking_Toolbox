@@ -196,11 +196,34 @@ test('computeRecursiveRadialLayout places a small leaf-parent\'s children evenly
   for (const r of radii) assert.equal(Math.abs(r - radii[0]) < 0.01, true, 'all four should be on the same ring');
 });
 
-test('computeRecursiveRadialLayout wraps a large leaf-parent\'s children into more rings once one ring is full', () => {
+test('computeRecursiveRadialLayout keeps a large leaf-parent\'s single ring at a reasonable radius, not linear-in-n blowup, because it uses the full circle (not a narrow wedge)', () => {
   const childrenOf = new Map([['root', Array.from({ length: 40 }, (_, i) => `leaf${i}`)]]);
-  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, minRadius: 190 });
-  const radii = new Set(Array.from({ length: 40 }, (_, i) => Math.round(Math.hypot(result.get(`leaf${i}`).x, result.get(`leaf${i}`).y))));
-  assert.equal(radii.size > 1, true, 'expected more than one distinct ring radius for 40 leaves');
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, leafSpacing: 220, minRadius: 190 });
+  const radii = Array.from({ length: 40 }, (_, i) => Math.hypot(result.get(`leaf${i}`).x, result.get(`leaf${i}`).y));
+  for (const r of radii) assert.equal(Math.abs(r - radii[0]) < 0.01, true, 'all 40 should be on the same single ring');
+  assert.equal(radii[0] < 3000, true, `expected a reasonable single-ring radius for 40 nodes on a full circle, got ${radii[0].toFixed(0)}`);
+});
+
+test('computeRecursiveRadialLayout gives an intermediate STRUCTURAL node (not just leaf-parents) a full circle around itself too (regression: a second-level branch - e.g. a second core switch hanging off the first - inherited a narrow wedge from root in an earlier version and needed radius ~26000px for its own 8 children on the real sample; confirmed by measuring it)', () => {
+  // root -> [core2, dist0..dist11] (12 siblings for core2 to inherit a narrow wedge from,
+  // if wedge inheritance still existed) -> core2 -> [b0..b7], each of which is itself a
+  // leaf-parent with a real cluster, mirroring the real sample's second-core shape.
+  const childrenOf = new Map([['root', ['core2']]]);
+  for (let i = 0; i < 12; i++) childrenOf.get('root').push(`dist${i}`);
+  childrenOf.set('core2', Array.from({ length: 8 }, (_, i) => `b${i}`));
+  for (let i = 0; i < 8; i++) {
+    childrenOf.set(`b${i}`, Array.from({ length: 10 + i * 4 }, (_, k) => `b${i}_leaf${k}`)); // 10..38 leaves
+  }
+
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 90, leafSpacing: 220, minRadius: 190 });
+  const core2Pos = result.get('core2');
+  const radii = Array.from({ length: 8 }, (_, i) => {
+    const p = result.get(`b${i}`);
+    return Math.hypot(p.x - core2Pos.x, p.y - core2Pos.y);
+  });
+  for (const r of radii) {
+    assert.equal(r < 5000, true, `core2's own children should stay well under the old ~26000px blowup, got ${r.toFixed(0)}`);
+  }
 });
 
 test('computeRecursiveRadialLayout centers a non-root leaf-parent\'s cluster on itself, using a full circle rather than a wedge inherited from its own parent', () => {
@@ -261,6 +284,34 @@ test('computeRecursiveRadialLayout never places two different nodes closer than 
     }
   }
   assert.equal(minDist >= 190 - 0.5, true, `closest pair anywhere was ${minDist.toFixed(1)}, expected >= 190`);
+});
+
+test('computeRecursiveRadialLayout never places two different nodes closer than the relevant spacing, on a real multi-level tree with an intermediate structural node (like the second core switch) that itself has leaf-parent children with real clusters', () => {
+  const childrenOf = new Map([['root', ['core2']]]);
+  for (let i = 0; i < 12; i++) {
+    const id = `dist${i}`;
+    childrenOf.get('root').push(id);
+    childrenOf.set(id, Array.from({ length: 3 + (i % 10) * 3 }, (_, k) => `${id}_leaf${k}`));
+  }
+  childrenOf.set('core2', []);
+  for (let i = 0; i < 8; i++) {
+    const id = `core2dist${i}`;
+    childrenOf.get('core2').push(id);
+    childrenOf.set(id, Array.from({ length: 5 + i * 4 }, (_, k) => `${id}_leaf${k}`));
+  }
+
+  const nodeSpacing = 90, leafSpacing = 220;
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing, leafSpacing, minRadius: 190 });
+  const allPositions = Array.from(result.values());
+  let minDist = Infinity;
+  for (let i = 0; i < allPositions.length; i++) {
+    for (let j = i + 1; j < allPositions.length; j++) {
+      minDist = Math.min(minDist, Math.hypot(allPositions[i].x - allPositions[j].x, allPositions[i].y - allPositions[j].y));
+    }
+  }
+  // The smallest spacing anywhere in the tree is nodeSpacing (90) - leafSpacing (220) only
+  // applies within a single cluster's own ring, which is always >= nodeSpacing here.
+  assert.equal(minDist >= nodeSpacing - 0.5, true, `closest pair anywhere was ${minDist.toFixed(1)}, expected >= ${nodeSpacing}`);
 });
 
 test('computeRecursiveRadialLayout produces identical output across repeated runs on the same input (deterministic)', () => {
