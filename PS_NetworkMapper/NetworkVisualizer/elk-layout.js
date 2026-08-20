@@ -43,10 +43,19 @@ async function computeLayout(visibleNodeIds, visibleEdges) {
   const graph = {
     id: 'root',
     layoutOptions: {
-      'elk.algorithm': 'layered',
-      'elk.direction': 'DOWN',
-      'elk.spacing.nodeNode': '60',
-      'elk.layered.spacing.nodeNodeBetweenLayers': '90',
+      // 'layered'+DOWN puts every same-depth node in one horizontal row, which produces
+      // an extremely wide, short diagram on this network's shape (core/distribution
+      // fan-out is shallow but wide) - confirmed empirically (a 20-child single-hub
+      // test graph laid out 4340x300px, a 14:1 ratio, and ELK's own wrapping/aspectRatio
+      // options don't help since they only wrap deep chains, not wide single layers).
+      // 'radial' instead fans a node's children out around it in every direction, which
+      // keeps the bounding box close to square regardless of how wide a level is (same
+      // test graph: 1621x1511px, roughly 1:1) and matches the reference layout requested.
+      // WEDGE_COMPACTION lets branches with fewer descendants sit closer to the root
+      // instead of every node landing on one uniform ring, which is otherwise wasted space.
+      'elk.algorithm': 'org.eclipse.elk.radial',
+      'elk.spacing.nodeNode': '70',
+      'elk.radial.compactor': 'WEDGE_COMPACTION',
     },
     children: visibleNodeIds.map(id => ({ id, width: NODE_WIDTH, height: NODE_HEIGHT })),
     edges: visibleEdges.map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] })),
