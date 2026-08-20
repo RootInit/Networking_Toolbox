@@ -1,29 +1,22 @@
-// Wraps a vendored ELK.js instance to lay out the currently-visible subgraph.
-// Runs on the main thread (see getElk() below for why - a Web Worker cannot load
-// under file://, which this tool must support), with a deterministic grid
-// fallback if layout errors or takes too long. `ELK` is a browser global from
-// vendor/elk.bundled.js, loaded via a classic <script> tag before this file -
-// referenced lazily (inside computeLayout, not at module scope) so this file
-// still imports cleanly under `node --test`, where computeGridFallback is
-// exercised without a browser.
+// Computes positions for the currently-visible subgraph via
+// GraphLayout.computeRecursiveRadialLayout (graph-layout.js) - despite the filename, ELK
+// is no longer used for the primary path. It was originally: this file wrapped a vendored
+// ELK.js instance, and computeRecursiveRadialLayout was a post-process applied on top of
+// ELK's own output. ELK's structural placement was replaced entirely once it was confirmed
+// (via headless-browser screenshot, not just reasoning) to collapse whole depth levels
+// near the root when the network's full leaf tier was exposed at once - see
+// graph-layout.js's header comment on computeRecursiveRadialLayout for the full history.
+// The file keeps its name so callers (app.js, network_vis.html's <script> tag) don't need
+// to change; `window.ElkLayout` is what's actually referenced elsewhere.
+//
+// computeGridFallback remains as the last-resort safety net if computeRecursiveRadialLayout
+// ever throws or the visible set is pathologically large enough to hit the timeout below -
+// it needs no browser globals, so it (and this file generally) still imports cleanly under
+// `node --test`, unlike the vendored ELK bundle this file used to depend on.
 
 const NODE_WIDTH = 160;
 const NODE_HEIGHT = 50;
 const LAYOUT_TIMEOUT_MS = 8000;
-
-let elkInstance = null;
-function getElk() {
-  if (!elkInstance) {
-    // No workerUrl/workerFactory: constructing ELK this way runs layout on the main
-    // thread instead of a Web Worker. This is required, not just simpler - a Worker's
-    // script fetch is rejected under file:// ("cannot be accessed from origin 'null'",
-    // confirmed empirically), which this tool must support with no local web server
-    // available. Clustering (graph-layout.js) keeps the typically-visible subgraph to a
-    // few dozen nodes, so the main-thread cost here is not noticeable in normal use.
-    elkInstance = new ELK();
-  }
-  return elkInstance;
-}
 
 function computeGridFallback(visibleNodeIds) {
   const positions = new Map();
@@ -40,57 +33,30 @@ function computeGridFallback(visibleNodeIds) {
 async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   if (visibleNodeIds.length === 0) return new Map();
 
-  const graph = {
-    id: 'root',
-    layoutOptions: {
-      // 'layered'+DOWN puts every same-depth node in one horizontal row, which produces
-      // an extremely wide, short diagram on this network's shape (core/distribution
-      // fan-out is shallow but wide) - confirmed empirically (a 20-child single-hub
-      // test graph laid out 4340x300px, a 14:1 ratio, and ELK's own wrapping/aspectRatio
-      // options don't help since they only wrap deep chains, not wide single layers).
-      // 'radial' instead fans a node's children out around it in every direction, which
-      // keeps the bounding box close to square regardless of how wide a level is (same
-      // test graph: 1621x1511px, roughly 1:1). Deliberately no compactor option here -
-      // the inner rings (everything but the leaf tier) use ELK's plain uniform-ring
-      // placement; leaf-tier compaction is instead handled explicitly below by
-      // GraphLayout.applyLeafGridClustering, which was requested specifically because
-      // ELK's own radial compactors made the inner rings uneven without meaningfully
-      // shrinking the (much bigger) outer leaf tier.
-      'elk.algorithm': 'org.eclipse.elk.radial',
-      'elk.spacing.nodeNode': '70',
-    },
-    children: visibleNodeIds.map(id => ({ id, width: NODE_WIDTH, height: NODE_HEIGHT })),
-    edges: visibleEdges.map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] })),
+  const doLayout = async () => {
+    const childrenOf = new Map();
+    visibleEdges.forEach(e => {
+      if (!childrenOf.has(e.from)) childrenOf.set(e.from, []);
+      childrenOf.get(e.from).push(e.to);
+    });
+    return window.GraphLayout.computeRecursiveRadialLayout(visibleNodeIds[0], childrenOf, layoutSettings);
   };
 
   const timeout = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('ELK layout timed out')), LAYOUT_TIMEOUT_MS);
+    setTimeout(() => reject(new Error('Layout timed out')), LAYOUT_TIMEOUT_MS);
   });
 
   try {
-    const laidOut = await Promise.race([getElk().layout(graph), timeout]);
-    let positions = new Map();
-    laidOut.children.forEach(n => positions.set(n.id, { x: n.x, y: n.y }));
-
-    if (typeof window !== 'undefined' && window.GraphLayout && visibleNodeIds.length > 0) {
-      const childrenOf = new Map();
-      visibleEdges.forEach(e => {
-        if (!childrenOf.has(e.from)) childrenOf.set(e.from, []);
-        childrenOf.get(e.from).push(e.to);
-      });
-      positions = window.GraphLayout.applyLeafGridClustering(positions, visibleNodeIds[0], childrenOf, layoutSettings);
-    }
-
-    return positions;
+    return await Promise.race([doLayout(), timeout]);
   } catch (err) {
-    console.error('ELK layout failed, falling back to a grid:', err);
+    console.error('Layout failed, falling back to a grid:', err);
     if (typeof document !== 'undefined') {
       var textEl = document.getElementById('fatal-error-text');
       var modalEl = document.getElementById('fatal-error-modal');
       if (textEl && modalEl) {
-        // err.message could in principle come from somewhere ELK doesn't fully control
-        // (e.g. a malformed graph shape) - build the message via textContent rather than
-        // concatenating it into innerHTML, so it can never be interpreted as markup.
+        // err.message could in principle come from somewhere not fully in this app's
+        // control - build the message via textContent rather than concatenating it into
+        // innerHTML, so it can never be interpreted as markup.
         textEl.innerHTML = 'Layout engine failed, showing a basic grid instead of the normal tree view.<br><br>';
         var errMsgEl = document.createElement('span');
         errMsgEl.textContent = (err && err.message) ? err.message : String(err);

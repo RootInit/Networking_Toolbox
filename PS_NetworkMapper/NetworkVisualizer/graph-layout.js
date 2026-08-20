@@ -153,111 +153,153 @@ function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshol
   }
 }
 
-// Re-arranges the leaf children of any "leaf-parent" (a node whose children are all
-// themselves leaves) into a compact grid instead of the wide arc a radial layout gives
-// them, once there are enough of them to be worth it. The grid is rotated to point in
-// the same root->parent direction the branch already radiates in, so it reads as "a
-// cluster at the tip of this spoke" rather than a layout that's inconsistent with the
-// rest of the (untouched) radial tree. Only leaf positions move - every non-leaf-parent
-// node (including every leaf-parent itself) keeps exactly the position `positions` came
-// in with, per this being scoped to "the outer ring only" (see the app's chat history:
-// the inner rings' plain radial placement was explicitly fine and must not change).
-function applyLeafGridClustering(positions, rootId, childrenOf, options) {
+// Places every node in the visible tree recursively: a node's children fan out around
+// IT the same way root's children fan out around root. A "leaf-parent" (a node whose
+// children are all themselves leaves) is the one special case - instead of continuing
+// the wedge it inherited from ITS OWN parent, its children form a concentric-ring
+// cluster centered on itself, using a full circle, unconstrained by that wedge: "a
+// smaller version of the center node," literally the same ring-packing math root uses,
+// just a smaller radius. That's what keeps it compact (ring capacity grows with radius,
+// so packing scales roughly with sqrt(childCount) instead of linearly) without needing
+// the wedge angle a wide leaf-heavy branch would otherwise be forced to squeeze into.
+//
+// Every node above a leaf-parent computes its OWN children's spacing as the larger of
+// the normal nodeSpacing and twice the largest cluster radius among those children (a
+// bottom-up "extent" pass, cached per node) - so if any one branch has an unusually
+// large leaf cluster, EVERY sibling at that level is spaced out to match, uniformly.
+// This was chosen deliberately over pushing just the oversized branch outward: pushing
+// individual branches is what produced "some nodes way too close together, some pushed
+// way too far" in an earlier version - a uniform spacing adjustment applied to a whole
+// ring never singles one branch out.
+//
+// This replaces an ELK-based approach (plain 'radial' for inner tiers + a hand-rolled
+// grid for the leaf tier): ELK computes one GLOBAL radius per depth level, weighted by
+// how many descendants that whole level has - confirmed via headless-browser screenshot
+// (not just reasoning about it) to visibly collapse the whole distribution-level ring
+// down near the root whenever the network's full leaf tier is exposed at once, since
+// that level's huge total descendant count dominates ELK's per-level radius choice for
+// every other level too, not just its own.
+//
+// A first attempt at a from-scratch replacement gave every node (not just leaf-parents)
+// a single ring, sized to its own local child count - "local" fixed the ELK bug, but a
+// leaf-heavy branch inheriting a narrow wedge from a parent with many siblings still
+// needed a huge radius to fit its children on one ring within that narrow wedge (~135000px
+// on the real ~340-node sample, confirmed by measuring it - worse than what it replaced).
+// A second attempt tried multiple rings within that inherited wedge to fix the blowup,
+// reusing the same angular columns across every ring; that's wrong for recursion - two
+// nodes sharing a column (one shallow, one a row further out) share an angle, and each
+// independently recurses its own descendants straight outward along that same angle,
+// which can land unrelated nodes on exactly identical coordinates (confirmed empirically,
+// not hypothesized). Centering each leaf-parent's own cluster on itself instead of on an
+// inherited wedge sidesteps the whole class of problem: it never needs to share angular
+// territory with anything outside its own subtree in the first place.
+function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const opts = options || {};
-  const threshold = opts.leafGridThreshold ?? 5;
-  const spacingX = opts.gridSpacingX ?? 190;
-  const spacingY = opts.gridSpacingY ?? 90;
-  const baseOffset = opts.gridBaseOffset ?? 110;
-  const minNodeSpacing = opts.minNodeSpacing ?? 170;
-  const maxPushesPerBranch = 200;
+  const nodeSpacing = opts.nodeSpacing ?? 190;
+  const minRadius = opts.minRadius ?? 190;
 
-  const result = new Map(positions);
-  const rootPos = positions.get(rootId);
-  if (!rootPos) return result;
+  const positions = new Map();
+  if (rootId == null) return positions;
+  positions.set(rootId, { x: 0, y: 0 });
 
   const isLeaf = id => !childrenOf.has(id) || childrenOf.get(id).length === 0;
-  const parents = Array.from(childrenOf.keys())
-    .filter(id => {
-      const kids = childrenOf.get(id);
-      return kids.length >= threshold && kids.every(isLeaf) && positions.has(id);
-    })
-    // Angular order, not ID order: collision resolution below finalizes one branch at a
-    // time and never revisits an earlier one, so branches must be visited in the same
-    // order they're actually laid out around the root - otherwise a branch can be
-    // finalized while a not-yet-placed neighbor still overlaps it, or the resolution
-    // can end up pushing whichever branch happens to sort last in ID order regardless
-    // of which one is actually closest to a collision (confirmed - this was a real bug,
-    // not a hypothetical one: on the full 342-node sample it left most branches
-    // un-pushed in a tight clump while repeatedly ejecting one or two unlucky others).
-    .sort((a, b) => {
-      const pa = positions.get(a), pb = positions.get(b);
-      return Math.atan2(pa.y - rootPos.y, pa.x - rootPos.x) - Math.atan2(pb.y - rootPos.y, pb.x - rootPos.x);
-    });
+  const isLeafParent = id => {
+    const kids = childrenOf.get(id);
+    return !!kids && kids.length > 0 && kids.every(isLeaf);
+  };
 
-  if (parents.length === 0) return result;
-
-  function placeGrid(parentId, offset) {
-    const kids = childrenOf.get(parentId);
-    const pPos = positions.get(parentId);
-    const dx = pPos.x - rootPos.x, dy = pPos.y - rootPos.y;
-    const dist = Math.hypot(dx, dy);
-    const angle = dist > 0 ? Math.atan2(dy, dx) : 0;
-    const cos = Math.cos(angle), sin = Math.sin(angle);
-    const cols = Math.ceil(Math.sqrt(kids.length));
-    const placed = new Map();
-    kids.forEach((childId, i) => {
-      const col = i % cols;
-      const row = Math.floor(i / cols);
-      const localX = (col - (cols - 1) / 2) * spacingX; // perpendicular spread (columns)
-      const localY = offset + row * spacingY;            // outward growth (rows)
-      // Local +Y (outward growth) must map onto the root->parent direction (cos, sin);
-      // local +X (column spread) onto the perpendicular (-sin, cos). Verified against
-      // theta=0 (parent due east of root): row 0 should land further east of the parent,
-      // continuing the same root->parent direction, not perpendicular to it.
-      placed.set(childId, {
-        x: pPos.x + localY * cos - localX * sin,
-        y: pPos.y + localY * sin + localX * cos,
-      });
-    });
-    return placed;
+  // How many concentric rings, each holding as many nodes as its own circumference
+  // allows (>= nodeSpacing apart), does it take to fit n nodes around a point? Returns
+  // the outermost ring's radius - the cluster's overall extent from its own center.
+  function clusterRadius(n) {
+    let idx = 0, ring = 0, r = minRadius;
+    while (idx < n) {
+      r = minRadius + ring * nodeSpacing;
+      const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / nodeSpacing));
+      idx += Math.min(capacity, n - idx);
+      ring++;
+    }
+    return r;
   }
 
-  function collidesWithAny(gridPositions, finalizedGrids) {
-    for (const other of finalizedGrids) {
-      for (const a of gridPositions) {
-        for (const b of other) {
-          if (Math.hypot(a.x - b.x, a.y - b.y) < minNodeSpacing) return true;
-        }
+  // Bottom-up, cached: how far from its OWN position does nodeId's subtree extend?
+  // Leaves: 0. Leaf-parents: their own cluster's radius. Everything else: however far out
+  // its own single-ring child placement reaches, plus the largest extent among its
+  // children (since that child's own subtree continues from there).
+  const extentCache = new Map();
+  function extent(nodeId) {
+    if (extentCache.has(nodeId)) return extentCache.get(nodeId);
+    let result;
+    if (isLeaf(nodeId)) {
+      result = 0;
+    } else if (isLeafParent(nodeId)) {
+      result = clusterRadius(childrenOf.get(nodeId).length);
+    } else {
+      const kids = childrenOf.get(nodeId);
+      const maxChildExtent = Math.max(0, ...kids.map(extent));
+      const n = kids.length;
+      // A center distance of just 2*maxChildExtent only guarantees the two DISCS don't
+      // overlap in area - a node sitting right on each disc's boundary, pointing directly
+      // at the other, could still land arbitrarily close to its counterpart (confirmed
+      // empirically: two adjacent large clusters landed nodes 76px apart with only the
+      // sum-of-radii margin). Adding nodeSpacing on top guarantees an actual gap.
+      const effSpacing = nodeSpacing + 2 * maxChildExtent;
+      const childRadius = n > 1 ? effSpacing / (2 * Math.sin(Math.PI / n)) : 0;
+      result = Math.max(minRadius, childRadius) + maxChildExtent;
+    }
+    extentCache.set(nodeId, result);
+    return result;
+  }
+
+  function placeClusterAround(centerPos, kids) {
+    const n = kids.length;
+    let idx = 0, ring = 0;
+    while (idx < n) {
+      const r = minRadius + ring * nodeSpacing;
+      const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / nodeSpacing));
+      const count = Math.min(capacity, n - idx);
+      for (let i = 0; i < count; i++) {
+        const angle = (2 * Math.PI * i) / count;
+        positions.set(kids[idx], {
+          x: centerPos.x + r * Math.cos(angle),
+          y: centerPos.y + r * Math.sin(angle),
+        });
+        idx++;
       }
+      ring++;
     }
-    return false;
   }
 
-  // Single pass in angular order: each branch is pushed out just far enough to clear
-  // every branch already finalized before it, then never revisited. Distinct rays out
-  // of a common root diverge as radius grows, so a large-enough offset always exists
-  // and this always terminates - no cross-branch re-checking, no oscillation.
-  const finalizedGrids = [];
-  const finalPositions = new Map();
-  for (const p of parents) {
-    let offset = baseOffset;
-    let grid = placeGrid(p, offset);
-    let pushes = 0;
-    while (collidesWithAny(Array.from(grid.values()), finalizedGrids) && pushes < maxPushesPerBranch) {
-      offset += spacingY;
-      grid = placeGrid(p, offset);
-      pushes++;
+  function place(nodeId, angleHint, angleSpan) {
+    const kids = childrenOf.get(nodeId) || [];
+    const n = kids.length;
+    if (n === 0) return;
+    const parentPos = positions.get(nodeId);
+
+    if (isLeafParent(nodeId)) {
+      placeClusterAround(parentPos, kids);
+      return; // leaves have no children of their own - nothing left to recurse into
     }
-    finalizedGrids.push(Array.from(grid.values()));
-    finalPositions.set(p, grid);
+
+    const maxChildExtent = Math.max(0, ...kids.map(extent));
+    const effSpacing = nodeSpacing + 2 * maxChildExtent; // see extent()'s comment above on why +nodeSpacing, not just 2x
+    const childSpan = angleSpan / n;
+    // Straight-line (chord) distance between adjacent same-radius children is
+    // 2*radius*sin(childSpan/2) - solving for the radius that keeps that >= effSpacing.
+    const radius = Math.max(minRadius, n > 1 ? effSpacing / (2 * Math.sin(childSpan / 2)) : 0);
+
+    kids.forEach((childId, i) => {
+      const angle = angleHint - angleSpan / 2 + (i + 0.5) * childSpan;
+      positions.set(childId, {
+        x: parentPos.x + radius * Math.cos(angle),
+        y: parentPos.y + radius * Math.sin(angle),
+      });
+      place(childId, angle, childSpan);
+    });
   }
 
-  for (const p of parents) {
-    for (const [childId, pos] of finalPositions.get(p)) {
-      result.set(childId, pos);
-    }
-  }
-  return result;
+  place(rootId, 0, 2 * Math.PI);
+  return positions;
 }
 
 // Dual-mode export: node:test imports this file via ESM `import {...}` syntax, which
@@ -268,7 +310,7 @@ function applyLeafGridClustering(positions, rootId, childrenOf, options) {
 // was the original approach, but ES modules cannot fetch anything under file://, which
 // this tool must support with no local web server available.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors, applyLeafGridClustering };
+    module.exports = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors, computeRecursiveRadialLayout };
 } else if (typeof window !== 'undefined') {
-    window.GraphLayout = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors, applyLeafGridClustering };
+    window.GraphLayout = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors, computeRecursiveRadialLayout };
 }

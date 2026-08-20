@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeGraphRoot, compareIpIds, buildPrimaryTree, computeVisibleTree, expandAncestors, applyLeafGridClustering } from '../graph-layout.js';
+import { computeGraphRoot, compareIpIds, buildPrimaryTree, computeVisibleTree, expandAncestors, computeRecursiveRadialLayout } from '../graph-layout.js';
 
 test('compareIpIds sorts dotted-quad IDs numerically, not lexically', () => {
   const ids = ['10.55.2.10', '10.55.2.2', '10.55.2.1'];
@@ -179,177 +179,126 @@ test('expandAncestors reveals a target buried behind an over-threshold ancestor'
   assert.equal(visibleNodeIds.includes('leaf0'), true);
 });
 
-// Shared fixture: root at origin, one leaf-parent straight east of root (theta=0),
-// with 9 leaf children (a clean 3x3 grid) - a plain, non-degenerate case.
-function eastParentFixture(leafCount) {
-  const childrenOf = new Map([
-    ['root', ['parent']],
-    ['parent', Array.from({ length: leafCount }, (_, i) => `leaf${i}`)],
-  ]);
-  const positions = new Map([
-    ['root', { x: 0, y: 0 }],
-    ['parent', { x: 500, y: 0 }],
-  ]);
-  return { childrenOf, positions };
-}
 
-test('applyLeafGridClustering leaves positions untouched below the threshold', () => {
-  const { childrenOf, positions } = eastParentFixture(4);
-  const result = applyLeafGridClustering(positions, 'root', childrenOf, { leafGridThreshold: 5 });
-  // Below threshold: nothing about "parent"'s children was touched, so they're simply
-  // absent from the input `positions` map still - applyLeafGridClustering never invents
-  // positions for nodes it doesn't reposition.
-  assert.equal(result.has('leaf0'), false);
-  assert.deepEqual(result.get('parent'), { x: 500, y: 0 });
-});
-
-test('applyLeafGridClustering grids leaf children once at/over the threshold, in a cols=ceil(sqrt(n)) shape', () => {
-  const { childrenOf, positions } = eastParentFixture(9);
-  const result = applyLeafGridClustering(positions, 'root', childrenOf, { leafGridThreshold: 5 });
-  const leafIds = Array.from({ length: 9 }, (_, i) => `leaf${i}`);
-  for (const id of leafIds) {
-    assert.equal(result.has(id), true, `${id} should have a position`);
-  }
-  const xs = new Set(leafIds.map(id => Math.round(result.get(id).x)));
-  const ys = new Set(leafIds.map(id => Math.round(result.get(id).y)));
-  // 9 nodes, cols = ceil(sqrt(9)) = 3 -> exactly 3 distinct columns and 3 distinct rows
-  assert.equal(xs.size <= 3, true, `expected at most 3 distinct x-rows, got ${xs.size}`);
-  assert.equal(ys.size <= 3, true, `expected at most 3 distinct y-rows, got ${ys.size}`);
-});
-
-test('applyLeafGridClustering never moves the leaf-parent itself, or the root', () => {
-  const { childrenOf, positions } = eastParentFixture(9);
-  const result = applyLeafGridClustering(positions, 'root', childrenOf, { leafGridThreshold: 5 });
+test('computeRecursiveRadialLayout places root at the origin', () => {
+  const result = computeRecursiveRadialLayout('root', new Map([['root', []]]), {});
   assert.deepEqual(result.get('root'), { x: 0, y: 0 });
-  assert.deepEqual(result.get('parent'), { x: 500, y: 0 });
 });
 
-test('applyLeafGridClustering grows the grid outward along the root->parent direction, not perpendicular to it', () => {
-  // Parent is due east of root (theta=0): row growth (the grid's "outward" axis) must
-  // increase x while staying near parent's y - not the other way around, which is the
-  // exact rotation-matrix sign mixup this function is easy to get backwards on.
-  const { childrenOf, positions } = eastParentFixture(9);
-  const result = applyLeafGridClustering(positions, 'root', childrenOf, { leafGridThreshold: 5, gridBaseOffset: 110, gridSpacingY: 90 });
-  const parentPos = positions.get('parent');
-  for (const id of ['leaf0', 'leaf1', 'leaf2', 'leaf3', 'leaf4', 'leaf5', 'leaf6', 'leaf7', 'leaf8']) {
-    const pos = result.get(id);
-    assert.equal(pos.x > parentPos.x, true, `${id} (${JSON.stringify(pos)}) should be further east than parent`);
-  }
+test('computeRecursiveRadialLayout returns an empty map for a null root', () => {
+  assert.equal(computeRecursiveRadialLayout(null, new Map(), {}).size, 0);
 });
 
-test('applyLeafGridClustering rotates the grid to follow a non-axis-aligned branch direction', () => {
-  // Parent sits north-east of root (45 degrees) instead of due east - the grid must
-  // rotate to match, not stay pinned to the world x/y axes.
+test('computeRecursiveRadialLayout places a small leaf-parent\'s children evenly on one ring around itself', () => {
+  const childrenOf = new Map([['root', ['a', 'b', 'c', 'd']]]); // root itself is a leaf-parent here
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, minRadius: 190 });
+  const radii = ['a', 'b', 'c', 'd'].map(id => Math.hypot(result.get(id).x, result.get(id).y));
+  for (const r of radii) assert.equal(Math.abs(r - radii[0]) < 0.01, true, 'all four should be on the same ring');
+});
+
+test('computeRecursiveRadialLayout wraps a large leaf-parent\'s children into more rings once one ring is full', () => {
+  const childrenOf = new Map([['root', Array.from({ length: 40 }, (_, i) => `leaf${i}`)]]);
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, minRadius: 190 });
+  const radii = new Set(Array.from({ length: 40 }, (_, i) => Math.round(Math.hypot(result.get(`leaf${i}`).x, result.get(`leaf${i}`).y))));
+  assert.equal(radii.size > 1, true, 'expected more than one distinct ring radius for 40 leaves');
+});
+
+test('computeRecursiveRadialLayout centers a non-root leaf-parent\'s cluster on itself, using a full circle rather than a wedge inherited from its own parent', () => {
+  // root -> mid (not a leaf-parent) -> [leaf0..leaf7] (mid IS a leaf-parent).
   const childrenOf = new Map([
-    ['root', ['parent']],
-    ['parent', Array.from({ length: 6 }, (_, i) => `leaf${i}`)],
+    ['root', ['mid']],
+    ['mid', Array.from({ length: 8 }, (_, i) => `leaf${i}`)],
   ]);
-  const positions = new Map([
-    ['root', { x: 0, y: 0 }],
-    ['parent', { x: 400, y: -400 }], // 45 degrees "up and to the right" in screen coords
-  ]);
-  const result = applyLeafGridClustering(positions, 'root', childrenOf, { leafGridThreshold: 5 });
-  const parentPos = positions.get('parent');
-  const branchAngle = Math.atan2(parentPos.y, parentPos.x);
-  for (let i = 0; i < 6; i++) {
-    const pos = result.get(`leaf${i}`);
-    const leafAngleFromParent = Math.atan2(pos.y - parentPos.y, pos.x - parentPos.x);
-    // Every leaf must fall within +/-90 degrees of the branch's own outward direction -
-    // i.e. on the far side of the parent from the root, not doubling back toward it or
-    // running perpendicular to the branch (which is what an unrotated axis-aligned grid,
-    // or the rotation-matrix sign mixup, would produce instead).
-    let delta = leafAngleFromParent - branchAngle;
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, minRadius: 190 });
+  const midPos = result.get('mid');
+  const midAngle = Math.atan2(midPos.y, midPos.x); // mid is root's only child -> angle 0
+  const leafAngles = Array.from({ length: 8 }, (_, i) => {
+    const p = result.get(`leaf${i}`);
+    return Math.atan2(p.y - midPos.y, p.x - midPos.x);
+  });
+  // At least one leaf should fall on the ROOT-FACING side of mid (within 90 degrees of
+  // pointing back toward root, i.e. roughly PI away from mid's own outward angle) - proof
+  // the cluster isn't confined to the outward-only wedge the old grid/wedge designs used.
+  const facesRootward = leafAngles.some(a => {
+    let delta = a - (midAngle + Math.PI);
     while (delta > Math.PI) delta -= 2 * Math.PI;
     while (delta < -Math.PI) delta += 2 * Math.PI;
-    assert.equal(Math.abs(delta) < Math.PI / 2, true,
-      `leaf${i} at angle ${leafAngleFromParent.toFixed(2)} should be within 90 degrees of branch angle ${branchAngle.toFixed(2)}`);
-  }
-});
-
-test('applyLeafGridClustering keeps two colliding branches from overlapping by pushing one outward', () => {
-  // Two leaf-parents close together in angle (both roughly east of root, one slightly
-  // north, one slightly south) with big grids - without collision resolution their grids
-  // would overlap in the middle.
-  const childrenOf = new Map([
-    ['root', ['parentA', 'parentB']],
-    ['parentA', Array.from({ length: 12 }, (_, i) => `a${i}`)],
-    ['parentB', Array.from({ length: 12 }, (_, i) => `b${i}`)],
-  ]);
-  const positions = new Map([
-    ['root', { x: 0, y: 0 }],
-    ['parentA', { x: 500, y: -40 }],
-    ['parentB', { x: 500, y: 40 }],
-  ]);
-  const result = applyLeafGridClustering(positions, 'root', childrenOf, {
-    leafGridThreshold: 5, minNodeSpacing: 170,
+    return Math.abs(delta) < Math.PI / 2;
   });
-  const aPositions = Array.from({ length: 12 }, (_, i) => result.get(`a${i}`));
-  const bPositions = Array.from({ length: 12 }, (_, i) => result.get(`b${i}`));
-  let minDist = Infinity;
-  for (const a of aPositions) {
-    for (const b of bPositions) {
-      minDist = Math.min(minDist, Math.hypot(a.x - b.x, a.y - b.y));
-    }
-  }
-  assert.equal(minDist >= 170, true, `closest cross-branch pair was ${minDist.toFixed(1)}, expected >= 170`);
+  assert.equal(facesRootward, true, 'expected at least one leaf on the root-facing side of its own cluster');
 });
 
-test('applyLeafGridClustering resolves collisions among many branches, not just the first pair (regression: used to leave most branches un-pushed while ejecting one or two far away)', () => {
-  // 16 leaf-parents spread evenly in a full circle around root, each with a sizeable
-  // grid - dense enough that every branch collides with at least one neighbor unless
-  // collision resolution actually visits all of them.
-  const BRANCH_COUNT = 16;
+test('computeRecursiveRadialLayout spaces ALL siblings uniformly when just one of them has an outsized cluster - never singles one branch out (regression: an earlier version pushed only the oversized branch, producing wildly uneven spacing)', () => {
   const childrenOf = new Map([['root', []]]);
-  const positions = new Map([['root', { x: 0, y: 0 }]]);
-  for (let i = 0; i < BRANCH_COUNT; i++) {
-    const parentId = `p${i}`;
-    childrenOf.get('root').push(parentId);
-    const angle = (2 * Math.PI * i) / BRANCH_COUNT;
-    positions.set(parentId, { x: 300 * Math.cos(angle), y: 300 * Math.sin(angle) });
-    childrenOf.set(parentId, Array.from({ length: 10 }, (_, k) => `${parentId}_leaf${k}`));
+  for (let i = 0; i < 10; i++) {
+    const id = `p${i}`;
+    childrenOf.get('root').push(id);
+    childrenOf.set(id, Array.from({ length: 6 }, (_, k) => `${id}_leaf${k}`)); // modest
   }
+  childrenOf.get('root').push('huge');
+  childrenOf.set('huge', Array.from({ length: 120 }, (_, i) => `huge_leaf${i}`)); // outsized
 
-  const result = applyLeafGridClustering(positions, 'root', childrenOf, { leafGridThreshold: 5 });
-
-  // Every branch's grid must have been placed at least at the base offset from its own
-  // parent - i.e. every branch was actually considered, not just one or two.
-  for (let i = 0; i < BRANCH_COUNT; i++) {
-    const parentId = `p${i}`;
-    const pPos = positions.get(parentId);
-    const leaf0 = result.get(`${parentId}_leaf0`);
-    assert.equal(typeof leaf0.x, 'number');
-    assert.equal(Math.hypot(leaf0.x - pPos.x, leaf0.y - pPos.y) >= 100, true,
-      `${parentId}'s first leaf should be pushed out from its parent, got distance ${Math.hypot(leaf0.x - pPos.x, leaf0.y - pPos.y).toFixed(1)}`);
-  }
-
-  // No two leaves from DIFFERENT branches should end up closer than the collision
-  // threshold (170, the default) - same-branch pairs are excluded since adjacent grid
-  // rows are deliberately spaced closer than that (90px) by construction, not a collision.
-  let minCrossBranchDist = Infinity;
-  for (let i = 0; i < BRANCH_COUNT; i++) {
-    for (let j = i + 1; j < BRANCH_COUNT; j++) {
-      for (let ki = 0; ki < 10; ki++) {
-        for (let kj = 0; kj < 10; kj++) {
-          const a = result.get(`p${i}_leaf${ki}`), b = result.get(`p${j}_leaf${kj}`);
-          minCrossBranchDist = Math.min(minCrossBranchDist, Math.hypot(a.x - b.x, a.y - b.y));
-        }
-      }
-    }
-  }
-  assert.equal(minCrossBranchDist >= 170, true, `closest cross-branch pair was ${minCrossBranchDist.toFixed(1)}, expected >= 170`);
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, minRadius: 190 });
+  const radii = childrenOf.get('root').map(id => Math.hypot(result.get(id).x, result.get(id).y));
+  const min = Math.min(...radii), max = Math.max(...radii);
+  assert.equal(max - min < 0.01, true,
+    `expected every one of root's 11 direct children at the same radius, saw a spread of ${(max - min).toFixed(1)}`);
 });
 
-test('applyLeafGridClustering treats a cluster placeholder as a leaf', () => {
-  // Cluster placeholder nodes ("cluster:X") never appear as a key in childrenOf, exactly
-  // like a real leaf switch - confirm they're gridded the same way, not skipped.
+test('computeRecursiveRadialLayout never places two different nodes closer than nodeSpacing, on an uneven multi-branch tree', () => {
+  const childrenOf = new Map([['root', []]]);
+  for (let i = 0; i < 16; i++) {
+    const id = `p${i}`;
+    childrenOf.get('root').push(id);
+    childrenOf.set(id, Array.from({ length: 3 + (i % 12) * 3 }, (_, k) => `${id}_leaf${k}`)); // 3..36 leaves, uneven
+  }
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, minRadius: 190 });
+  const allPositions = Array.from(result.values());
+  let minDist = Infinity;
+  for (let i = 0; i < allPositions.length; i++) {
+    for (let j = i + 1; j < allPositions.length; j++) {
+      minDist = Math.min(minDist, Math.hypot(allPositions[i].x - allPositions[j].x, allPositions[i].y - allPositions[j].y));
+    }
+  }
+  assert.equal(minDist >= 190 - 0.5, true, `closest pair anywhere was ${minDist.toFixed(1)}, expected >= 190`);
+});
+
+test('computeRecursiveRadialLayout produces identical output across repeated runs on the same input (deterministic)', () => {
   const childrenOf = new Map([
-    ['root', ['parent']],
-    ['parent', ['leaf0', 'leaf1', 'leaf2', 'leaf3', 'cluster:leaf4']],
+    ['root', ['a', 'b', 'c']],
+    ['a', ['a0', 'a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']],
+    ['b', ['b0', 'b1']],
   ]);
-  const positions = new Map([
-    ['root', { x: 0, y: 0 }],
-    ['parent', { x: 500, y: 0 }],
-  ]);
-  const result = applyLeafGridClustering(positions, 'root', childrenOf, { leafGridThreshold: 5 });
-  assert.equal(result.has('cluster:leaf4'), true);
+  const first = computeRecursiveRadialLayout('root', childrenOf, {});
+  const second = computeRecursiveRadialLayout('root', childrenOf, {});
+  for (const id of first.keys()) {
+    assert.deepEqual(second.get(id), first.get(id), `position for ${id} differed between runs`);
+  }
+});
+
+test('computeRecursiveRadialLayout stays fast and does not blow up radius on the real ~340-node sample shape (regression: an earlier single-ring-per-node version reached max radius ~135000px on this exact shape - confirmed by measuring it, not assumed)', () => {
+  const childrenOf = new Map([['root', []]]);
+  for (let i = 0; i < 15; i++) {
+    const id = `dist${i}`;
+    childrenOf.get('root').push(id);
+    childrenOf.set(id, Array.from({ length: 5 + (i % 8) }, (_, k) => `${id}_leaf${k}`));
+  }
+  childrenOf.get('root').push('huge');
+  childrenOf.set('huge', Array.from({ length: 150 }, (_, i) => `huge_leaf${i}`));
+
+  const startMs = Date.now();
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, minRadius: 190 });
+  const elapsedMs = Date.now() - startMs;
+  assert.equal(elapsedMs < 2000, true, `layout took ${elapsedMs}ms, expected well under 2000ms`);
+
+  let maxRadius = 0;
+  for (const p of result.values()) maxRadius = Math.max(maxRadius, Math.hypot(p.x, p.y));
+  // A generous but meaningful bound: the huge branch's own cluster needs
+  // clusterRadius(150) from ITSELF, plus root's own ring radius to reach that branch in
+  // the first place - a small constant multiple of that sum catches the earlier ~135000px
+  // blowup (which was roughly 15x this bound) while still allowing real, proportionate growth.
+  const totalLeaves = 150 + Array.from({ length: 15 }, (_, i) => 5 + (i % 8)).reduce((a, b) => a + b, 0);
+  const roughClusterRadius = 190 * Math.sqrt(150 / (2 * Math.PI)); // same math as clusterRadius(150), inlined
+  const bound = 5 * (roughClusterRadius + 190 * 16); // + a generous root-ring allowance
+  assert.equal(maxRadius < bound, true, `max radius was ${maxRadius.toFixed(0)}, expected under ${bound.toFixed(0)} (total leaves in tree: ${totalLeaves})`);
 });

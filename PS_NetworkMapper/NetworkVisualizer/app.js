@@ -50,9 +50,8 @@ function readPositiveIntSetting(id, min) {
 }
 function getLayoutSettings() {
     return {
-        leafGridThreshold: readPositiveIntSetting('leafGridThreshold', 2),
-        gridSpacingX: readPositiveIntSetting('gridSpacingX', 20),
-        gridSpacingY: readPositiveIntSetting('gridSpacingY', 20),
+        nodeSpacing: readPositiveIntSetting('nodeSpacing', 20),
+        minRadius: readPositiveIntSetting('minRadius', 20),
     };
 }
 
