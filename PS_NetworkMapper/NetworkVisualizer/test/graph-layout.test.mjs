@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeGraphRoot, compareIpIds, buildPrimaryTree } from '../graph-layout.js';
+import { computeGraphRoot, compareIpIds, buildPrimaryTree, computeVisibleTree, expandAncestors } from '../graph-layout.js';
 
 test('compareIpIds sorts dotted-quad IDs numerically, not lexically', () => {
   const ids = ['10.55.2.10', '10.55.2.2', '10.55.2.1'];
@@ -106,4 +106,60 @@ test('buildPrimaryTree leaves an unreachable node out of parentOf/childrenOf', (
   const { parentOf, childrenOf } = buildPrimaryTree(nodeIds, edges, 'root');
   assert.equal(parentOf.has('island'), false);
   assert.equal(childrenOf.has('island'), false);
+});
+
+function starTree(childCount) {
+  const nodeIds = ['root', ...Array.from({ length: childCount }, (_, i) => `c${i}`)];
+  const edges = nodeIds.slice(1).map(id => ({ from: 'root', to: id }));
+  return buildPrimaryTree(nodeIds, edges, 'root');
+}
+
+test('computeVisibleTree shows everything when under the threshold', () => {
+  const { childrenOf } = starTree(5);
+  const { visibleNodeIds, clusters } = computeVisibleTree('root', childrenOf, new Set(), 8);
+  assert.equal(visibleNodeIds.length, 6); // root + 5 children
+  assert.equal(clusters.size, 0);
+});
+
+test('computeVisibleTree collapses children into one cluster when over the threshold', () => {
+  const { childrenOf } = starTree(20);
+  const { visibleNodeIds, clusters } = computeVisibleTree('root', childrenOf, new Set(), 8);
+  assert.equal(visibleNodeIds.length, 2); // root + 1 cluster placeholder
+  assert.equal(clusters.size, 1);
+  const cluster = clusters.get('cluster:root');
+  assert.equal(cluster.parentId, 'root');
+  assert.equal(cluster.memberIds.length, 20);
+});
+
+test('computeVisibleTree reveals real children once the parent is in expandedNodes', () => {
+  const { childrenOf } = starTree(20);
+  const { visibleNodeIds, clusters } = computeVisibleTree('root', childrenOf, new Set(['root']), 8);
+  assert.equal(visibleNodeIds.length, 21); // root + all 20 children, no cluster
+  assert.equal(clusters.size, 0);
+});
+
+test('computeVisibleTree collapses a deep subtree behind its nearest over-threshold ancestor', () => {
+  // root -> mid -> (20 leaves). mid has 20 children (over threshold), root has 1 (mid, under threshold).
+  const nodeIds = ['root', 'mid', ...Array.from({ length: 20 }, (_, i) => `leaf${i}`)];
+  const edges = [
+    { from: 'root', to: 'mid' },
+    ...Array.from({ length: 20 }, (_, i) => ({ from: 'mid', to: `leaf${i}` })),
+  ];
+  const { childrenOf } = buildPrimaryTree(nodeIds, edges, 'root');
+  const { visibleNodeIds, clusters } = computeVisibleTree('root', childrenOf, new Set(), 8);
+  assert.deepEqual(visibleNodeIds.sort(), ['cluster:mid', 'mid', 'root'].sort());
+  assert.equal(clusters.get('cluster:mid').memberIds.length, 20);
+});
+
+test('expandAncestors reveals a target buried behind an over-threshold ancestor', () => {
+  const nodeIds = ['root', 'mid', 'leaf0', 'leaf1'];
+  const edges = [
+    { from: 'root', to: 'mid' }, { from: 'mid', to: 'leaf0' }, { from: 'mid', to: 'leaf1' },
+  ];
+  const { parentOf, childrenOf } = buildPrimaryTree(nodeIds, edges, 'root');
+  const expandedNodes = new Set();
+  expandAncestors(parentOf, childrenOf, 'leaf0', expandedNodes, 1); // threshold 1: "mid" (2 children) is over it
+  assert.equal(expandedNodes.has('mid'), true);
+  const { visibleNodeIds } = computeVisibleTree('root', childrenOf, expandedNodes, 1);
+  assert.equal(visibleNodeIds.includes('leaf0'), true);
 });

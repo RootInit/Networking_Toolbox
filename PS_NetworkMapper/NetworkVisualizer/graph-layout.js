@@ -92,3 +92,58 @@ export function buildPrimaryTree(nodeIds, edges, rootId) {
 
   return { parentOf, childrenOf, secondaryEdges };
 }
+
+function collectDescendants(childrenOf, nodeId) {
+  const result = [];
+  const stack = [...(childrenOf.get(nodeId) || [])];
+  while (stack.length > 0) {
+    const next = stack.pop();
+    result.push(next);
+    stack.push(...(childrenOf.get(next) || []));
+  }
+  return result;
+}
+
+function isExpanded(childrenOf, nodeId, expandedNodes, threshold) {
+  const childCount = (childrenOf.get(nodeId) || []).length;
+  return childCount <= threshold || expandedNodes.has(nodeId);
+}
+
+export function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold) {
+  const visibleNodeIds = [];
+  const visibleEdges = [];
+  const clusters = new Map();
+
+  if (rootId == null) return { visibleNodeIds, visibleEdges, clusters };
+
+  const queue = [rootId];
+  visibleNodeIds.push(rootId);
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const children = childrenOf.get(current) || [];
+
+    if (isExpanded(childrenOf, current, expandedNodes, threshold)) {
+      for (const child of children) {
+        visibleNodeIds.push(child);
+        visibleEdges.push({ from: current, to: child });
+        queue.push(child);
+      }
+    } else {
+      const clusterId = `cluster:${current}`;
+      visibleNodeIds.push(clusterId);
+      visibleEdges.push({ from: current, to: clusterId });
+      clusters.set(clusterId, { parentId: current, memberIds: collectDescendants(childrenOf, current) });
+    }
+  }
+
+  return { visibleNodeIds, visibleEdges, clusters };
+}
+
+export function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshold) {
+  let current = parentOf.get(targetId);
+  while (current != null) {
+    const childCount = (childrenOf.get(current) || []).length;
+    if (childCount > threshold) expandedNodes.add(current);
+    current = parentOf.get(current);
+  }
+}
