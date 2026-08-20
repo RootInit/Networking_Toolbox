@@ -251,7 +251,7 @@ test('computeRecursiveRadialLayout centers a non-root leaf-parent\'s cluster on 
   assert.equal(facesRootward, true, 'expected at least one leaf on the root-facing side of its own cluster');
 });
 
-test('computeRecursiveRadialLayout spaces ALL siblings uniformly when just one of them has an outsized cluster - never singles one branch out (regression: an earlier version pushed only the oversized branch, producing wildly uneven spacing)', () => {
+test('computeRecursiveRadialLayout lets a small branch sit much closer to its parent than an outsized sibling, while still keeping every pair clear of each other (requested directly: pull small clusters in, give big ones more room, individually - not one uniform ring sized from the worst case)', () => {
   const childrenOf = new Map([['root', []]]);
   for (let i = 0; i < 10; i++) {
     const id = `p${i}`;
@@ -261,11 +261,24 @@ test('computeRecursiveRadialLayout spaces ALL siblings uniformly when just one o
   childrenOf.get('root').push('huge');
   childrenOf.set('huge', Array.from({ length: 120 }, (_, i) => `huge_leaf${i}`)); // outsized
 
-  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, minRadius: 190 });
-  const radii = childrenOf.get('root').map(id => Math.hypot(result.get(id).x, result.get(id).y));
-  const min = Math.min(...radii), max = Math.max(...radii);
-  assert.equal(max - min < 0.01, true,
-    `expected every one of root's 11 direct children at the same radius, saw a spread of ${(max - min).toFixed(1)}`);
+  const nodeSpacing = 190, leafSpacing = 190, minRadius = 190;
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing, leafSpacing, minRadius });
+  const modestRadii = Array.from({ length: 10 }, (_, i) => Math.hypot(result.get(`p${i}`).x, result.get(`p${i}`).y));
+  const hugeRadius = Math.hypot(result.get('huge').x, result.get('huge').y);
+
+  assert.equal(Math.max(...modestRadii) < hugeRadius, true,
+    `expected every modest branch closer to root than "huge", got modest max ${Math.max(...modestRadii).toFixed(1)} vs huge ${hugeRadius.toFixed(1)}`);
+
+  // And still no collision anywhere, including each modest branch's own leaves against
+  // "huge"'s leaves.
+  const allPositions = Array.from(result.values());
+  let minDist = Infinity;
+  for (let i = 0; i < allPositions.length; i++) {
+    for (let j = i + 1; j < allPositions.length; j++) {
+      minDist = Math.min(minDist, Math.hypot(allPositions[i].x - allPositions[j].x, allPositions[i].y - allPositions[j].y));
+    }
+  }
+  assert.equal(minDist >= nodeSpacing - 0.5, true, `closest pair anywhere was ${minDist.toFixed(1)}, expected >= ${nodeSpacing}`);
 });
 
 test('computeRecursiveRadialLayout never places two different nodes closer than nodeSpacing, on an uneven multi-branch tree', () => {
@@ -350,9 +363,15 @@ test('computeRecursiveRadialLayout: nodeSpacing and leafSpacing move independent
     'shrinking nodeSpacing should not change a cluster\'s own internal leaf packing extent');
 
   // Growing leafSpacing should make the cluster's own extent (furthest leaf from mid)
-  // bigger, without moving mid itself (mid has no siblings, so nodeSpacing never affected it).
+  // bigger. mid itself legitimately moves further from root too now (mid has no
+  // siblings to space out from, but its own bigger cluster still needs enough
+  // clearance from root not to crowd it - unlike the old uniform-ring design, a lone
+  // child's distance from its parent depends on its own size, not just a flat minRadius).
   const midPosBase = base.get('mid'), midPosWider = widerLeaves.get('mid');
-  assert.deepEqual(midPosWider, midPosBase, 'growing leafSpacing should not move the cluster\'s own anchor point');
+  const midRadiusBase = Math.hypot(midPosBase.x, midPosBase.y);
+  const midRadiusWider = Math.hypot(midPosWider.x, midPosWider.y);
+  assert.equal(midRadiusWider > midRadiusBase, true,
+    `expected mid to sit further from root with a bigger leafSpacing-driven cluster (got ${midRadiusWider.toFixed(1)} vs ${midRadiusBase.toFixed(1)})`);
   const radiusBase = maxLeafExtentFromMid(base);
   const radiusWider = maxLeafExtentFromMid(widerLeaves);
   assert.equal(radiusWider > radiusBase, true,

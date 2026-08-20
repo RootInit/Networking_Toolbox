@@ -175,13 +175,24 @@ function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshol
 // ring radius, on the real ~340-node sample. Dropping wedge inheritance for every level,
 // not just the leaf tier, removes the problem instead of chasing it level by level.
 //
-// Every node computes its OWN children's spacing as the larger of the relevant spacing
-// constant and the worst actual ADJACENT pair's combined extent among its children (a
-// bottom-up "extent" pass, cached per node) - so if any one child has an unusually large
-// subtree, only the neighbors actually sitting next to it are spaced out to match, not
-// every sibling uniformly regardless of who's actually adjacent to whom (that was an
-// earlier, needlessly conservative version - reported directly as clusters sitting far
-// apart with no realistic risk of overlapping).
+// Every node's children sit at fixed, evenly-spaced angles around it (same as before),
+// but each child's DISTANCE from that shared center is relaxed individually instead of
+// forced onto one uniform ring: pulled in toward its own natural resting distance (just
+// far enough to clear its own cluster from the parent), pushed out only as far as an
+// actual conflict with another child requires. A uniform ring - even one sized from the
+// worst actual adjacent pair rather than the single biggest cluster everywhere (an
+// earlier version) - still forces every child out to match whichever child needs the
+// most room; a small cluster next to a huge one had no way to sit closer just because
+// IT was small. This was requested directly against a manually-arranged reference
+// layout: small clusters pulled in close, large ones given more room, individually.
+//
+// The relaxation is a fixed-iteration numerical pass, not a live physics simulation -
+// same input always produces the same output, and it runs once during layout
+// computation with no animation. It checks every pair of a node's children against each
+// other each iteration, not just angular neighbors - two children two steps apart in
+// angle can still end up closer to each other than to their own immediate neighbor once
+// each has its own independent radius, so only checking adjacent pairs (correct when
+// every child shared one radius) would miss that.
 function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const opts = options || {};
   // nodeSpacing governs structural (branch-to-branch) placement: how far apart sibling
@@ -193,6 +204,7 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const nodeSpacing = opts.nodeSpacing ?? 190;
   const leafSpacing = opts.leafSpacing ?? 190;
   const minRadius = opts.minRadius ?? 190;
+  const relaxIterations = opts.relaxIterations ?? 150;
 
   const positions = new Map();
   if (rootId == null) return positions;
@@ -201,37 +213,87 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const isLeaf = id => !childrenOf.has(id) || childrenOf.get(id).length === 0;
   const allChildrenAreLeaves = kids => kids.every(isLeaf);
 
-  // Only two children that actually end up NEXT TO EACH OTHER can ever collide - using
-  // 2*(the single largest extent among all children) as the required spacing for EVERY
-  // pair is only correct when the two biggest clusters happen to be adjacent, and is
-  // needlessly conservative otherwise. The real, tighter requirement is the worst actual
-  // adjacent pair's combined extent. Children are spread evenly in array order around a
-  // full circle, so every child (including the pair wrapping from last back to first) has
-  // exactly two neighbors.
-  function maxAdjacentPairExtentSum(extents) {
+  // Finds each of n children's own minimal radius from their shared center, given fixed
+  // angles 2*PI*i/n. Starts everyone at their own natural resting radius (just clears
+  // their own extent from the center), then repeatedly checks every pair: if child i is
+  // currently too close to child j (chord distance, from the law of cosines at their
+  // fixed angle gap, below the two extents' combined requirement), i is pushed out to
+  // the minimum radius that clears j - never pulled back in below its own natural rest,
+  // and never adjusted by moving j instead (j gets its own turn in the same sweep).
+  function relaxRadii(extents, spacing) {
     const n = extents.length;
-    if (n < 2) return 0;
-    let maxSum = 0;
-    for (let i = 0; i < n; i++) {
-      const j = (i + 1) % n;
-      maxSum = Math.max(maxSum, extents[i] + extents[j]);
+    if (n === 0) return [];
+    const naturalMin = extents.map(e => minRadius + e);
+    if (n === 1) return naturalMin;
+
+    const angleStep = (2 * Math.PI) / n;
+    const radii = naturalMin.slice();
+
+    for (let iter = 0; iter < relaxIterations; iter++) {
+      // Jacobi-style: every i's update this sweep reads only `radii` as it stood at the
+      // START of the sweep, and all updates apply together at the end. Updating radii[i]
+      // in place as each i is processed (Gauss-Seidel) makes the result depend on
+      // processing order: whichever child is processed LAST in a sweep sees its
+      // neighbors already freshly pushed outward, and since a large-enough neighbor
+      // radius alone can satisfy the chord-distance requirement (dominating the
+      // separation) even while ri stays small, that child can end up never growing at
+      // all - confirmed empirically: 40 IDENTICAL leaves (same extent, so logically
+      // interchangeable) converged to wildly different radii (190 to 1120) purely from
+      // processing order. Reading a single consistent snapshot for the whole sweep
+      // removes that order-dependence.
+      const next = radii.slice();
+      for (let i = 0; i < n; i++) {
+        let desired = radii[i];
+        for (let j = 0; j < n; j++) {
+          if (j === i) continue;
+          const requiredDist = extents[i] + extents[j] + spacing;
+          const rawDiff = Math.abs(i - j) * angleStep;
+          const angleDiff = Math.min(rawDiff, 2 * Math.PI - rawDiff);
+          const rj = radii[j];
+          const cosA = Math.cos(angleDiff);
+          // chord(ri)^2 = ri^2 - 2*rj*cosA*ri + rj^2 is a parabola in ri, minimized at
+          // ri=rj*cosA - so the constraint chord(ri) >= requiredDist holds OUTSIDE
+          // [smallerRoot, largerRoot], not inside. `desired` (a small, near-zero-ish
+          // radius relative to a much bigger rj) can already be safely below
+          // smallerRoot and satisfy the constraint on its own, dominated by rj's own
+          // distance from center - pushing straight to the larger root regardless would
+          // then be a needless, and compounding, escalation (confirmed empirically: a
+          // version that always jumped to the larger root diverged to radii in the
+          // billions within 150 iterations on realistic tree shapes). Only push out at
+          // all when `desired` currently, actually violates the constraint.
+          const chordSq = desired * desired - 2 * rj * cosA * desired + rj * rj;
+          if (chordSq < requiredDist * requiredDist) {
+            const b = -2 * rj * cosA;
+            const c = rj * rj - requiredDist * requiredDist;
+            const disc = b * b - 4 * c;
+            const candidate = disc >= 0 ? (-b + Math.sqrt(disc)) / 2 : rj + requiredDist;
+            if (candidate > desired) desired = candidate;
+          }
+        }
+        next[i] = desired;
+      }
+      for (let i = 0; i < n; i++) radii[i] = next[i];
     }
-    return maxSum;
+    return radii;
   }
 
-  // Given n children each needing `spacing` clearance from their neighbors, the radius
-  // of the single ring that fits them evenly around a full circle - solved from the
-  // straight-line (chord) distance between adjacent same-radius points,
-  // 2*radius*sin(PI/n), which must be >= spacing.
-  function ringRadius(n, spacing) {
-    return n > 1 ? spacing / (2 * Math.sin(Math.PI / n)) : 0;
+  const extentCache = new Map();
+  const radiiCache = new Map(); // nodeId -> relaxed radii for its children, same order as childrenOf.get(nodeId)
+
+  function childLayout(nodeId) {
+    if (radiiCache.has(nodeId)) return radiiCache.get(nodeId);
+    const kids = childrenOf.get(nodeId) || [];
+    const extents = kids.map(extent);
+    const spacing = allChildrenAreLeaves(kids) ? leafSpacing : nodeSpacing;
+    const radii = relaxRadii(extents, spacing);
+    radiiCache.set(nodeId, radii);
+    return radii;
   }
 
   // Bottom-up, cached: how far from its OWN position does nodeId's subtree extend?
-  // Leaves: 0. Everything else: however far out its own child-placement ring reaches,
-  // plus the largest extent among its children (since that child's own subtree
-  // continues from there).
-  const extentCache = new Map();
+  // Leaves: 0. Everything else: the farthest any child's own (radius from here + that
+  // child's own extent) reaches, since children now sit at individually varying radii
+  // rather than one uniform ring.
   function extent(nodeId) {
     if (extentCache.has(nodeId)) return extentCache.get(nodeId);
     let result;
@@ -239,17 +301,12 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
       result = 0;
     } else {
       const kids = childrenOf.get(nodeId);
-      const extents = kids.map(extent);
-      const maxChildExtent = Math.max(0, ...extents);
-      const spacing = allChildrenAreLeaves(kids) ? leafSpacing : nodeSpacing;
-      // A center distance of just the adjacent-pair extent sum only guarantees the two
-      // DISCS don't overlap in area - a node sitting right on each disc's boundary,
-      // pointing directly at the other, could still land arbitrarily close to its
-      // counterpart (confirmed empirically: two adjacent large clusters landed nodes
-      // 76px apart with only that margin). Adding the spacing constant on top
-      // guarantees an actual gap.
-      const effSpacing = spacing + maxAdjacentPairExtentSum(extents);
-      result = Math.max(minRadius, ringRadius(kids.length, effSpacing)) + maxChildExtent;
+      const radii = childLayout(nodeId);
+      let maxReach = 0;
+      for (let i = 0; i < kids.length; i++) {
+        maxReach = Math.max(maxReach, radii[i] + extent(kids[i]));
+      }
+      result = maxReach;
     }
     extentCache.set(nodeId, result);
     return result;
@@ -260,17 +317,14 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     const n = kids.length;
     if (n === 0) return;
     const parentPos = positions.get(nodeId);
-
-    const extents = kids.map(extent);
-    const spacing = allChildrenAreLeaves(kids) ? leafSpacing : nodeSpacing;
-    const effSpacing = spacing + maxAdjacentPairExtentSum(extents);
-    const radius = Math.max(minRadius, ringRadius(n, effSpacing));
+    const radii = childLayout(nodeId);
+    const angleStep = (2 * Math.PI) / n;
 
     kids.forEach((childId, i) => {
-      const angle = (2 * Math.PI * i) / n;
+      const angle = i * angleStep;
       positions.set(childId, {
-        x: parentPos.x + radius * Math.cos(angle),
-        y: parentPos.y + radius * Math.sin(angle),
+        x: parentPos.x + radii[i] * Math.cos(angle),
+        y: parentPos.y + radii[i] * Math.sin(angle),
       });
       place(childId);
     });
