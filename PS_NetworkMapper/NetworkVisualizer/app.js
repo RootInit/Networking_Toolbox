@@ -28,7 +28,17 @@ var allEdges = [];             // {from, to}[]
 var graphRoot = null;
 var primaryTree = { parentOf: new Map(), childrenOf: new Map(), secondaryEdges: [] };
 var expandedNodes = new Set();
-var clusterThreshold = 8;
+
+// clusterThreshold is read fresh from the DOM on every use (see getClusterThreshold
+// below) instead of cached from the input's `change` event - relying on that event
+// having already fired left the very first render after a page load using the stale
+// default of 8 whenever change didn't fire in time, silently clustering any root with
+// more than 8 immediate children into a single node.
+function getClusterThreshold() {
+    var el = document.getElementById('clusterThreshold');
+    var n = el ? parseInt(el.value, 10) : NaN;
+    return (Number.isFinite(n) && n >= 2) ? n : 8;
+}
 
 // CDP/headless-browser verification needs to inspect internal state. Kept even though
 // app.js is a classic script again (its top-level vars ARE window properties) because
@@ -41,7 +51,7 @@ window.__debug = {
     get expandedNodes() { return expandedNodes; },
     get graphRoot() { return graphRoot; },
     get primaryTree() { return primaryTree; },
-    get clusterThreshold() { return clusterThreshold; },
+    get clusterThreshold() { return getClusterThreshold(); },
 };
 
 // Ensure Vis.js is ready before declaring DataSets
@@ -104,7 +114,6 @@ window.switchTab = function(tabId) {
 window.setClusterThreshold = function(value) {
     var n = parseInt(value, 10);
     if (!Number.isFinite(n) || n < 2) return;
-    clusterThreshold = n;
     window.renderVisibleGraph();
 };
 
@@ -298,7 +307,7 @@ window.renderVisibleGraph = function() {
 
 async function doRenderVisibleGraph() {
     window.showProgress("Computing layout...", 100);
-    var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, clusterThreshold);
+    var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, getClusterThreshold());
     var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges);
 
     nodesDataset.clear(); edgesDataset.clear();
@@ -396,7 +405,7 @@ window.performGlobalSearch = function() {
 
     if (targetIp) {
         (async () => {
-            window.GraphLayout.expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, clusterThreshold);
+            window.GraphLayout.expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, getClusterThreshold());
             await window.renderVisibleGraph();
             network.selectNodes([targetIp]);
             network.focus(targetIp, { scale: 1.0, animation: { duration: 500 } });
