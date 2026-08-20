@@ -276,6 +276,38 @@ test('computeRecursiveRadialLayout produces identical output across repeated run
   }
 });
 
+test('computeRecursiveRadialLayout: nodeSpacing and leafSpacing move independently - shrinking nodeSpacing pulls a cluster inward without changing its own internal leaf packing, and growing leafSpacing widens the cluster without moving it', () => {
+  const childrenOf = new Map([['root', ['mid']], ['mid', Array.from({ length: 9 }, (_, i) => `leaf${i}`)]]);
+
+  const base = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, leafSpacing: 190, minRadius: 190 });
+  const tighterBranch = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 60, leafSpacing: 190, minRadius: 190 });
+  const widerLeaves = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, leafSpacing: 400, minRadius: 190 });
+
+  // mid is root's only child, so its own radius from root is just minRadius regardless of
+  // nodeSpacing (no siblings to space out from) - but its own leaf packing (relative to
+  // itself) should be identical between base and tighterBranch, since only nodeSpacing changed.
+  const maxLeafExtentFromMid = (result) => {
+    const midPos = result.get('mid');
+    let maxR = 0;
+    for (let i = 0; i < 9; i++) {
+      const p = result.get(`leaf${i}`);
+      maxR = Math.max(maxR, Math.hypot(p.x - midPos.x, p.y - midPos.y));
+    }
+    return maxR;
+  };
+  assert.equal(maxLeafExtentFromMid(tighterBranch), maxLeafExtentFromMid(base),
+    'shrinking nodeSpacing should not change a cluster\'s own internal leaf packing extent');
+
+  // Growing leafSpacing should make the cluster's own extent (furthest leaf from mid)
+  // bigger, without moving mid itself (mid has no siblings, so nodeSpacing never affected it).
+  const midPosBase = base.get('mid'), midPosWider = widerLeaves.get('mid');
+  assert.deepEqual(midPosWider, midPosBase, 'growing leafSpacing should not move the cluster\'s own anchor point');
+  const radiusBase = maxLeafExtentFromMid(base);
+  const radiusWider = maxLeafExtentFromMid(widerLeaves);
+  assert.equal(radiusWider > radiusBase, true,
+    `expected leafSpacing=400 to produce a bigger cluster than leafSpacing=190 (got ${radiusWider.toFixed(1)} vs ${radiusBase.toFixed(1)})`);
+});
+
 test('computeRecursiveRadialLayout stays fast and does not blow up radius on the real ~340-node sample shape (regression: an earlier single-ring-per-node version reached max radius ~135000px on this exact shape - confirmed by measuring it, not assumed)', () => {
   const childrenOf = new Map([['root', []]]);
   for (let i = 0; i < 15; i++) {

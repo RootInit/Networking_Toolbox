@@ -51,6 +51,7 @@ function readPositiveIntSetting(id, min) {
 function getLayoutSettings() {
     return {
         nodeSpacing: readPositiveIntSetting('nodeSpacing', 20),
+        leafSpacing: readPositiveIntSetting('leafSpacing', 20),
         minRadius: readPositiveIntSetting('minRadius', 20),
     };
 }

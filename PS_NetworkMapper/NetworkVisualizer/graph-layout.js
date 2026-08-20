@@ -195,7 +195,14 @@ function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshol
 // territory with anything outside its own subtree in the first place.
 function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const opts = options || {};
+  // nodeSpacing governs structural (branch-to-branch) placement: how far apart sibling
+  // branches sit, and the safety margin between two different clusters. leafSpacing
+  // governs only the packing WITHIN one cluster (leaf-to-leaf distance). Splitting these
+  // was requested directly: clusters as a whole should be able to sit closer to root and
+  // to each other (smaller nodeSpacing) while the individual leaves inside each one get
+  // more room (bigger leafSpacing) - one shared constant couldn't do both at once.
   const nodeSpacing = opts.nodeSpacing ?? 190;
+  const leafSpacing = opts.leafSpacing ?? 190;
   const minRadius = opts.minRadius ?? 190;
 
   const positions = new Map();
@@ -209,13 +216,13 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   };
 
   // How many concentric rings, each holding as many nodes as its own circumference
-  // allows (>= nodeSpacing apart), does it take to fit n nodes around a point? Returns
+  // allows (>= leafSpacing apart), does it take to fit n nodes around a point? Returns
   // the outermost ring's radius - the cluster's overall extent from its own center.
   function clusterRadius(n) {
     let idx = 0, ring = 0, r = minRadius;
     while (idx < n) {
-      r = minRadius + ring * nodeSpacing;
-      const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / nodeSpacing));
+      r = minRadius + ring * leafSpacing;
+      const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / leafSpacing));
       idx += Math.min(capacity, n - idx);
       ring++;
     }
@@ -255,8 +262,8 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     const n = kids.length;
     let idx = 0, ring = 0;
     while (idx < n) {
-      const r = minRadius + ring * nodeSpacing;
-      const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / nodeSpacing));
+      const r = minRadius + ring * leafSpacing;
+      const capacity = Math.max(1, Math.floor((2 * Math.PI * r) / leafSpacing));
       const count = Math.min(capacity, n - idx);
       for (let i = 0; i < count; i++) {
         const angle = (2 * Math.PI * i) / count;
