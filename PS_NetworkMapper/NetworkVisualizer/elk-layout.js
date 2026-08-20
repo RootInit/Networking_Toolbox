@@ -1,10 +1,11 @@
-// Wraps a vendored ELK.js instance to lay out the currently-visible subgraph
-// in a Web Worker (never on the main thread), with a deterministic grid
-// fallback if the worker errors or takes too long. `ELK` is a browser global
-// from vendor/elk.bundled.js, loaded via a classic <script> tag before this
-// module - referenced lazily (inside computeLayout, not at module scope) so
-// this file still imports cleanly under `node --test`, where computeGridFallback
-// is exercised without a browser.
+// Wraps a vendored ELK.js instance to lay out the currently-visible subgraph.
+// Runs on the main thread (see getElk() below for why - a Web Worker cannot load
+// under file://, which this tool must support), with a deterministic grid
+// fallback if layout errors or takes too long. `ELK` is a browser global from
+// vendor/elk.bundled.js, loaded via a classic <script> tag before this file -
+// referenced lazily (inside computeLayout, not at module scope) so this file
+// still imports cleanly under `node --test`, where computeGridFallback is
+// exercised without a browser.
 
 const NODE_WIDTH = 160;
 const NODE_HEIGHT = 50;
@@ -62,6 +63,14 @@ async function computeLayout(visibleNodeIds, visibleEdges) {
     return positions;
   } catch (err) {
     console.error('ELK layout failed, falling back to a grid:', err);
+    if (typeof document !== 'undefined') {
+      var textEl = document.getElementById('fatal-error-text');
+      var modalEl = document.getElementById('fatal-error-modal');
+      if (textEl && modalEl) {
+        textEl.innerHTML = 'Layout engine failed, showing a basic grid instead of the normal tree view.<br><br>' + (err && err.message ? err.message : String(err));
+        modalEl.style.display = 'block';
+      }
+    }
     return computeGridFallback(visibleNodeIds);
   }
 }

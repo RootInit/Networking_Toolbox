@@ -53,6 +53,21 @@ test('computeGraphRoot breaks eccentricity ties by lowest IP', () => {
   assert.equal(computeGraphRoot(nodeIds, edges), '10.0.0.2');
 });
 
+test('computeGraphRoot prefers the largest component over a smaller-eccentricity isolated node', () => {
+  // A 6-node chain (root candidates have eccentricity 2-5) plus one fully isolated
+  // node (eccentricity 0 - the global minimum, but reachable to nobody). Without a
+  // component-size preference, the isolated node wins and the whole chain vanishes
+  // from any downstream tree/render built from this root.
+  const nodeIds = ['c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'isolated'];
+  const edges = [
+    { from: 'c1', to: 'c2' }, { from: 'c2', to: 'c3' }, { from: 'c3', to: 'c4' },
+    { from: 'c4', to: 'c5' }, { from: 'c5', to: 'c6' },
+  ];
+  const root = computeGraphRoot(nodeIds, edges);
+  assert.notEqual(root, 'isolated');
+  assert.ok(['c3', 'c4'].includes(root)); // center of a 6-node chain is one of the two middle nodes
+});
+
 test('buildPrimaryTree assigns BFS-order parents on a simple tree', () => {
   const nodeIds = ['root', 'a', 'b', 'a1', 'a2'];
   const edges = [

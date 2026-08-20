@@ -50,14 +50,19 @@ function computeGraphRoot(nodeIds, edges) {
 
   const adj = buildAdjacency(nodeIds, edges);
   let bestId = null;
+  let bestComponentSize = -1;
   let bestEccentricity = Infinity;
 
   const sortedIds = Array.from(nodeIds).sort(compareIpIds);
   for (const id of sortedIds) {
     const dist = bfsDistances(adj, id);
+    const componentSize = dist.size;
     let eccentricity = 0;
     for (const d of dist.values()) eccentricity = Math.max(eccentricity, d);
-    if (eccentricity < bestEccentricity) {
+
+    if (componentSize > bestComponentSize ||
+        (componentSize === bestComponentSize && eccentricity < bestEccentricity)) {
+      bestComponentSize = componentSize;
       bestEccentricity = eccentricity;
       bestId = id;
     }

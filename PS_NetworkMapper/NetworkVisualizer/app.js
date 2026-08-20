@@ -30,8 +30,10 @@ var primaryTree = { parentOf: new Map(), childrenOf: new Map(), secondaryEdges: 
 var expandedNodes = new Set();
 var clusterThreshold = 8;
 
-// CDP/headless-browser verification needs to inspect internal state, but ES module
-// top-level vars aren't exposed on window the way classic-script globals were.
+// CDP/headless-browser verification needs to inspect internal state. Kept even though
+// app.js is a classic script again (its top-level vars ARE window properties) because
+// every verification step written while it was still a module already depends on this
+// exact interface - removing it would mean touching all of that again for no benefit.
 window.__debug = {
     get nodesDataset() { return nodesDataset; },
     get edgesDataset() { return edgesDataset; },
@@ -139,9 +141,11 @@ window.forceLoadFile = function() {
         window.showProgress("Processing Enterprise Topology...", 100);
         
         setTimeout(async function() {
+            var parseSucceeded = false;
             try {
                 var data = JSON.parse(e.target.result);
                 if (!data.Topology) throw new Error("Missing 'Topology' array in JSON.");
+                parseSucceeded = true;
 
                 globalTopologyData = data.Topology;
 
@@ -154,9 +158,9 @@ window.forceLoadFile = function() {
 
                 document.getElementById('legend-group').style.display = 'block';
                 window.setStatus(`Success! Mapped ${globalTopologyData.length} nodes.`, "green");
-            } catch (err) { 
-                window.setStatus("JSON Parse Error.", "red"); 
-                throw err; 
+            } catch (err) {
+                window.setStatus(parseSucceeded ? "Render error - see details." : "JSON Parse Error.", "red");
+                throw err;
             } finally {
                 btn.disabled = false;
             }
@@ -247,6 +251,7 @@ window.buildSwitchMap = async function() {
     network = new vis.Network(container, { nodes: nodesDataset, edges: edgesDataset }, {
         layout: { hierarchical: false },
         physics: { enabled: false },
+        edges: { smooth: false },
         interaction: { navigationButtons: true, keyboard: true, hover: true, dragNodes: true },
     });
     network.on("selectNode", function (params) {
@@ -261,6 +266,16 @@ window.buildSwitchMap = async function() {
             window.renderVisibleGraph();
         }
     });
+    network.on("doubleClick", function (params) {
+        if (params.nodes.length === 0) return;
+        var id = params.nodes[0];
+        // Double-clicking a real node that's currently manually expanded collapses it
+        // back down - the only way to undo an expand short of reloading the file.
+        if (expandedNodes.has(id)) {
+            expandedNodes.delete(id);
+            window.renderVisibleGraph();
+        }
+    });
 
     await window.renderVisibleGraph();
 };
@@ -270,7 +285,13 @@ window.buildSwitchMap = async function() {
 // expand/collapse, threshold change, search) gets covered automatically -
 // the ELK round-trip this awaits can take up to a few seconds on a large
 // visible set, and the canvas would otherwise sit blank with no indicator.
-window.renderVisibleGraph = async function() {
+var renderChain = Promise.resolve();
+window.renderVisibleGraph = function() {
+    renderChain = renderChain.then(doRenderVisibleGraph).catch(err => { console.error('renderVisibleGraph failed:', err); throw err; });
+    return renderChain;
+};
+
+async function doRenderVisibleGraph() {
     window.showProgress("Computing layout...", 100);
     var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, clusterThreshold);
     var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges);
@@ -288,6 +309,7 @@ window.renderVisibleGraph = async function() {
                     : { background: '#E8E8E8', border: '#B0B0B0' },
                 font: { multi: true, bold: true, color: meta.scanned ? 'black' : '#666666' },
                 vlanCache: meta.vlanCache, x: pos.x, y: pos.y, physics: false,
+                title: expandedNodes.has(id) ? 'Double-click to collapse' : undefined,
             });
         } else {
             var cluster = visible.clusters.get(id);
@@ -312,8 +334,11 @@ window.renderVisibleGraph = async function() {
         }
     });
 
+    var vlanFilterEl = document.getElementById('vlanFilter');
+    if (vlanFilterEl && vlanFilterEl.value !== 'ALL') { window.applyVlanFilter(); }
+
     window.hideProgress();
-};
+}
 
 // 3. Global Filters
 window.applyVlanFilter = function() {
