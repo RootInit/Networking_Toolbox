@@ -64,3 +64,31 @@ export function computeGraphRoot(nodeIds, edges) {
   }
   return bestId;
 }
+
+export function buildPrimaryTree(nodeIds, edges, rootId) {
+  const adj = buildAdjacency(nodeIds, edges);
+  const parentOf = new Map([[rootId, null]]);
+  const childrenOf = new Map([[rootId, []]]);
+  const treeEdgeKeys = new Set();
+
+  const edgeKey = (a, b) => [a, b].sort(compareIpIds).join('|');
+
+  const queue = [rootId];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const neighbors = Array.from(adj.get(current) || []).sort(compareIpIds);
+    for (const next of neighbors) {
+      if (!parentOf.has(next)) {
+        parentOf.set(next, current);
+        childrenOf.set(next, []);
+        childrenOf.get(current).push(next);
+        treeEdgeKeys.add(edgeKey(current, next));
+        queue.push(next);
+      }
+    }
+  }
+
+  const secondaryEdges = edges.filter(e => !treeEdgeKeys.has(edgeKey(e.from, e.to)));
+
+  return { parentOf, childrenOf, secondaryEdges };
+}

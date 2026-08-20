@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeGraphRoot, compareIpIds } from '../graph-layout.js';
+import { computeGraphRoot, compareIpIds, buildPrimaryTree } from '../graph-layout.js';
 
 test('compareIpIds sorts dotted-quad IDs numerically, not lexically', () => {
   const ids = ['10.55.2.10', '10.55.2.2', '10.55.2.1'];
@@ -51,4 +51,59 @@ test('computeGraphRoot breaks eccentricity ties by lowest IP', () => {
   const nodeIds = ['10.0.0.5', '10.0.0.2'];
   const edges = [{ from: '10.0.0.5', to: '10.0.0.2' }];
   assert.equal(computeGraphRoot(nodeIds, edges), '10.0.0.2');
+});
+
+test('buildPrimaryTree assigns BFS-order parents on a simple tree', () => {
+  const nodeIds = ['root', 'a', 'b', 'a1', 'a2'];
+  const edges = [
+    { from: 'root', to: 'a' }, { from: 'root', to: 'b' },
+    { from: 'a', to: 'a1' }, { from: 'a', to: 'a2' },
+  ];
+  const { parentOf, childrenOf } = buildPrimaryTree(nodeIds, edges, 'root');
+  assert.equal(parentOf.get('root'), null);
+  assert.equal(parentOf.get('a'), 'root');
+  assert.equal(parentOf.get('b'), 'root');
+  assert.equal(parentOf.get('a1'), 'a');
+  assert.equal(parentOf.get('a2'), 'a');
+  assert.deepEqual(childrenOf.get('root').sort(), ['a', 'b']);
+  assert.deepEqual(childrenOf.get('a').sort(), ['a1', 'a2']);
+  assert.deepEqual(childrenOf.get('b'), []);
+});
+
+test('buildPrimaryTree picks the deterministic (lowest-ID) parent when a node has two equal-depth candidates', () => {
+  // root -> {10.0.0.1, 10.0.0.2}, both root's children, both connected to "leaf".
+  // "leaf" is discovered at depth 2 either way; its parent must deterministically
+  // be whichever of 10.0.0.1/10.0.0.2 sorts first among root's children.
+  const nodeIds = ['root', '10.0.0.2', '10.0.0.1', 'leaf'];
+  const edges = [
+    { from: 'root', to: '10.0.0.2' }, { from: 'root', to: '10.0.0.1' },
+    { from: '10.0.0.2', to: 'leaf' }, { from: '10.0.0.1', to: 'leaf' },
+  ];
+  const { parentOf, secondaryEdges } = buildPrimaryTree(nodeIds, edges, 'root');
+  assert.equal(parentOf.get('leaf'), '10.0.0.1');
+  assert.equal(secondaryEdges.length, 1);
+  assert.deepEqual(
+    [secondaryEdges[0].from, secondaryEdges[0].to].sort(),
+    ['10.0.0.2', 'leaf'].sort()
+  );
+});
+
+test('buildPrimaryTree puts every non-tree edge into secondaryEdges', () => {
+  // Triangle: root-a, root-b, a-b. a-b is not a tree edge (a and b are both
+  // root's direct children), so it's secondary.
+  const nodeIds = ['root', 'a', 'b'];
+  const edges = [
+    { from: 'root', to: 'a' }, { from: 'root', to: 'b' }, { from: 'a', to: 'b' },
+  ];
+  const { secondaryEdges } = buildPrimaryTree(nodeIds, edges, 'root');
+  assert.equal(secondaryEdges.length, 1);
+  assert.deepEqual([secondaryEdges[0].from, secondaryEdges[0].to].sort(), ['a', 'b']);
+});
+
+test('buildPrimaryTree leaves an unreachable node out of parentOf/childrenOf', () => {
+  const nodeIds = ['root', 'a', 'island'];
+  const edges = [{ from: 'root', to: 'a' }];
+  const { parentOf, childrenOf } = buildPrimaryTree(nodeIds, edges, 'root');
+  assert.equal(parentOf.has('island'), false);
+  assert.equal(childrenOf.has('island'), false);
 });
