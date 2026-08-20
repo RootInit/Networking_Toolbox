@@ -67,7 +67,13 @@ async function computeLayout(visibleNodeIds, visibleEdges) {
       var textEl = document.getElementById('fatal-error-text');
       var modalEl = document.getElementById('fatal-error-modal');
       if (textEl && modalEl) {
-        textEl.innerHTML = 'Layout engine failed, showing a basic grid instead of the normal tree view.<br><br>' + (err && err.message ? err.message : String(err));
+        // err.message could in principle come from somewhere ELK doesn't fully control
+        // (e.g. a malformed graph shape) - build the message via textContent rather than
+        // concatenating it into innerHTML, so it can never be interpreted as markup.
+        textEl.innerHTML = 'Layout engine failed, showing a basic grid instead of the normal tree view.<br><br>';
+        var errMsgEl = document.createElement('span');
+        errMsgEl.textContent = (err && err.message) ? err.message : String(err);
+        textEl.appendChild(errMsgEl);
         modalEl.style.display = 'block';
       }
     }
