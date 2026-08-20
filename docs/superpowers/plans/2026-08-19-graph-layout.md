@@ -4,9 +4,11 @@
 
 **Goal:** Replace the NetworkVisualizer's physics-based (`forceAtlas2Based`) graph layout with a deterministic hierarchical layout that stays readable at ~500 switch nodes.
 
-**Architecture:** Two new pure-logic ES modules — `graph-layout.js` (root selection via graph-center, primary spanning tree / secondary edges, child-count-based clustering — all plain-data functions, unit-testable under Node) and `elk-layout.js` (thin wrapper around a vendored ELK.js instance running its layout in a Web Worker, with a grid fallback on failure/timeout). `app.js`'s `buildSwitchMap` is rewritten to call these instead of configuring vis-network physics, feeding ELK-computed positions into vis-network with `physics: false`.
+**Architecture:** Two new pure-logic files — `graph-layout.js` (root selection via graph-center, primary spanning tree / secondary edges, child-count-based clustering — all plain-data functions, unit-testable under Node) and `elk-layout.js` (thin wrapper around a vendored ELK.js instance, with a grid fallback on failure/timeout). `app.js`'s `buildSwitchMap` is rewritten to call these instead of configuring vis-network physics, feeding ELK-computed positions into vis-network with `physics: false`.
 
-**Tech Stack:** Vanilla ES modules (no build step, no bundler), vis-network 9.1.9 (already vendored), elkjs 0.12.0 (vendored in this plan), Node's built-in `node:test` for the pure-logic unit tests, headless Chromium + the existing `~/.claude/tools/cdp.mjs` driver for browser-dependent verification.
+**Tech Stack:** Vanilla classic scripts (no build step, no bundler, no ES modules — see Task 8), vis-network 9.1.9 (already vendored), elkjs 0.12.0 (vendored, main-thread only, no Worker — see Task 8), Node's built-in `node:test` for the pure-logic unit tests (via Node's CJS/ESM interop against plain `module.exports`, no `export` keyword needed in the source files themselves), headless Chromium + the existing `~/.claude/tools/cdp.mjs` driver for browser-dependent verification.
+
+**Note on Tasks 1-7 vs. Task 8:** Tasks 1-3 and 5 originally wrote `graph-layout.js`/`elk-layout.js` as real ES modules (`export function ...`), and Tasks 6-7 wired `app.js` up as `type="module"` with a Worker-backed ELK instance, per the spec. After Task 6 shipped, a hard requirement surfaced that hadn't been in the spec: the tool must run via `file://` (double-click, no local web server available in the deployment environment) — and ES modules plus Web Workers both refuse to load anything under `file://` (confirmed empirically). Task 8 fixes this by converting the loading mechanism to classic scripts with a dual Node/browser export pattern and a Worker-less ELK instance. None of Tasks 1-3/5-7's actual logic changes — only how the files are loaded. Task 1-7's own historical review records (in the SDD ledger) describe the ES-module/Worker version as it existed when reviewed; Task 8's own review is what verifies the final, file://-compatible state.
 
 **Spec:** `docs/superpowers/specs/2026-08-19-graph-layout-design.md`
 
@@ -18,6 +20,7 @@
 - Site/building-based grouping is explicitly out of scope — clustering is purely by primary-tree child count, threshold configurable in the UI (default 8).
 - Secondary (non-tree) edges are rendered as straight dashed lines between ELK-computed tree positions — no custom edge-routing/polylines (see spec "Alternatives considered").
 - `app.js`'s existing behavior (right-drawer tabs, VLAN filter, search-and-focus, the Phase 1 two-pass scanned/unscanned node styling) must keep working exactly as before; this plan changes *how positions are computed*, not the rest of the UI.
+- **The app must run when `network_vis.html` is opened directly from disk (`file://`), with no local web server available.** Added after Task 6 shipped, superseding that task's original ES-module/Worker approach — see Task 8. This binds every task from Task 8 onward, and retroactively means Tasks 6-7's `type="module"`/Worker wiring is intermediate state, not the final target.
 
 ---
 
@@ -28,7 +31,7 @@
 - **Create** `PS_NetworkMapper/NetworkVisualizer/vendor/elk.bundled.js`, `PS_NetworkMapper/NetworkVisualizer/vendor/elk-worker.min.js` — vendored elkjs 0.12.0.
 - **Create** `PS_NetworkMapper/NetworkVisualizer/test/graph-layout.test.mjs` — `node:test` unit tests for `graph-layout.js`.
 - **Create** `PS_NetworkMapper/NetworkVisualizer/test/elk-layout.test.mjs` — `node:test` unit tests for `elk-layout.js`'s `computeGridFallback`.
-- **Create** `PS_NetworkMapper/NetworkVisualizer/test/generate-fixture.mjs` — generates a synthetic ~500-node topology JSON fixture for large-scale verification (Task 8 only; not part of the app itself).
+- **Create** `PS_NetworkMapper/NetworkVisualizer/test/generate-fixture.mjs` — generates a synthetic ~500-node topology JSON fixture for large-scale verification (Task 9 only; not part of the app itself).
 - **Modify** `PS_NetworkMapper/NetworkVisualizer/app.js` — `buildSwitchMap` rewritten to call the new modules instead of configuring physics; new clustering state (`expandedNodes`, `clusterThreshold`) and click handling; `performGlobalSearch` expands ancestor clusters before focusing. Converted to `type="module"` so it can `import` the new files.
 - **Modify** `PS_NetworkMapper/NetworkVisualizer/network_vis.html` — script tags for the vendored ELK files and the module-typed `app.js`; new "Max children before grouping" number input in the left panel.
 
@@ -1219,7 +1222,380 @@ git commit -m "feat: cluster threshold control, remove dead physics toggle, sear
 
 ---
 
-### Task 8: Synthetic ~500-node fixture and large-scale verification
+### Task 8: Convert to file://-compatible classic-script loading
+
+**Files:**
+- Modify: `PS_NetworkMapper/NetworkVisualizer/graph-layout.js`
+- Modify: `PS_NetworkMapper/NetworkVisualizer/elk-layout.js`
+- Modify: `PS_NetworkMapper/NetworkVisualizer/app.js`
+- Modify: `PS_NetworkMapper/NetworkVisualizer/network_vis.html`
+- Delete: `PS_NetworkMapper/NetworkVisualizer/vendor/elk-worker.min.js` (no longer referenced)
+
+**Why this task exists:** after Task 6 shipped, testing surfaced a hard requirement this
+plan hadn't accounted for: the tool must run by double-clicking `network_vis.html`
+directly from disk, with no local web server available in the deployment environment.
+Two things break that, confirmed empirically (headless Chromium, both under `file://`):
+
+1. ES modules (`type="module"`, `import`/`export`) cannot fetch anything across a
+   `file://` origin — confirmed a classic `<script src="local.js">` loads fine under
+   `file://`, but a `type="module"` script (or an `import` inside one) fails outright.
+2. Separately, `new Worker('external.js')` is flatly rejected under `file://`
+   ("Script at 'file://...' cannot be accessed from origin 'null'") — this is what
+   `elk-layout.js`'s `workerUrl: 'vendor/elk-worker.min.js'` option relies on.
+
+Both are fixed by dropping ES modules and the Worker entirely for the browser-loaded
+code, confirmed working under `file://` with a direct test:
+- `graph-layout.js`/`elk-layout.js` become plain classic scripts that attach their
+  functions to `window.GraphLayout`/`window.ElkLayout` instead of using `export`.
+- `new ELK()` constructed with no `workerUrl`/`workerFactory` option runs correctly
+  under `file://` (confirmed: produces the same layered positions as the worker-backed
+  path did) — the trade-off is that layout computation now runs on the main thread
+  instead of a background worker. Given clustering (Task 3/7) already keeps the
+  typically-visible subgraph to a few dozen nodes rather than all ~500 at once, this is
+  imperceptible in normal use; it would only be noticeable if a user manually expanded
+  every cluster simultaneously, which is a deliberate, infrequent action rather than the
+  default view.
+
+**Node-testability is unaffected — this is why the blast radius stays small.** Node's
+ESM loader supports importing named bindings from a plain CommonJS `module.exports = {a,
+b}` object via built-in static analysis (confirmed empirically: `import { foo, bar }
+from './cjs-lib.js'` against a file using `module.exports = { foo, bar }`, no `export`
+keyword anywhere, resolves correctly). That means **`test/graph-layout.test.mjs` and
+`test/elk-layout.test.mjs` need zero changes** — their existing `import { computeGraphRoot,
+compareIpIds, ... } from '../graph-layout.js'` style imports keep working unchanged
+against the new `module.exports`-based file. Only the two implementation files' export
+mechanism changes; all the actual graph/layout logic from Tasks 1-3 and 5 is untouched.
+
+**Interfaces:**
+- Consumes: nothing new — this task changes how the existing functions from
+  `graph-layout.js`/`elk-layout.js` are exposed and how `app.js` reaches them, not their
+  signatures or behavior.
+- Produces: `window.GraphLayout = { computeGraphRoot, compareIpIds, buildPrimaryTree,
+  computeVisibleTree, expandAncestors }` and `window.ElkLayout = { computeGridFallback,
+  computeLayout }`, both set by plain classic `<script>` tags. `app.js` becomes a classic
+  script again (no `type="module"`), calling through `window.GraphLayout.*`/
+  `window.ElkLayout.computeLayout` instead of using `import`. `window.__debug` (Task 6)
+  is left in place unchanged — it's harmless now that `app.js`'s top-level `var`s are
+  window properties again via normal classic-script semantics, and every already-written
+  verification step in Task 7 (done) and Task 9 (not yet dispatched) already uses it, so
+  removing it would mean touching those again for no benefit.
+
+- [ ] **Step 1: `graph-layout.js` — drop `export`, add a dual Node/browser footer**
+
+In `PS_NetworkMapper/NetworkVisualizer/graph-layout.js`, remove the `export` keyword from
+each of these five lines (leave everything else about each function — its body, its
+name, its position in the file — completely unchanged):
+
+```javascript
+export function compareIpIds(a, b) {
+```
+→
+```javascript
+function compareIpIds(a, b) {
+```
+
+```javascript
+export function computeGraphRoot(nodeIds, edges) {
+```
+→
+```javascript
+function computeGraphRoot(nodeIds, edges) {
+```
+
+```javascript
+export function buildPrimaryTree(nodeIds, edges, rootId) {
+```
+→
+```javascript
+function buildPrimaryTree(nodeIds, edges, rootId) {
+```
+
+```javascript
+export function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold) {
+```
+→
+```javascript
+function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold) {
+```
+
+```javascript
+export function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshold) {
+```
+→
+```javascript
+function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshold) {
+```
+
+Then append this footer at the very end of the file:
+
+```javascript
+
+// Dual-mode export: node:test imports this file via ESM `import {...}` syntax, which
+// Node resolves against `module.exports` here through its built-in CJS/ESM interop
+// (confirmed working - no `export` keyword needed for named imports to work). The
+// browser loads this same file as a classic <script>, where `module` doesn't exist,
+// so it attaches to `window.GraphLayout` instead. Using `export` + `type="module"` here
+// was the original approach, but ES modules cannot fetch anything under file://, which
+// this tool must support with no local web server available.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors };
+} else if (typeof window !== 'undefined') {
+    window.GraphLayout = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors };
+}
+```
+
+- [ ] **Step 2: Verify `graph-layout.js`'s tests are unaffected**
+
+Run: `node --test PS_NetworkMapper/NetworkVisualizer/test/graph-layout.test.mjs`
+Expected: PASS, same 16/16 as before Step 1 — the test file itself needs no changes.
+
+- [ ] **Step 3: `elk-layout.js` — drop `export`, remove the Worker, add the same dual footer**
+
+In `PS_NetworkMapper/NetworkVisualizer/elk-layout.js`, find:
+
+```javascript
+let elkInstance = null;
+function getElk() {
+  if (!elkInstance) {
+    elkInstance = new ELK({ workerUrl: 'vendor/elk-worker.min.js' });
+  }
+  return elkInstance;
+}
+
+export function computeGridFallback(visibleNodeIds) {
+```
+
+Replace with:
+
+```javascript
+let elkInstance = null;
+function getElk() {
+  if (!elkInstance) {
+    // No workerUrl/workerFactory: constructing ELK this way runs layout on the main
+    // thread instead of a Web Worker. This is required, not just simpler - a Worker's
+    // script fetch is rejected under file:// ("cannot be accessed from origin 'null'",
+    // confirmed empirically), which this tool must support with no local web server
+    // available. Clustering (graph-layout.js) keeps the typically-visible subgraph to a
+    // few dozen nodes, so the main-thread cost here is not noticeable in normal use.
+    elkInstance = new ELK();
+  }
+  return elkInstance;
+}
+
+function computeGridFallback(visibleNodeIds) {
+```
+
+Then find:
+
+```javascript
+export async function computeLayout(visibleNodeIds, visibleEdges) {
+```
+
+Replace with:
+
+```javascript
+async function computeLayout(visibleNodeIds, visibleEdges) {
+```
+
+Then append this footer at the very end of the file (same dual-mode pattern as
+`graph-layout.js`):
+
+```javascript
+
+// See graph-layout.js's matching footer for why this isn't `export`/`type="module"`.
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { computeGridFallback, computeLayout };
+} else if (typeof window !== 'undefined') {
+    window.ElkLayout = { computeGridFallback, computeLayout };
+}
+```
+
+- [ ] **Step 4: Verify `elk-layout.js`'s tests are unaffected**
+
+Run: `node --test PS_NetworkMapper/NetworkVisualizer/test/elk-layout.test.mjs`
+Expected: PASS, same 3/3 as before Step 3.
+
+- [ ] **Step 5: Remove the now-unused vendored Worker file**
+
+```bash
+rm PS_NetworkMapper/NetworkVisualizer/vendor/elk-worker.min.js
+```
+
+- [ ] **Step 6: Update `app.js` to call through `window.GraphLayout`/`window.ElkLayout`**
+
+In `app.js`, find (the two lines at the very top of the file):
+
+```javascript
+import { computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors } from './graph-layout.js';
+import { computeLayout } from './elk-layout.js';
+```
+
+Delete both lines entirely (no replacement — `app.js` is a classic script again, nothing
+to import; the functions are reached via `window.GraphLayout`/`window.ElkLayout` at each
+call site below).
+
+Then update each of the five call sites:
+
+Find:
+```javascript
+    graphRoot = computeGraphRoot(nodeIds, allEdges);
+    primaryTree = buildPrimaryTree(nodeIds, allEdges, graphRoot);
+```
+Replace with:
+```javascript
+    graphRoot = window.GraphLayout.computeGraphRoot(nodeIds, allEdges);
+    primaryTree = window.GraphLayout.buildPrimaryTree(nodeIds, allEdges, graphRoot);
+```
+
+Find:
+```javascript
+    var visible = computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, clusterThreshold);
+    var positions = await computeLayout(visible.visibleNodeIds, visible.visibleEdges);
+```
+Replace with:
+```javascript
+    var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, clusterThreshold);
+    var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges);
+```
+
+Find:
+```javascript
+            expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, clusterThreshold);
+```
+Replace with:
+```javascript
+            window.GraphLayout.expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, clusterThreshold);
+```
+
+(`window.__debug`, right below the two deleted import lines, is untouched — leave it exactly as Task 6 left it.)
+
+- [ ] **Step 7: Update `network_vis.html` — vendor script tags, drop the file:// mitigation, revert app.js to a classic script**
+
+Find:
+
+```html
+    <!-- Load Vis.js (vendored: PS_NetworkMapper/NetworkVisualizer/vendor/vis-network.min.js, v9.1.9 pinned) -->
+    <script type="text/javascript" src="vendor/vis-network.min.js"></script>
+    <!-- Load ELK.js (vendored: vendor/elk.bundled.js + vendor/elk-worker.min.js, v0.12.0 pinned) -->
+    <script type="text/javascript" src="vendor/elk.bundled.js"></script>
+```
+
+Replace with (adds the two application logic files as classic scripts, in dependency
+order, right after their vendor dependencies; drops the now-inaccurate "+
+vendor/elk-worker.min.js" from the comment since Step 5 removed that file):
+
+```html
+    <!-- Load Vis.js (vendored: PS_NetworkMapper/NetworkVisualizer/vendor/vis-network.min.js, v9.1.9 pinned) -->
+    <script type="text/javascript" src="vendor/vis-network.min.js"></script>
+    <!-- Load ELK.js (vendored: vendor/elk.bundled.js, v0.12.0 pinned; runs on the main
+         thread, no Worker - see elk-layout.js for why) -->
+    <script type="text/javascript" src="vendor/elk.bundled.js"></script>
+    <!-- Classic scripts (not ES modules) so this page works under file:// with no local
+         web server - see graph-layout.js's footer comment for why. -->
+    <script type="text/javascript" src="graph-layout.js"></script>
+    <script type="text/javascript" src="elk-layout.js"></script>
+```
+
+Then find (the file://-mitigation block Task 6 added, now unnecessary since nothing
+fails under file:// anymore - and the `type="module"` app.js tag it was guarding):
+
+```html
+    <!-- Load the Application Logic -->
+    <script>
+        // Module scripts fail silently under file:// (opaque-origin CORS restriction on
+        // ES module fetch) - before app.js even gets a chance to install its own
+        // window.onerror, this classic script guarantees a clear message instead of a
+        // blank page if that happens.
+        window.addEventListener('error', function (e) {
+            if (e.target && e.target.tagName === 'SCRIPT' && e.target.type === 'module') {
+                var modal = document.getElementById('fatal-error-modal');
+                var text = document.getElementById('fatal-error-text');
+                if (modal && text) {
+                    text.innerHTML = 'This page uses ES modules and cannot run when opened directly from disk (file://) due to browser security restrictions.<br><br>Serve this folder over a local web server instead, for example:<br><code>python3 -m http.server 8080</code><br>then open <code>http://localhost:8080/network_vis.html</code>.';
+                    modal.style.display = 'block';
+                }
+            }
+        }, true);
+    </script>
+    <script type="module" src="app.js"></script>
+```
+
+Replace with:
+
+```html
+    <!-- Load the Application Logic -->
+    <script src="app.js"></script>
+```
+
+- [ ] **Step 8: Verify the app works under `file://` with no server**
+
+Using headless Chromium (`nix shell nixpkgs#chromium`, same pattern as prior tasks), navigate
+DIRECTLY to the file path — no `python3 -m http.server`, no `nav` to a `localhost` URL:
+
+```json
+[
+  {"nav": "file:///home/alexander/Documents/Programming/Networking_Toolbox/PS_NetworkMapper/NetworkVisualizer/network_vis.html"},
+  {"wait": 1000},
+  {"eval": "typeof window.GraphLayout"},
+  {"eval": "typeof window.ElkLayout"},
+  {"eval": "(async () => { const resp = await fetch('file:///home/alexander/Documents/Programming/Networking_Toolbox/PS_NetworkMapper/TestMap.json').catch(() => null); return resp ? 'fetch-ok' : 'fetch-blocked-use-file-input-instead'; })()"}
+]
+```
+
+`fetch()` against a `file://` URL is often blocked too (a separate restriction from the
+module/Worker ones already fixed) - that's fine and expected, since this app already
+loads data via `<input type="file">` + `FileReader`, never `fetch()`, for exactly this
+reason. Confirm the first two evals return `"object"` (not `"undefined"`) - that's the
+actual thing this step needs to prove: the vendored libraries and the two application
+scripts all loaded and initialized correctly with no server. Then drive the same
+file-input-based load flow as every prior task's verification (`DataTransfer`/`File`
+trick) against `TestMap.json`'s content read via Node beforehand and inlined into the
+eval, since `fetch()` may not be available to read the fixture from disk in-page:
+
+```json
+[
+  {"eval": "(async () => { window.__TESTMAP_JSON = <PASTE TestMap.json's full text here as a JS string literal, escaped>; const file = new File([window.__TESTMAP_JSON], 'TestMap.json', {type: 'application/json'}); const dt = new DataTransfer(); dt.items.add(file); document.getElementById('jsonUpload').files = dt.files; window.forceLoadFile(); return 'triggered'; })()"},
+  {"wait": 2500},
+  {"eval": "document.getElementById('status-text').innerText"},
+  {"eval": "window.__debug.nodesDataset.length"},
+  {"eval": "window.__debug.nodesDataset.get().map(n => ({id: n.id, x: n.x, y: n.y}))"},
+  {"shot": "<scratchpad>/task8_fileurl_working.png"}
+]
+```
+
+Expected: `typeof window.GraphLayout` / `typeof window.ElkLayout` both `"object"`; status
+reads `"Success! Mapped 3 nodes."`; 4 nodes with distinct non-NaN positions, same as
+every previous task's TestMap.json regression check — except this time achieved with
+`file://` as the page origin, no server running at all. This is the actual deliverable
+this task exists to prove.
+
+Also re-run the existing HTTP-served regression once, to confirm this change didn't
+break the already-working server-based path:
+
+```json
+[
+  {"nav": "http://localhost:<port>/NetworkVisualizer/network_vis.html"},
+  {"wait": 1000},
+  {"eval": "(async () => { const resp = await fetch('../TestMap.json'); const text = await resp.text(); const file = new File([text], 'TestMap.json', {type: 'application/json'}); const dt = new DataTransfer(); dt.items.add(file); document.getElementById('jsonUpload').files = dt.files; window.forceLoadFile(); })(); 'triggered'"},
+  {"wait": 2500},
+  {"eval": "document.getElementById('status-text').innerText"},
+  {"eval": "window.__debug.nodesDataset.length"}
+]
+```
+
+Expected: identical "Success! Mapped 3 nodes." / 4-node result over HTTP too.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add PS_NetworkMapper/NetworkVisualizer/graph-layout.js PS_NetworkMapper/NetworkVisualizer/elk-layout.js PS_NetworkMapper/NetworkVisualizer/app.js PS_NetworkMapper/NetworkVisualizer/network_vis.html
+git rm PS_NetworkMapper/NetworkVisualizer/vendor/elk-worker.min.js
+git commit -m "fix: drop ES modules and the ELK Worker so the app runs under file:// with no server"
+```
+
+---
+
+### Task 9: Synthetic ~500-node fixture and large-scale verification
 
 **Files:**
 - Create: `PS_NetworkMapper/NetworkVisualizer/test/generate-fixture.mjs`
@@ -1339,7 +1715,7 @@ git commit -m "test: add synthetic ~500-node fixture generator for large-scale l
 
 ## Self-Review Notes
 
-- **Spec coverage:** graph-center root (Task 1) ✓, primary tree / secondary edges (Task 2) ✓, child-count clustering (Task 3, Task 7 UI) ✓, ELK in a Web Worker with fallback (Task 4, 5) ✓, integration replacing physics (Task 6) ✓, search expands clusters (Task 7 Step 4) ✓, 500-node testing (Task 8) ✓. Map-overlay mode and site-based grouping: explicitly out of scope per the spec, no task implements them, none should.
+- **Spec coverage:** graph-center root (Task 1) ✓, primary tree / secondary edges (Task 2) ✓, child-count clustering (Task 3, Task 7 UI) ✓, ELK layout with fallback (Task 4, 5) ✓ — originally Worker-backed per the spec, later moved to main-thread-only by Task 8 once a hard `file://`-with-no-server requirement surfaced; noted as a deliberate spec deviation, not an oversight, since a Worker cannot run under `file://` at all ✓, integration replacing physics (Task 6) ✓, search expands clusters (Task 7 Step 4) ✓, `file://` compatibility (Task 8, not in the original spec — added mid-execution per a hard deployment requirement) ✓, 500-node testing (Task 9) ✓. Map-overlay mode and site-based grouping: explicitly out of scope per the spec, no task implements them, none should.
 - **Placeholder scan:** every step has concrete code or a concrete verification plan with expected output; no "add error handling" or "TBD" left in.
 - **Type consistency:** `visibleNodeIds`/`visibleEdges`/`clusters` shape from Task 3 is consumed as-is by Task 6's `renderVisibleGraph`; `parentOf`/`childrenOf` shape from Task 2 is consumed as-is by Task 3's tests and Task 7's `expandAncestors` call; `computeLayout`'s `Map<string,{x,y}>` return is consumed as-is in Task 6. Function names match their Task 1/2/3 export declarations everywhere they're called in later tasks.
 - **Cross-task interaction findings (added during SDD pre-flight scan, 2026-08-19):** two gaps found by tracing how Task 6/7's new code interacts with unmodified Phase 1 code sharing the same `nodesDataset`/`network` interface, both fixed in-plan before dispatch: (1) `buildSwitchMap` becoming `async` with `renderVisibleGraph` doing the real awaited work, but its only caller (`forceLoadFile`) not awaiting it, would have shown "Success!" and hidden the loading bar before layout actually finished — fixed by Task 6 Step 4 (await the call) plus moving the progress-bar show/hide into `renderVisibleGraph` itself. (2) Phase 1's `applyVlanFilter`, untouched by Tasks 1-6, colors nodes by `scannedIps.has(id)` — always false for a `cluster:*` id — so it would have clobbered Task 6's gold/dashed cluster styling the instant the VLAN dropdown was touched; fixed by Task 7 Step 3 (early-return for `isCluster` nodes), verified in Task 7 Step 5.
