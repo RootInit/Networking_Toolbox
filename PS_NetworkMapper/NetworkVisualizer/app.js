@@ -40,6 +40,22 @@ function getClusterThreshold() {
     return (Number.isFinite(n) && n >= 2) ? n : 8;
 }
 
+// Same "read live from the DOM, never cache" approach as getClusterThreshold above -
+// same bug class, same fix. Falls back to graph-layout.js's own defaults (via undefined)
+// whenever a field is missing/invalid, rather than duplicating those default numbers here.
+function readPositiveIntSetting(id, min) {
+    var el = document.getElementById(id);
+    var n = el ? parseInt(el.value, 10) : NaN;
+    return (Number.isFinite(n) && n >= min) ? n : undefined;
+}
+function getLayoutSettings() {
+    return {
+        leafGridThreshold: readPositiveIntSetting('leafGridThreshold', 2),
+        gridSpacingX: readPositiveIntSetting('gridSpacingX', 20),
+        gridSpacingY: readPositiveIntSetting('gridSpacingY', 20),
+    };
+}
+
 // CDP/headless-browser verification needs to inspect internal state. Kept even though
 // app.js is a classic script again (its top-level vars ARE window properties) because
 // every verification step written while it was still a module already depends on this
@@ -115,6 +131,22 @@ window.setClusterThreshold = function(value) {
     var n = parseInt(value, 10);
     if (!Number.isFinite(n) || n < 2) return;
     window.renderVisibleGraph();
+};
+
+// Layout settings (leaf-grid threshold/spacing) share the same "just trigger a
+// re-render, the actual value is re-read live at render time" approach - see
+// getLayoutSettings above.
+window.setLayoutSetting = function() {
+    window.renderVisibleGraph();
+};
+
+window.toggleLeftPanel = function(e) {
+    if (e) e.stopPropagation();
+    document.getElementById('left-panel').classList.toggle('collapsed');
+};
+window.expandLeftPanelIfCollapsed = function() {
+    var panel = document.getElementById('left-panel');
+    if (panel.classList.contains('collapsed')) panel.classList.remove('collapsed');
 };
 
 // 1. File Loading & Parsing
@@ -308,7 +340,7 @@ window.renderVisibleGraph = function() {
 async function doRenderVisibleGraph() {
     window.showProgress("Computing layout...", 100);
     var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, getClusterThreshold());
-    var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges);
+    var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges, getLayoutSettings());
 
     nodesDataset.clear(); edgesDataset.clear();
 

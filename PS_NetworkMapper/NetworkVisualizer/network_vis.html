@@ -20,8 +20,21 @@
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; width: 100vw; overflow: hidden; background-color: var(--bg); color: #333; }
         
         /* Layout Panels */
-        #left-panel { width: 320px; min-width: 320px; padding: 20px; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: column; box-sizing: border-box; }
+        #left-panel { width: 320px; min-width: 320px; padding: 20px; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: column; box-sizing: border-box; position: relative; transition: width 0.15s ease, min-width 0.15s ease, padding 0.15s ease; }
         #center-panel { flex-grow: 1; height: 100%; position: relative; }
+
+        /* Collapsed left panel: a thin bar showing only the toggle icon. The whole bar
+           is clickable to re-expand (not just the button) - see #handleLeftPanelBarClick
+           in app.js - so a user doesn't have to aim for a tiny target to get it back. */
+        #left-panel.collapsed { width: 44px; min-width: 44px; padding: 16px 0; cursor: pointer; }
+        #left-panel.collapsed:hover { background: #eef2f7; }
+        #left-panel.collapsed #left-panel-content { display: none; }
+
+        #panelToggleBtn { position: absolute; top: 14px; right: 10px; width: 26px; height: 26px; padding: 0; margin: 0; background: transparent; border: none; color: var(--primary); display: flex; align-items: center; justify-content: center; border-radius: 4px; cursor: pointer; }
+        #panelToggleBtn:hover { background: rgba(0,0,0,0.08); }
+        #left-panel.collapsed #panelToggleBtn { position: static; margin: 0 auto; }
+        #panelToggleIcon { transition: transform 0.15s ease; }
+        #left-panel.collapsed #panelToggleIcon { transform: rotate(180deg); }
         
         /* RIGHT PANEL IS BACK */
         #right-panel { width: 500px; min-width: 500px; background: var(--panel-bg); box-shadow: -2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: none; flex-direction: column; box-sizing: border-box; border-left: 1px solid var(--border); }
@@ -109,7 +122,13 @@
     </div>
 
     <!-- LEFT PANEL: Controls -->
-    <div id="left-panel">
+    <div id="left-panel" onclick="window.expandLeftPanelIfCollapsed()">
+        <button id="panelToggleBtn" onclick="window.toggleLeftPanel(event)" title="Collapse panel" aria-label="Collapse panel">
+            <svg id="panelToggleIcon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="10,2 4,8 10,14"></polyline>
+            </svg>
+        </button>
+        <div id="left-panel-content">
         <div class="control-group">
             <h2>1. Load Network Map</h2>
             <input type="file" id="jsonUpload" accept=".json">
@@ -120,14 +139,27 @@
         <div class="control-group">
             <h2>2. Search & Filter</h2>
             <input type="text" id="globalSearch" placeholder="Search IP, MAC, User, Host..." onkeyup="window.performGlobalSearch()">
-            
+
             <label style="font-size: 0.85rem; font-weight: bold;">VLAN Highlight Layer:</label>
             <select id="vlanFilter" onchange="window.applyVlanFilter()">
                 <option value="ALL">Show All VLANs</option>
             </select>
-            
+
             <label style="font-size: 0.85rem; font-weight: bold;">Max children before grouping:</label>
             <input type="number" id="clusterThreshold" min="2" max="200" value="8" onchange="window.setClusterThreshold(this.value)">
+        </div>
+
+        <div class="control-group">
+            <h2>3. Layout Settings</h2>
+
+            <label style="font-size: 0.85rem; font-weight: bold;">Leaf cluster: min switches to grid</label>
+            <input type="number" id="leafGridThreshold" min="2" max="200" value="5" onchange="window.setLayoutSetting()">
+
+            <label style="font-size: 0.85rem; font-weight: bold;">Leaf cluster: horizontal spacing (px)</label>
+            <input type="number" id="gridSpacingX" min="20" max="1000" step="10" value="190" onchange="window.setLayoutSetting()">
+
+            <label style="font-size: 0.85rem; font-weight: bold;">Leaf cluster: vertical spacing (px)</label>
+            <input type="number" id="gridSpacingY" min="20" max="1000" step="10" value="90" onchange="window.setLayoutSetting()">
         </div>
 
         <div class="control-group" id="legend-group" style="display:none; border-bottom: none; margin-bottom: 0;">
@@ -136,6 +168,7 @@
             <div class="legend-item"><span class="legend-swatch" style="background:#D2E5FF; border-color:#2B7CE9; border-radius:50%;"></span> Scanned virtual chassis / stack</div>
             <div class="legend-item"><span class="legend-swatch" style="background:#E8E8E8; border-color:#B0B0B0;"></span> Unscanned neighbor</div>
             <div class="legend-item"><span class="legend-swatch" style="background:#fdf6e3; border-color:#d9b34e; border-style:dashed;"></span> Collapsed group (click to expand)</div>
+        </div>
         </div>
     </div>
 

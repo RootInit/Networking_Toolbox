@@ -37,7 +37,7 @@ function computeGridFallback(visibleNodeIds) {
   return positions;
 }
 
-async function computeLayout(visibleNodeIds, visibleEdges) {
+async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   if (visibleNodeIds.length === 0) return new Map();
 
   const graph = {
@@ -50,12 +50,14 @@ async function computeLayout(visibleNodeIds, visibleEdges) {
       // options don't help since they only wrap deep chains, not wide single layers).
       // 'radial' instead fans a node's children out around it in every direction, which
       // keeps the bounding box close to square regardless of how wide a level is (same
-      // test graph: 1621x1511px, roughly 1:1) and matches the reference layout requested.
-      // WEDGE_COMPACTION lets branches with fewer descendants sit closer to the root
-      // instead of every node landing on one uniform ring, which is otherwise wasted space.
+      // test graph: 1621x1511px, roughly 1:1). Deliberately no compactor option here -
+      // the inner rings (everything but the leaf tier) use ELK's plain uniform-ring
+      // placement; leaf-tier compaction is instead handled explicitly below by
+      // GraphLayout.applyLeafGridClustering, which was requested specifically because
+      // ELK's own radial compactors made the inner rings uneven without meaningfully
+      // shrinking the (much bigger) outer leaf tier.
       'elk.algorithm': 'org.eclipse.elk.radial',
       'elk.spacing.nodeNode': '70',
-      'elk.radial.compactor': 'WEDGE_COMPACTION',
     },
     children: visibleNodeIds.map(id => ({ id, width: NODE_WIDTH, height: NODE_HEIGHT })),
     edges: visibleEdges.map((e, i) => ({ id: `e${i}`, sources: [e.from], targets: [e.to] })),
@@ -67,8 +69,18 @@ async function computeLayout(visibleNodeIds, visibleEdges) {
 
   try {
     const laidOut = await Promise.race([getElk().layout(graph), timeout]);
-    const positions = new Map();
+    let positions = new Map();
     laidOut.children.forEach(n => positions.set(n.id, { x: n.x, y: n.y }));
+
+    if (typeof window !== 'undefined' && window.GraphLayout && visibleNodeIds.length > 0) {
+      const childrenOf = new Map();
+      visibleEdges.forEach(e => {
+        if (!childrenOf.has(e.from)) childrenOf.set(e.from, []);
+        childrenOf.get(e.from).push(e.to);
+      });
+      positions = window.GraphLayout.applyLeafGridClustering(positions, visibleNodeIds[0], childrenOf, layoutSettings);
+    }
+
     return positions;
   } catch (err) {
     console.error('ELK layout failed, falling back to a grid:', err);

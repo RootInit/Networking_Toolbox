@@ -153,6 +153,113 @@ function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshol
   }
 }
 
+// Re-arranges the leaf children of any "leaf-parent" (a node whose children are all
+// themselves leaves) into a compact grid instead of the wide arc a radial layout gives
+// them, once there are enough of them to be worth it. The grid is rotated to point in
+// the same root->parent direction the branch already radiates in, so it reads as "a
+// cluster at the tip of this spoke" rather than a layout that's inconsistent with the
+// rest of the (untouched) radial tree. Only leaf positions move - every non-leaf-parent
+// node (including every leaf-parent itself) keeps exactly the position `positions` came
+// in with, per this being scoped to "the outer ring only" (see the app's chat history:
+// the inner rings' plain radial placement was explicitly fine and must not change).
+function applyLeafGridClustering(positions, rootId, childrenOf, options) {
+  const opts = options || {};
+  const threshold = opts.leafGridThreshold ?? 5;
+  const spacingX = opts.gridSpacingX ?? 190;
+  const spacingY = opts.gridSpacingY ?? 90;
+  const baseOffset = opts.gridBaseOffset ?? 110;
+  const minNodeSpacing = opts.minNodeSpacing ?? 170;
+  const maxPushesPerBranch = 200;
+
+  const result = new Map(positions);
+  const rootPos = positions.get(rootId);
+  if (!rootPos) return result;
+
+  const isLeaf = id => !childrenOf.has(id) || childrenOf.get(id).length === 0;
+  const parents = Array.from(childrenOf.keys())
+    .filter(id => {
+      const kids = childrenOf.get(id);
+      return kids.length >= threshold && kids.every(isLeaf) && positions.has(id);
+    })
+    // Angular order, not ID order: collision resolution below finalizes one branch at a
+    // time and never revisits an earlier one, so branches must be visited in the same
+    // order they're actually laid out around the root - otherwise a branch can be
+    // finalized while a not-yet-placed neighbor still overlaps it, or the resolution
+    // can end up pushing whichever branch happens to sort last in ID order regardless
+    // of which one is actually closest to a collision (confirmed - this was a real bug,
+    // not a hypothetical one: on the full 342-node sample it left most branches
+    // un-pushed in a tight clump while repeatedly ejecting one or two unlucky others).
+    .sort((a, b) => {
+      const pa = positions.get(a), pb = positions.get(b);
+      return Math.atan2(pa.y - rootPos.y, pa.x - rootPos.x) - Math.atan2(pb.y - rootPos.y, pb.x - rootPos.x);
+    });
+
+  if (parents.length === 0) return result;
+
+  function placeGrid(parentId, offset) {
+    const kids = childrenOf.get(parentId);
+    const pPos = positions.get(parentId);
+    const dx = pPos.x - rootPos.x, dy = pPos.y - rootPos.y;
+    const dist = Math.hypot(dx, dy);
+    const angle = dist > 0 ? Math.atan2(dy, dx) : 0;
+    const cos = Math.cos(angle), sin = Math.sin(angle);
+    const cols = Math.ceil(Math.sqrt(kids.length));
+    const placed = new Map();
+    kids.forEach((childId, i) => {
+      const col = i % cols;
+      const row = Math.floor(i / cols);
+      const localX = (col - (cols - 1) / 2) * spacingX; // perpendicular spread (columns)
+      const localY = offset + row * spacingY;            // outward growth (rows)
+      // Local +Y (outward growth) must map onto the root->parent direction (cos, sin);
+      // local +X (column spread) onto the perpendicular (-sin, cos). Verified against
+      // theta=0 (parent due east of root): row 0 should land further east of the parent,
+      // continuing the same root->parent direction, not perpendicular to it.
+      placed.set(childId, {
+        x: pPos.x + localY * cos - localX * sin,
+        y: pPos.y + localY * sin + localX * cos,
+      });
+    });
+    return placed;
+  }
+
+  function collidesWithAny(gridPositions, finalizedGrids) {
+    for (const other of finalizedGrids) {
+      for (const a of gridPositions) {
+        for (const b of other) {
+          if (Math.hypot(a.x - b.x, a.y - b.y) < minNodeSpacing) return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  // Single pass in angular order: each branch is pushed out just far enough to clear
+  // every branch already finalized before it, then never revisited. Distinct rays out
+  // of a common root diverge as radius grows, so a large-enough offset always exists
+  // and this always terminates - no cross-branch re-checking, no oscillation.
+  const finalizedGrids = [];
+  const finalPositions = new Map();
+  for (const p of parents) {
+    let offset = baseOffset;
+    let grid = placeGrid(p, offset);
+    let pushes = 0;
+    while (collidesWithAny(Array.from(grid.values()), finalizedGrids) && pushes < maxPushesPerBranch) {
+      offset += spacingY;
+      grid = placeGrid(p, offset);
+      pushes++;
+    }
+    finalizedGrids.push(Array.from(grid.values()));
+    finalPositions.set(p, grid);
+  }
+
+  for (const p of parents) {
+    for (const [childId, pos] of finalPositions.get(p)) {
+      result.set(childId, pos);
+    }
+  }
+  return result;
+}
+
 // Dual-mode export: node:test imports this file via ESM `import {...}` syntax, which
 // Node resolves against `module.exports` here through its built-in CJS/ESM interop
 // (confirmed working - no `export` keyword needed for named imports to work). The
@@ -161,7 +268,7 @@ function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshol
 // was the original approach, but ES modules cannot fetch anything under file://, which
 // this tool must support with no local web server available.
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors };
+    module.exports = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors, applyLeafGridClustering };
 } else if (typeof window !== 'undefined') {
-    window.GraphLayout = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors };
+    window.GraphLayout = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors, applyLeafGridClustering };
 }
