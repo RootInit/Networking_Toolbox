@@ -773,8 +773,6 @@ Find the whole existing `window.buildSwitchMap` function (from `// 2. THE REPULS
 ```javascript
 // 2. Topology data -> node/edge metadata (positions are computed separately by renderVisibleGraph)
 window.buildSwitchMap = async function() {
-    window.hideProgress();
-
     allNodeMeta.clear();
     allEdges = [];
     var addedEdges = new Set();
@@ -849,8 +847,13 @@ window.buildSwitchMap = async function() {
     await window.renderVisibleGraph();
 };
 
-// 2b. Recompute the visible subgraph (clustering) and lay it out.
+// 2b. Recompute the visible subgraph (clustering) and lay it out. Owns the
+// progress-bar lifecycle itself so every caller (initial load, cluster
+// expand/collapse, threshold change, search) gets covered automatically -
+// the ELK round-trip this awaits can take up to a few seconds on a large
+// visible set, and the canvas would otherwise sit blank with no indicator.
 window.renderVisibleGraph = async function() {
+    window.showProgress("Computing layout...", 100);
     var visible = computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, clusterThreshold);
     var positions = await computeLayout(visible.visibleNodeIds, visible.visibleEdges);
 
@@ -890,12 +893,86 @@ window.renderVisibleGraph = async function() {
             edgesDataset.add({ id: `secondary-${i}`, from: e.from, to: e.to, width: 1, color: '#c0c0c0', dashes: [4, 4] });
         }
     });
+
+    window.hideProgress();
 };
 ```
 
 Note: `physicsToggle` / `togglePhysics` become dead UI now that physics is always off — Task 7 removes that button; leave it as-is for this task so the diff stays reviewable on its own (it'll simply have no visible effect until Task 7).
 
-- [ ] **Step 4: Regression-verify against `TestMap.json` (small graph, no clustering triggered)**
+- [ ] **Step 4: Await the async render call from `forceLoadFile`**
+
+`buildSwitchMap` is now `async` and does real awaited work (`renderVisibleGraph` awaits `computeLayout`'s ELK round-trip). Its only caller, inside `forceLoadFile`'s `reader.onload`, currently calls it fire-and-forget - left as-is, the status message would flip to "Success!" and the loading bar would never even show, because Step 3 already covers the wait via `renderVisibleGraph`'s own `showProgress`/`hideProgress`, but only if this call site actually awaits it before running the code that follows.
+
+In `app.js`, find:
+
+```javascript
+    reader.onload = function(e) {
+        window.showProgress("Processing Enterprise Topology...", 100);
+        
+        setTimeout(function() {
+            try {
+                var data = JSON.parse(e.target.result);
+                if (!data.Topology) throw new Error("Missing 'Topology' array in JSON.");
+                
+                globalTopologyData = data.Topology;
+
+                // Clients arrive pre-correlated (MAC table + cross-device ARP enrichment
+                // done server-side by Start-NetworkMapper.ps1); the visualizer just displays them.
+                globalTopologyData.forEach(device => { device.TrueClients = device.Clients || []; });
+
+                window.extractVlans();
+                window.buildSwitchMap();
+                
+                document.getElementById('physicsToggle').style.display = 'block';
+                document.getElementById('legend-group').style.display = 'block';
+                window.setStatus(`Success! Mapped ${globalTopologyData.length} nodes.`, "green");
+            } catch (err) { 
+                window.setStatus("JSON Parse Error.", "red"); 
+                throw err; 
+            } finally {
+                btn.disabled = false;
+            }
+        }, 100);
+    };
+```
+
+Replace with (only the `setTimeout(function()` -> `setTimeout(async function()` and `window.buildSwitchMap();` -> `await window.buildSwitchMap();` lines actually change; the rest is reproduced for full context):
+
+```javascript
+    reader.onload = function(e) {
+        window.showProgress("Processing Enterprise Topology...", 100);
+        
+        setTimeout(async function() {
+            try {
+                var data = JSON.parse(e.target.result);
+                if (!data.Topology) throw new Error("Missing 'Topology' array in JSON.");
+                
+                globalTopologyData = data.Topology;
+
+                // Clients arrive pre-correlated (MAC table + cross-device ARP enrichment
+                // done server-side by Start-NetworkMapper.ps1); the visualizer just displays them.
+                globalTopologyData.forEach(device => { device.TrueClients = device.Clients || []; });
+
+                window.extractVlans();
+                await window.buildSwitchMap();
+                
+                document.getElementById('physicsToggle').style.display = 'block';
+                document.getElementById('legend-group').style.display = 'block';
+                window.setStatus(`Success! Mapped ${globalTopologyData.length} nodes.`, "green");
+            } catch (err) { 
+                window.setStatus("JSON Parse Error.", "red"); 
+                throw err; 
+            } finally {
+                btn.disabled = false;
+            }
+        }, 100);
+    };
+```
+
+Note: Task 7 Step 2 also edits inside this same block (removing the `physicsToggle` display line) - it finds that line by its own text, which this edit leaves untouched, so the two edits don't conflict.
+
+- [ ] **Step 5: Regression-verify against `TestMap.json` (small graph, no clustering triggered)**
 
 `TestMap.json` has 4 nodes total (3 scanned + 1 unscanned placeholder from Phase 1's fixture), all well under the default threshold of 8 - clustering shouldn't trigger, so this is a pure regression check that everything from Phase 1 still works with the new layout path.
 
@@ -915,9 +992,9 @@ Using the same static-server + headless-Chromium + CDP pattern as Task 5 Step 6,
 ]
 ```
 
-Expected: status still reads `"Success! Mapped 3 nodes."`; `nodesDataset.length` is `4` (3 scanned + `10.55.2.3` unscanned placeholder); every node has distinct, non-NaN `x`/`y` (confirms ELK positions, not all stacked at `0,0`); `10.55.2.1`'s color is still the blue "scanned" color (confirms the Phase 1 two-pass fix carried over); the drawer still opens on click/selectNode. Compare the screenshot's node layout against the Task 1 (`01_overview.png`) screenshot from Phase 1's manual verification — same 4 nodes, now laid out top-down in tree layers instead of physics-scattered.
+Expected: status still reads `"Success! Mapped 3 nodes."`; `nodesDataset.length` is `4` (3 scanned + `10.55.2.3` unscanned placeholder); every node has distinct, non-NaN `x`/`y` (confirms ELK positions, not all stacked at `0,0`); `10.55.2.1`'s color is still the blue "scanned" color (confirms the Phase 1 two-pass fix carried over); the drawer still opens on click/selectNode; the loading bar was visible at some point during the wait rather than the canvas just sitting blank (confirms Step 4's await fix is wired correctly). Compare the screenshot's node layout against the Task 1 (`01_overview.png`) screenshot from Phase 1's manual verification — same 4 nodes, now laid out top-down in tree layers instead of physics-scattered.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add PS_NetworkMapper/NetworkVisualizer/app.js PS_NetworkMapper/NetworkVisualizer/network_vis.html
@@ -933,7 +1010,7 @@ git commit -m "feat: replace physics layout with graph-center rooted ELK layout"
 - Modify: `PS_NetworkMapper/NetworkVisualizer/app.js` (wire the threshold input; `performGlobalSearch` expands ancestors first)
 
 **Interfaces:**
-- Consumes: `expandAncestors` from `graph-layout.js`; `renderVisibleGraph`, `expandedNodes`, `clusterThreshold`, `primaryTree` from Task 6.
+- Consumes: `expandAncestors` from `graph-layout.js`; `renderVisibleGraph`, `expandedNodes`, `clusterThreshold`, `primaryTree` from Task 6. Also patches `applyVlanFilter` (from Phase 1, untouched by Tasks 1-6) - see Step 4: it colors every node by `scannedIps.has(id)`, which is `false` for a `cluster:*` placeholder id just like it is for an unscanned neighbor, so without this step a cluster's gold/dashed styling (Task 6) would be silently overwritten by the "unscanned" gray branch the instant a user touches the VLAN dropdown.
 - Produces: no new exports — this task is UI wiring only.
 
 - [ ] **Step 1: Remove the dead physics button, add the threshold control**
@@ -987,7 +1064,67 @@ window.setClusterThreshold = function(value) {
 
 Also remove the now-unused `var physicsEnabled = true;` line and the `document.getElementById('physicsToggle').style.display = 'block';` line inside `forceLoadFile`'s success path (search for it — it's right before the `legend-group` display line added in Phase 1; leave that `legend-group` line as-is).
 
-- [ ] **Step 3: Make search expand ancestor clusters before focusing**
+- [ ] **Step 3: Keep cluster placeholders styled gold/dashed under the VLAN filter**
+
+In `app.js`, find (this is Phase 1's `applyVlanFilter`, unchanged until now):
+
+```javascript
+window.applyVlanFilter = function() {
+    var selectedVlan = document.getElementById('vlanFilter').value;
+    var scannedIps = new Set(globalTopologyData.filter(d => d && d.DeviceIP).map(d => String(d.DeviceIP)));
+    var updates = [];
+
+    nodesDataset.get().forEach(node => {
+        var matchesVlan = selectedVlan === "ALL" || (node.vlanCache && node.vlanCache.includes(selectedVlan.toString()));
+
+        if (!scannedIps.has(String(node.id))) {
+            // Unscanned neighbor placeholders always stay gray; a VLAN filter can only dim them further.
+            updates.push({ id: node.id, color: { background: '#E8E8E8', border: '#B0B0B0' }, font: { color: matchesVlan ? '#666666' : '#dddddd' } });
+        } else if (matchesVlan) {
+            updates.push({ id: node.id, color: node.isStack ? { background: '#D2E5FF', border: '#2B7CE9' } : { background: '#97C2FC', border: '#2B7CE9' }, font: { color: 'black' } });
+        } else {
+            updates.push({ id: node.id, color: { background: '#f2f2f2', border: '#e6e6e6' }, font: { color: '#cccccc' } });
+        }
+    });
+    nodesDataset.update(updates);
+    
+    if (currentSelectedNodeData) window.openRightDrawer(currentSelectedNodeData.DeviceIP);
+};
+```
+
+Replace with (adds one branch, checked before the scanned/unscanned logic, that leaves cluster placeholders alone):
+
+```javascript
+window.applyVlanFilter = function() {
+    var selectedVlan = document.getElementById('vlanFilter').value;
+    var scannedIps = new Set(globalTopologyData.filter(d => d && d.DeviceIP).map(d => String(d.DeviceIP)));
+    var updates = [];
+
+    nodesDataset.get().forEach(node => {
+        if (node.isCluster) {
+            // Collapsed groups have no VLAN data of their own (their members are hidden) -
+            // always keep the gold/dashed "collapsed group" styling regardless of filter.
+            return;
+        }
+
+        var matchesVlan = selectedVlan === "ALL" || (node.vlanCache && node.vlanCache.includes(selectedVlan.toString()));
+
+        if (!scannedIps.has(String(node.id))) {
+            // Unscanned neighbor placeholders always stay gray; a VLAN filter can only dim them further.
+            updates.push({ id: node.id, color: { background: '#E8E8E8', border: '#B0B0B0' }, font: { color: matchesVlan ? '#666666' : '#dddddd' } });
+        } else if (matchesVlan) {
+            updates.push({ id: node.id, color: node.isStack ? { background: '#D2E5FF', border: '#2B7CE9' } : { background: '#97C2FC', border: '#2B7CE9' }, font: { color: 'black' } });
+        } else {
+            updates.push({ id: node.id, color: { background: '#f2f2f2', border: '#e6e6e6' }, font: { color: '#cccccc' } });
+        }
+    });
+    nodesDataset.update(updates);
+    
+    if (currentSelectedNodeData) window.openRightDrawer(currentSelectedNodeData.DeviceIP);
+};
+```
+
+- [ ] **Step 4: Make search expand ancestor clusters before focusing**
 
 In `app.js`, find `window.performGlobalSearch`:
 
@@ -1015,7 +1152,7 @@ Replace with:
     }
 ```
 
-- [ ] **Step 4: Verify clustering + search-expansion in the browser**
+- [ ] **Step 5: Verify clustering, VLAN-filter stability, and search-expansion in the browser**
 
 Generate a small fixture with one over-threshold fan-out (11 children off a single "hub" switch, plus a couple of ordinary edges) — save as `/tmp/.../scratchpad/cluster_test.json` with the same `{Topology: [...]}` shape as `TestMap.json` (a hub device whose `Neighbors` array lists 11 distinct `ManagementIP`s, each with a `Hostname`; none of the 11 need their own top-level `Topology` entry — they'll render as unscanned leaves, which is fine for testing clustering purely on tree shape).
 
@@ -1029,15 +1166,17 @@ Using the static-server + Chromium + CDP pattern from prior tasks:
   {"wait": 2000},
   {"eval": "nodesDataset.get().map(n => n.id)"},
   {"shot": "<scratchpad>/task7_clustered.png"},
+  {"eval": "window.applyVlanFilter(); nodesDataset.get().find(n => n.isCluster).color"},
+  {"shot": "<scratchpad>/task7_cluster_survives_vlan_filter.png"},
   {"eval": "(async () => { document.getElementById('globalSearch').value = 'leaf5'; window.performGlobalSearch(); await new Promise(r => setTimeout(r, 1500)); return nodesDataset.get().map(n => n.id); })()"},
   {"wait": 300},
   {"shot": "<scratchpad>/task7_expanded_via_search.png"}
 ]
 ```
 
-Expected: first `nodesDataset.get()` shows the hub plus exactly one `cluster:<hubId>` node (not all 11 leaves) — confirms clustering triggers. After searching for a leaf hostname/IP that's inside the collapsed cluster, the second `nodesDataset.get()` includes that leaf directly (no more `cluster:<hubId>` entry, replaced by all 11 real leaf nodes) — confirms `expandAncestors` + re-render correctly reveals it, and the screenshot shows the drawer open on the found node.
+Expected: first `nodesDataset.get()` shows the hub plus exactly one `cluster:<hubId>` node (not all 11 leaves) — confirms clustering triggers. After calling `applyVlanFilter()` with "Show All VLANs" still selected, the cluster node's `color` is still `{background: '#fdf6e3', border: '#d9b34e'}` (not the gray "unscanned" color) — confirms Step 3's fix. After searching for a leaf hostname/IP that's inside the collapsed cluster, the final `nodesDataset.get()` includes that leaf directly (no more `cluster:<hubId>` entry, replaced by all 11 real leaf nodes) — confirms `expandAncestors` + re-render correctly reveals it, and the screenshot shows the drawer open on the found node.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add PS_NetworkMapper/NetworkVisualizer/app.js PS_NetworkMapper/NetworkVisualizer/network_vis.html
@@ -1166,6 +1305,7 @@ git commit -m "test: add synthetic ~500-node fixture generator for large-scale l
 
 ## Self-Review Notes
 
-- **Spec coverage:** graph-center root (Task 1) ✓, primary tree / secondary edges (Task 2) ✓, child-count clustering (Task 3, Task 7 UI) ✓, ELK in a Web Worker with fallback (Task 4, 5) ✓, integration replacing physics (Task 6) ✓, search expands clusters (Task 7 Step 3) ✓, 500-node testing (Task 8) ✓. Map-overlay mode and site-based grouping: explicitly out of scope per the spec, no task implements them, none should.
+- **Spec coverage:** graph-center root (Task 1) ✓, primary tree / secondary edges (Task 2) ✓, child-count clustering (Task 3, Task 7 UI) ✓, ELK in a Web Worker with fallback (Task 4, 5) ✓, integration replacing physics (Task 6) ✓, search expands clusters (Task 7 Step 4) ✓, 500-node testing (Task 8) ✓. Map-overlay mode and site-based grouping: explicitly out of scope per the spec, no task implements them, none should.
 - **Placeholder scan:** every step has concrete code or a concrete verification plan with expected output; no "add error handling" or "TBD" left in.
 - **Type consistency:** `visibleNodeIds`/`visibleEdges`/`clusters` shape from Task 3 is consumed as-is by Task 6's `renderVisibleGraph`; `parentOf`/`childrenOf` shape from Task 2 is consumed as-is by Task 3's tests and Task 7's `expandAncestors` call; `computeLayout`'s `Map<string,{x,y}>` return is consumed as-is in Task 6. Function names match their Task 1/2/3 export declarations everywhere they're called in later tasks.
+- **Cross-task interaction findings (added during SDD pre-flight scan, 2026-08-19):** two gaps found by tracing how Task 6/7's new code interacts with unmodified Phase 1 code sharing the same `nodesDataset`/`network` interface, both fixed in-plan before dispatch: (1) `buildSwitchMap` becoming `async` with `renderVisibleGraph` doing the real awaited work, but its only caller (`forceLoadFile`) not awaiting it, would have shown "Success!" and hidden the loading bar before layout actually finished — fixed by Task 6 Step 4 (await the call) plus moving the progress-bar show/hide into `renderVisibleGraph` itself. (2) Phase 1's `applyVlanFilter`, untouched by Tasks 1-6, colors nodes by `scannedIps.has(id)` — always false for a `cluster:*` id — so it would have clobbered Task 6's gold/dashed cluster styling the instant the VLAN dropdown was touched; fixed by Task 7 Step 3 (early-return for `isCluster` nodes), verified in Task 7 Step 5.
