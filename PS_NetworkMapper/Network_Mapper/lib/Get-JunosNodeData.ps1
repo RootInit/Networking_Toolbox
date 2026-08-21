@@ -11,15 +11,12 @@ param (
     [switch]$Log 
 )
 
-if (-not (Test-Path $AuthFile)) { throw "Auth file missing at $AuthFile! Copy Auth.example.json to Auth.json and fill in real credentials." }
-$AuthData = Get-Content $AuthFile -Raw | ConvertFrom-Json
-$Username = $AuthData.Username
-$Password = $AuthData.Password
+$WorkerScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
+. (Join-Path $WorkerScriptDir "Connect-JunosSsh.ps1")
 
-$AskPassPath = Join-Path $env:TEMP "ssh_askpass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).bat"
-$AskPassText = Join-Path $env:TEMP "ssh_pass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
-[System.IO.File]::WriteAllText($AskPassText, $Password)
-[System.IO.File]::WriteAllText($AskPassPath, "@type `"$AskPassText`"")
+$Auth = Get-JunosAuth -AuthFile $AuthFile
+$Username = $Auth.Username
+$AskPass = New-JunosAskPass -Password $Auth.Password
 
 # Everything below runs inside a try/finally so the plaintext askpass files
 # (containing the real switch password) are always removed, even on error or exit.
@@ -32,14 +29,12 @@ function Invoke-InteractiveBatch {
     $TempOut = Join-Path $env:TEMP "ssh_out_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
     $TempErr = Join-Path $env:TEMP "ssh_err_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
     
-    $SshArgs = @("-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "$Username@$TargetIP")
+    $SshArgs = Get-JunosSshArgs -Username $Username -TargetIP $TargetIP
     $ProcInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ssh.exe $($SshArgs -join ' ') > `"$TempOut`" 2> `"$TempErr`"")
     $ProcInfo.UseShellExecute = $false; $ProcInfo.CreateNoWindow = $true
     $ProcInfo.RedirectStandardInput = $true
-    
-    $ProcInfo.EnvironmentVariables["DISPLAY"] = "dummy:0"
-    $ProcInfo.EnvironmentVariables["SSH_ASKPASS"] = $AskPassPath
-    $ProcInfo.EnvironmentVariables["SSH_ASKPASS_REQUIRE"] = "force"
+
+    foreach ($EnvKey in $AskPass.EnvironmentVariables.Keys) { $ProcInfo.EnvironmentVariables[$EnvKey] = $AskPass.EnvironmentVariables[$EnvKey] }
     
     if ($HumanReadable) { Write-Host "  -> Establishing Interactive Shell & Injecting Commands..." -ForegroundColor DarkGray }
     
@@ -59,10 +54,20 @@ function Invoke-InteractiveBatch {
     $Process.StandardInput.WriteLine("show vlans")
     $Process.StandardInput.WriteLine("show ethernet-switching table")
     $Process.StandardInput.WriteLine("show arp no-resolve")
+    # These four are appended last, after the ARP table the client-IP correlation
+    # depends on: if a slow switch trips the hard timeout below, it truncates only
+    # this optional data instead of corrupting client IPs. Config backup is last of the
+    # four specifically because it's the largest output of anything in this batch (a
+    # full device config, potentially thousands of lines on a big stack) - a timeout
+    # should cost the config backup before it costs uptime/alarms/RE-health.
+    $Process.StandardInput.WriteLine("show system uptime")
+    $Process.StandardInput.WriteLine("show chassis alarms")
+    $Process.StandardInput.WriteLine("show chassis routing-engine")
+    $Process.StandardInput.WriteLine("show configuration | display set")
     $Process.StandardInput.WriteLine("quit")
     $Process.StandardInput.Close()
 
-    $Process.WaitForExit(30000) | Out-Null
+    $Process.WaitForExit(50000) | Out-Null
     if (-not $Process.HasExited) { $Process.Kill(); Write-LogMsg "TIMEOUT on interactive batch." }
     
     $Output = if (Test-Path $TempOut) { Get-Content $TempOut -Raw } else { "" }
@@ -76,7 +81,19 @@ function Invoke-InteractiveBatch {
 
 $NodeData = @{
     DeviceIP = $TargetIP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
-    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{}
+    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+    Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
+    # These reflect only the RE that answered the CLI session (the master on a VC),
+    # not an aggregate across all members - named accordingly, not "Cpu"/"Memory".
+    MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
+    # LLDP-MED endpoints (phones, APs) - kept separate from Neighbors, which is the
+    # switch-to-switch topology graph and was never meant to include them. See the LLDP
+    # parsing loop below for why these are captured instead of discarded outright.
+    MedNeighbors = @()
+    # Full "show configuration | display set" text - folded into the same interactive
+    # batch as everything else above (one SSH connection, not two) but deliberately
+    # redacted out of the -Log RawDumps file below - see that block for why.
+    Configuration = "Unknown"
 }
 
 try {
@@ -85,13 +102,23 @@ try {
     $Result = Invoke-InteractiveBatch
     $RawOutput = $Result.Output
 
-    # --- CONDITIONAL RAW LOG DUMP ---
+    # --- CONDITIONAL RAW LOG DUMP (config output redacted) ---
     if ($Log -and -not [string]::IsNullOrWhiteSpace($RawOutput)) {
         $DumpDir = Join-Path $PWD "RawDumps"
         if (-not (Test-Path $DumpDir)) { New-Item -ItemType Directory -Path $DumpDir -Force | Out-Null }
         $RawLogPath = Join-Path $DumpDir "Raw_$TargetIP.txt"
-        $RawOutput | Out-File $RawLogPath -Force
-        Write-LogMsg "Raw payload saved to $RawLogPath"
+
+        # Config backup content - SNMP communities, RADIUS/TACACS+ shared secrets, local
+        # user secrets - is far more sensitive than anything else this tool captures, and
+        # isn't parsed at all (just stored verbatim), so RawDumps gets none of the
+        # debugging benefit it exists for and all of the risk. Redact it before writing:
+        # keep the command echo line (so it's visible the command ran) and replace
+        # everything after it, to the end of the captured output, with a placeholder.
+        # "show configuration | display set" is written last in Invoke-InteractiveBatch
+        # specifically so this "to the end" replacement is safe - nothing else follows it.
+        $RedactedOutput = $RawOutput -replace '(?ms)(^.*>\s*show\s+configuration\s*\|\s*display\s+set[^\r\n]*[\r\n]+).*\z', '$1[CONFIGURATION REDACTED - not written to RawDumps by design; see the Configuration field in NetworkMap output]'
+        $RedactedOutput | Out-File $RawLogPath -Force
+        Write-LogMsg "Raw payload saved to $RawLogPath (configuration output redacted)"
     }
 
     if ([string]::IsNullOrWhiteSpace($RawOutput)) {
@@ -117,11 +144,23 @@ try {
         elseif ($Sec -match '^(?i)vlans\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["VLANS"] = $Matches.content }
         elseif ($Sec -match '^(?i)ethernet-switching table\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["MAC_TABLE"] = $Matches.content }
         elseif ($Sec -match '^(?i)arp no-resolve\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ARP_TABLE"] = $Matches.content }
+        elseif ($Sec -match '^(?i)system uptime\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["UPTIME"] = $Matches.content }
+        elseif ($Sec -match '^(?i)chassis alarms\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ALARMS"] = $Matches.content }
+        elseif ($Sec -match '^(?i)chassis routing-engine\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ROUTING_ENGINE"] = $Matches.content }
+        # Unlike every section above, nothing with "show " follows this one - "quit" does -
+        # so the -split boundary above can't bound it and a greedy (?s).* would swallow the
+        # trailing "user@switch> quit" echo (and any "Connection closed" text after it) into
+        # the config itself. Stop non-greedily at the next CLI prompt line instead.
+        elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+\S+@\S+[>#]\s|\z)') { $DataDict["CONFIG"] = $Matches.content }
     }
 
     # --- Parse Identity ---
     if ($DataDict["VERSION"] -match "(?i)Hostname:\s*(?<host>\S+)") { $NodeData.Hostname = $Matches.host }
     if ($DataDict["VERSION"] -match "(?i)Junos:\s*(?<ver>\S+)") { $NodeData.JunosVersion = $Matches.ver }
+
+    # --- Parse Config Backup (stored verbatim, no further parsing - see the redaction
+    # comment above for why this never reaches RawDumps) ---
+    if (-not [string]::IsNullOrWhiteSpace($DataDict["CONFIG"])) { $NodeData.Configuration = $DataDict["CONFIG"].Trim() }
     
     # --- Parse Stack/Hardware ---
     $ParsedStack = $false
@@ -154,6 +193,31 @@ try {
 
     # --- Parse Gateway ---
     if ($DataDict["ROUTE"] -match "to\s+(?<gw>\b(?:\d{1,3}\.){3}\d{1,3}\b)\s+via") { $NodeData.Gateway = $Matches.gw }
+
+    # --- Parse Uptime / Last Config Change (both from "show system uptime") ---
+    if ($DataDict["UPTIME"] -match "(?i)System booted:\s*(?<boot>[^\(\r\n]+)") { $NodeData.Uptime = $Matches.boot.Trim() }
+    if ($DataDict["UPTIME"] -match "(?i)Last configured:\s*(?<cfg>[^\(\r\n]+?)\s*\([^\)]*\)\s*by\s+(?<user>\S+)") {
+        $NodeData.LastConfigured = $Matches.cfg.Trim()
+        $NodeData.LastConfiguredBy = $Matches.user.Trim()
+    }
+
+    # --- Parse Chassis Alarms ---
+    if ($DataDict["ALARMS"] -notmatch "(?i)no alarms currently active") {
+        foreach ($Line in ($DataDict["ALARMS"] -split "`n")) {
+            $Line = $Line.Trim()
+            if ($Line -match "^(?<time>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s+\S+)\s+(?<class>Major|Minor)\s+(?<desc>.+)$") {
+                $NodeData.Alarms += [PSCustomObject]@{ Time = $Matches.time.Trim(); Class = $Matches.class; Description = $Matches.desc.Trim() }
+            }
+        }
+    }
+
+    # --- Parse Routing Engine Health (first RE block reported - the master on a VC) ---
+    if ($DataDict["ROUTING_ENGINE"] -match "(?i)Idle\s+(?<idle>\d+)\s+percent") {
+        $NodeData.MasterCpuUtilization = "$(100 - [int]$Matches.idle)%"
+    }
+    if ($DataDict["ROUTING_ENGINE"] -match "(?i)Memory utilization\s+(?<mem>\d+)\s+percent") {
+        $NodeData.MasterMemoryUtilization = "$($Matches.mem)%"
+    }
 
     # --- Parse Interfaces ---
     foreach ($Line in ($DataDict["INTERFACES_TERSE"] -split "`n")) {
@@ -198,10 +262,11 @@ try {
         }
     }
 
-    # --- Parse LLDP Neighbors ---
+    # --- Parse LLDP Neighbors (switch-to-switch topology) + LLDP-MED Endpoints (phones/APs) ---
     $Blocks = $DataDict["LLDP"] -split "(?i)(?=Local Interface\s*:)"
     foreach ($Block in $Blocks) {
-        if ($Block -match "Class III Device" -or $Block -match "Bridge Telephone" -or $Block -match "WLAN Access Point" -or $Block -match "ArubaOS") { continue }
+        $IsMedEndpoint = ($Block -match "Class III Device") -or ($Block -match "Bridge Telephone") -or ($Block -match "WLAN Access Point") -or ($Block -match "ArubaOS")
+
         $Neigh = @{ LocalPort = "Unknown"; RemotePort = "Unknown"; Hostname = "Unknown"; MacAddress = "Unknown"; ManagementIP = "Unknown"; Description = "Unknown" }
         if ($Block -match "(?i)Local Interface\s*:\s*(?<port>[^\r\n]+)") { $Neigh.LocalPort = $Matches.port.Trim() }
         if ($Block -match "(?i)Port ID\s*:\s*(?<rport>[^\r\n]+)") { $Neigh.RemotePort = $Matches.rport.Trim() }
@@ -209,8 +274,16 @@ try {
         if ($Block -match "(?i)Chassis ID\s*:\s*(?<mac>[^\r\n]+)") { $Neigh.MacAddress = $Matches.mac.Trim() }
         if ($Block -match "(?i)(?:Management Address|Address)\s*:\s*(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)") { $Neigh.ManagementIP = $Matches.ip.Trim() }
         if ($Block -match "(?i)System Description\s*:\s*(?<desc>[^\r\n]+)") { $Neigh.Description = $Matches.desc.Trim() }
-        
-        if ($Neigh.ManagementIP -ne "Unknown" -and $Neigh.ManagementIP -ne $TargetIP -and $Neigh.ManagementIP -ne "0.0.0.0") {
+
+        if ($IsMedEndpoint) {
+            # Phones/APs identifying via LLDP-MED rarely advertise a management address the
+            # way a switch does, so - unlike $NodeData.Neighbors below - capture is gated
+            # only on having parsed a local port: that's the field the visualizer's
+            # daisy-chain detection correlates against the MAC-table client list on.
+            if ($Neigh.LocalPort -ne "Unknown") {
+                $NodeData.MedNeighbors += [PSCustomObject]$Neigh
+            }
+        } elseif ($Neigh.ManagementIP -ne "Unknown" -and $Neigh.ManagementIP -ne $TargetIP -and $Neigh.ManagementIP -ne "0.0.0.0") {
             $NodeData.Neighbors += [PSCustomObject]$Neigh
         }
     }
@@ -288,6 +361,20 @@ if ($HumanReadable) {
     Write-Host "==================================================================" -ForegroundColor Cyan
     Write-Host "Junos Version : $($NodeData.JunosVersion)"
     Write-Host "Default GW    : $($NodeData.Gateway)"
+    Write-Host "Uptime        : $($NodeData.Uptime)"
+    Write-Host "Last Config   : $($NodeData.LastConfigured) by $($NodeData.LastConfiguredBy)"
+    Write-Host "RE CPU / Mem  : $($NodeData.MasterCpuUtilization) / $($NodeData.MasterMemoryUtilization)"
+    if ($NodeData.Alarms.Count -gt 0) {
+        Write-Host "Alarms        : $($NodeData.Alarms.Count) ACTIVE" -ForegroundColor Red
+    } else {
+        Write-Host "Alarms        : None" -ForegroundColor Green
+    }
+    if ($NodeData.Configuration -ne "Unknown") {
+        $ConfigLineCount = ($NodeData.Configuration -split "`n").Count
+        Write-Host "Config Backup : $ConfigLineCount lines captured (not shown here - not written to RawDumps either; see the JSON output)" -ForegroundColor DarkGray
+    } else {
+        Write-Host "Config Backup : FAILED or empty" -ForegroundColor Red
+    }
     if ($Log) { Write-Host "Raw Log Dump  : .\RawDumps\Raw_$TargetIP.txt" -ForegroundColor DarkGray }
     
     Write-Host "`n--- Stack Members ---" -ForegroundColor Cyan
@@ -318,5 +405,5 @@ if ($HumanReadable) {
 return @{ Node = $NodeData; Logs = $Logs }
 
 } finally {
-    Remove-Item -Path $AskPassPath, $AskPassText -Force -ErrorAction SilentlyContinue
+    Remove-JunosAskPass -AskPassContext $AskPass
 }

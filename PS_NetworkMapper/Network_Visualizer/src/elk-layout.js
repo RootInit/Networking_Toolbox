@@ -34,6 +34,11 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   if (visibleNodeIds.length === 0) return new Map();
 
   const doLayout = async () => {
+    // Yield once before the synchronous crunch below - computeRecursiveRadialLayout has
+    // no awaits of its own, so without this the caller's "Computing layout..." progress
+    // text (see doRenderVisibleGraph in app.js) would never get a chance to paint before
+    // the main thread blocks for however long the layout takes.
+    await new Promise(r => setTimeout(r, 0));
     const childrenOf = new Map();
     visibleEdges.forEach(e => {
       if (!childrenOf.has(e.from)) childrenOf.set(e.from, []);

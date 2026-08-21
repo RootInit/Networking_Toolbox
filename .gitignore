@@ -1,8 +1,20 @@
-# Real credentials - only Auth.example.json (placeholder template) is tracked
-PS_NetworkMapper/Auth.json
+# Real credentials - only Network_Mapper/lib/Auth.example.json (placeholder template) is
+# tracked. The real Auth.json a user creates from it lives next to Start-NetworkMapper.ps1
+# (its default -AuthFile ".\Auth.json" is CWD-relative, and Network_Mapper/ is where you'd
+# actually invoke that script from), not in lib/ with the template.
+PS_NetworkMapper/Network_Mapper/Auth.json
 
-# Scraper output - contains real internal topology/IP data, not fixtures
-PS_NetworkMapper/NetworkMap.json
-PS_NetworkMapper/NetworkMap.tmp.json
-PS_NetworkMapper/Mapper_Debug.log
-PS_NetworkMapper/RawDumps/
+# Scraper output - contains real internal topology/IP data, not fixtures. Every real crawl
+# writes into the shared Network_Maps/ folder (see Start-NetworkMapper.ps1's $SnapshotDir),
+# named NetworkMap_<timestamp>.json(.enc) or ...tmp... while a write is in progress. The two
+# shipped sample snapshots happen to follow that same naming convention on purpose (so
+# "Load Folder of Snapshots" can load them together to demo the multi-snapshot/diff
+# features) - the explicit `!` exceptions below are the only tracked files matching the
+# pattern; any OTHER NetworkMap_*.json(.enc) is real crawl output and stays ignored.
+PS_NetworkMapper/Network_Maps/NetworkMap_*.json
+PS_NetworkMapper/Network_Maps/NetworkMap_*.json.enc
+!PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-13_091500.json
+!PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-20_143207.json
+!PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-20_143207.json.enc
+PS_NetworkMapper/Network_Mapper/Mapper_Debug.log
+PS_NetworkMapper/Network_Mapper/RawDumps/
