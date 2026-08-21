@@ -51,7 +51,20 @@
         button:disabled { background-color: #cccccc; cursor: not-allowed; }
 
         #globalSearch { border: 2px solid var(--accent); }
-        
+
+        .search-fields { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 2px 0 10px; }
+        .search-fields label { display: flex; align-items: center; gap: 4px; width: auto; font-size: 0.75rem; font-weight: normal; color: #555; cursor: pointer; margin: 0; }
+        .search-fields input { width: auto; margin: 0; padding: 0; }
+
+        #searchResults:not(:empty) { display: block; max-height: 280px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 10px; }
+        .search-result { padding: 8px 10px; border-bottom: 1px solid #eee; cursor: pointer; font-size: 0.78rem; }
+        .search-result:last-child { border-bottom: none; }
+        .search-result:hover { background: #eef4fd; }
+        .search-result .sr-device { font-weight: bold; color: var(--primary); }
+        .search-result .sr-match { color: #777; margin-top: 2px; }
+        .search-result .sr-match b { color: var(--accent); font-weight: bold; }
+        .search-no-results { padding: 10px; font-size: 0.8rem; color: #888; text-align: center; }
+
         /* Loading Overlay */
         #loadingBar { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); z-index: 999; display: none; justify-content: center; align-items: center; flex-direction: column; }
         .progress-border { width: 400px; height: 20px; border: 1px solid #ccc; background: #eee; border-radius: 10px; overflow: hidden; }
@@ -138,7 +151,19 @@
 
         <div class="control-group">
             <h2>2. Search & Filter</h2>
-            <input type="text" id="globalSearch" placeholder="Search IP, MAC, User, Host..." onkeyup="window.performGlobalSearch()">
+            <div style="display:flex; gap:6px;">
+                <input type="text" id="globalSearch" placeholder="Search..." style="margin-bottom:0;"
+                       onkeydown="if (event.key === 'Enter') { window.performGlobalSearch(); }">
+                <button type="button" style="width:auto; margin:0; padding:8px 14px;" onclick="window.performGlobalSearch()">Search</button>
+            </div>
+            <div class="search-fields">
+                <label><input type="checkbox" id="searchFieldIp" checked> IP Address</label>
+                <label><input type="checkbox" id="searchFieldHostname" checked> Hostname</label>
+                <label><input type="checkbox" id="searchFieldMac" checked> MAC Address</label>
+                <label><input type="checkbox" id="searchFieldUser" checked> Username</label>
+                <label><input type="checkbox" id="searchFieldSerial" checked> Serial Number</label>
+            </div>
+            <div id="searchResults"></div>
 
             <label style="font-size: 0.85rem; font-weight: bold;">VLAN Highlight Layer:</label>
             <select id="vlanFilter" onchange="window.applyVlanFilter()">

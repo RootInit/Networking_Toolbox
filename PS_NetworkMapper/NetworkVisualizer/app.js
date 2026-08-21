@@ -22,6 +22,53 @@ var allVlans = new Map();
 var currentSelectedNodeData = null;
 var searchHighlightQuery = "";
 
+// Search index (see window.buildSearchIndex / window.performGlobalSearch) - built once
+// per file load instead of re-scanning every device's nested StackMembers/TrueClients
+// arrays (and re-lowercasing every field) on every search. deviceByIp turns the O(devices)
+// linear scan every drawer open used to do into an O(1) lookup.
+var searchIndex = [];   // {deviceIp, field, value, valueLower}[]
+var deviceByIp = new Map();
+
+var SEARCH_FIELD_LABELS = { ip: 'IP Address', hostname: 'Hostname', mac: 'MAC Address', user: 'Username', serial: 'Serial Number' };
+// Which tab to jump to for a match in each field - null means "leave whatever tab is
+// already active" (matches on the device's own identity don't point anywhere specific).
+var SEARCH_FIELD_TABS = { ip: null, hostname: null, mac: 'tab-clients', user: 'tab-clients', serial: 'tab-stack' };
+
+window.buildSearchIndex = function() {
+    searchIndex = [];
+    deviceByIp.clear();
+
+    globalTopologyData.forEach(device => {
+        if (!device || !device.DeviceIP) return;
+        var ip = String(device.DeviceIP);
+        deviceByIp.set(ip, device);
+
+        searchIndex.push({ deviceIp: ip, field: 'ip', value: ip, valueLower: ip.toLowerCase() });
+        if (device.Hostname) {
+            searchIndex.push({ deviceIp: ip, field: 'hostname', value: String(device.Hostname), valueLower: String(device.Hostname).toLowerCase() });
+        }
+
+        // StackMembers/TrueClients aren't asArray-wrapped elsewhere in this file either
+        // (see renderStack/renderClients) - PowerShell's ConvertTo-Json only collapses a
+        // single-element array to a bare object for fields this app has needed to guard
+        // (Alarms), so this mirrors the existing, working assumption rather than
+        // introducing an inconsistent one just for search.
+        (device.StackMembers || []).forEach(sm => {
+            if (sm && sm.Serial) {
+                searchIndex.push({ deviceIp: ip, field: 'serial', value: String(sm.Serial), valueLower: String(sm.Serial).toLowerCase() });
+            }
+        });
+
+        (device.TrueClients || []).forEach(c => {
+            if (c.IP) searchIndex.push({ deviceIp: ip, field: 'ip', value: String(c.IP), valueLower: String(c.IP).toLowerCase() });
+            if (c.MAC) searchIndex.push({ deviceIp: ip, field: 'mac', value: String(c.MAC), valueLower: String(c.MAC).toLowerCase() });
+            if (c.Dot1x_User && c.Dot1x_User !== "Unknown") {
+                searchIndex.push({ deviceIp: ip, field: 'user', value: String(c.Dot1x_User), valueLower: String(c.Dot1x_User).toLowerCase() });
+            }
+        });
+    });
+};
+
 // Deterministic layout state (see graph-layout.js / elk-layout.js).
 var allNodeMeta = new Map();   // id -> {label, shape, isStack, vlanCache, scanned}
 var allEdges = [];             // {from, to}[]
@@ -194,6 +241,7 @@ window.forceLoadFile = function() {
                 // done server-side by Start-NetworkMapper.ps1); the visualizer just displays them.
                 globalTopologyData.forEach(device => { device.TrueClients = device.Clients || []; });
 
+                window.buildSearchIndex();
                 window.extractVlans();
                 await window.buildSwitchMap();
 
@@ -415,41 +463,84 @@ window.applyVlanFilter = function() {
     if (currentSelectedNodeData) window.openRightDrawer(currentSelectedNodeData.DeviceIP);
 };
 
+// Runs only on Enter / the Search button (see network_vis.html) - it used to run on
+// every keystroke (onkeyup), which felt slow because each call didn't just search, it
+// immediately expanded ancestors, re-rendered the whole visible graph, and animated the
+// camera to the first match - all of that firing on every keystroke while typing is what
+// was actually slow, not the string matching itself. Now that expensive chain only runs
+// when a specific result is clicked (see window.goToSearchResult), not while searching.
 window.performGlobalSearch = function() {
-    var query = document.getElementById('globalSearch').value.toLowerCase().trim();
-    searchHighlightQuery = query;
-    
+    var query = document.getElementById('globalSearch').value.trim();
+    var queryLower = query.toLowerCase();
+    searchHighlightQuery = queryLower;
+
+    var resultsEl = document.getElementById('searchResults');
+
     if (!query) {
+        resultsEl.innerHTML = '';
         if (currentSelectedNodeData) window.openRightDrawer(currentSelectedNodeData.DeviceIP);
         return;
     }
 
-    var targetIp = null;
-    for (var i = 0; i < globalTopologyData.length; i++) {
-        var device = globalTopologyData[i];
-        if (String(device.DeviceIP).toLowerCase().includes(query) || (device.Hostname && String(device.Hostname).toLowerCase().includes(query))) {
-            targetIp = device.DeviceIP; break;
-        }
-        if (device.TrueClients && device.TrueClients.find(c => (c.IP && String(c.IP).toLowerCase().includes(query)) || (c.MAC && String(c.MAC).toLowerCase().includes(query)) || (c.Dot1x_User && String(c.Dot1x_User).toLowerCase().includes(query)))) {
-            targetIp = device.DeviceIP; break;
-        }
+    var fieldsEnabled = {
+        ip: document.getElementById('searchFieldIp').checked,
+        hostname: document.getElementById('searchFieldHostname').checked,
+        mac: document.getElementById('searchFieldMac').checked,
+        user: document.getElementById('searchFieldUser').checked,
+        serial: document.getElementById('searchFieldSerial').checked,
+    };
+
+    // searchIndex is prebuilt (see window.buildSearchIndex) with every value already
+    // lowercased, so this is a single flat scan with a plain substring check - no nested
+    // array walking and no re-lowercasing on every search.
+    var matches = [];
+    var seen = new Set(); // the same (device, field, value) can appear more than once - e.g. two different clients happening to share a MAC record - collapse those to one row
+    for (var i = 0; i < searchIndex.length; i++) {
+        var entry = searchIndex[i];
+        if (!fieldsEnabled[entry.field] || entry.valueLower.indexOf(queryLower) === -1) continue;
+        var key = entry.deviceIp + '|' + entry.field + '|' + entry.value;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        matches.push(entry);
+    }
+    matches.sort((a, b) => window.GraphLayout.compareIpIds(a.deviceIp, b.deviceIp) || a.field.localeCompare(b.field));
+
+    if (matches.length === 0) {
+        resultsEl.innerHTML = `<div class="search-no-results">No matches for "${esc(query)}".</div>`;
+        return;
     }
 
-    if (targetIp) {
-        (async () => {
-            window.GraphLayout.expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, getClusterThreshold());
-            await window.renderVisibleGraph();
-            network.selectNodes([targetIp]);
-            network.focus(targetIp, { scale: 1.0, animation: { duration: 500 } });
-            window.openRightDrawer(targetIp);
-            if (!targetIp.toLowerCase().includes(query)) { window.switchTab('tab-clients'); }
-        })();
-    }
+    resultsEl.innerHTML = matches.map((m, idx) => {
+        var device = deviceByIp.get(m.deviceIp);
+        var hostname = device && device.Hostname ? ` (${esc(device.Hostname)})` : '';
+        return `<div class="search-result" data-idx="${idx}">
+            <div class="sr-device">${esc(m.deviceIp)}${hostname}</div>
+            <div class="sr-match">${esc(SEARCH_FIELD_LABELS[m.field])}: <b>${esc(m.value)}</b></div>
+        </div>`;
+    }).join('');
+
+    Array.from(resultsEl.querySelectorAll('.search-result')).forEach((el, idx) => {
+        el.onclick = () => window.goToSearchResult(matches[idx].deviceIp, SEARCH_FIELD_TABS[matches[idx].field]);
+    });
+};
+
+// Everything a search result click actually needs to do: reveal the device (expanding
+// any collapsed cluster ancestors), re-render, select and focus it on the canvas, open
+// its drawer, and land on whichever tab actually shows the field that matched.
+window.goToSearchResult = function(targetIp, tab) {
+    (async () => {
+        window.GraphLayout.expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, getClusterThreshold());
+        await window.renderVisibleGraph();
+        network.selectNodes([targetIp]);
+        network.focus(targetIp, { scale: 1.0, animation: { duration: 500 } });
+        window.openRightDrawer(targetIp);
+        if (tab) window.switchTab(tab);
+    })();
 };
 
 // 4. Data Drawer Renderer
 window.openRightDrawer = function(ip) {
-    currentSelectedNodeData = globalTopologyData.find(d => String(d.DeviceIP) === String(ip));
+    currentSelectedNodeData = deviceByIp.get(String(ip));
     var panel = document.getElementById('right-panel');
     document.getElementById('drawer-title').innerText = ip;
     
