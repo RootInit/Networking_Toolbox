@@ -284,7 +284,7 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   // requirement), i is pushed out to the minimum radius that clears j - never pulled
   // back in below its own natural rest, and never adjusted by moving j instead (j gets
   // its own turn in the same sweep).
-  function relaxRadii(extents, spacing) {
+  function relaxRadii(kids, extents, spacing) {
     const n = extents.length;
     if (n === 0) return { radii: [], angles: [] };
     const naturalMinByOriginalIndex = extents.map(e => minRadius + e);
@@ -294,7 +294,11 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     // not original array order - mapped back to original-index order just before return.
     const posOf = spreadBySize(extents);
     const orderedExtents = new Array(n);
-    for (let i = 0; i < n; i++) orderedExtents[posOf[i]] = extents[i];
+    const orderedKids = new Array(n);
+    for (let i = 0; i < n; i++) {
+      orderedExtents[posOf[i]] = extents[i];
+      orderedKids[posOf[i]] = kids[i];
+    }
     const naturalMin = orderedExtents.map(e => minRadius + e);
     const angles = computeChildAngles(naturalMin);
 
@@ -315,12 +319,37 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
       const next = radii.slice();
       for (let i = 0; i < n; i++) {
         let desired = radii[i];
+        const angleI = angles[i];
         for (let j = 0; j < n; j++) {
           if (j === i) continue;
-          const requiredDist = orderedExtents[i] + orderedExtents[j] + spacing;
-          const rawDiff = Math.abs(angles[i] - angles[j]);
-          const angleDiff = Math.min(rawDiff, 2 * Math.PI - rawDiff);
           const rj = radii[j];
+          const angleJ = angles[j];
+
+          // requiredDist used to be a fixed extents[i]+extents[j]+spacing - the two
+          // subtrees' worst-case reach in ANY direction, charged against each other
+          // regardless of which way either actually points. Measured directly on the
+          // real sample: true clearance between two subtrees came out 2600-6500px against
+          // a 350px requirement, 7-18x more than needed, because one oversized branch's
+          // reach in some unrelated direction was being charged to every neighbor
+          // (reported as "two separate halves... large gap", confirmed by that
+          // measurement, not assumed). reachToward(childId, angle) below answers the
+          // narrower question that actually matters here: how far does THIS subtree
+          // reach specifically toward the OTHER one, not in its single worst direction.
+          //
+          // The direction used is the real vector from i's (evolving, within this sweep)
+          // position to j's (this sweep's snapshot) position, not just angleJ-angleI -
+          // i and j generally sit at different radii from the shared center, so the true
+          // direction between them is a real 2D vector, not a bearing difference. This
+          // does NOT touch the chord/distance formula below, which is still the exact
+          // law-of-cosines distance between two points at radii ri,rj separated by
+          // angleDiff around a shared origin - unrelated geometry, still exact.
+          const ax = desired * Math.cos(angleI), ay = desired * Math.sin(angleI);
+          const bx = rj * Math.cos(angleJ), by = rj * Math.sin(angleJ);
+          const abAngle = Math.atan2(by - ay, bx - ax);
+          const requiredDist = reachToward(orderedKids[i], abAngle) + reachToward(orderedKids[j], abAngle + Math.PI) + spacing;
+
+          const rawDiff = Math.abs(angleI - angleJ);
+          const angleDiff = Math.min(rawDiff, 2 * Math.PI - rawDiff);
           const cosA = Math.cos(angleDiff);
           // chord(ri)^2 = ri^2 - 2*rj*cosA*ri + rj^2 is a parabola in ri, minimized at
           // ri=rj*cosA - so the constraint chord(ri) >= requiredDist holds OUTSIDE
@@ -365,7 +394,7 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     const kids = childrenOf.get(nodeId) || [];
     const extents = kids.map(extent);
     const spacing = allChildrenAreLeaves(kids) ? leafSpacing : nodeSpacing;
-    const layout = relaxRadii(extents, spacing);
+    const layout = relaxRadii(kids, extents, spacing);
     layoutCache.set(nodeId, layout);
     return layout;
   }
@@ -373,7 +402,11 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   // Bottom-up, cached: how far from its OWN position does nodeId's subtree extend?
   // Leaves: 0. Everything else: the farthest any child's own (radius from here + that
   // child's own extent) reaches, since children now sit at individually varying radii
-  // rather than one uniform ring.
+  // rather than one uniform ring. This is the OMNIDIRECTIONAL worst case, deliberately -
+  // it's what naturalMin uses to keep nodeId's own descendants (which can be in ANY
+  // direction around nodeId) from wrapping back and touching nodeId's OWN parent. That's
+  // a different question from "how far does this subtree reach toward one specific
+  // neighbor" - see reachToward below, which is what the sibling-clearance check needs.
   function extent(nodeId) {
     if (extentCache.has(nodeId)) return extentCache.get(nodeId);
     let result;
@@ -390,6 +423,37 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     }
     extentCache.set(nodeId, result);
     return result;
+  }
+
+  // How far nodeId's subtree extends in roughly the direction `angle` (global/absolute -
+  // the same frame every node's own childLayout angles use, since place() adds them
+  // straight onto the parent position with no per-level rotation, so a query angle means
+  // the same physical direction at every depth). Measured from nodeId's own center.
+  //
+  // Only children whose own angle is on the `angle` side contribute positively; a child
+  // roughly opposite `angle` projects negatively and is naturally outcompeted by `best`
+  // starting at 0, so it never lowers the result. extent(child) is a safe (if loose)
+  // upper bound on how far ANY child could reach in ANY direction, including `angle` - if
+  // a child's best possible contribution (its own projected position plus that bound)
+  // can't beat the best answer already found, it's skipped without recursing into it.
+  // That's a safe prune (it never discards a child that could have improved the true
+  // answer) and cuts off the vast majority of a large subtree in practice, since only
+  // children whose own angle is reasonably close to the query direction have any real
+  // chance of mattering.
+  function reachToward(nodeId, angle) {
+    if (isLeaf(nodeId)) return 0;
+    const kids = childrenOf.get(nodeId);
+    const { radii, angles } = childLayout(nodeId);
+    let best = 0;
+    for (let i = 0; i < kids.length; i++) {
+      const rawDiff = Math.abs(angles[i] - angle);
+      const angleDiff = Math.min(rawDiff, 2 * Math.PI - rawDiff);
+      const projected = radii[i] * Math.cos(angleDiff);
+      if (projected + extent(kids[i]) <= best) continue;
+      const trueReach = projected + reachToward(kids[i], angle);
+      if (trueReach > best) best = trueReach;
+    }
+    return best;
   }
 
   function place(nodeId) {

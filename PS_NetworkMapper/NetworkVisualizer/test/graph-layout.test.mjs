@@ -435,3 +435,62 @@ test('computeRecursiveRadialLayout stays fast and does not blow up radius on the
   const bound = 5 * (roughClusterRadius + 190 * 16); // + a generous root-ring allowance
   assert.equal(maxRadius < bound, true, `max radius was ${maxRadius.toFixed(0)}, expected under ${bound.toFixed(0)} (total leaves in tree: ${totalLeaves})`);
 });
+
+test('computeRecursiveRadialLayout lets modest siblings sit closer to a structural branch than its OWN worst-case reach (in some unrelated direction) would require (regression: sibling clearance used to be charged the branch\'s omnidirectional extent - farthest reach in ANY direction - against every neighbor regardless of which way it actually pointed; confirmed directly on the real sample by measuring true minimum distance between two whole subtrees: 2600-6500px against a 350px nodeSpacing requirement, 7-18x more than needed, because one branch\'s single most distant descendant, oriented in some direction irrelevant to a given neighbor, was still being charged against that neighbor)', () => {
+  const childrenOf = new Map([['root', []]]);
+  for (let i = 0; i < 10; i++) {
+    const id = `p${i}`;
+    childrenOf.get('root').push(id);
+    childrenOf.set(id, Array.from({ length: 6 }, (_, k) => `${id}_leaf${k}`)); // modest leaf-parents
+  }
+  // A structural branch (like the real sample's second core switch) whose own children
+  // are unevenly sized (24, 8, 7, 9, 6, 8, 7 - a ~3.4x spread, matching the real sample's
+  // core2's own 354-1196 child extents) - its omnidirectional extent is dominated by its
+  // one largest child, sitting at whatever angle it happens to land at within the
+  // branch's own full circle, unrelated to which of root's other children are nearby.
+  childrenOf.get('root').push('hub');
+  const hubKids = [];
+  [24, 8, 7, 9, 6, 8, 7].forEach((size, i) => {
+    const id = `hub_c${i}`;
+    hubKids.push(id);
+    childrenOf.set(id, Array.from({ length: size }, (_, k) => `${id}_leaf${k}`));
+  });
+  childrenOf.set('hub', hubKids);
+
+  const nodeSpacing = 190, leafSpacing = 190, minRadius = 190;
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing, leafSpacing, minRadius });
+
+  function collectSubtree(id) {
+    const out = [id];
+    const stack = [...(childrenOf.get(id) || [])];
+    while (stack.length) { const n = stack.pop(); out.push(n); stack.push(...(childrenOf.get(n) || [])); }
+    return out;
+  }
+  const hubPositions = collectSubtree('hub').map(id => result.get(id));
+
+  let minDistToHub = Infinity;
+  for (let i = 0; i < 10; i++) {
+    const siblingPositions = collectSubtree(`p${i}`).map(id => result.get(id));
+    for (const a of hubPositions) for (const b of siblingPositions) {
+      minDistToHub = Math.min(minDistToHub, Math.hypot(a.x - b.x, a.y - b.y));
+    }
+  }
+  // Comparing directly against the old, unmodified omnidirectional-extent algorithm on
+  // this exact tree shape (measured, not assumed): old gave a closest true clearance of
+  // 1157px; directional reach gives 906px, a real (if here modest - the effect compounds
+  // much more on the real sample's deeper, wider tree) reduction. 5.5x nodeSpacing sits
+  // comfortably between the two, so this catches a regression back toward the old
+  // omnidirectional behavior without being so tight it's fragile to unrelated changes.
+  assert.equal(minDistToHub < nodeSpacing * 5.5, true,
+    `closest true clearance to hub's subtree was ${minDistToHub.toFixed(0)}, expected under ${nodeSpacing * 5.5} (nodeSpacing=${nodeSpacing})`);
+
+  // Still never an actual collision anywhere.
+  const allPositions = Array.from(result.values());
+  let minDist = Infinity;
+  for (let i = 0; i < allPositions.length; i++) {
+    for (let j = i + 1; j < allPositions.length; j++) {
+      minDist = Math.min(minDist, Math.hypot(allPositions[i].x - allPositions[j].x, allPositions[i].y - allPositions[j].y));
+    }
+  }
+  assert.equal(minDist >= nodeSpacing - 0.5, true, `closest pair anywhere was ${minDist.toFixed(1)}, expected >= ${nodeSpacing}`);
+});
