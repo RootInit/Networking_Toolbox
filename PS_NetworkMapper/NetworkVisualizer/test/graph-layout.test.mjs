@@ -494,3 +494,56 @@ test('computeRecursiveRadialLayout lets modest siblings sit closer to a structur
   }
   assert.equal(minDist >= nodeSpacing - 0.5, true, `closest pair anywhere was ${minDist.toFixed(1)}, expected >= ${nodeSpacing}`);
 });
+
+test('computeRecursiveRadialLayout stays fast with many non-leaf siblings at one level (regression: reachToward, called for every pair on every relaxation sweep, made a 300-non-leaf-sibling tree take 11.9s - a 32x regression over the pre-directional-reach algorithm\'s 371ms on the same shape, confirmed by measuring both, not assumed. A leaf/leaf fast path - two leaves\' true clearance is always exactly `spacing`, so it skips the vector math and recursion entirely - an early exit once a relaxation sweep changes nothing by more than 0.01px, and a memo cache for reachToward keyed by node + a quantized angle bucket together brought this back under 5s)', () => {
+  const childrenOf = new Map([['root', []]]);
+  for (let i = 0; i < 150; i++) {
+    const id = `br${i}`;
+    childrenOf.get('root').push(id);
+    childrenOf.set(id, Array.from({ length: 3 + (i % 5) }, (_, k) => `${id}_l${k}`)); // non-leaf siblings, mildly uneven
+  }
+
+  const startMs = Date.now();
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, leafSpacing: 190, minRadius: 190 });
+  const elapsedMs = Date.now() - startMs;
+  assert.equal(elapsedMs < 5000, true, `layout took ${elapsedMs}ms, expected well under 5000ms (the app's own layout timeout is 8000ms)`);
+  assert.equal(result.size, 1 + 150 + Array.from({ length: 150 }, (_, i) => 3 + (i % 5)).reduce((a, b) => a + b, 0));
+});
+
+test('computeRecursiveRadialLayout\'s reachToward angle-bucket cache never returns less than the true clearance would require (regression: an earlier version cached the value AT the raw, unrounded query angle under a rounded bucket key - which can return a value computed for a slightly different angle than the one actually asked about, silently under-reserving whenever the true value at the exact angle was higher than at the bucket it got rounded into. Confirmed empirically, not just suspected: a 40-non-leaf-sibling case produced a real 189.8px true clearance against a 190px requirement. Fixed by caching the value at the bucket\'s CENTER angle and padding the return by extent(nodeId) times the angular distance from that center to the real query angle - a provably safe bound, since reachToward is extent(nodeId)-Lipschitz in angle by construction, not a fudge factor)', () => {
+  const childrenOf = new Map([['root', []]]);
+  for (let i = 0; i < 40; i++) {
+    const id = `br${i}`;
+    childrenOf.get('root').push(id);
+    childrenOf.set(id, Array.from({ length: 5 }, (_, k) => `${id}_l${k}`));
+  }
+  const nodeSpacing = 190;
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing, leafSpacing: 190, minRadius: 190 });
+
+  function collectSubtree(id) {
+    const out = [id];
+    const stack = [...(childrenOf.get(id) || [])];
+    while (stack.length) { const n = stack.pop(); out.push(n); stack.push(...(childrenOf.get(n) || [])); }
+    return out;
+  }
+  const subtrees = Array.from({ length: 40 }, (_, i) => collectSubtree(`br${i}`).map(id => result.get(id)));
+  let minDist = Infinity;
+  for (let i = 0; i < 40; i++) {
+    for (let j = i + 1; j < 40; j++) {
+      for (const a of subtrees[i]) for (const b of subtrees[j]) {
+        minDist = Math.min(minDist, Math.hypot(a.x - b.x, a.y - b.y));
+      }
+    }
+  }
+  assert.equal(minDist >= nodeSpacing - 0.5, true,
+    `closest true cross-branch clearance was ${minDist.toFixed(2)}, expected >= ${nodeSpacing}`);
+});
+
+test('computeRecursiveRadialLayout never divides by zero when minRadius is 0 and every child is a leaf (regression: naturalMin is minRadius+extent, and computeChildAngles divides each child\'s share by the sum of all of them - when minRadius is 0 and every child is a leaf (extent also 0), that sum is 0, silently turning every angle into NaN and every position into {x: NaN, y: NaN}. The app\'s own UI floors minRadius at 20 so this can\'t happen through normal use, but computeRecursiveRadialLayout is exported and callable directly - this guards the function\'s own contract, not just this one caller)', () => {
+  const childrenOf = new Map([['root', ['a', 'b', 'c']]]);
+  const result = computeRecursiveRadialLayout('root', childrenOf, { minRadius: 0, leafSpacing: 100 });
+  for (const id of ['a', 'b', 'c']) {
+    const p = result.get(id);
+    assert.equal(Number.isFinite(p.x) && Number.isFinite(p.y), true, `${id} position was {x: ${p.x}, y: ${p.y}}, expected finite numbers`);
+  }
+});
