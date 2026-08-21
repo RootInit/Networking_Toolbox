@@ -239,20 +239,64 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     return angles;
   }
 
+  // Children are placed in whatever order childrenOf happens to list them (typically IP
+  // order, since that's how the tree was built) - nothing about that order has any
+  // reason to spread big clusters apart from each other. Two of the largest clusters
+  // landing next to each other by pure chance forces much more separation between that
+  // one pair than the rest of the ring needs (confirmed on the real sample: the two
+  // biggest leaf-parents, 25 and 42 devices, were consecutive in IP order). Returns
+  // posOf[originalIndex] -> circular position, built by placing the largest extent
+  // first, then repeatedly placing the next-largest extent into whichever remaining
+  // position is farthest (by circular distance) from every already-placed position -
+  // large clusters end up spread maximally apart, with smaller ones filling the gaps.
+  function spreadBySize(extents) {
+    const n = extents.length;
+    const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => extents[b] - extents[a]);
+    const posOf = new Array(n).fill(-1);
+    const filled = new Array(n).fill(false);
+    posOf[order[0]] = 0;
+    filled[0] = true;
+    for (let k = 1; k < n; k++) {
+      let bestPos = -1, bestMinDist = -1;
+      for (let p = 0; p < n; p++) {
+        if (filled[p]) continue;
+        let minDist = Infinity;
+        for (let q = 0; q < n; q++) {
+          if (!filled[q]) continue;
+          const raw = Math.abs(p - q);
+          minDist = Math.min(minDist, Math.min(raw, n - raw));
+        }
+        if (minDist > bestMinDist) { bestMinDist = minDist; bestPos = p; }
+      }
+      posOf[order[k]] = bestPos;
+      filled[bestPos] = true;
+    }
+    return posOf;
+  }
+
   // Finds each of n children's own minimal radius from their shared center, given each
   // child's fixed angle (see computeChildAngles above - proportional to size, not an
-  // equal share). Starts everyone at their own natural resting radius (just clears
-  // their own extent from the center), then repeatedly checks every pair: if child i is
-  // currently too close to child j (chord distance, from the law of cosines at their
-  // angle gap, below the two extents' combined requirement), i is pushed out to
-  // the minimum radius that clears j - never pulled back in below its own natural rest,
-  // and never adjusted by moving j instead (j gets its own turn in the same sweep).
+  // equal share - and spreadBySize above - ordered to keep large children apart from
+  // each other, not their original array order). Starts everyone at their own natural
+  // resting radius (just clears their own extent from the center), then repeatedly
+  // checks every pair: if child i is currently too close to child j (chord distance,
+  // from the law of cosines at their angle gap, below the two extents' combined
+  // requirement), i is pushed out to the minimum radius that clears j - never pulled
+  // back in below its own natural rest, and never adjusted by moving j instead (j gets
+  // its own turn in the same sweep).
   function relaxRadii(extents, spacing) {
     const n = extents.length;
     if (n === 0) return { radii: [], angles: [] };
-    const naturalMin = extents.map(e => minRadius + e);
+    const naturalMinByOriginalIndex = extents.map(e => minRadius + e);
+    if (n === 1) return { radii: naturalMinByOriginalIndex, angles: computeChildAngles(naturalMinByOriginalIndex) };
+
+    // From here on, all computation works in POSITION order (spreadBySize's output),
+    // not original array order - mapped back to original-index order just before return.
+    const posOf = spreadBySize(extents);
+    const orderedExtents = new Array(n);
+    for (let i = 0; i < n; i++) orderedExtents[posOf[i]] = extents[i];
+    const naturalMin = orderedExtents.map(e => minRadius + e);
     const angles = computeChildAngles(naturalMin);
-    if (n === 1) return { radii: naturalMin, angles };
 
     const radii = naturalMin.slice();
 
@@ -273,7 +317,7 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
         let desired = radii[i];
         for (let j = 0; j < n; j++) {
           if (j === i) continue;
-          const requiredDist = extents[i] + extents[j] + spacing;
+          const requiredDist = orderedExtents[i] + orderedExtents[j] + spacing;
           const rawDiff = Math.abs(angles[i] - angles[j]);
           const angleDiff = Math.min(rawDiff, 2 * Math.PI - rawDiff);
           const rj = radii[j];
@@ -301,7 +345,16 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
       }
       for (let i = 0; i < n; i++) radii[i] = next[i];
     }
-    return { radii, angles };
+
+    // Map back from position order to original array order, so callers never need to
+    // know spreadBySize reordered anything internally.
+    const resultRadii = new Array(n);
+    const resultAngles = new Array(n);
+    for (let i = 0; i < n; i++) {
+      resultRadii[i] = radii[posOf[i]];
+      resultAngles[i] = angles[posOf[i]];
+    }
+    return { radii: resultRadii, angles: resultAngles };
   }
 
   const extentCache = new Map();

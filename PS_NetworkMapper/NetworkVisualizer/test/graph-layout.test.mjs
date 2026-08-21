@@ -327,6 +327,37 @@ test('computeRecursiveRadialLayout never places two different nodes closer than 
   assert.equal(minDist >= nodeSpacing - 0.5, true, `closest pair anywhere was ${minDist.toFixed(1)}, expected >= ${nodeSpacing}`);
 });
 
+test('computeRecursiveRadialLayout spreads the largest children apart from each other instead of using their original array order (regression: two of the real sample\'s biggest leaf-parents, 25 and 42 devices, were consecutive in IP order, forcing far more separation between that one pair than the rest of the ring needed - reported directly as "still can be brought together more")', () => {
+  const childrenOf = new Map([['root', []]]);
+  // Two huge branches placed adjacently in array order, deliberately, plus several
+  // modest ones - if array order were used as-is, the two huge branches would end up
+  // angular neighbors; spreading by size should separate them instead.
+  const sizes = [5, 5, 5, 80, 90, 5, 5, 5, 5];
+  sizes.forEach((n, i) => {
+    const id = `p${i}`;
+    childrenOf.get('root').push(id);
+    childrenOf.set(id, Array.from({ length: n }, (_, k) => `${id}_leaf${k}`));
+  });
+
+  const result = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 90, leafSpacing: 190, minRadius: 190 });
+  const rootPos = result.get('root');
+  const angleOf = id => Math.atan2(result.get(id).y - rootPos.y, result.get(id).x - rootPos.x);
+
+  // The two huge branches (p3, p4) should not be angularly adjacent - some other branch
+  // should sit between them on at least one side, i.e. they should not be consecutive in
+  // the final ordering of children sorted by angle around root.
+  const idsSortedByAngle = childrenOf.get('root').slice().sort((a, b) => angleOf(a) - angleOf(b));
+  let adjacent = false;
+  for (let i = 0; i < idsSortedByAngle.length; i++) {
+    const next = idsSortedByAngle[(i + 1) % idsSortedByAngle.length];
+    if ((idsSortedByAngle[i] === 'p3' && next === 'p4') || (idsSortedByAngle[i] === 'p4' && next === 'p3')) {
+      adjacent = true;
+    }
+  }
+  assert.equal(adjacent, false,
+    `expected the two huge branches (p3, p4) not to be angularly adjacent, but the sorted order was ${idsSortedByAngle.join(', ')}`);
+});
+
 test('computeRecursiveRadialLayout produces identical output across repeated runs on the same input (deterministic)', () => {
   const childrenOf = new Map([
     ['root', ['a', 'b', 'c']],
