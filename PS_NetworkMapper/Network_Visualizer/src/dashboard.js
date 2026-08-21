@@ -538,24 +538,46 @@ window.renderTopologyDiff = function() {
 // caveat rendered directly in the tab. VLANs with no discovered boundary still show a raw
 // live-IP count instead of a fabricated or omitted percentage.
 function extractSubnetsFromConfigs(devices) {
-    var irbToSubnet = new Map(); // irb unit -> {ip, prefix}
-    var vlanToIrb = new Map();   // vlan name -> irb unit
+    // Both regexes are joined PER DEVICE (irb unit numbers are only unique within one
+    // device's own config, not fleet-wide) before merging into the final vlanName->subnet
+    // map - joining through two flat, fleet-wide maps used to let an unrelated device that
+    // happens to reuse the same irb unit NUMBER for a different purpose silently overwrite
+    // an earlier device's real mapping, with no way to tell it happened.
+    var vlanToSubnet = new Map();
+    var conflicts = [];
 
     devices.forEach(d => {
         if (!d.Configuration || d.Configuration === "Unknown") return;
         var text = d.Configuration;
         var m;
+
+        var irbToSubnet = new Map(); // irb unit -> {ip, prefix}, scoped to this device only
         var irbRe = /set interfaces irb\.(\d+)[^\r\n]*family inet address (\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})/g;
         while ((m = irbRe.exec(text)) !== null) irbToSubnet.set(m[1], { ip: m[2], prefix: parseInt(m[3], 10) });
+
         var vlanRe = /set vlans (\S+) l3-interface irb\.(\d+)/g;
-        while ((m = vlanRe.exec(text)) !== null) vlanToIrb.set(m[1], m[2]);
+        while ((m = vlanRe.exec(text)) !== null) {
+            var vlanName = m[1], irbUnit = m[2];
+            var subnet = irbToSubnet.get(irbUnit);
+            if (!subnet) continue;
+
+            var existing = vlanToSubnet.get(vlanName);
+            if (existing && (existing.ip !== subnet.ip || existing.prefix !== subnet.prefix)) {
+                // A genuine conflict: two different devices report different subnets for
+                // the same VLAN name (could be a real stretched-VLAN-different-subnet
+                // multi-site design, or a config error) - keep whichever was found first
+                // (deterministic, not "whichever device happened to be processed last")
+                // and surface it instead of silently picking one.
+                conflicts.push({ vlanName: vlanName, device: d.Hostname || d.DeviceIP, kept: existing, sawInstead: subnet });
+                continue;
+            }
+            if (!existing) vlanToSubnet.set(vlanName, subnet);
+        }
     });
 
-    var vlanToSubnet = new Map();
-    vlanToIrb.forEach((irbUnit, vlanName) => {
-        var subnet = irbToSubnet.get(irbUnit);
-        if (subnet) vlanToSubnet.set(vlanName, subnet);
-    });
+    if (conflicts.length > 0) {
+        console.warn('IP Space: conflicting subnet boundaries for the same VLAN name across devices - kept the first one found for each:', conflicts);
+    }
     return vlanToSubnet;
 }
 

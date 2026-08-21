@@ -150,8 +150,16 @@ try {
         # Unlike every section above, nothing with "show " follows this one - "quit" does -
         # so the -split boundary above can't bound it and a greedy (?s).* would swallow the
         # trailing "user@switch> quit" echo (and any "Connection closed" text after it) into
-        # the config itself. Stop non-greedily at the next CLI prompt line instead.
-        elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+\S+@\S+[>#]\s|\z)') { $DataDict["CONFIG"] = $Matches.content }
+        # the config itself. Stop non-greedily at the next CLI prompt line instead - anchored
+        # on the LITERAL "quit" that's echoed there (Invoke-InteractiveBatch always sends it
+        # immediately after this command, see above), not just any prompt-shaped line. A
+        # generic `\S+@\S+[>#]` pattern alone is not safe: Junos places no restriction on
+        # `set system login message` banner text, so a banner containing something like
+        # "contact admin@example.com > for support" could match a bare prompt-shape pattern
+        # and truncate the capture early - it can't also spell out the literal word "quit"
+        # immediately after by coincidence. `\z` remains as the fallback for the rare case
+        # the echo isn't present at all (e.g. the connection dropped before it arrived).
+        elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+\S+@\S+[>#]\s*quit\b|\z)') { $DataDict["CONFIG"] = $Matches.content }
     }
 
     # --- Parse Identity ---
@@ -211,11 +219,28 @@ try {
         }
     }
 
-    # --- Parse Routing Engine Health (first RE block reported - the master on a VC) ---
-    if ($DataDict["ROUTING_ENGINE"] -match "(?i)Idle\s+(?<idle>\d+)\s+percent") {
+    # --- Parse Routing Engine Health ---
+    # On a dual-RE system / Virtual Chassis, "show chassis routing-engine" reports one
+    # block per member headed "Slot N:" with its own "Current state" (Master/Backup/...).
+    # Slot order in the raw text is NOT guaranteed to put the master first (confirmed
+    # against Juniper's own command reference and mastership-check docs - both document
+    # "Slot 0: Current state Master" / "Slot 1: Current state Backup" as literal example
+    # output, with no ordering guarantee), so grabbing the first "Idle NN percent" /
+    # "Memory utilization NN percent" match anywhere in the combined text could silently
+    # report the BACKUP's health as if it were the master's whenever slot 1 happens to be
+    # master. Scope the search to the text starting at "Current state ... Master" and
+    # ending at the next "Slot N:" header (or end of output) instead. A standalone
+    # single-RE system has no "Current state"/"Slot N:" fields at all in this command's
+    # output, so that pattern simply won't match there - the fallback below then searches
+    # the whole (unambiguous, single-RE) blob, same as before.
+    $MasterReBlock = $DataDict["ROUTING_ENGINE"]
+    if ($DataDict["ROUTING_ENGINE"] -match "(?is)Current state\s+Master(?<masterblock>.*?)(?=Slot \d+:|\z)") {
+        $MasterReBlock = $Matches.masterblock
+    }
+    if ($MasterReBlock -match "(?i)Idle\s+(?<idle>\d+)\s+percent") {
         $NodeData.MasterCpuUtilization = "$(100 - [int]$Matches.idle)%"
     }
-    if ($DataDict["ROUTING_ENGINE"] -match "(?i)Memory utilization\s+(?<mem>\d+)\s+percent") {
+    if ($MasterReBlock -match "(?i)Memory utilization\s+(?<mem>\d+)\s+percent") {
         $NodeData.MasterMemoryUtilization = "$($Matches.mem)%"
     }
 
