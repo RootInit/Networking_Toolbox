@@ -201,9 +201,9 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   // was requested directly: clusters as a whole should be able to sit closer to root and
   // to each other (smaller nodeSpacing) while the individual leaves inside each one get
   // more room (bigger leafSpacing) - one shared constant couldn't do both at once.
-  const nodeSpacing = opts.nodeSpacing ?? 190;
-  const leafSpacing = opts.leafSpacing ?? 190;
-  const minRadius = opts.minRadius ?? 190;
+  const nodeSpacing = opts.nodeSpacing ?? 350;
+  const leafSpacing = opts.leafSpacing ?? 250;
+  const minRadius = opts.minRadius ?? 250;
   const relaxIterations = opts.relaxIterations ?? 150;
 
   const positions = new Map();
