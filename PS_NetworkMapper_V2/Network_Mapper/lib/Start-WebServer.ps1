@@ -54,6 +54,26 @@ function Get-QueryParam {
     return $null
 }
 
+# CSRF guard for the two state-changing endpoints (/api/connect, /api/rescan). Binding to
+# "localhost" (see the header comment) only proves the CALLER runs as this user - it does
+# nothing to prove the caller is OUR page rather than a hidden form on some other site the
+# analyst has open in another tab, and either endpoint can trigger an outbound SSH session
+# using the real switch password from Auth.json. Origin (and Referer as fallback, since not
+# every browser sends Origin on a same-origin fetch) is the standard defense: both are set
+# by the browser itself from the requesting page's actual origin, so page JS cannot forge
+# them, and a bare cross-origin <form> POST still carries a truthful Origin header even
+# though it needs no CORS preflight to fire. Fail closed - neither header present means
+# this wasn't a browser navigating from our own page, so it's refused too.
+function Test-SameOriginRequest {
+    param($Request, [int]$Port)
+    $Expected = "http://localhost:$Port"
+    $Origin = $Request.Headers["Origin"]
+    if ($Origin) { return $Origin -eq $Expected }
+    $Referer = $Request.Headers["Referer"]
+    if ($Referer) { return $Referer -eq "$Expected/" -or $Referer.StartsWith("$Expected/") }
+    return $false
+}
+
 # The one action a browser click can trigger server-side: launch Connect-Switch.ps1 (a
 # real interactive SSH session, askpass-injected from Auth.json) against a target IP.
 # Deliberately narrow - a fixed script, one validated parameter, no free-form command or
@@ -217,8 +237,12 @@ function Invoke-StaticFile {
     if ([string]::IsNullOrWhiteSpace($RelPath)) { $RelPath = "network_vis.html" }
 
     $RootFull = [System.IO.Path]::GetFullPath($VisualizerRoot)
+    if (-not $RootFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) { $RootFull += [System.IO.Path]::DirectorySeparatorChar }
     $FullPath = [System.IO.Path]::GetFullPath((Join-Path $RootFull $RelPath))
 
+    # StartsWith needs $RootFull's trailing separator (added above) or this containment
+    # check is only a string-prefix match, not a path-prefix match - "Network_Visualizer"
+    # would then also accept a sibling directory named e.g. "Network_Visualizer_old".
     if (-not $FullPath.StartsWith($RootFull, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $FullPath -PathType Leaf)) {
         Send-WebResponse -Response $Response -StatusCode 404 -Bytes ([System.Text.Encoding]::UTF8.GetBytes("Not found"))
         return
@@ -271,15 +295,23 @@ function Start-MapperWebServer {
 
             try {
                 if ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/connect") {
-                    $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
-                    $Body = $Reader.ReadToEnd()
-                    $Reader.Close()
-                    Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -AuthFile $AuthFile
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
+                        $Body = $Reader.ReadToEnd()
+                        $Reader.Close()
+                        Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -AuthFile $AuthFile
+                    }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/rescan") {
-                    $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
-                    $Body = $Reader.ReadToEnd()
-                    $Reader.Close()
-                    Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -AuthFile $AuthFile
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
+                        $Body = $Reader.ReadToEnd()
+                        $Reader.Close()
+                        Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -AuthFile $AuthFile
+                    }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
                     $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
                     Invoke-RescanStatusAction -Response $Response -JobId $JobId
