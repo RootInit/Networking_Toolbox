@@ -188,8 +188,9 @@
         .drawer-header { padding: 15px 20px; background: var(--primary); color: white; display: flex; justify-content: space-between; align-items: center; }
         .drawer-header h2 { color: white; margin: 0; font-size: 1.2rem; }
         .close-btn { cursor: pointer; font-size: 1.5rem; font-weight: bold; line-height: 1; transition: 0.2s;}
-        #copyConnectBtn, #printReportBtn { width: auto; margin: 0; padding: 6px 12px; font-size: 0.75rem; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.4); }
-        #copyConnectBtn:hover, #printReportBtn:hover { background: rgba(255,255,255,0.28); }
+        #rescanBtn, #copyConnectBtn, #printReportBtn { width: auto; margin: 0; padding: 6px 12px; font-size: 0.75rem; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.4); }
+        #rescanBtn:hover, #copyConnectBtn:hover, #printReportBtn:hover { background: rgba(255,255,255,0.28); }
+        #rescanBtn:disabled { opacity: 0.6; cursor: default; }
         .close-btn:hover { color: #ff6b6b; }
 
         /* Config diff (see window.renderConfigDiff) - display set output is a flat,
@@ -510,7 +511,8 @@
         <div class="drawer-header">
             <h2 id="drawer-title">Switch Details</h2>
             <div style="display:flex; align-items:center; gap:14px;">
-                <button type="button" id="copyConnectBtn" onclick="window.copyConnectCommand()" title="Copy a Connect-Switch.ps1 command for this device to your clipboard">Copy Connect Command</button>
+                <button type="button" id="rescanBtn" onclick="window.rescanDevice()" title="Re-run the diagnostic scan for just this device, without a full fleet crawl">Re-scan</button>
+                <button type="button" id="copyConnectBtn" onclick="window.copyConnectCommand()" title="Launch an interactive SSH session to this device via the local webserver">Launch SSH Session</button>
                 <button type="button" id="printReportBtn" onclick="window.printDeviceReport()" title="Open a printable report for this device in a new tab">Print Report</button>
                 <span class="close-btn" onclick="window.closeDrawer()">&times;</span>
             </div>

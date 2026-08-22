@@ -3,7 +3,10 @@ param (
     [Parameter(Mandatory=$true)]
     [string]$TargetIP,
     
-    [string]$AuthFile = ".\Auth.json",
+    # Normally passed explicitly by Start-NetworkMapper.ps1 (V2's Auth.json is shared with
+    # PS_NetworkMapper/, not local to this folder) - this default only matters if the
+    # worker is ever invoked standalone.
+    [string]$AuthFile = (Join-Path $PSScriptRoot "..\..\..\PS_NetworkMapper\Network_Mapper\Auth.json"),
     
     [switch]$HumanReadable,
     
@@ -130,7 +133,10 @@ try {
         # return skips. Left as @{}, it serializes to JSON "{}" instead of "[]", and any
         # consumer that does `(node.Interfaces || []).forEach(...)` (Network_Visualizer's
         # CSV export does exactly this) throws on it, since "{}" is truthy. Converting it
-        # here keeps this early-return path shape-consistent with the normal one.
+        # here keeps this early-return path shape-consistent with the normal one - and
+        # matters more here than in V1, since a rescanned device that fails now has a
+        # guard (ok:false, never merged) but the underlying shape bug is worth not leaving
+        # in place regardless.
         $NodeData.Interfaces = @()
         return @{ Node = $NodeData; Logs = $Logs }
     }

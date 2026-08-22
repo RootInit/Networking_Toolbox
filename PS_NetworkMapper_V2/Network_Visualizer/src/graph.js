@@ -351,6 +351,42 @@ window.applyVlanFilter = function() {
     if (currentSelectedNodeData) window.openRightDrawer(currentSelectedNodeData.DeviceIP);
 };
 
+// Updates one node's metadata and (if currently visible) its rendered appearance after a
+// single-device rescan (see drawer.js's mergeRescannedDevice) - deliberately NOT a call to
+// window.buildSwitchMap(), which destroys and recreates the vis.Network instance,
+// resetting pan/zoom and collapsing every manually-expanded cluster. A .update() (not
+// .add()) on nodesDataset is a no-op if the node isn't currently rendered - e.g. it's
+// hidden inside a collapsed cluster - which is the right behavior: this corrects one
+// device's detail data, it does not attempt to keep the graph's shape/visibility live.
+window.refreshNodeVisual = function(ip) {
+    var device = globalTopologyData.find(d => d && String(d.DeviceIP) === String(ip));
+    if (!device) return;
+
+    var switchIp = String(device.DeviceIP);
+    var hostname = device.Hostname || "Unknown";
+    var isStack = !!(device.StackMembers && device.StackMembers.length > 1);
+    var stackIcon = isStack ? `\n[VC: ${device.StackMembers.length} Node]` : "";
+
+    var meta = {
+        label: `Switch\n${switchIp}\n(${hostname})${stackIcon}`,
+        shape: isStack ? 'database' : 'box', isStack: isStack, scanned: true,
+        vlanCache: device.TrueClients ? device.TrueClients.map(c => String(c.VLAN_Tag)) : [],
+    };
+    allNodeMeta.set(switchIp, meta);
+
+    if (nodesDataset && nodesDataset.get(switchIp)) {
+        // A rescanned device is always "scanned:true" now - covers both "existing scanned
+        // node, data refreshed" and "was a gray unscanned LLDP placeholder, now promoted
+        // to a real blue scanned node" with the same update call.
+        nodesDataset.update({
+            id: switchIp, label: meta.label, shape: meta.shape, isStack: meta.isStack,
+            color: meta.isStack ? { background: '#D2E5FF', border: '#2B7CE9' } : { background: '#97C2FC', border: '#2B7CE9' },
+            font: { multi: true, bold: true, color: 'black' },
+            vlanCache: meta.vlanCache,
+        });
+    }
+};
+
 window.setClusterThreshold = function(value) {
     var n = parseInt(value, 10);
     if (!Number.isFinite(n) || n < 2) return;

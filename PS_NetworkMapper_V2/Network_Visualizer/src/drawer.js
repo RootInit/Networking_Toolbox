@@ -24,29 +24,196 @@ window.switchTab = function(tabId) {
     }
 };
 
-// SSH quick-connect: a browser page can't spawn a process (no such API exists in any
-// mainstream browser, confirmed - not a workaroundable gap), but it CAN write to the
-// clipboard reliably when triggered by a real click (also confirmed - a bare script call
-// with no user gesture behind it fails). So the realistic "quick connect" is one click to
-// copy the command, one paste into a terminal - see Network_Mapper/lib/Connect-Switch.ps1.
-// The path assumes the terminal's CWD is Network_Mapper/ (where Start-NetworkMapper.ps1
-// itself lives, so a user already running crawls from there needs no extra `cd`).
+// SSH quick-connect: V1 could only copy a command to the clipboard (no browser API can
+// spawn a process). V2 is served by Start-WebServer.ps1 - itself a PowerShell process on
+// the analyst's own machine - so this can POST to that server's one fixed action instead:
+// /api/connect launches lib\Connect-Switch.ps1 (a real interactive SSH session) against
+// the given IP via Start-Process. Only works because the server is localhost-only; see
+// Start-WebServer.ps1's header comment.
 window.copyConnectCommand = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
-    var command = `pwsh -File "lib\\Connect-Switch.ps1" -TargetIP ${ip}`;
     var btn = document.getElementById('copyConnectBtn');
+    var original = btn ? btn.textContent : null;
     try {
-        await navigator.clipboard.writeText(command);
-        if (btn) {
-            var original = btn.textContent;
-            btn.textContent = 'Copied!';
-            setTimeout(() => { btn.textContent = original; }, 1500);
-        }
-        window.setStatus(`Copied to clipboard: ${command}`, "green");
+        if (btn) btn.textContent = 'Launching...';
+        var resp = await fetch('/api/connect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip: ip })
+        });
+        var result = await resp.json();
+        if (!resp.ok) throw new Error(result.error || ('HTTP ' + resp.status));
+        window.setStatus(`SSH session launched for ${ip}`, "green");
     } catch (e) {
-        window.setStatus("Could not copy to clipboard: " + e.message, "red");
+        window.setStatus("Could not launch SSH session: " + e.message, "red");
+    } finally {
+        if (btn) setTimeout(() => { btn.textContent = original; }, 1500);
     }
+};
+
+// On-demand single-device rescan: re-runs the same fixed read-only diagnostic batch
+// Get-JunosNodeData.ps1 already runs for a full crawl, against just this one IP, via
+// Start-WebServer.ps1's /api/rescan (async - see that endpoint's own comment for why a
+// synchronous call would freeze the whole server). Works for the "Unscanned Node"
+// placeholder case too (a device only ever seen as an LLDP neighbor) - that's a
+// legitimate rescan target, not just a refresh of already-scanned data.
+var rescanPollTimer = null;
+
+window.rescanDevice = async function() {
+    var ip = document.getElementById('drawer-title').innerText;
+    if (!ip) return;
+    var btn = document.getElementById('rescanBtn');
+    var original = btn ? btn.textContent : null;
+
+    function finish(msg, color) {
+        if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+        window.setStatus(msg, color);
+    }
+
+    var jobId;
+    try {
+        if (btn) { btn.disabled = true; btn.textContent = 'Scanning...'; }
+        var resp = await fetch('/api/rescan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip: ip })
+        });
+        var result = await resp.json();
+        if (resp.status === 409 && result.jobId) {
+            // Only one rescan slot exists server-side. Attaching is only safe when it's
+            // OUR device already in flight (e.g. a double-click) - the server hands back
+            // which IP the running job is actually for, and if it's a different device,
+            // silently attaching would poll that job to completion and then report ITS
+            // result under this device's name once merged/messaged.
+            if (result.ip !== ip) {
+                finish("A rescan of " + result.ip + " is already running - try again once it finishes.", "red");
+                return;
+            }
+            jobId = result.jobId;
+        } else if (!resp.ok) {
+            finish("Could not start rescan: " + (result.error || ('HTTP ' + resp.status)), "red");
+            return;
+        } else {
+            jobId = result.jobId;
+        }
+    } catch (e) {
+        finish("Could not start rescan: " + e.message, "red");
+        return;
+    }
+
+    var pollStart = Date.now();
+    var poll = async function() {
+        // Client-side ceiling stays above the server's own ~90s hard timeout so the
+        // browser never gives up before the server has had a chance to report one.
+        if (Date.now() - pollStart > 100000) { finish("Rescan timed out waiting for a response.", "red"); return; }
+
+        var statusResp, status;
+        try {
+            statusResp = await fetch('/api/rescan/status?jobId=' + encodeURIComponent(jobId));
+            status = await statusResp.json();
+        } catch (e) {
+            finish("Lost connection to the local server - retry once it's running again.", "red");
+            return;
+        }
+
+        if (statusResp.status === 404) {
+            finish("Rescan job expired or the server restarted - try again.", "red");
+            return;
+        }
+        if (status.status === 'timeout') {
+            finish("Rescan of " + ip + " timed out.", "red");
+            return;
+        }
+        if (status.status === 'running') {
+            rescanPollTimer = setTimeout(poll, 2000);
+            return;
+        }
+        // status.status === 'complete'
+        if (!status.ok) {
+            finish("Rescan failed: " + (status.reason || "unknown error") + " - existing data left unchanged.", "red");
+            return;
+        }
+        window.mergeRescannedDevice(status.node);
+        finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString() + ".", "green");
+    };
+    poll();
+};
+
+// Client-side port of Start-NetworkMapper.ps1's Update-ClientIpCorrelation. A
+// single-device rescan only ever has that one switch's own local ARP table - a
+// downstream client's IP is usually resolved from the L3 gateway's ARP table instead,
+// which the full crawl correlates once across every device. Without re-running that same
+// two-pass correlation after a merge, a client that showed a real IP (from the original
+// crawl) would flip back to "Unknown" after "refreshing" its access switch - the exact
+// opposite of what this feature is for.
+function correlateClientIps(topology) {
+    var globalArpMap = new Map();
+    topology.forEach(device => {
+        (device.ArpEntries || []).forEach(arp => {
+            if (arp && arp.MAC && arp.IP) globalArpMap.set(arp.MAC, arp.IP);
+        });
+    });
+    topology.forEach(device => {
+        (device.Clients || []).forEach(client => {
+            if (client && client.IP === "Unknown" && globalArpMap.has(client.MAC)) {
+                client.IP = globalArpMap.get(client.MAC);
+            }
+        });
+    });
+}
+
+// Merges a successful rescan result into the active snapshot's in-memory state only -
+// never written back to the on-disk snapshot file. Two independent reasons: the loaded
+// file may be encrypted and its password is deliberately not retained after use, and
+// snapshot immutability is load-bearing for Topology Diff and cross-snapshot config
+// compare elsewhere in this app. The rescanned data lives only in this tab, only for this
+// session; RescannedAt (shown in the Summary tab) makes that ephemerality visible instead
+// of surprising.
+window.mergeRescannedDevice = function(freshDevice) {
+    if (!freshDevice || !freshDevice.DeviceIP || activeSnapshotIndex < 0) return;
+    var ip = String(freshDevice.DeviceIP);
+    var topology = loadedSnapshots[activeSnapshotIndex].topology; // same array globalTopologyData references
+
+    freshDevice.TrueClients = freshDevice.Clients || [];
+    freshDevice.RescannedAt = new Date().toISOString();
+
+    var index = topology.findIndex(d => d && String(d.DeviceIP) === ip);
+    if (index === -1) {
+        topology.push(freshDevice); // was an "Unscanned Node" placeholder until now
+    } else {
+        topology[index] = freshDevice;
+    }
+
+    correlateClientIps(topology);
+
+    // buildSearchIndex() replaces snapshot.deviceByIp with a brand-new Map rather than
+    // mutating the existing one - re-pointing the module-level deviceByIp variable here
+    // is required, not optional, or search click-through would keep serving the stale
+    // object even though the drawer itself is showing fresh data.
+    window.buildSearchIndex();
+    deviceByIp = loadedSnapshots[activeSnapshotIndex].deviceByIp;
+
+    window.extractVlans();
+
+    // Gated on the drawer's own displayed IP, not on currentSelectedNodeData - for the
+    // "Unscanned Node" placeholder case (the whole other reason to rescan something),
+    // currentSelectedNodeData is null (openRightDrawer never set it, that's exactly why
+    // the placeholder message shows), so checking it here would silently skip the
+    // re-render on precisely the case this feature advertises supporting.
+    var drawerIp = document.getElementById('drawer-title').innerText;
+    var drawerOpen = document.getElementById('right-panel').style.display !== 'none';
+    if (drawerOpen && drawerIp === ip) {
+        window.openRightDrawer(ip); // deviceByIp now resolves to freshDevice - re-renders every tab from it
+    }
+
+    // Deliberately not a full window.buildSwitchMap() rebuild - that destroys the
+    // vis.Network instance, resetting pan/zoom and collapsing every manually-expanded
+    // cluster, for a feature whose whole pitch is a quick single-node refresh. Known
+    // limitation: a structural change (new/removed LLDP neighbor) won't show as a new
+    // edge until the graph is fully reloaded.
+    if (window.refreshNodeVisual) window.refreshNodeVisual(ip);
 };
 
 window.openRightDrawer = function(ip) {
@@ -77,7 +244,14 @@ window.renderSummary = function() {
         ? `<span class="badge red">${alarms.length} ACTIVE</span>`
         : `<span class="badge green">None</span>`;
 
+    var rescannedHtml = d.RescannedAt
+        ? `<div style="grid-column:1/-1; background:#fff8e1; color:#7a6224; padding:6px 12px; border-radius:4px; font-size:0.8rem; margin-bottom:4px;">
+             Live rescan at ${esc(new Date(d.RescannedAt).toLocaleTimeString())} - not saved to the snapshot file, this session only.
+           </div>`
+        : '';
+
     var html = `
+        ${rescannedHtml}
         <div class="summary-item"><label>Hostname</label><div>${esc(d.Hostname) || 'N/A'}</div></div>
         <div class="summary-item"><label>IP Address</label><div>${esc(d.DeviceIP) || 'N/A'}</div></div>
         <div class="summary-item"><label>Junos OS</label><div>${esc(d.JunosVersion) || 'N/A'}</div></div>
