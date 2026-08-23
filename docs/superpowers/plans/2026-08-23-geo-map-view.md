@@ -715,6 +715,7 @@ git commit -m "Add device-location key resolution (serial > hostname > IP priori
 **Files:**
 - Modify: `PS_NetworkMapper_V2/Network_Mapper/lib/Start-WebServer.ps1`
 - Modify: `PS_NetworkMapper_V2/Network_Mapper/Start-NetworkMapper.ps1:26-46` (new `-ConfigPath`)
+- Modify: `.gitignore` (exclude the real `Configuration.json.enc`, same as `Auth.json`)
 - Create: `PS_NetworkMapper/Network_Mapper/lib/Configuration.example.json` (template, mirrors `Auth.example.json`)
 
 **Interfaces:**
@@ -729,7 +730,7 @@ git commit -m "Add device-location key resolution (serial > hostname > IP priori
 This sandbox has no `pwsh` — every step below is written and structurally verified by
 exact pattern-matching against the existing, working `/api/rescan`/`/api/connect`
 handlers (same CSRF check, same `Send-WebJson` helper, same body-reading idiom), not
-executed here. The commands in Step 5 are for the user to run later, on a machine with
+executed here. The commands in Step 7 are for the user to run later, on a machine with
 PowerShell, against a real `Auth.json`.
 
 - [ ] **Step 1: Dot-source the shared crypto lib from `Start-WebServer.ps1` itself**
@@ -885,7 +886,19 @@ real secret; unlike `Auth.json`, `Configuration.json.enc` is normally written by
 in-app editor, not hand-authored, but the template still documents the exact shape
 `/api/save-config` expects in its request body).
 
-- [ ] **Step 6: Manual verification (run on a machine with PowerShell — not this sandbox)**
+- [ ] **Step 6: Add `Configuration.json.enc` to `.gitignore`**
+
+It holds real building/room location data once written, same sensitivity class as
+`Auth.json` (which `.gitignore` already excludes at line 5,
+`PS_NetworkMapper/Network_Mapper/Auth.json`) — and this task's own Step 7 manual
+verification creates one at exactly this path. Add, immediately after that existing
+`Auth.json` line in `.gitignore`:
+
+```
+PS_NetworkMapper/Network_Mapper/Configuration.json.enc
+```
+
+- [ ] **Step 7: Manual verification (run on a machine with PowerShell — not this sandbox)**
 
 ```powershell
 # From PS_NetworkMapper_V2/Network_Mapper/, with a real Auth.json present:
@@ -906,10 +919,10 @@ curl.exe -X POST http://localhost:8787/api/save-config -d '{"devices":[]}'
 # No Origin/Referer header - expected: 403 {"error":"Cross-origin request refused"}.
 ```
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
-git add PS_NetworkMapper_V2/Network_Mapper/lib/Start-WebServer.ps1 PS_NetworkMapper_V2/Network_Mapper/Start-NetworkMapper.ps1 PS_NetworkMapper/Network_Mapper/lib/Configuration.example.json
+git add PS_NetworkMapper_V2/Network_Mapper/lib/Start-WebServer.ps1 PS_NetworkMapper_V2/Network_Mapper/Start-NetworkMapper.ps1 PS_NetworkMapper/Network_Mapper/lib/Configuration.example.json .gitignore
 git commit -m "Add /api/config and /api/save-config endpoints for Configuration.json.enc"
 ```
 
