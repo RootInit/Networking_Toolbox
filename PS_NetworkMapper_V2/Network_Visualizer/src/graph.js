@@ -93,48 +93,20 @@ window.extractVlans = function() {
 // 2. Topology data -> node/edge metadata (positions are computed separately by renderVisibleGraph)
 window.buildSwitchMap = async function() {
     allNodeMeta.clear();
-    allEdges = [];
-    var addedEdges = new Set();
+    allEdges = window.TopologyGraph.computeNeighborEdges(globalTopologyData);
 
-    // Pass 1: every device that was actually scanned gets a fully-styled node,
-    // even if another device already referenced its IP as a neighbor below.
-    globalTopologyData.forEach(device => {
-        if (!device || !device.DeviceIP) return;
+    var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
+    var deviceByIpLocal = new Map(globalTopologyData.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
 
-        var switchIp = String(device.DeviceIP);
-        var hostname = device.Hostname || "Unknown";
-        var isStack = !!(device.StackMembers && device.StackMembers.length > 1);
-        var stackIcon = isStack ? `\n[VC: ${device.StackMembers.length} Node]` : "";
-
-        allNodeMeta.set(switchIp, {
-            label: `Switch\n${switchIp}\n(${hostname})${stackIcon}`,
-            shape: isStack ? 'database' : 'box', isStack: isStack, scanned: true,
-            vlanCache: device.TrueClients ? device.TrueClients.map(c => String(c.VLAN_Tag)) : [],
-        });
-    });
-
-    // Pass 2: neighbors mentioned via LLDP that were never themselves scanned
-    // get a placeholder node instead.
-    globalTopologyData.forEach(device => {
-        if (!device || !device.DeviceIP || !device.Neighbors) return;
-        var switchIp = String(device.DeviceIP);
-
-        device.Neighbors.forEach(neighbor => {
-            var neighborIp = String(neighbor.ManagementIP);
-            if (!neighborIp || neighborIp === "Unknown" || neighborIp === "0.0.0.0") return;
-
-            if (!allNodeMeta.has(neighborIp)) {
-                allNodeMeta.set(neighborIp, {
-                    label: `Switch\n${neighborIp}\n(${neighbor.Hostname || "Unknown"})`,
-                    shape: 'box', isStack: false, scanned: false, vlanCache: [],
-                });
-            }
-
-            var edgeKey = [switchIp, neighborIp].sort().join('-');
-            if (!addedEdges.has(edgeKey)) {
-                allEdges.push({ from: switchIp, to: neighborIp });
-                addedEdges.add(edgeKey);
-            }
+    classification.forEach(function (meta, ip) {
+        var device = deviceByIpLocal.get(ip);
+        var stackIcon = meta.isStack ? `\n[VC: ${device.StackMembers.length} Node]` : "";
+        allNodeMeta.set(ip, {
+            label: meta.scanned
+                ? `Switch\n${ip}\n(${meta.hostname})${stackIcon}`
+                : `Switch\n${ip}\n(${meta.hostname})`,
+            shape: meta.isStack ? 'database' : 'box', isStack: meta.isStack, scanned: meta.scanned,
+            vlanCache: (device && device.TrueClients) ? device.TrueClients.map(c => String(c.VLAN_Tag)) : [],
         });
     });
 
