@@ -5,7 +5,7 @@
 // both ends use only primitives available everywhere: Aes/CBC, PBKDF2, HMAC-SHA256.
 // Self-contained (no dependency on any other file in this app) - see app.js's
 // window.promptForPassword / readSnapshotFile for the only caller.
-window.TopologyCrypto = (function() {
+var TopologyCrypto = (function() {
     function b64ToBytes(b64) {
         var bin = atob(b64);
         var bytes = new Uint8Array(bin.length);
@@ -41,9 +41,10 @@ window.TopologyCrypto = (function() {
     var MIN_ITERATIONS = 1000;
     var MAX_ITERATIONS = 5000000;
 
-    async function decryptEnvelope(envelope, password) {
-        if (!envelope || envelope.format !== 'PSNetworkMapper-EncryptedTopology') {
-            throw new Error('Not a recognized encrypted topology file.');
+    async function decryptEnvelope(envelope, password, expectedFormats) {
+        expectedFormats = expectedFormats || ['PSNetworkMapper-EncryptedTopology'];
+        if (!envelope || expectedFormats.indexOf(envelope.format) === -1) {
+            throw new Error('Not a recognized encrypted file (expected one of: ' + expectedFormats.join(', ') + ').');
         }
         if (envelope.version !== 1) {
             throw new Error(`Unsupported envelope version: ${envelope.version}`);
@@ -76,5 +77,11 @@ window.TopologyCrypto = (function() {
         return new TextDecoder().decode(plainBuf);
     }
 
-    return { decryptEnvelope: decryptEnvelope };
+    var TopologyCryptoExports = { decryptEnvelope: decryptEnvelope };
+    if (typeof module !== 'undefined' && module.exports) {
+        module.exports = { TopologyCrypto: TopologyCryptoExports };
+    } else if (typeof window !== 'undefined') {
+        window.TopologyCrypto = TopologyCryptoExports;
+    }
+    return TopologyCryptoExports;
 })();
