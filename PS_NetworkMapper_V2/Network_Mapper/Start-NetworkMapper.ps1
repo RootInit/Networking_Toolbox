@@ -28,6 +28,7 @@ $WorkerPath = Join-Path $ScriptDir "lib\Get-JunosNodeData.ps1"
 $ConnectScriptPath = Join-Path $ScriptDir "lib\Connect-Switch.ps1"
 $VisualizerRoot = Join-Path $ScriptDir "..\Network_Visualizer"
 . (Join-Path $ScriptDir "lib\Start-WebServer.ps1")
+. (Join-Path $ScriptDir "lib\TopologyCrypto.ps1")
 $DebugLog = Join-Path $ScriptDir "Mapper_Debug.log"
 # Snapshots (and now the NDJSON device-history ledger) live in the ORIGINAL
 # PS_NetworkMapper's Network_Maps/ folder, not a V2-local copy - shared per the
@@ -62,46 +63,6 @@ if ($Log) { Write-Host "[LOGGING ENABLED] Raw payloads will be saved to .\RawDum
 # through this.
 $PBKDF2_ITERATIONS = 600000
 $EncKeyBytes = $null; $MacKeyBytes = $null; $SaltBytes = $null
-
-# Builds an encrypted envelope from a plaintext JSON string. IV is fresh per call (per
-# write); key/salt are derived once for the whole run and passed in, since PBKDF2 at
-# 200k iterations is too slow to redo on every 5-second periodic write.
-function Protect-TopologyPayload {
-    param([string]$PlainJson, [byte[]]$EncKey, [byte[]]$MacKey, [byte[]]$Salt, [int]$Iterations)
-
-    $Aes = [System.Security.Cryptography.Aes]::Create()
-    $Aes.KeySize = 256
-    $Aes.Key = $EncKey
-    $Aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
-    $Aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
-    $Aes.GenerateIV()
-    $IvBytes = $Aes.IV
-
-    $PlainBytes = [System.Text.Encoding]::UTF8.GetBytes($PlainJson)
-    $Encryptor = $Aes.CreateEncryptor()
-    $CipherBytes = $Encryptor.TransformFinalBlock($PlainBytes, 0, $PlainBytes.Length)
-    $Encryptor.Dispose()
-    $Aes.Dispose()
-
-    # HMAC covers IV + ciphertext (encrypt-then-MAC) so tampering with either is caught
-    # before any bytes are handed to the decryptor - verified browser-side before decrypt.
-    $Hmac = [System.Security.Cryptography.HMACSHA256]::new($MacKey)
-    $MacBytes = $Hmac.ComputeHash($IvBytes + $CipherBytes)
-    $Hmac.Dispose()
-
-    return [ordered]@{
-        format       = "PSNetworkMapper-EncryptedTopology"
-        version      = 1
-        kdf          = "PBKDF2-SHA256"
-        iterations   = $Iterations
-        cipher       = "AES-256-CBC"
-        macAlgorithm = "HMAC-SHA256"
-        salt         = [Convert]::ToBase64String($Salt)
-        iv           = [Convert]::ToBase64String($IvBytes)
-        mac          = [Convert]::ToBase64String($MacBytes)
-        ciphertext   = [Convert]::ToBase64String($CipherBytes)
-    }
-}
 
 # Single write path for all three call sites below (init/periodic/final) so encryption
 # only has to be wired in once instead of duplicated three times.
@@ -140,13 +101,9 @@ if (-not $NoEncryption) {
     $Rng.GetBytes($SaltBytes)
     $Rng.Dispose()
 
-    $Kdf = [System.Security.Cryptography.Rfc2898DeriveBytes]::new($EncryptionPassword, $SaltBytes, $PBKDF2_ITERATIONS, [System.Security.Cryptography.HashAlgorithmName]::SHA256)
-    $KeyMaterial = $Kdf.GetBytes(64)
-    $Kdf.Dispose()
-    $EncKeyBytes = $KeyMaterial[0..31]
-    $MacKeyBytes = $KeyMaterial[32..63]
-    # Best-effort only - PowerShell strings are managed/immutable, so this can't
-    # guarantee the plaintext password is scrubbed from memory, just dereferenced.
+    $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
+    $EncKeyBytes = $KeyMaterial.EncKey
+    $MacKeyBytes = $KeyMaterial.MacKey
     $EncryptionPassword = $null
 }
 
