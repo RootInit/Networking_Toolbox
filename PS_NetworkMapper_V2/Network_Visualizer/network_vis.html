@@ -187,8 +187,13 @@
         .sidebar-tab-content.active { display: flex; }
         #sidebar-tab-analysis.active { flex-grow: 1; }
 
-        /* Right Panel Drawer Header */
-        .drawer-header { padding: 15px 20px; background: var(--primary); color: white; display: flex; justify-content: space-between; align-items: center; }
+        /* Right Panel Drawer Header
+           Two stacked rows: title+close on top (the dismiss affordance stays where
+           it's expected, next to the title), action buttons on their own row below
+           so they have room to wrap instead of fighting the title for width. */
+        .drawer-header { padding: 15px 20px; background: var(--primary); color: white; display: flex; flex-direction: column; gap: 10px; }
+        .drawer-header-top { display: flex; justify-content: space-between; align-items: center; gap: 14px; }
+        .drawer-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
         .drawer-header h2 { color: white; margin: 0; font-size: 1.2rem; }
         .close-btn { cursor: pointer; font-size: 1.5rem; font-weight: bold; line-height: 1; transition: 0.2s;}
         #rescanBtn, #copyConnectBtn, #printReportBtn { width: auto; margin: 0; padding: 6px 12px; font-size: 0.75rem; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.4); }
@@ -549,12 +554,14 @@
     <!-- RIGHT PANEL: Data Sidebar -->
     <div id="right-panel">
         <div class="drawer-header">
-            <h2 id="drawer-title">Switch Details</h2>
-            <div style="display:flex; align-items:center; gap:14px;">
+            <div class="drawer-header-top">
+                <h2 id="drawer-title">Switch Details</h2>
+                <span class="close-btn" onclick="window.closeDrawer()">&times;</span>
+            </div>
+            <div class="drawer-header-actions">
                 <button type="button" id="rescanBtn" onclick="window.rescanDevice()" title="Re-run the diagnostic scan for just this device, without a full fleet crawl">Re-scan</button>
                 <button type="button" id="copyConnectBtn" onclick="window.copyConnectCommand()" title="Launch an interactive SSH session to this device via the local webserver">Launch SSH Session</button>
                 <button type="button" id="printReportBtn" onclick="window.printDeviceReport()" title="Open a printable report for this device in a new tab">Print Report</button>
-                <span class="close-btn" onclick="window.closeDrawer()">&times;</span>
             </div>
         </div>
         
