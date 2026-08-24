@@ -39,7 +39,18 @@ window.switchCenterView = function(view) {
     var saveBtn = document.getElementById('mapSaveConfigBtn');
     if (saveBtn) saveBtn.style.display = (view === 'map') ? '' : 'none';
 
-    if (view !== 'map') return;
+    if (view !== 'map') {
+        // Mirror image of the leafletMap.invalidateSize() call below, for the diagram side:
+        // buildSwitchMap may have (re)created the vis.Network instance while #mynetwork was
+        // display:none (a snapshot load/switch that happened while Map view was showing),
+        // sizing its canvas against the hidden container's bogus 0x0 clientWidth/
+        // clientHeight - graph.js's window.resizeDiagram forces a re-measure/redraw/refit
+        // now that the container is actually visible again. Guarded for existence per the
+        // brief, though graph.js loads before map.js in network_vis.html's script order so
+        // it should always be defined here.
+        if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
+        return;
+    }
 
     if (leafletMap !== null) {
         // renderMapMarkers (and any camera move) may have run while #mapview was
@@ -307,9 +318,18 @@ window.openLocationEditor = function(ip) {
     editorPendingLatLng = null;
     var device = deviceByIp.get(String(ip));
     document.getElementById('editorDeviceLabel').textContent = 'Set Location: ' + (device && device.Hostname !== 'Unknown' ? device.Hostname : ip);
-    document.getElementById('editorBuilding').value = '';
-    document.getElementById('editorRoom').value = '';
-    document.getElementById('editorNotes').value = '';
+    // This editor is reachable two ways (see renderMapMarkers's "Edit location" popup link
+    // comment above): from the Unplaced Devices list, where the device by definition has no
+    // resolved location yet, and from an already-placed marker's own popup, where it does.
+    // Blanking the form unconditionally was correct for the first case but silently
+    // discarded the existing building/room/notes for the second the moment the user hit
+    // Save (commitLocationEdit always writes whatever the form currently holds) - prefill
+    // from the existing resolved entry when there is one, so re-saving without touching
+    // these fields preserves them instead of wiping them to empty strings.
+    var existing = device ? window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries) : null;
+    document.getElementById('editorBuilding').value = existing ? (existing.building || '') : '';
+    document.getElementById('editorRoom').value = existing ? (existing.room || '') : '';
+    document.getElementById('editorNotes').value = existing ? (existing.notes || '') : '';
     document.getElementById('location-editor-modal').style.display = 'flex';
 
     leafletMap.once('click', onEditorMapClick);

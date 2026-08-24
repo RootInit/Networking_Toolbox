@@ -10,6 +10,13 @@ var allEdges = [];             // {from, to}[]
 var graphRoot = null;
 var primaryTree = { parentOf: new Map(), childrenOf: new Map(), secondaryEdges: [] };
 var expandedNodes = new Set();
+// True whenever buildSwitchMap most recently (re)constructed the vis.Network instance while
+// #mynetwork was display:none (see window.resizeDiagram below) - i.e. there is a pending
+// degenerate camera transform that a plain redraw won't correct. Deliberately NOT reset by
+// anything except resizeDiagram actually running its fit() - same "only correct the thing
+// that's actually broken, don't fight the user's own pan/zoom" reasoning as map.js's own
+// hasFitBoundsOnce for the Leaflet side.
+var diagramSizedWhileHidden = false;
 
 // clusterThreshold is read fresh from the DOM on every use (see getClusterThreshold
 // below) instead of cached from the input's `change` event - relying on that event
@@ -117,6 +124,14 @@ window.buildSwitchMap = async function() {
 
     if (network !== null) { network.destroy(); network = null; }
     var container = document.getElementById('mynetwork');
+    // A construction while #mynetwork is display:none (e.g. a snapshot load/switch that
+    // happened while Map view is showing) reads clientWidth/clientHeight as 0 - vis-network
+    // computes its initial camera fit against that bogus size, which the container later
+    // becoming visible again does not correct on its own (confirmed empirically: the
+    // canvas's own pixel width/height self-corrects once visible again, but the pan/zoom
+    // transform vis-network computed at construction time does not) - see resizeDiagram
+    // below for the actual fix.
+    diagramSizedWhileHidden = (container.clientWidth === 0 || container.clientHeight === 0);
     network = new vis.Network(container, { nodes: nodesDataset, edges: edgesDataset }, {
         layout: { hierarchical: false },
         physics: { enabled: false },
@@ -370,4 +385,31 @@ window.setClusterThreshold = function(value) {
 // getLayoutSettings above.
 window.setLayoutSetting = function() {
     window.renderVisibleGraph();
+};
+
+// #mynetwork can be display:none while Map view is active (see map.js's switchCenterView) -
+// called from map.js's switchCenterView whenever the user switches TO diagram view, so a
+// diagram built (buildSwitchMap) while hidden is always corrected by the time it's actually
+// looked at, regardless of what happened to it while it was hidden.
+//
+// setSize + redraw run every time - cheap, and correct the canvas's own pixel dimensions to
+// the now-visible container regardless of cause. fit() is NOT unconditional, deliberately:
+// re-framing the camera on every plain Map<->Diagram switch would reset the user's pan/zoom
+// on every visit, which review waves on this branch have repeatedly flagged as worse than
+// the bug being fixed (see hasFitBoundsOnce in map.js and refreshNodeVisual's comment above
+// for the same principle applied to the Leaflet and single-device-update cases
+// respectively). fit() only runs, and only once, when diagramSizedWhileHidden is true - i.e.
+// buildSwitchMap actually (re)built the network against a bogus 0x0 size and its initial
+// camera fit is genuinely degenerate, not just "the user switched tabs." Confirmed
+// empirically (see final-followup-fix-report.md): an unconditional fit() measurably resets
+// an in-progress pan/zoom on every switch; this guard eliminates that regression while still
+// correcting the actual bug.
+window.resizeDiagram = function() {
+    if (!network) return;
+    network.setSize('100%', '100%');
+    network.redraw();
+    if (diagramSizedWhileHidden) {
+        network.fit();
+        diagramSizedWhileHidden = false;
+    }
 };
