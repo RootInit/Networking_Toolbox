@@ -19,7 +19,16 @@ window.switchCenterView = function(view) {
     document.getElementById('btn-center-view-diagram').classList.toggle('active', view === 'diagram');
     document.getElementById('btn-center-view-map').classList.toggle('active', view === 'map');
 
-    if (view === 'map' && leafletMap === null) window.initMapView();
+    if (view !== 'map') return;
+    if (leafletMap === null) {
+        window.initMapView();
+    } else if (!mapConfigLoaded) {
+        // A previous config load attempt was cancelled or failed (see loadMapConfiguration
+        // below) - retry it on every return to Map view instead of leaving the view wedged.
+        // The Leaflet instance itself is never torn down/recreated for this - only the
+        // config fetch+decrypt is re-attempted.
+        window.loadMapConfiguration().then(function () { window.renderMapMarkers(); });
+    }
 };
 
 window.initMapView = async function() {
@@ -35,26 +44,58 @@ window.initMapView = async function() {
 
 // Fetches and decrypts Configuration.json.enc (if any). Sets mapConfigEntries/mapConfigLoaded.
 // A missing file (404, fresh checkout) is a normal empty state, not an error - matches how
-// a missing Auth.json is handled elsewhere in this app.
+// a missing Auth.json is handled elsewhere in this app, and mapConfigLoaded=true there since
+// there's nothing to retry. A cancelled password prompt or a network/parse failure is a real
+// failure: it's reported via showMapStatus (same "Cancelled" handling app.js's own
+// processSelectedFiles already does for the identical rejection from the topology-file
+// password prompt) and leaves mapConfigLoaded=false so switchCenterView's retry path above
+// can re-attempt it - this function must never throw/reject, since initMapView awaits it
+// with nothing downstream to catch a rejection.
 window.loadMapConfiguration = async function() {
-    var resp = await fetch('/api/config');
+    var resp;
+    try {
+        resp = await fetch('/api/config');
+    } catch (fetchErr) {
+        window.showMapStatus('Could not reach the server to load saved locations (' + fetchErr.message + '). Click Map again to retry.');
+        mapConfigEntries = [];
+        mapConfigLoaded = false;
+        return;
+    }
     if (resp.status === 404) {
         mapConfigEntries = [];
         mapConfigLoaded = true;
+        window.showMapStatus('');
         return;
     }
     if (!resp.ok) {
-        window.showMapStatus('Failed to load Configuration.json.enc: HTTP ' + resp.status);
+        window.showMapStatus('Failed to load Configuration.json.enc: HTTP ' + resp.status + '. Click Map again to retry.');
         mapConfigEntries = [];
-        mapConfigLoaded = true;
+        mapConfigLoaded = false;
         return;
     }
 
-    var envelope = await resp.json();
+    var envelope;
+    try {
+        envelope = await resp.json();
+    } catch (parseErr) {
+        window.showMapStatus('Configuration.json.enc is not valid JSON (' + parseErr.message + '). Click Map again to retry.');
+        mapConfigEntries = [];
+        mapConfigLoaded = false;
+        return;
+    }
+
     var decryptedText = null;
     var errorMsg = null;
     while (decryptedText === null) {
-        var password = await window.promptForPassword(errorMsg);
+        var password;
+        try {
+            password = await window.promptForPassword(errorMsg);
+        } catch (cancelErr) {
+            window.showMapStatus('Location config decryption cancelled - devices will show without saved locations. Click Map again to retry.');
+            mapConfigEntries = [];
+            mapConfigLoaded = false;
+            return;
+        }
         try {
             decryptedText = await window.TopologyCrypto.decryptEnvelope(envelope, password, ['PSNetworkMapper-EncryptedConfig']);
         } catch (decErr) {
@@ -63,6 +104,7 @@ window.loadMapConfiguration = async function() {
     }
     mapConfigEntries = JSON.parse(decryptedText).devices || [];
     mapConfigLoaded = true;
+    window.showMapStatus('');
 };
 
 window.showMapStatus = function(message) {
@@ -80,7 +122,11 @@ var MARKER_COLORS = {
 function iconForClassification(meta) {
     var colors = !meta.scanned ? MARKER_COLORS.unscanned : (meta.isStack ? MARKER_COLORS.scannedStack : MARKER_COLORS.scanned);
     var size = 26;
-    var label = meta.hostname !== 'Unknown' ? meta.hostname : '';
+    // meta.hostname is device-supplied (LLDP/DNS data this app doesn't control) and this
+    // html string is rendered via Leaflet's innerHTML-based divIcon, unlike vis-network's
+    // canvas-drawn (fillText) diagram labels - escape with the same window.esc (utils.js)
+    // every other innerHTML-bound device string in this app already uses.
+    var label = meta.hostname !== 'Unknown' ? window.esc(meta.hostname) : '';
     var html = '<div style="width:' + size + 'px;height:' + size + 'px;border-radius:' + (meta.isStack ? '30%' : '50%') +
         ';background:' + colors.background + ';border:2px solid ' + colors.border +
         ';display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;' +
