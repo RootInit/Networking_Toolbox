@@ -22,6 +22,8 @@
 # Invoke-ConnectAction (below) needs New-JunosCredentialFile. Same "dot-source directly,
 # don't rely on caller load order" reasoning as the TopologyCrypto.ps1 dot-source above.
 . (Join-Path $PSScriptRoot "Connect-JunosSsh.ps1")
+# Invoke-ScanNetworkAction (below) needs Invoke-FleetCrawl.
+. (Join-Path $PSScriptRoot "Invoke-FleetCrawl.ps1")
 
 $script:ContentTypes = @{
     ".html" = "text/html; charset=utf-8"
@@ -253,6 +255,112 @@ function Invoke-RescanStatusAction {
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "running"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
 }
 
+# Kicks off a full fleet crawl from the browser, via Invoke-FleetCrawl (see that file) run
+# asynchronously in its own runspace pool - same "must not block the accept loop" reasoning
+# as Invoke-RescanAction, but sized to $MaxConcurrent (a real crawl needs real concurrency,
+# unlike a single-device rescan's 1-slot pool). Only one scan may be in flight at a time,
+# tracked in $script:PendingScanNetwork exactly like $script:PendingScan does for rescans -
+# a second click while one is running is refused with a 409, not queued or stacked.
+function Invoke-ScanNetworkAction {
+    param($Response, [string]$Body, [string]$WorkerPath, [string]$JunosUsername, [string]$JunosPassword,
+          [string]$MaxConcurrent, [string[]]$AllowedScopes, [string]$SnapshotDir, [string]$DeviceHistoryLedger,
+          [byte[]]$EncKey, [byte[]]$MacKey, [byte[]]$Salt, [int]$Iterations)
+
+    if ([string]::IsNullOrWhiteSpace($JunosUsername) -or [string]::IsNullOrWhiteSpace($JunosPassword)) {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "No Juniper login configured - set it in the Settings tab, then try again." }
+        return
+    }
+
+    if ($script:PendingScanNetwork) {
+        Send-WebJson -Response $Response -StatusCode 409 -Object @{ error = "A network scan is already in progress"; ip = $script:PendingScanNetwork.StartIP }
+        return
+    }
+
+    $Parsed = $null
+    try { $Parsed = $Body | ConvertFrom-Json } catch {}
+    $StartIP = if ($Parsed -and $Parsed.startIp) { [string]$Parsed.startIp } else { $null }
+
+    if (-not $StartIP -or $StartIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing starting IP address" }
+        return
+    }
+
+    $ProgressTable = [hashtable]::Synchronized(@{ Visited = 0; QueueDepth = 1; ActiveJobs = 0; Done = $false })
+    $PS = [powershell]::Create().AddCommand("Invoke-FleetCrawl").
+        AddParameter("StartIP", $StartIP).
+        AddParameter("AllowedScopes", $AllowedScopes).
+        AddParameter("MaxConcurrent", [int]$MaxConcurrent).
+        AddParameter("WorkerPath", $WorkerPath).
+        AddParameter("Username", $JunosUsername).
+        AddParameter("Password", $JunosPassword).
+        AddParameter("SnapshotDir", $SnapshotDir).
+        AddParameter("DeviceHistoryLedger", $DeviceHistoryLedger).
+        AddParameter("ProgressTable", $ProgressTable)
+    if ($EncKey) { $PS.AddParameter("EncKey", $EncKey).AddParameter("MacKey", $MacKey).AddParameter("Salt", $Salt).AddParameter("Iterations", $Iterations) | Out-Null }
+
+    # Invoke-FleetCrawl itself is defined in the caller's session state (dot-sourced at the
+    # top of this file) - a fresh [powershell]::Create() runspace does NOT inherit that by
+    # default, so the function definition has to travel into the new runspace explicitly.
+    $InitialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    $FleetCrawlPath = Join-Path $PSScriptRoot "Invoke-FleetCrawl.ps1"
+    $InitialState.StartupScripts.Add($FleetCrawlPath) | Out-Null
+    $Runspace = [runspacefactory]::CreateRunspace($InitialState)
+    $Runspace.Open()
+    $PS.Runspace = $Runspace
+
+    $Handle = $PS.BeginInvoke()
+    $script:PendingScanNetwork = [PSCustomObject]@{ PS = $PS; Runspace = $Runspace; Handle = $Handle; StartIP = $StartIP; StartTime = (Get-Date); ProgressTable = $ProgressTable }
+    Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; startIp = $StartIP }
+}
+
+# Polled by the browser every ~2s while a scan is outstanding. Unlike Invoke-RescanStatusAction
+# (one device, small/bounded runtime), a full fleet crawl can run for many minutes - no
+# client-side timeout ceiling is imposed here; the browser just keeps polling until it sees
+# "complete". Returns the FULL decrypted topology inline on completion (not a second file
+# fetch) - Invoke-FleetCrawl already holds it all in memory at that point, so there is
+# nothing to gain by writing it to disk and reading it straight back over a new endpoint,
+# and doing so would mean adding new file-serving surface rooted outside $VisualizerRoot.
+function Invoke-ScanNetworkStatusAction {
+    param($Response)
+
+    if (-not $script:PendingScanNetwork) {
+        Send-WebJson -Response $Response -StatusCode 404 -Object @{ error = "No scan is currently running or was ever started this session" }
+        return
+    }
+
+    $Job = $script:PendingScanNetwork
+
+    if ($Job.Handle.IsCompleted) {
+        $script:PendingScanNetwork = $null
+        try {
+            $Result = $Job.PS.EndInvoke($Job.Handle)
+        } catch {
+            $Job.PS.Dispose(); $Job.Runspace.Dispose()
+            Send-WebJson -Response $Response -StatusCode 200 -Depth 20 -Object @{ status = "complete"; ok = $false; reason = "Scan failed: $_" }
+            return
+        }
+        $Job.PS.Dispose(); $Job.Runspace.Dispose()
+
+        if (-not $Result -or -not $Result.Topology) {
+            Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "complete"; ok = $false; reason = "Scan produced no data - see server console/debug log" }
+            return
+        }
+
+        Send-WebJson -Response $Response -StatusCode 200 -Depth 30 -Object @{
+            status = "complete"; ok = $true
+            topology = $Result.Topology; scanTimestamp = $Result.ScanTimestampIso
+            outputFile = (Split-Path $Result.OutputFile -Leaf); visitedCount = $Result.VisitedCount
+        }
+        return
+    }
+
+    Send-WebJson -Response $Response -StatusCode 200 -Object @{
+        status = "running"; startIp = $Job.StartIP
+        elapsedSeconds = [math]::Round(((Get-Date) - $Job.StartTime).TotalSeconds)
+        visited = $Job.ProgressTable.Visited; queueDepth = $Job.ProgressTable.QueueDepth; activeJobs = $Job.ProgressTable.ActiveJobs
+    }
+}
+
 # Serves the current Configuration.json.enc envelope as-is (still encrypted - the browser
 # decrypts client-side with a human-typed password, exactly like NetworkMap files). 404
 # with a JSON body (not the generic Invoke-StaticFile 404) so the browser can tell "no
@@ -382,6 +490,14 @@ function Start-MapperWebServer {
         [Parameter(Mandatory=$true)][AllowNull()][AllowEmptyString()][string]$EncryptionPassword,
         [string]$JunosUsername = "",
         [string]$JunosPassword = "",
+        [Parameter(Mandatory=$true)][int]$MaxConcurrent,
+        [Parameter(Mandatory=$true)][string[]]$AllowedScopes,
+        [Parameter(Mandatory=$true)][string]$SnapshotDir,
+        [Parameter(Mandatory=$true)][string]$DeviceHistoryLedger,
+        [byte[]]$EncKey,
+        [byte[]]$MacKey,
+        [byte[]]$Salt,
+        [int]$Iterations,
         [int]$Port = 8787
     )
 
@@ -402,6 +518,7 @@ function Start-MapperWebServer {
     $script:RescanPool.Open()
     $script:PendingScan = $null
     $script:OrphanedScans = [System.Collections.Generic.List[object]]::new()
+    $script:PendingScanNetwork = $null
 
     Write-Host "`nWeb UI listening on $Prefix (localhost only - Ctrl+C to stop)" -ForegroundColor Cyan
     Start-Process $Prefix
@@ -434,6 +551,17 @@ function Start-MapperWebServer {
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
                     $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
                     Invoke-RescanStatusAction -Response $Response -JobId $JobId
+                } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/scan-network") {
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
+                        $Body = $Reader.ReadToEnd()
+                        $Reader.Close()
+                        Invoke-ScanNetworkAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations $Iterations
+                    }
+                } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/scan-network/status") {
+                    Invoke-ScanNetworkStatusAction -Response $Response
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/config") {
                     Invoke-GetConfigAction -Response $Response -ConfigPath $ConfigPath
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/save-config") {
@@ -457,6 +585,7 @@ function Start-MapperWebServer {
         $Listener.Close()
         if ($script:PendingScan) { try { $script:PendingScan.PS.Stop() } catch {}; $script:PendingScan.PS.Dispose() }
         foreach ($Orphan in $script:OrphanedScans) { try { $Orphan.PS.Stop() } catch {}; $Orphan.PS.Dispose() }
+        if ($script:PendingScanNetwork) { try { $script:PendingScanNetwork.PS.Stop() } catch {}; $script:PendingScanNetwork.PS.Dispose(); $script:PendingScanNetwork.Runspace.Dispose() }
         $script:RescanPool.Close()
         $script:RescanPool.Dispose()
     }
