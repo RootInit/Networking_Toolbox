@@ -271,6 +271,24 @@ function Invoke-ScanNetworkAction {
         return
     }
 
+    # Opportunistically reap a finished scan job before deciding whether a new one can
+    # start - same shape as Invoke-RescanAction's orphan reaping above. Without this, a
+    # scan that finished but whose result the browser never polled again (tab closed,
+    # page reloaded after the last poll) would sit in $script:PendingScanNetwork forever,
+    # 409-ing every future "Scan Network" click even though nothing is actually running.
+    # If Invoke-ScanNetworkStatusAction already cached the outcome (.Collected), the
+    # PS/Runspace are already disposed and this just clears the slot; if a poll never
+    # arrived at all, collect it here so the runspace/pool resources aren't leaked.
+    if ($script:PendingScanNetwork -and $script:PendingScanNetwork.Handle.IsCompleted) {
+        $Finished = $script:PendingScanNetwork
+        if (-not $Finished.Collected) {
+            try { $Finished.PS.EndInvoke($Finished.Handle) | Out-Null } catch {}
+            try { $Finished.PS.Dispose() } catch {}
+            try { $Finished.Runspace.Dispose() } catch {}
+        }
+        $script:PendingScanNetwork = $null
+    }
+
     if ($script:PendingScanNetwork) {
         Send-WebJson -Response $Response -StatusCode 409 -Object @{ error = "A network scan is already in progress"; ip = $script:PendingScanNetwork.StartIP }
         return
@@ -285,6 +303,14 @@ function Invoke-ScanNetworkAction {
         return
     }
 
+    # A fixed path next to the snapshot output, mirroring the CLI crawl path's own
+    # -DebugLogPath (Start-NetworkMapper.ps1's $DebugLog) - without this,
+    # Invoke-FleetCrawl's internal Write-DebugLogLocal is a total no-op for every
+    # web-triggered scan (see Invoke-ScanNetworkStatusAction's failure message, which
+    # otherwise points at a debug log that was never written) and a failed web scan is
+    # undiagnosable. Overwritten (not appended) per crawl, same as the CLI path.
+    $DebugLogPath = Join-Path $SnapshotDir "ScanNetwork_Debug.log"
+
     $ProgressTable = [hashtable]::Synchronized(@{ Visited = 0; QueueDepth = 1; ActiveJobs = 0; Done = $false })
     $PS = [powershell]::Create().AddCommand("Invoke-FleetCrawl").
         AddParameter("StartIP", $StartIP).
@@ -295,7 +321,8 @@ function Invoke-ScanNetworkAction {
         AddParameter("Password", $JunosPassword).
         AddParameter("SnapshotDir", $SnapshotDir).
         AddParameter("DeviceHistoryLedger", $DeviceHistoryLedger).
-        AddParameter("ProgressTable", $ProgressTable)
+        AddParameter("ProgressTable", $ProgressTable).
+        AddParameter("DebugLogPath", $DebugLogPath)
     if ($EncKey) { $PS.AddParameter("EncKey", $EncKey).AddParameter("MacKey", $MacKey).AddParameter("Salt", $Salt).AddParameter("Iterations", $Iterations) | Out-Null }
 
     # Invoke-FleetCrawl itself is defined in the caller's session state (dot-sourced at the
@@ -309,7 +336,11 @@ function Invoke-ScanNetworkAction {
     $PS.Runspace = $Runspace
 
     $Handle = $PS.BeginInvoke()
-    $script:PendingScanNetwork = [PSCustomObject]@{ PS = $PS; Runspace = $Runspace; Handle = $Handle; StartIP = $StartIP; StartTime = (Get-Date); ProgressTable = $ProgressTable }
+    # Collected/Outcome: filled in once by Invoke-ScanNetworkStatusAction the first time it
+    # observes completion (see that function) so a completed result can be re-served
+    # idempotently to every later poll instead of being destructively consumed by the
+    # first one.
+    $script:PendingScanNetwork = [PSCustomObject]@{ PS = $PS; Runspace = $Runspace; Handle = $Handle; StartIP = $StartIP; StartTime = (Get-Date); ProgressTable = $ProgressTable; Collected = $false; Outcome = $null }
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; startIp = $StartIP }
 }
 
@@ -331,26 +362,56 @@ function Invoke-ScanNetworkStatusAction {
     $Job = $script:PendingScanNetwork
 
     if ($Job.Handle.IsCompleted) {
-        $script:PendingScanNetwork = $null
-        try {
-            $Result = $Job.PS.EndInvoke($Job.Handle)
-        } catch {
-            $Job.PS.Dispose(); $Job.Runspace.Dispose()
-            Send-WebJson -Response $Response -StatusCode 200 -Depth 20 -Object @{ status = "complete"; ok = $false; reason = "Scan failed: $_" }
-            return
-        }
-        $Job.PS.Dispose(); $Job.Runspace.Dispose()
+        # Collect (EndInvoke + Dispose) exactly once, the first poll that observes
+        # completion, and cache the outcome on the job object itself. Every later poll
+        # (including one after $Job has been left in $script:PendingScanNetwork for a
+        # while - see Invoke-ScanNetworkAction's reap-before-409, which is what eventually
+        # clears this slot) re-serves the SAME cached outcome instead of calling EndInvoke
+        # a second time (which throws - a PSDataCollection handle can only be ended once)
+        # or losing the result entirely. This is what makes a completed scan's result
+        # readable more than once.
+        if (-not $Job.Collected) {
+            try {
+                $Result = $Job.PS.EndInvoke($Job.Handle)
+                # $Result is the PSDataCollection[PSObject] EndInvoke wraps the pipeline
+                # output in. Invoke-FleetCrawl returns exactly one hashtable via `return
+                # @{ Topology = ...; ... }`, so $Result normally holds exactly one item -
+                # index into it explicitly rather than dotting straight into $Result.
+                # Dotting (e.g. $Result.Topology) is PowerShell member enumeration: for a
+                # 1-item collection it unwraps straight through to that single item's own
+                # .Topology property, so when the crawl finds exactly 1 device,
+                # $Result.Topology would be the bare device PSCustomObject rather than the
+                # actual List[object] the function returned - and ConvertTo-Json would then
+                # emit "topology":{...} instead of "topology":[{...}], breaking the
+                # browser's data.Topology.forEach(...) in readSnapshotFile. Indexing
+                # ($Result[0]) always returns the real return value regardless of item
+                # count, so .Topology off of THAT is always the actual List[object] -
+                # ConvertTo-Json then always renders it as an array ([], [{...}], or
+                # [{...},{...}]) no matter how many devices were visited.
+                $Payload = if ($Result -and $Result.Count -gt 0) { $Result[0] } else { $null }
 
-        if (-not $Result -or -not $Result.Topology) {
-            Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "complete"; ok = $false; reason = "Scan produced no data - see server console/debug log" }
-            return
+                if (-not $Payload -or -not $Payload.Topology) {
+                    $Job.Outcome = @{ status = "complete"; ok = $false; reason = "Scan produced no data - see server console/debug log" }
+                } else {
+                    $Job.Outcome = @{
+                        status = "complete"; ok = $true
+                        topology = $Payload.Topology; scanTimestamp = $Payload.ScanTimestampIso
+                        outputFile = (Split-Path $Payload.OutputFile -Leaf); visitedCount = $Payload.VisitedCount
+                    }
+                }
+            } catch {
+                $Job.Outcome = @{ status = "complete"; ok = $false; reason = "Scan failed: $_" }
+            }
+            try { $Job.PS.Dispose() } catch {}
+            try { $Job.Runspace.Dispose() } catch {}
+            $Job.Collected = $true
         }
 
-        Send-WebJson -Response $Response -StatusCode 200 -Depth 30 -Object @{
-            status = "complete"; ok = $true
-            topology = $Result.Topology; scanTimestamp = $Result.ScanTimestampIso
-            outputFile = (Split-Path $Result.OutputFile -Leaf); visitedCount = $Result.VisitedCount
-        }
+        # -Depth 100 matches Invoke-FleetCrawl.ps1's Write-TopologyOutputLocal (the
+        # file-write path) - this endpoint serializes the exact same device-object shape
+        # inline, and the old -Depth 30 here risked ConvertTo-Json silently truncating a
+        # deeply-nested topology into type-name strings past the depth limit.
+        Send-WebJson -Response $Response -StatusCode 200 -Depth 100 -Object $Job.Outcome
         return
     }
 
@@ -585,7 +646,14 @@ function Start-MapperWebServer {
         $Listener.Close()
         if ($script:PendingScan) { try { $script:PendingScan.PS.Stop() } catch {}; $script:PendingScan.PS.Dispose() }
         foreach ($Orphan in $script:OrphanedScans) { try { $Orphan.PS.Stop() } catch {}; $Orphan.PS.Dispose() }
-        if ($script:PendingScanNetwork) { try { $script:PendingScanNetwork.PS.Stop() } catch {}; $script:PendingScanNetwork.PS.Dispose(); $script:PendingScanNetwork.Runspace.Dispose() }
+        # .Collected means Invoke-ScanNetworkStatusAction already ran EndInvoke/Dispose on
+        # this job and cached its outcome - Stop()/Dispose() again here would double-dispose
+        # the PS/Runspace, so only tear down a job that never got collected.
+        if ($script:PendingScanNetwork -and -not $script:PendingScanNetwork.Collected) {
+            try { $script:PendingScanNetwork.PS.Stop() } catch {}
+            try { $script:PendingScanNetwork.PS.Dispose() } catch {}
+            try { $script:PendingScanNetwork.Runspace.Dispose() } catch {}
+        }
         $script:RescanPool.Close()
         $script:RescanPool.Dispose()
     }
