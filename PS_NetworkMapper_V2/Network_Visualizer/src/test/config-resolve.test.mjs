@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { extractDeviceKeys, resolveDeviceLocation, bestKeyForSave } from '../config-resolve.js';
 
 const STANDALONE = { DeviceIP: '10.0.0.1', Hostname: 'sw1', StackMembers: [{ Serial: 'SER1', Role: 'Standalone' }] };
-const STACK = { DeviceIP: '10.0.0.2', Hostname: 'sw2', StackMembers: [{ Serial: 'S-BACKUP', Role: 'Backup' }, { Serial: 'S-MASTER', Role: 'Master' }] };
+const STACK = { DeviceIP: '10.0.0.2', Hostname: 'sw2', StackMembers: [{ Serial: 'S-MASTER', Role: 'Master' }, { Serial: 'S-BACKUP', Role: 'Backup' }] };
 const NO_SERIAL = { DeviceIP: '10.0.0.3', Hostname: 'sw3', StackMembers: [] };
 const NO_SERIAL_NO_HOSTNAME = { DeviceIP: '10.0.0.4', Hostname: 'Unknown', StackMembers: [] };
 
@@ -43,6 +43,22 @@ test('resolveDeviceLocation falls back to hostname when no serial entry matches'
 test('resolveDeviceLocation falls back to ip as a last resort', () => {
   const entries = [{ key: '10.0.0.4', keyType: 'ip', building: 'By IP' }];
   assert.equal(resolveDeviceLocation(NO_SERIAL_NO_HOSTNAME, entries).building, 'By IP');
+});
+
+test('resolveDeviceLocation prefers serial over hostname when both entries exist', () => {
+  const entries = [
+    { key: 'sw1', keyType: 'hostname', building: 'Wrong (hostname-keyed)' },
+    { key: 'SER1', keyType: 'serial', building: 'Right (serial-keyed)' },
+  ];
+  assert.equal(resolveDeviceLocation(STANDALONE, entries).building, 'Right (serial-keyed)');
+});
+
+test('resolveDeviceLocation prefers hostname over ip when both entries exist', () => {
+  const entries = [
+    { key: '10.0.0.3', keyType: 'ip', building: 'Wrong (ip-keyed)' },
+    { key: 'sw3', keyType: 'hostname', building: 'Right (hostname-keyed)' },
+  ];
+  assert.equal(resolveDeviceLocation(NO_SERIAL, entries).building, 'Right (hostname-keyed)');
 });
 
 test('resolveDeviceLocation returns null when nothing matches', () => {
