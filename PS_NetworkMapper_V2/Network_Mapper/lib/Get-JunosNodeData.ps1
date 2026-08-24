@@ -2,24 +2,23 @@
 param (
     [Parameter(Mandatory=$true)]
     [string]$TargetIP,
-    
-    # Normally passed explicitly by Start-NetworkMapper.ps1 (V2's Auth.json is shared with
-    # PS_NetworkMapper/, not local to this folder) - this default only matters if the
-    # worker is ever invoked standalone.
-    [string]$AuthFile = (Join-Path $PSScriptRoot "..\..\..\PS_NetworkMapper\Network_Mapper\Auth.json"),
-    
+
+    [Parameter(Mandatory=$true)]
+    [string]$Username,
+
+    [Parameter(Mandatory=$true)]
+    [string]$Password,
+
     [switch]$HumanReadable,
-    
+
     # NEW: Only write raw payload text files if this flag is present
-    [switch]$Log 
+    [switch]$Log
 )
 
 $WorkerScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 . (Join-Path $WorkerScriptDir "Connect-JunosSsh.ps1")
 
-$Auth = Get-JunosAuth -AuthFile $AuthFile
-$Username = $Auth.Username
-$AskPass = New-JunosAskPass -Password $Auth.Password
+$AskPass = New-JunosAskPass -Password $Password
 
 # Everything below runs inside a try/finally so the plaintext askpass files
 # (containing the real switch password) are always removed, even on error or exit.
