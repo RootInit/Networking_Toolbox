@@ -306,6 +306,19 @@
         .daisy-badge { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 3px; font-size: 0.65rem; font-weight: bold; cursor: help; }
         .daisy-badge.confirmed { background-color: #16a085; color: white; }
         .daisy-badge.possible { background-color: #f6d55c; color: #6b5600; }
+
+        /* Map view: the hostname label under each marker (a permanent Leaflet tooltip bound
+           in map.js's renderMapMarkers, NOT text inside the marker circle - see
+           iconForClassification's comment for why). Overrides leaflet.css's chunky default
+           tooltip styling down to something label-sized, while keeping enough contrast to
+           stay readable over map tiles. This <style> block comes after the leaflet.css
+           <link> above, so these tie-specificity rules win. */
+        .map-marker-label { font-size: 9px; font-weight: 700; color: #333; background: rgba(255,255,255,0.85); border: none; box-shadow: none; padding: 1px 3px; }
+        /* Leaflet draws the tooltip's callout arrow as a :before on the direction class
+           (.leaflet-tooltip-bottom:before in leaflet.css) - a label pinned directly under a
+           22px marker doesn't need one, and its hardcoded #fff border-color wouldn't match
+           the translucent background above anyway. */
+        .map-marker-label::before { display: none; }
     </style>
 </head>
 <body>

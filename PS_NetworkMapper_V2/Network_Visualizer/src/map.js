@@ -256,22 +256,27 @@ var MARKER_COLORS = {
 
 function iconForClassification(meta) {
     var colors = !meta.scanned ? MARKER_COLORS.unscanned : (meta.isStack ? MARKER_COLORS.scannedStack : MARKER_COLORS.scanned);
-    // Was 26px/8px-single-line, which clipped real hostnames (e.g. "ACCESS-SW-042.local")
-    // mid-word - bumped to 40px and switched the label to wrap onto up to 2 lines (below)
-    // instead of truncating, while staying small enough that clustered markers (see the
-    // reported screenshot - markers sitting close together along a road) don't overlap
-    // each other's labels.
-    var size = 40;
-    // meta.hostname is device-supplied (LLDP/DNS data this app doesn't control) and this
-    // html string is rendered via Leaflet's innerHTML-based divIcon, unlike vis-network's
-    // canvas-drawn (fillText) diagram labels - escape with the same window.esc (utils.js)
-    // every other innerHTML-bound device string in this app already uses.
-    var label = meta.hostname !== 'Unknown' ? window.esc(meta.hostname) : '';
+    // The hostname is NOT drawn inside this circle. Two earlier attempts were: 26px with a
+    // single clipped line, then 40px with wrapped text - a realistic 19-character hostname
+    // ("ACCESS-SW-001.local") still needs four wrapped lines at that font size and overflows
+    // a 40px circle top and bottom. Growing the circle far enough to hold arbitrary text was
+    // the wrong lever anyway: it grows the CLICK target with it, and Leaflet markers default
+    // to bubblingMouseEvents:false (verified in the vendored leaflet.js), so a click landing
+    // on a marker never reaches the map's own click handler - which is exactly how the
+    // location editor places its pin (leafletMap.once('click', onEditorMapClick)). A 40px
+    // marker is 2.4x the area of the original 26px one, so click-to-place-pin silently
+    // failed far more often in the clustered case the bug report screenshotted, leaving the
+    // once-listener armed to misplace the pin on some later unrelated click.
+    //
+    // So: the circle is back to a small, low-collision 22px and carries no text, and the
+    // hostname is a separate permanent Leaflet tooltip anchored below it (see
+    // renderMapMarkers). Tooltips are interactive:false by default (also verified in the
+    // vendored leaflet.js - .leaflet-tooltip is pointer-events:none in leaflet.css), so the
+    // label adds no clickable area at all: only the small circle stays clickable.
+    var size = 22;
     var html = '<div style="width:' + size + 'px;height:' + size + 'px;border-radius:' + (meta.isStack ? '30%' : '50%') +
         ';background:' + colors.background + ';border:2px solid ' + colors.border +
-        ';display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;line-height:1.05;' +
-        'color:#333;text-align:center;overflow:hidden;box-sizing:border-box;padding:2px;' +
-        'white-space:normal;word-break:break-word;box-shadow:0 1px 3px rgba(0,0,0,0.4);">' + label + '</div>';
+        ';box-shadow:0 1px 3px rgba(0,0,0,0.4);box-sizing:border-box;"></div>';
     return L.divIcon({ className: '', html: html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
 
@@ -326,6 +331,24 @@ window.renderMapMarkers = function() {
 
         placedByIp.set(ip, { lat: entry.lat, lng: entry.lng });
         var marker = L.marker([entry.lat, entry.lng], { icon: iconForClassification(meta) }).addTo(leafletMap);
+        // The hostname label lives here, not inside the marker's circle - see
+        // iconForClassification's comment for why (text inside the circle either clips or
+        // forces the circle - and with it the click target - to grow). permanent:true shows
+        // it without a hover; direction 'bottom' + the offset below clear the 22px circle so
+        // the two never overlap, and the tooltip is free to be as wide as the hostname needs
+        // since nothing clips it. Non-interactive by Leaflet's default, so it adds no
+        // clickable area (see .leaflet-tooltip's pointer-events:none in leaflet.css).
+        //
+        // window.esc is REQUIRED here despite the option being called plain content:
+        // Leaflet's DivOverlay._updateContent does `contentNode.innerHTML = content` for a
+        // STRING content (verified in the vendored leaflet.js) - it is not a textContent
+        // assignment - so an unescaped device-supplied hostname would be an XSS sink exactly
+        // like the divIcon html was.
+        if (meta.hostname !== 'Unknown') {
+            marker.bindTooltip(window.esc(meta.hostname), {
+                permanent: true, direction: 'bottom', offset: [0, 8], className: 'map-marker-label',
+            });
+        }
         marker.on('click', function () { window.openRightDrawer(ip); });
         // Spec ("In-app editor", Architecture item 8): the editor is reachable from an
         // Unplaced-Devices row OR from an existing marker's popup ("Edit location") - only
