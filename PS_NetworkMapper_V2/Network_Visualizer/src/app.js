@@ -58,6 +58,9 @@ var activeSnapshotIndex = -1;
 // see window.switchSidebarTab. Used so a file load can refresh the Analysis Dashboard
 // live when it's already the visible tab, instead of only on tab-switch.
 var activeSidebarTab = 'sidebar-tab-load';
+// Which center-panel view (Diagram / Map) is showing - see window.switchCenterView in
+// map.js. Same cross-cutting UI-mode pattern as activeSidebarTab above.
+var activeCenterView = 'diagram';
 
 // Search index (see search.js's window.buildSearchIndex / window.performGlobalSearch) -
 // built once per file load instead of re-scanning every device's nested StackMembers/
