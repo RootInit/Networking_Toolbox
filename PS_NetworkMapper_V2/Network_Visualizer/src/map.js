@@ -10,6 +10,13 @@ var leafletMap = null;
 var mapMarkersByIp = new Map();
 var mapConfigEntries = [];      // decrypted Configuration.json's devices[], or [] if none loaded yet
 var mapConfigLoaded = false;    // true once a GET /api/config attempt (success OR "no file yet") has completed
+// True once fitBounds has ever run against real markers. renderMapMarkers is now called
+// from every place topology data can change (new snapshot, single-device rescan), not just
+// from the original three call sites - re-fitting the camera on every one of those would
+// reset the user's pan/zoom every time a rescan completes or a snapshot switches, which is
+// worse than the stale-map bug this is fixing. Only the very first time markers appear
+// does the camera auto-frame; every re-render after that only touches markers/edges.
+var hasFitBoundsOnce = false;
 
 window.switchCenterView = function(view) {
     activeCenterView = view;
@@ -23,16 +30,53 @@ window.switchCenterView = function(view) {
     document.getElementById('mapUnplacedPanel').style.display = (view === 'map') ? 'block' : 'none';
     document.getElementById('btn-center-view-diagram').classList.toggle('active', view === 'diagram');
     document.getElementById('btn-center-view-map').classList.toggle('active', view === 'map');
+    // Same leak class as #mapStatusNote above (see the comment there, fixed in d5e884c) -
+    // a second instance the final review caught: the floating Save button is a sibling of
+    // #mapview too, so it isn't covered by the display-toggling above and would otherwise
+    // float over the diagram canvas whenever pending edits exist and the user switches away.
+    // Hidden (not removed) here so it reappears correctly on the next switch back to Map
+    // without losing the pending-edit count it's tracking.
+    var saveBtn = document.getElementById('mapSaveConfigBtn');
+    if (saveBtn) saveBtn.style.display = (view === 'map') ? '' : 'none';
 
     if (view !== 'map') return;
+
+    if (leafletMap !== null) {
+        // renderMapMarkers (and any camera move) may have run while #mapview was
+        // display:none (e.g. a snapshot load or single-device rescan that happened while
+        // Diagram view was showing) - Leaflet sizes itself from the container's
+        // clientWidth/clientHeight, which read 0 while hidden, so tiles for the real
+        // viewport were never fetched. invalidateSize() re-measures the now-visible
+        // container and repaints; it does not change the center/zoom itself, so this does
+        // not fight the hasFitBoundsOnce/pan-preservation logic in renderMapMarkers - it
+        // only fixes the rendering, not the framing. Hoisted above the branches below (not
+        // just in the "already loaded" branch) so BOTH re-entry paths - the common "config
+        // already loaded, just returning to Map" case and the rarer "retrying a
+        // previously-failed config load" case - get it, not just one of them.
+        leafletMap.invalidateSize();
+    }
+
     if (leafletMap === null) {
-        window.initMapView();
+        window.initMapView().catch(function (err) {
+            window.showMapStatus('Failed to load map: ' + err.message);
+        });
     } else if (!mapConfigLoaded) {
         // A previous config load attempt was cancelled or failed (see loadMapConfiguration
         // below) - retry it on every return to Map view instead of leaving the view wedged.
         // The Leaflet instance itself is never torn down/recreated for this - only the
         // config fetch+decrypt is re-attempted.
-        window.loadMapConfiguration().then(function () { window.renderMapMarkers(); });
+        window.loadMapConfiguration().then(function () {
+            window.renderMapMarkers();
+        }).catch(function (err) {
+            window.showMapStatus('Failed to load map: ' + err.message);
+        });
+    } else {
+        // If markers appeared for the very first time while this view was hidden,
+        // renderMapMarkers's own maybeFitBoundsToMarkers() call deferred the first fit
+        // rather than fitting against the bogus 0x0 size the container had while hidden -
+        // retry it now that invalidateSize() above has it visible and correctly sized. A
+        // no-op if the first fit already happened, or if there are still no markers.
+        maybeFitBoundsToMarkers();
     }
 };
 
@@ -139,7 +183,30 @@ function iconForClassification(meta) {
     return L.divIcon({ className: '', html: html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
 
+// Only fits the camera to the placed markers the first time markers ever appear - see
+// hasFitBoundsOnce's own comment above. If the map container is currently hidden (the user
+// is on Diagram view while a snapshot load/rescan triggers a re-render), Leaflet's own size
+// (clientWidth/clientHeight) reads 0x0 and both invalidateSize/fitBounds would compute
+// against that bogus size - so this defers instead of fitting against garbage; the pending
+// first-fit is retried by switchCenterView the next time the user actually returns to Map
+// view (see the `else` branch there).
+function maybeFitBoundsToMarkers() {
+    if (hasFitBoundsOnce || mapMarkersByIp.size === 0) return;
+    var container = document.getElementById('mapview');
+    if (!container || container.style.display !== 'block') return; // hidden - retry later
+    leafletMap.invalidateSize();
+    leafletMap.fitBounds(L.featureGroup(Array.from(mapMarkersByIp.values())).getBounds(), { padding: [40, 40] });
+    hasFitBoundsOnce = true;
+}
+
 window.renderMapMarkers = function() {
+    // Safe to call unconditionally from anywhere in the app (a new snapshot loading, a
+    // single-device rescan merging) even if Map view has never been opened this session -
+    // Leaflet itself (leafletMap) only exists once initMapView has run at least once, so
+    // there is nothing to update yet; the next actual switch to Map view runs initMapView
+    // and renders from current data normally.
+    if (leafletMap === null) return;
+
     mapMarkersByIp.forEach(function (marker) { leafletMap.removeLayer(marker); });
     mapMarkersByIp.clear();
     if (window.mapEdgeLayer) { leafletMap.removeLayer(window.mapEdgeLayer); window.mapEdgeLayer = null; }
@@ -153,10 +220,41 @@ window.renderMapMarkers = function() {
         if (!device) return; // unscanned neighbors have no chassis/serial data to resolve a location from
         var entry = window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries);
         if (!entry) return;
+        // /api/save-config only validates that a `devices` key exists on the request body,
+        // not the shape of each entry - a hand-crafted POST (e.g. via curl) could write a
+        // malformed entry with a missing/non-numeric lat or lng. L.marker/L.polyline throw
+        // Leaflet's own "Invalid LatLng object" on a non-finite coordinate, which - since
+        // this runs inside a forEach with no per-entry try/catch - would abort the rest of
+        // this render pass (later markers, the edge layer, the Unplaced list all never
+        // render) with no visible error, wedging the map. Skip the bad entry instead.
+        if (!Number.isFinite(entry.lat) || !Number.isFinite(entry.lng)) {
+            console.warn('Skipping map location entry with invalid lat/lng for device ' + ip, entry);
+            return;
+        }
 
         placedByIp.set(ip, { lat: entry.lat, lng: entry.lng });
         var marker = L.marker([entry.lat, entry.lng], { icon: iconForClassification(meta) }).addTo(leafletMap);
         marker.on('click', function () { window.openRightDrawer(ip); });
+        // Spec ("In-app editor", Architecture item 8): the editor is reachable from an
+        // Unplaced-Devices row OR from an existing marker's popup ("Edit location") - only
+        // the first half existed before this fix. Built via DOM methods (not innerHTML),
+        // same reasoning as renderUnplacedDevicesList's escaping below: nothing here embeds
+        // device-supplied data into markup via string concatenation. This is a second,
+        // independent way to open the same window.openLocationEditor(ip) the Unplaced list
+        // already calls - openLocationEditor itself doesn't change for a device that
+        // already has a location.
+        var popupEl = document.createElement('div');
+        var editLink = document.createElement('a');
+        editLink.href = '#';
+        editLink.textContent = 'Edit location';
+        editLink.style.cssText = 'color:var(--accent); cursor:pointer;';
+        editLink.addEventListener('click', function (evt) {
+            evt.preventDefault();
+            marker.closePopup(); // the popup would otherwise sit over the map, blocking the click-to-place-pin the editor is about to ask for - same failure class as Task 12's modal-backdrop bug
+            window.openLocationEditor(ip);
+        });
+        popupEl.appendChild(editLink);
+        marker.bindPopup(popupEl);
         mapMarkersByIp.set(ip, marker);
     });
 
@@ -169,9 +267,7 @@ window.renderMapMarkers = function() {
     });
     window.mapEdgeLayer = L.layerGroup(lines).addTo(leafletMap);
 
-    if (mapMarkersByIp.size > 0) {
-        leafletMap.fitBounds(L.featureGroup(Array.from(mapMarkersByIp.values())).getBounds(), { padding: [40, 40] });
-    }
+    maybeFitBoundsToMarkers();
 
     window.renderUnplacedDevicesList(classification, deviceByIpLocal, placedByIp);
 };
@@ -187,7 +283,12 @@ window.revealDeviceOnMap = function(ip) {
 
 var editorTargetIp = null;
 var editorPendingLatLng = null;
-var pendingConfigEdits = new Map(); // key (from bestKeyForSave) -> full entry object, accumulated across edits until Save
+// keyType+':'+key (from bestKeyForSave) -> { entry, deviceIp }, accumulated across edits
+// until Save. deviceIp is carried alongside the entry (not just the entry itself) so
+// saveConfiguration can look the device back up via deviceByIp and collapse any of its
+// OTHER stale-keyed entries at save time - see saveConfiguration's own comment below for
+// why that lookup, not just the map key, is what makes the collapse possible.
+var pendingConfigEdits = new Map();
 
 // Named (not inline) so closeLocationEditor can `off` it below - `leafletMap.once` still
 // only ever fires it a single time per registration, but without a name, re-opening the
@@ -235,7 +336,7 @@ window.commitLocationEdit = function() {
         room: document.getElementById('editorRoom').value,
         notes: document.getElementById('editorNotes').value,
     };
-    pendingConfigEdits.set(keyInfo.keyType + ':' + keyInfo.key, entry);
+    pendingConfigEdits.set(keyInfo.keyType + ':' + keyInfo.key, { entry: entry, deviceIp: String(editorTargetIp) });
     window.closeLocationEditor();
     window.showMapStatus(pendingConfigEdits.size + ' unsaved change(s) - click Save Configuration to write them.');
     window.renderSaveConfigButton();
@@ -258,19 +359,38 @@ window.renderSaveConfigButton = function() {
 };
 
 window.saveConfiguration = async function() {
-    // Merge pending edits over the currently-loaded config entries: an untouched entry
-    // (its key+keyType never appears in pendingConfigEdits) survives unchanged, and a
-    // pending edit for a device that already had an entry under the *same* key+keyType
-    // replaces it in place. This does NOT collapse a device across a keyType change - an
-    // edit that resolves to a device's serial (bestKeyForSave prefers serial when
-    // available) is keyed 'serial:X', a completely different map key from any pre-existing
-    // 'hostname:Y'/'ip:Z' entry for that same physical device, so the stale entry would
-    // survive alongside the new one rather than being replaced. Harmless in practice since
-    // resolveDeviceLocation (config-resolve.js) checks serial before hostname/ip and would
-    // resolve to the newer entry either way, but it is a latent duplicate this merge does
-    // not clean up.
+    // Merge pending edits over the currently-loaded config entries. An untouched entry
+    // (its key+keyType never appears in pendingConfigEdits) survives unchanged.
+    //
+    // Before inserting each pending edit's entry, collapse any STALE entry left behind by a
+    // key change: if a device was saved once under one key (e.g. hostname-keyed, because it
+    // had no serial yet) and is now being edited again after its keys changed (e.g. a
+    // rescan gave it a serial, so bestKeyForSave now returns the serial key), the old
+    // hostname-keyed entry would otherwise never be removed - saveConfiguration only ever
+    // added/updated by the NEW key, leaving the stale old-keyed entry sitting in
+    // Configuration.json.enc forever. That's not just clutter: resolveDeviceLocation
+    // (config-resolve.js) matches purely on `entry.key === value` within a keyType tier
+    // with no binding to which device created the entry, so if that old key is ever reused
+    // by a DIFFERENT device before that device's own serial is captured, resolution could
+    // silently attach the new device to the old device's stale saved location.
+    //
+    // extractDeviceKeys(device) gives the device's full set of CURRENT candidate keys
+    // (serial/hostname/ip, whichever are non-null) - not just the one key this particular
+    // edit happens to be saved under - so this removes every one of them from `merged`,
+    // regardless of which tier the device used to be keyed by, before inserting the new
+    // entry under its (possibly different) current key.
     var merged = new Map(mapConfigEntries.map(function (e) { return [e.keyType + ':' + e.key, e]; }));
-    pendingConfigEdits.forEach(function (entry, k) { merged.set(k, entry); });
+    pendingConfigEdits.forEach(function (pending) {
+        var device = deviceByIp.get(pending.deviceIp);
+        if (device) {
+            var keys = window.ConfigResolve.extractDeviceKeys(device);
+            ['serial', 'hostname', 'ip'].forEach(function (keyType) {
+                var value = keys[keyType];
+                if (value !== null && value !== undefined) merged.delete(keyType + ':' + value);
+            });
+        }
+        merged.set(pending.entry.keyType + ':' + pending.entry.key, pending.entry);
+    });
     var devices = Array.from(merged.values());
 
     var resp;

@@ -91,6 +91,14 @@ window.setActiveSnapshot = async function(index) {
 
     var switcher = document.getElementById('snapshotSwitcher');
     if (switcher) switcher.value = String(index);
+
+    // The map view (map.js) has its own rendering of this same topology data - without
+    // this, switching snapshots only ever rebuilt the diagram, so a Map view opened before
+    // this switch (or before any snapshot was ever loaded) would keep showing whatever it
+    // showed last, silently, for the rest of the session. renderMapMarkers is a no-op if
+    // Map view has never been initialized this session (see its own leafletMap===null
+    // guard), and re-renders in place (no camera reset) if it has.
+    window.renderMapMarkers();
 };
 
 // Shows the snapshot picker only when more than one snapshot is loaded - for the common

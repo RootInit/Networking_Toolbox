@@ -214,6 +214,14 @@ window.mergeRescannedDevice = function(freshDevice) {
     // limitation: a structural change (new/removed LLDP neighbor) won't show as a new
     // edge until the graph is fully reloaded.
     if (window.refreshNodeVisual) window.refreshNodeVisual(ip);
+
+    // Same "the map has its own rendering of this data" reasoning as setActiveSnapshot
+    // (app.js) - a rescanned device's freshly-resolved location (or a chassis serial that
+    // now resolves where it didn't before) should show up on the map too, not just the
+    // diagram. No-op if Map view was never opened this session (renderMapMarkers's own
+    // leafletMap===null guard) and does not reset the user's pan/zoom if it has been
+    // (hasFitBoundsOnce in map.js).
+    if (window.renderMapMarkers) window.renderMapMarkers();
 };
 
 window.openRightDrawer = function(ip) {
