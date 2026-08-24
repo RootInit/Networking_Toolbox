@@ -293,7 +293,6 @@ window.revealDeviceOnMap = function(ip) {
 };
 
 var editorTargetIp = null;
-var editorPendingLatLng = null;
 // keyType+':'+key (from bestKeyForSave) -> { entry, deviceIp }, accumulated across edits
 // until Save. deviceIp is carried alongside the entry (not just the entry itself) so
 // saveConfiguration can look the device back up via deviceByIp and collapse any of its
@@ -305,31 +304,38 @@ var pendingConfigEdits = new Map();
 // only ever fires it a single time per registration, but without a name, re-opening the
 // editor (or opening/cancelling repeatedly without ever clicking the map) stacks up
 // once-listeners that Leaflet never got the chance to auto-remove, and each stale one would
-// still overwrite editorPendingLatLng if the map were ever clicked afterward for an
-// unrelated reason. Cheap to avoid, so it's handled explicitly rather than left as
+// still overwrite #editorLat/#editorLng's values if the map were ever clicked afterward for
+// an unrelated reason. Cheap to avoid, so it's handled explicitly rather than left as
 // benign-but-untidy.
 function onEditorMapClick(e) {
-    editorPendingLatLng = e.latlng;
+    document.getElementById('editorLat').value = e.latlng.lat.toFixed(6);
+    document.getElementById('editorLng').value = e.latlng.lng.toFixed(6);
     window.showMapStatus('Pin placed at ' + e.latlng.lat.toFixed(5) + ', ' + e.latlng.lng.toFixed(5) + ' - fill in the form and click Set Pin.');
 }
 
 window.openLocationEditor = function(ip) {
     editorTargetIp = ip;
-    editorPendingLatLng = null;
     var device = deviceByIp.get(String(ip));
     document.getElementById('editorDeviceLabel').textContent = 'Set Location: ' + (device && device.Hostname !== 'Unknown' ? device.Hostname : ip);
     // This editor is reachable two ways (see renderMapMarkers's "Edit location" popup link
     // comment above): from the Unplaced Devices list, where the device by definition has no
     // resolved location yet, and from an already-placed marker's own popup, where it does.
     // Blanking the form unconditionally was correct for the first case but silently
-    // discarded the existing building/room/notes for the second the moment the user hit
-    // Save (commitLocationEdit always writes whatever the form currently holds) - prefill
-    // from the existing resolved entry when there is one, so re-saving without touching
-    // these fields preserves them instead of wiping them to empty strings.
+    // discarded the existing building/room/notes (and now lat/lng) for the second the moment
+    // the user hit Save (commitLocationEdit always writes whatever the form currently holds)
+    // - prefill from the existing resolved entry when there is one, so re-saving without
+    // touching these fields preserves them instead of wiping them to empty strings, and so
+    // editing an already-placed device shows its real current coordinates instead of
+    // requiring a re-click just to have something valid to save.
     var existing = device ? window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries) : null;
     document.getElementById('editorBuilding').value = existing ? (existing.building || '') : '';
     document.getElementById('editorRoom').value = existing ? (existing.room || '') : '';
     document.getElementById('editorNotes').value = existing ? (existing.notes || '') : '';
+    // Number.isFinite guard (not `existing.lat || ''`) because `|| ''` would blank a
+    // legitimate 0 latitude/longitude (e.g. a device placed exactly on the equator/prime
+    // meridian) - unlikely for this app's real data, but the guard costs nothing.
+    document.getElementById('editorLat').value = (existing && Number.isFinite(existing.lat)) ? existing.lat : '';
+    document.getElementById('editorLng').value = (existing && Number.isFinite(existing.lng)) ? existing.lng : '';
     document.getElementById('location-editor-modal').style.display = 'flex';
 
     leafletMap.once('click', onEditorMapClick);
@@ -339,19 +345,20 @@ window.closeLocationEditor = function() {
     document.getElementById('location-editor-modal').style.display = 'none';
     leafletMap.off('click', onEditorMapClick);
     editorTargetIp = null;
-    editorPendingLatLng = null;
 };
 
 window.commitLocationEdit = function() {
-    if (!editorPendingLatLng) {
-        window.showMapStatus('Click a spot on the map first.');
+    var lat = parseFloat(document.getElementById('editorLat').value);
+    var lng = parseFloat(document.getElementById('editorLng').value);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        window.showMapStatus('Enter valid latitude/longitude - click a spot on the map, or type coordinates directly.');
         return;
     }
     var device = deviceByIp.get(String(editorTargetIp));
     var keyInfo = window.ConfigResolve.bestKeyForSave(device);
     var entry = {
         key: keyInfo.key, keyType: keyInfo.keyType,
-        lat: editorPendingLatLng.lat, lng: editorPendingLatLng.lng,
+        lat: lat, lng: lng,
         building: document.getElementById('editorBuilding').value,
         room: document.getElementById('editorRoom').value,
         notes: document.getElementById('editorNotes').value,

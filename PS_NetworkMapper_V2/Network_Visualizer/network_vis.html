@@ -527,7 +527,11 @@
         <div style="background:var(--panel-bg); width:360px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); overflow:hidden; pointer-events:auto;">
             <div class="drawer-header"><h2 id="editorDeviceLabel">Set Location</h2></div>
             <div style="padding:18px;">
-                <p style="font-size:0.82rem; color:#666; margin:0 0 12px;">Click a spot on the map to place this device, then fill in the details below.</p>
+                <p style="font-size:0.82rem; color:#666; margin:0 0 12px;">Click a spot on the map to place this device, or type coordinates directly below, then fill in the details.</p>
+                <label style="font-size:0.8rem; font-weight:bold;">Latitude</label>
+                <input type="number" step="any" id="editorLat" placeholder="e.g. 47.653500">
+                <label style="font-size:0.8rem; font-weight:bold;">Longitude</label>
+                <input type="number" step="any" id="editorLng" placeholder="e.g. -122.306800">
                 <label style="font-size:0.8rem; font-weight:bold;">Building</label>
                 <input type="text" id="editorBuilding" placeholder="Building name">
                 <label style="font-size:0.8rem; font-weight:bold;">Room</label>
