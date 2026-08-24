@@ -110,12 +110,20 @@ function Invoke-ConnectAction {
         return
     }
 
+    # Declared outside the try so the catch can still see it: the credential file (switch
+    # username + password, plaintext, in %TEMP%) is written BEFORE Start-Process runs, and is
+    # normally removed by Connect-Switch.ps1's own finally block once it has read it.
+    $CredFile = $null
     try {
         $CredFile = New-JunosCredentialFile -Username $JunosUsername -Password $JunosPassword
         $ArgString = @("-NoExit", "-File", "`"$ConnectScriptPath`"", "-TargetIP", $TargetIP, "-CredentialFile", "`"$CredFile`"") -join ' '
         Start-Process -FilePath "powershell.exe" -ArgumentList $ArgString | Out-Null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "launched"; ip = $TargetIP }
     } catch {
+        # Start-Process (or the credential-file write itself) failed - Connect-Switch.ps1 never
+        # launched to clean up the credential file itself, so remove it here instead of leaking
+        # the switch password in plaintext at %TEMP% (and accumulating one more file per retry).
+        if ($CredFile) { Remove-JunosCredentialFile -CredentialFile $CredFile }
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to launch SSH session: $_" }
     }
 }
@@ -285,6 +293,16 @@ function Invoke-GetConfigAction {
 function Invoke-SaveConfigAction {
     param($Response, [string]$Body, [string]$ConfigPath, [string]$EncryptionPassword)
 
+    # Fail closed. Start-NetworkMapper.ps1 blanks the password when Configuration.json.enc
+    # could not be decrypted at startup and the operator chose to continue anyway - the
+    # password typed there is proven wrong, and re-encrypting the whole file under it would
+    # permanently and silently change the file's real password to a string nobody has a
+    # record of, locking every future session out of its own config.
+    if ([string]::IsNullOrWhiteSpace($EncryptionPassword)) {
+        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "No working encryption password for this session - Configuration.json.enc could not be decrypted at startup, so saving is disabled to avoid rewriting the file under an unverified password. Restart Start-NetworkMapper.ps1 with the correct password." }
+        return
+    }
+
     $Parsed = $null
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
     # Presence check, not truthiness: `-not $Parsed.devices` would also reject a
@@ -354,7 +372,14 @@ function Start-MapperWebServer {
         [Parameter(Mandatory=$true)][string]$ConnectScriptPath,
         [Parameter(Mandatory=$true)][string]$WorkerPath,
         [Parameter(Mandatory=$true)][string]$ConfigPath,
-        [Parameter(Mandatory=$true)][string]$EncryptionPassword,
+        # Still mandatory (a caller must make a deliberate decision about it), but empty/null
+        # is a legal VALUE: Start-NetworkMapper.ps1 passes $null on the "continue without
+        # server-side credentials" path, where the only password typed was proven wrong
+        # against Configuration.json.enc. That means "no verified password this session" and
+        # Invoke-SaveConfigAction refuses to write the config file at all - do not re-tighten
+        # this to reject empty, or that path dies with a raw parameter-binding error on
+        # launch instead of serving the viewer read-only.
+        [Parameter(Mandatory=$true)][AllowNull()][AllowEmptyString()][string]$EncryptionPassword,
         [string]$JunosUsername = "",
         [string]$JunosPassword = "",
         [int]$Port = 8787

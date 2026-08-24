@@ -58,7 +58,15 @@ function ConvertFrom-SecurePassword {
 # (Juniper credentials + app settings) now lives ONLY behind this password; there is no
 # file-based fallback anymore (Auth.json is gone).
 Write-Host ""
-$EncryptionPassword = ConvertFrom-SecurePassword -SecureString (Read-Host -Prompt "Enter encryption password" -AsSecureString)
+# Re-prompted rather than accepted: Read-Host -AsSecureString happily returns an empty
+# SecureString for a bare Enter, and an empty password reaches Start-MapperWebServer (and,
+# in crawl mode, the PBKDF2 key derivation) as a value nothing downstream can do anything
+# useful with - previously surfacing as a raw parameter-binding error instead of a readable
+# message.
+do {
+    $EncryptionPassword = ConvertFrom-SecurePassword -SecureString (Read-Host -Prompt "Enter encryption password" -AsSecureString)
+    if ([string]::IsNullOrEmpty($EncryptionPassword)) { Write-Host "Password cannot be empty." -ForegroundColor Red }
+} while ([string]::IsNullOrEmpty($EncryptionPassword))
 
 $JunosUsername = $null
 $JunosPassword = $null
@@ -88,6 +96,12 @@ if (Test-Path $ConfigPath) {
         Write-Host "`nCould not decrypt Configuration.json.enc after $Attempts attempt(s)." -ForegroundColor Yellow
         $Continue = Read-Host "Continue without server-side Juniper credentials/settings? (y/N)"
         if ($Continue -notmatch '^(?i)y') { throw "Aborted: could not decrypt Configuration.json.enc." }
+
+        # The password just typed failed to decrypt the file 3 times in a row - it's proven
+        # wrong (or the file is corrupted), so it must not be allowed to silently REWRITE the
+        # file under that wrong password the next time something calls /api/save-config. Blank
+        # it; Invoke-SaveConfigAction (Start-WebServer.ps1) refuses to save when this is empty.
+        $EncryptionPassword = $null
     }
 }
 
