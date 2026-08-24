@@ -1,0 +1,13 @@
+{
+    "devices": [
+        {
+            "key": "JN123ABC0456",
+            "keyType": "serial",
+            "lat": 47.65335,
+            "lng": -122.30687,
+            "building": "Example Building",
+            "room": "Example Room",
+            "notes": "Example notes - delete this entry, it's not real."
+        }
+    ]
+}

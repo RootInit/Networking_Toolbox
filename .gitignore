@@ -4,6 +4,11 @@
 # actually invoke that script from), not in lib/ with the template.
 PS_NetworkMapper/Network_Mapper/Auth.json
 
+# Real device-location data - only Network_Mapper/lib/Configuration.example.json
+# (placeholder template) is tracked. Written by /api/save-config (Start-WebServer.ps1),
+# same sensitivity class as Auth.json above.
+PS_NetworkMapper/Network_Mapper/Configuration.json.enc
+
 # Scraper output - contains real internal topology/IP data, not fixtures. Every real crawl
 # writes into the shared Network_Maps/ folder (see Start-NetworkMapper.ps1's $SnapshotDir),
 # named NetworkMap_<timestamp>.json(.enc) or ...tmp... while a write is in progress. The two

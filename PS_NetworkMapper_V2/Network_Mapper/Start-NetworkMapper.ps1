@@ -27,6 +27,10 @@ $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 $WorkerPath = Join-Path $ScriptDir "lib\Get-JunosNodeData.ps1"
 $ConnectScriptPath = Join-Path $ScriptDir "lib\Connect-Switch.ps1"
 $VisualizerRoot = Join-Path $ScriptDir "..\Network_Visualizer"
+# Lives next to Auth.json (wherever -AuthFile resolves it, shared with the original
+# PS_NetworkMapper/ by default - see $AuthFile's own default above) rather than under V2's
+# own tree, same sharing rationale as $AuthFile/$SnapshotDir.
+$ConfigPath = Join-Path (Split-Path $AuthFile -Parent) "Configuration.json.enc"
 . (Join-Path $ScriptDir "lib\Start-WebServer.ps1")
 . (Join-Path $ScriptDir "lib\TopologyCrypto.ps1")
 $DebugLog = Join-Path $ScriptDir "Mapper_Debug.log"
@@ -43,7 +47,7 @@ $DeviceHistoryLedger = Join-Path $SnapshotDir "device_history.ndjson"
 # needs no switch credentials at all, and Connect-Switch.ps1 already throws its own clear
 # error if the SSH-launch button is used without one.
 if (-not $SwitchIP) {
-    Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -AuthFile $AuthFile -WorkerPath $WorkerPath -Port $WebPort
+    Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -AuthFile $AuthFile -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath
     return
 }
 
@@ -344,4 +348,4 @@ finally {
 # default browser to it. Runs after the crawl (not instead of it) so the freshly-written
 # snapshot is immediately available to "Load Folder of Snapshots" without a manual step -
 # this call blocks (serving requests) until Ctrl+C.
-Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -AuthFile $AuthFile -WorkerPath $WorkerPath -Port $WebPort
+Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -AuthFile $AuthFile -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath

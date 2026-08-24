@@ -11,6 +11,14 @@
 #
 # Not meant to be run directly - dot-source it, then call Start-MapperWebServer.
 
+# Invoke-SaveConfigAction (below) needs Get-TopologyKeyMaterial/Protect-TopologyPayload.
+# Dot-sourced here directly rather than relying on the caller (Start-NetworkMapper.ps1)
+# having already loaded it first, so this file's correctness doesn't depend on caller load
+# order. $PSScriptRoot inside a dot-sourced file resolves to that file's own directory, not
+# the caller's - both files live in Network_Mapper/lib/, so this resolves correctly
+# regardless of how Start-WebServer.ps1 itself gets loaded.
+. (Join-Path $PSScriptRoot "TopologyCrypto.ps1")
+
 $script:ContentTypes = @{
     ".html" = "text/html; charset=utf-8"
     ".js"   = "application/javascript; charset=utf-8"
@@ -227,6 +235,79 @@ function Invoke-RescanStatusAction {
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "running"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
 }
 
+# Serves the current Configuration.json.enc envelope as-is (still encrypted - the browser
+# decrypts client-side with a human-typed password, exactly like NetworkMap files). 404
+# with a JSON body (not the generic Invoke-StaticFile 404) so the browser can tell "no
+# config yet" (a normal, expected state on a fresh checkout, same as missing Auth.json)
+# apart from a real error.
+#
+# Deliberately does NOT round-trip through ConvertFrom-Json/Send-WebJson: the brief's
+# original draft used `ConvertFrom-Json -AsHashtable` to satisfy Send-WebJson's
+# [hashtable] parameter, but -AsHashtable is PowerShell 6.0+ only, and this file (like
+# Start-NetworkMapper.ps1's AesGcm avoidance and Get-QueryParam's System.Web avoidance)
+# has to run under Windows PowerShell 5.1 too - there it throws a binding error on every
+# call, caught below, so /api/config would 500 unconditionally. The envelope is already
+# JSON on disk and is served unchanged either way, so skip the parse entirely and write
+# the raw bytes straight through (same Send-WebResponse helper Invoke-StaticFile uses).
+function Invoke-GetConfigAction {
+    param($Response, [string]$ConfigPath)
+
+    if (-not (Test-Path $ConfigPath)) {
+        Send-WebJson -Response $Response -StatusCode 404 -Object @{ error = "No configuration file yet" }
+        return
+    }
+
+    try {
+        $Raw = Get-Content $ConfigPath -Raw
+        Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Raw)) -ContentType "application/json; charset=utf-8"
+    } catch {
+        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to read configuration file: $_" }
+    }
+}
+
+# Encrypts and writes Configuration.json.enc. The browser sends PLAINTEXT edited config
+# JSON - the encryption password never crosses the wire in either direction, same as
+# topology writes: this reads Auth.json's EncryptionPassword server-side, exactly like
+# Start-NetworkMapper.ps1's Write-TopologyOutput does. A fresh salt/IV is generated per
+# save (unlike a crawl's session-cached key - saves are rare/interactive, not periodic, so
+# there's no repeated-PBKDF2-cost reason to cache keys across calls here).
+function Invoke-SaveConfigAction {
+    param($Response, [string]$Body, [string]$ConfigPath, [string]$AuthFile)
+
+    if (-not (Test-Path $AuthFile)) {
+        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Auth file missing at $AuthFile" }
+        return
+    }
+    $AuthData = Get-Content $AuthFile -Raw | ConvertFrom-Json
+    if (-not $AuthData.EncryptionPassword -or [string]::IsNullOrWhiteSpace($AuthData.EncryptionPassword)) {
+        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Auth.json has no EncryptionPassword set" }
+        return
+    }
+
+    $Parsed = $null
+    try { $Parsed = $Body | ConvertFrom-Json } catch {}
+    if (-not $Parsed -or -not $Parsed.devices) {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Request body must be JSON with a 'devices' array" }
+        return
+    }
+
+    try {
+        $SaltBytes = [byte[]]::new(16)
+        $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        $Rng.GetBytes($SaltBytes)
+        $Rng.Dispose()
+
+        $Iterations = 600000
+        $KeyMaterial = Get-TopologyKeyMaterial -Password $AuthData.EncryptionPassword -Salt $SaltBytes -Iterations $Iterations
+        $Envelope = Protect-TopologyPayload -PlainJson $Body -EncKey $KeyMaterial.EncKey -MacKey $KeyMaterial.MacKey -Salt $SaltBytes -Iterations $Iterations -Format "PSNetworkMapper-EncryptedConfig"
+
+        $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
+        Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "saved" }
+    } catch {
+        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to save configuration: $_" }
+    }
+}
+
 # Serves a file under $VisualizerRoot, defaulting "/" to network_vis.html. Resolves the
 # request path to an absolute path and rejects anything that lands outside
 # $VisualizerRoot (../ traversal, absolute-path requests) before it ever touches disk.
@@ -263,6 +344,7 @@ function Start-MapperWebServer {
         [Parameter(Mandatory=$true)][string]$ConnectScriptPath,
         [Parameter(Mandatory=$true)][string]$AuthFile,
         [Parameter(Mandatory=$true)][string]$WorkerPath,
+        [Parameter(Mandatory=$true)][string]$ConfigPath,
         [int]$Port = 8787
     )
 
@@ -315,6 +397,17 @@ function Start-MapperWebServer {
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
                     $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
                     Invoke-RescanStatusAction -Response $Response -JobId $JobId
+                } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/config") {
+                    Invoke-GetConfigAction -Response $Response -ConfigPath $ConfigPath
+                } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/save-config") {
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
+                        $Body = $Reader.ReadToEnd()
+                        $Reader.Close()
+                        Invoke-SaveConfigAction -Response $Response -Body $Body -ConfigPath $ConfigPath -AuthFile $AuthFile
+                    }
                 } else {
                     Invoke-StaticFile -Response $Response -AbsolutePath $Request.Url.AbsolutePath -VisualizerRoot $VisualizerRoot
                 }
