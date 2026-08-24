@@ -105,13 +105,46 @@ if (Test-Path $ConfigPath) {
     }
 }
 
+# --- Output Encryption (AES-256-CBC, encrypt-then-MAC with HMAC-SHA256) ---
+# Deliberately avoids AesGcm: it's .NET Core/5+ only, and this script also has to run
+# under Windows PowerShell 5.1 (.NET Framework), which doesn't have it. CBC+HMAC needs
+# nothing beyond Aes/Rfc2898DeriveBytes/HMACSHA256, all present on both runtimes, and
+# both algorithms are natively available in the browser's Web Crypto API on the
+# Network_Visualizer side, which decrypts this same format.
+# Shared with Start-WebServer.ps1's /api/save-config via TopologyCrypto.ps1's
+# Get-TopologyPbkdf2Iterations (dot-sourced above) - see that function's own comment for the
+# OWASP guidance and why this isn't a local literal.
+# Runs unconditionally (both crawl mode and server-only mode) so a browser-triggered scan
+# from server-only mode also has key material available to hand to Invoke-FleetCrawl.
+# Guarded on $EncryptionPassword being non-empty, not just -NoEncryption: that guard is
+# reachable now that this runs before the server-only early return (previously it wasn't -
+# crawl mode's credential check threw first, and server-only mode returned before this ever
+# ran) - the decrypt-failure-continue path above (line ~104) can leave $EncryptionPassword
+# $null, and Get-TopologyKeyMaterial's -Password is Mandatory=$true, so an unguarded call
+# would be a terminating parameter-binding error instead of "viewer launches unencrypted."
+$PBKDF2_ITERATIONS = Get-TopologyPbkdf2Iterations
+$EncKeyBytes = $null; $MacKeyBytes = $null; $SaltBytes = $null
+
+if (-not $NoEncryption -and $EncryptionPassword) {
+    Write-Host "Output encryption enabled - Network_Visualizer will prompt for this same password when the file is opened." -ForegroundColor Yellow
+
+    $SaltBytes = [byte[]]::new(16)
+    $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $Rng.GetBytes($SaltBytes)
+    $Rng.Dispose()
+
+    $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
+    $EncKeyBytes = $KeyMaterial.EncKey
+    $MacKeyBytes = $KeyMaterial.MacKey
+}
+
 # Server-only launch: no -SwitchIP means "just show me the viewer", not "crawl the
 # fleet". Proceeds regardless of whether Juniper credentials are present - browsing
 # existing snapshots needs no switch credentials at all, and Invoke-ConnectAction/
 # Invoke-RescanAction already fail cleanly (pointing at the Settings tab) if the browser
 # tries an action that needs them.
 if (-not $SwitchIP) {
-    Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword
+    Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
     return
 }
 
@@ -124,31 +157,6 @@ if (-not $JunosUsername -or -not $JunosPassword) {
 
 Write-Host "Initializing Enterprise Orchestrator starting at $SwitchIP..." -ForegroundColor Cyan
 if ($Log) { Write-Host "[LOGGING ENABLED] Raw payloads will be saved to .\RawDumps\" -ForegroundColor Yellow }
-
-# --- Output Encryption (AES-256-CBC, encrypt-then-MAC with HMAC-SHA256) ---
-# Deliberately avoids AesGcm: it's .NET Core/5+ only, and this script also has to run
-# under Windows PowerShell 5.1 (.NET Framework), which doesn't have it. CBC+HMAC needs
-# nothing beyond Aes/Rfc2898DeriveBytes/HMACSHA256, all present on both runtimes, and
-# both algorithms are natively available in the browser's Web Crypto API on the
-# Network_Visualizer side, which decrypts this same format.
-# Shared with Start-WebServer.ps1's /api/save-config via TopologyCrypto.ps1's
-# Get-TopologyPbkdf2Iterations (dot-sourced above) - see that function's own comment for the
-# OWASP guidance and why this isn't a local literal.
-$PBKDF2_ITERATIONS = Get-TopologyPbkdf2Iterations
-$EncKeyBytes = $null; $MacKeyBytes = $null; $SaltBytes = $null
-
-if (-not $NoEncryption) {
-    Write-Host "Output encryption enabled - Network_Visualizer will prompt for this same password when the file is opened." -ForegroundColor Yellow
-
-    $SaltBytes = [byte[]]::new(16)
-    $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-    $Rng.GetBytes($SaltBytes)
-    $Rng.Dispose()
-
-    $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
-    $EncKeyBytes = $KeyMaterial.EncKey
-    $MacKeyBytes = $KeyMaterial.MacKey
-}
 
 . (Join-Path $ScriptDir "lib\Invoke-FleetCrawl.ps1")
 
@@ -165,4 +173,4 @@ $CrawlResult = Invoke-FleetCrawl -StartIP $SwitchIP -AllowedScopes $AllowedScope
 # default browser to it. Runs after the crawl (not instead of it) so the freshly-written
 # snapshot is immediately available to "Load Folder of Snapshots" without a manual step -
 # this call blocks (serving requests) until Ctrl+C.
-Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword
+Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
