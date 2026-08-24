@@ -185,6 +185,47 @@ window.revealDeviceOnMap = function(ip) {
     return true;
 };
 
-// Replaced by Task 11 - intentionally empty for now.
+// Replaced by Task 12 - intentionally records the call for Task 11's own verification
+// instead of opening the real editor.
+window.openLocationEditor = function(ip) {
+    window.__lastOpenLocationEditorIp = ip;
+};
+
+window.toggleUnplacedPanel = function() {
+    var list = document.getElementById('mapUnplacedList');
+    var icon = document.getElementById('mapUnplacedToggleIcon');
+    var collapsed = list.style.display === 'none';
+    list.style.display = collapsed ? 'block' : 'none';
+    icon.innerHTML = collapsed ? '&#9660;' : '&#9650;';
+};
+
 window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, placedByIp) {
+    var listEl = document.getElementById('mapUnplacedList');
+    var countEl = document.getElementById('mapUnplacedCount');
+    listEl.innerHTML = '';
+
+    var unplaced = [];
+    classification.forEach(function (meta, ip) {
+        if (!meta.scanned) return;          // only scanned devices are ever geo-taggable (see Task 4's key resolution - an unscanned neighbor has no chassis data to key by)
+        if (placedByIp.has(ip)) return;      // already has a resolved location
+        unplaced.push({ ip: ip, meta: meta });
+    });
+
+    countEl.textContent = unplaced.length + ' device' + (unplaced.length === 1 ? '' : 's') + ' with no location set';
+
+    unplaced.forEach(function (row) {
+        var rowEl = document.createElement('div');
+        rowEl.style.cssText = 'padding:6px 12px; font-size:0.8rem; border-bottom:1px solid #f0f0f0; display:flex; justify-content:space-between; align-items:center; gap:8px;';
+        // row.meta.hostname/row.ip are device-supplied (LLDP/DNS data this app doesn't
+        // control) and this string is assigned to .innerHTML, same as iconForClassification's
+        // marker label above - escape with window.esc (utils.js) before concatenating,
+        // matching the fix applied there (see Task 8's post-review XSS fix).
+        var label = row.meta.hostname !== 'Unknown' ? window.esc(row.meta.hostname) : window.esc(row.ip);
+        rowEl.innerHTML =
+            '<span style="cursor:pointer; color:var(--accent);">' + label + '</span>' +
+            '<button type="button" style="width:auto; margin:0; padding:4px 8px; font-size:0.72rem;">Set location</button>';
+        rowEl.querySelector('span').addEventListener('click', function () { window.openRightDrawer(row.ip); });
+        rowEl.querySelector('button').addEventListener('click', function () { window.openLocationEditor(row.ip); });
+        listEl.appendChild(rowEl);
+    });
 };
