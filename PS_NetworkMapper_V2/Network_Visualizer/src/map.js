@@ -13,6 +13,11 @@ var mapConfigLoaded = false;    // true once a GET /api/config attempt (success 
 
 window.switchCenterView = function(view) {
     activeCenterView = view;
+    // A status note shown while in one view (e.g. Task 9's "No location set for this
+    // device." from a map-view search) is a plain #mapStatusNote sibling, not a child of
+    // #mapview - it isn't covered by the display-toggling below, so it stays visibly
+    // floating over whichever view comes next unless explicitly cleared here.
+    window.showMapStatus('');
     document.getElementById('mynetwork').style.display = (view === 'diagram') ? 'block' : 'none';
     document.getElementById('mapview').style.display = (view === 'map') ? 'block' : 'none';
     document.getElementById('mapUnplacedPanel').style.display = (view === 'map') ? 'block' : 'none';
