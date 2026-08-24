@@ -335,6 +335,22 @@
         </div>
     </div>
 
+    <!-- Scan Network: starting-IP prompt (see window.startNetworkScan) -->
+    <div id="scan-start-ip-modal" style="position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:9999; display:none; justify-content:center; align-items:center;">
+        <div style="background:var(--panel-bg); width:340px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); overflow:hidden;">
+            <div class="drawer-header"><h2 style="font-size:1.05rem;">Scan Network</h2></div>
+            <div style="padding:18px;">
+                <p style="margin:0 0 12px; font-size:0.85rem; color:#666;">No previous scan is loaded - enter the starting switch's IP address to begin a fleet crawl.</p>
+                <div id="scan-start-ip-error" style="display:none; background:#fdecea; color:#c0392b; border:1px solid #f5c6c2; border-radius:4px; padding:8px 10px; font-size:0.8rem; margin-bottom:12px;"></div>
+                <input type="text" id="scan-start-ip-input" placeholder="e.g. 10.55.2.2" autocomplete="off">
+                <div style="display:flex; gap:10px; margin-top:4px;">
+                    <button id="scan-start-ip-cancel-btn" type="button" style="background:#eee; color:#333; flex:1; width:auto; margin-bottom:0;">Cancel</button>
+                    <button id="scan-start-ip-confirm-btn" type="button" style="flex:1; width:auto; margin-bottom:0;">Start Scan</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- LEFT PANEL: Controls -->
     <div id="left-panel">
         <div id="left-panel-body">
@@ -351,6 +367,7 @@
             <button id="loadBtn" onclick="window.forceLoadFile()">Render Topology</button>
             <input type="file" id="jsonUploadFolder" webkitdirectory multiple style="display:none;" onchange="window.forceLoadFolder()">
             <button id="loadFolderBtn" type="button" style="background:#eee; color:#333;" onclick="document.getElementById('jsonUploadFolder').click()">Load Folder of Snapshots</button>
+            <button id="scanNetworkBtn" type="button" style="background:#2c3e50; color:white;" onclick="window.startNetworkScan()">Scan Network</button>
             <p id="status-text" style="font-size: 0.85rem; color: #666; margin: 0; font-weight: bold;">Waiting for file...</p>
             <div id="crawl-age-badge" class="crawl-age"></div>
             <div id="snapshotSwitcherContainer" style="display:none; margin-top:10px;">
@@ -679,6 +696,7 @@
     <script src="src/dashboard.js"></script>
     <script src="src/search.js"></script>
     <script src="src/drawer.js"></script>
+    <script src="src/scan-network.js"></script>
     <script src="src/vendor/leaflet/leaflet.js"></script>
     <script src="src/map.js"></script>
     <script src="src/app.js"></script>
