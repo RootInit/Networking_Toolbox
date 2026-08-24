@@ -5,17 +5,16 @@ param (
     [Parameter(HelpMessage="Starting IP address of the first switch - omit to launch the viewer against existing snapshots without crawling")]
     [string]$SwitchIP,
 
-    # V2 shares its data (real switch credentials, snapshot history) with the original
-    # PS_NetworkMapper/ instead of forking it - see the sibling-path default below. Only
-    # the code (this webserver, the SSH-spawn action, the NDJSON ledger) is new.
-    [string]$AuthFile = (Join-Path $PSScriptRoot "..\..\PS_NetworkMapper\Network_Mapper\Auth.json"),
     [string[]]$AllowedScopes = @("131.30."),
 
     [int]$MaxConcurrent = 10,
     [switch]$Log,
     # Output encryption is on by default (topology, clients, and - now - full device
     # config backups are sensitive enough that "on unless you opt in" was the wrong
-    # default). Pass this to get a plain .json instead of .json.enc.
+    # default). Pass this to get a plain .json instead of .json.enc. Does NOT skip the
+    # encryption-password prompt below - Configuration.json.enc (credentials/settings) is
+    # read regardless of this flag, which only controls whether THIS run's own topology
+    # output gets encrypted.
     [switch]$NoEncryption,
 
     # Bound to localhost only - see Start-WebServer.ps1's header comment for why LAN
@@ -27,10 +26,14 @@ $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 $WorkerPath = Join-Path $ScriptDir "lib\Get-JunosNodeData.ps1"
 $ConnectScriptPath = Join-Path $ScriptDir "lib\Connect-Switch.ps1"
 $VisualizerRoot = Join-Path $ScriptDir "..\Network_Visualizer"
-# Lives next to Auth.json (wherever -AuthFile resolves it, shared with the original
-# PS_NetworkMapper/ by default - see $AuthFile's own default above) rather than under V2's
-# own tree, same sharing rationale as $AuthFile/$SnapshotDir.
-$ConfigPath = Join-Path (Split-Path $AuthFile -Parent) "Configuration.json.enc"
+# V2 shares its data (snapshot history, and now Configuration.json.enc) with the original
+# PS_NetworkMapper/ instead of forking it - see $SnapshotDir below. Only the code (this
+# webserver, the SSH-spawn action, the NDJSON ledger) is new. Configuration.json.enc lives
+# in that shared Network_Mapper/ folder, same location it's always lived in (previously
+# anchored off -AuthFile's parent directory - now a fixed relative path, since -AuthFile no
+# longer exists).
+$SharedMapperDir = Join-Path $ScriptDir "..\..\PS_NetworkMapper\Network_Mapper"
+$ConfigPath = Join-Path $SharedMapperDir "Configuration.json.enc"
 . (Join-Path $ScriptDir "lib\Start-WebServer.ps1")
 . (Join-Path $ScriptDir "lib\TopologyCrypto.ps1")
 $DebugLog = Join-Path $ScriptDir "Mapper_Debug.log"
@@ -42,13 +45,67 @@ $SnapshotDir = Join-Path $ScriptDir "..\..\PS_NetworkMapper\Network_Maps"
 if (-not (Test-Path $SnapshotDir)) { New-Item -ItemType Directory -Path $SnapshotDir -Force | Out-Null }
 $DeviceHistoryLedger = Join-Path $SnapshotDir "device_history.ndjson"
 
+# Converts a SecureString to plaintext - the standard cross-runtime idiom (works
+# identically on Windows PowerShell 5.1 and pwsh 7+, unlike manually marshaling the BSTR,
+# which needs its own explicit ZeroFreeBSTR cleanup to avoid a leak).
+function ConvertFrom-SecurePassword {
+    param([Parameter(Mandatory=$true)][securestring]$SecureString)
+    return [System.Net.NetworkCredential]::new('', $SecureString).Password
+}
+
+# Always interactively entered, in BOTH crawl and server-only modes, regardless of
+# -NoEncryption - see the -NoEncryption param's own comment above for why. Configuration.json.enc
+# (Juniper credentials + app settings) now lives ONLY behind this password; there is no
+# file-based fallback anymore (Auth.json is gone).
+Write-Host ""
+$EncryptionPassword = ConvertFrom-SecurePassword -SecureString (Read-Host -Prompt "Enter encryption password" -AsSecureString)
+
+$JunosUsername = $null
+$JunosPassword = $null
+if (Test-Path $ConfigPath) {
+    $Attempts = 0
+    $DecryptedConfigJson = $null
+    while ($null -eq $DecryptedConfigJson -and $Attempts -lt 3) {
+        $Attempts++
+        try {
+            $Envelope = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+            $DecryptedConfigJson = Unprotect-TopologyPayload -Envelope $Envelope -Password $EncryptionPassword -ExpectedFormats @("PSNetworkMapper-EncryptedConfig")
+        } catch {
+            Write-Host "Failed to decrypt Configuration.json.enc: $_" -ForegroundColor Red
+            if ($Attempts -lt 3) {
+                $EncryptionPassword = ConvertFrom-SecurePassword -SecureString (Read-Host -Prompt "Re-enter encryption password (attempt $($Attempts + 1) of 3)" -AsSecureString)
+            }
+        }
+    }
+
+    if ($DecryptedConfigJson) {
+        $ConfigParsed = $DecryptedConfigJson | ConvertFrom-Json
+        if ($ConfigParsed.credentials) {
+            $JunosUsername = $ConfigParsed.credentials.username
+            $JunosPassword = $ConfigParsed.credentials.password
+        }
+    } else {
+        Write-Host "`nCould not decrypt Configuration.json.enc after $Attempts attempt(s)." -ForegroundColor Yellow
+        $Continue = Read-Host "Continue without server-side Juniper credentials/settings? (y/N)"
+        if ($Continue -notmatch '^(?i)y') { throw "Aborted: could not decrypt Configuration.json.enc." }
+    }
+}
+
 # Server-only launch: no -SwitchIP means "just show me the viewer", not "crawl the
-# fleet". Deliberately ahead of the Auth.json check below - browsing existing snapshots
-# needs no switch credentials at all, and Connect-Switch.ps1 already throws its own clear
-# error if the SSH-launch button is used without one.
+# fleet". Proceeds regardless of whether Juniper credentials are present - browsing
+# existing snapshots needs no switch credentials at all, and Invoke-ConnectAction/
+# Invoke-RescanAction already fail cleanly (pointing at the Settings tab) if the browser
+# tries an action that needs them.
 if (-not $SwitchIP) {
-    Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -AuthFile $AuthFile -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath
+    Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword
     return
+}
+
+# Crawling every device needs SSH credentials; there is no partial crawl to attempt
+# without them, and this holds regardless of -NoEncryption (that flag only affects
+# topology-write encryption, not whether credentials are needed to crawl at all).
+if (-not $JunosUsername -or -not $JunosPassword) {
+    throw "No Juniper login configured - set it in the Settings tab of the web viewer, then run a crawl."
 }
 
 Write-Host "Initializing Enterprise Orchestrator starting at $SwitchIP..." -ForegroundColor Cyan
@@ -81,22 +138,8 @@ function Write-TopologyOutput {
     }
 }
 
-if (-not (Test-Path $AuthFile)) { throw "Auth file missing at $AuthFile! V2 shares credentials with the original PS_NetworkMapper - copy PS_NetworkMapper\Network_Mapper\lib\Auth.example.json to PS_NetworkMapper\Network_Mapper\Auth.json, fill in real switch credentials, and set EncryptionPassword (or pass -NoEncryption). Alternatively pass -AuthFile to point at a different file." }
-$AuthData = Get-Content $AuthFile -Raw | ConvertFrom-Json
-
 if (-not $NoEncryption) {
-    # Sourced from Auth.json rather than an interactive prompt so encryption can be on by
-    # default without blocking unattended/scheduled runs on a password prompt. This does
-    # mean Auth.json is now a higher-value target than before - it already held the live
-    # switch credentials in plaintext, and now also gates every historical encrypted
-    # snapshot. An attacker with Auth.json could already re-crawl the live switches
-    # directly, so the marginal exposure is real but smaller than it first looks; still
-    # worth knowing this trade was made deliberately, not accidentally.
-    if (-not $AuthData.EncryptionPassword -or [string]::IsNullOrWhiteSpace($AuthData.EncryptionPassword)) {
-        throw "Auth.json is missing an 'EncryptionPassword' field, required because output encryption is on by default. Add one to $AuthFile, or pass -NoEncryption to write plain .json instead."
-    }
-    $EncryptionPassword = $AuthData.EncryptionPassword
-    Write-Host "Output encryption enabled (password from Auth.json) - Network_Visualizer will prompt for it when the file is opened." -ForegroundColor Yellow
+    Write-Host "Output encryption enabled - Network_Visualizer will prompt for this same password when the file is opened." -ForegroundColor Yellow
 
     $SaltBytes = [byte[]]::new(16)
     $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -106,7 +149,6 @@ if (-not $NoEncryption) {
     $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
     $EncKeyBytes = $KeyMaterial.EncKey
     $MacKeyBytes = $KeyMaterial.MacKey
-    $EncryptionPassword = $null
 }
 
 # Timestamped once per scan (not re-stamped on every periodic write below), so a single
@@ -210,11 +252,10 @@ try {
             # If already visited, skip immediately before spinning up a thread
             if (!$Visited.Add($NextIP)) { continue } 
             
-            # -AuthFile passed explicitly (unlike V1, where the worker's own CWD-relative
-            # default is enough because Auth.json sits next to it) - V2's $AuthFile now
-            # resolves outside this folder entirely (shared with PS_NetworkMapper/), so the
-            # worker's default ".\Auth.json" would look in the wrong place otherwise.
-            $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $NextIP).AddParameter("AuthFile", $AuthFile)
+            # -Username/-Password passed explicitly (in-memory, via .AddParameter - never a
+            # file or command line) rather than letting the worker read Auth.json itself,
+            # which no longer exists.
+            $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $NextIP).AddParameter("Username", $JunosUsername).AddParameter("Password", $JunosPassword)
             if ($Log) { $PS.AddParameter("Log") | Out-Null }
 
             $PS.RunspacePool = $RunspacePool
@@ -346,4 +387,4 @@ finally {
 # default browser to it. Runs after the crawl (not instead of it) so the freshly-written
 # snapshot is immediately available to "Load Folder of Snapshots" without a manual step -
 # this call blocks (serving requests) until Ctrl+C.
-Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -AuthFile $AuthFile -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath
+Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword
