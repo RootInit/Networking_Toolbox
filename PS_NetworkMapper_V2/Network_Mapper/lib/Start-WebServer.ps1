@@ -286,7 +286,11 @@ function Invoke-SaveConfigAction {
 
     $Parsed = $null
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
-    if (-not $Parsed -or -not $Parsed.devices) {
+    # Presence check, not truthiness: `-not $Parsed.devices` would also reject a
+    # legitimate `devices: []` save (PowerShell treats an empty array as falsy), which is
+    # exactly what the in-app editor sends the first time someone deletes their last
+    # location entry. $null -eq checks for "key absent (or explicitly null)" instead.
+    if (-not $Parsed -or $null -eq $Parsed.devices) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Request body must be JSON with a 'devices' array" }
         return
     }
