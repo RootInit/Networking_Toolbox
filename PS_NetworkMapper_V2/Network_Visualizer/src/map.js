@@ -9,6 +9,8 @@
 var leafletMap = null;
 var mapMarkersByIp = new Map();
 var mapConfigEntries = [];      // decrypted Configuration.json's devices[], or [] if none loaded yet
+var loadedCredentials = null;   // decrypted Configuration.json's credentials ({username, password}), or null
+var loadedSettings = {};        // decrypted Configuration.json's settings (partial or empty) - merge over defaults at read time
 var mapConfigLoaded = false;    // true once a GET /api/config attempt (success OR "no file yet") has completed
 // True once fitBounds has ever run against real markers. renderMapMarkers is now called
 // from every place topology data can change (new snapshot, single-device rescan), not just
@@ -123,6 +125,8 @@ window.loadMapConfiguration = async function() {
     }
     if (resp.status === 404) {
         mapConfigEntries = [];
+        loadedCredentials = null;
+        loadedSettings = {};
         mapConfigLoaded = true;
         window.showMapStatus('');
         return;
@@ -130,6 +134,8 @@ window.loadMapConfiguration = async function() {
     if (!resp.ok) {
         window.showMapStatus('Failed to load Configuration.json.enc: HTTP ' + resp.status + '. Click Map again to retry.');
         mapConfigEntries = [];
+        loadedCredentials = null;
+        loadedSettings = {};
         mapConfigLoaded = false;
         return;
     }
@@ -140,6 +146,8 @@ window.loadMapConfiguration = async function() {
     } catch (parseErr) {
         window.showMapStatus('Configuration.json.enc is not valid JSON (' + parseErr.message + '). Click Map again to retry.');
         mapConfigEntries = [];
+        loadedCredentials = null;
+        loadedSettings = {};
         mapConfigLoaded = false;
         return;
     }
@@ -153,6 +161,8 @@ window.loadMapConfiguration = async function() {
         } catch (cancelErr) {
             window.showMapStatus('Location config decryption cancelled - devices will show without saved locations. Click Map again to retry.');
             mapConfigEntries = [];
+            loadedCredentials = null;
+            loadedSettings = {};
             mapConfigLoaded = false;
             return;
         }
@@ -162,9 +172,39 @@ window.loadMapConfiguration = async function() {
             errorMsg = decErr.message;
         }
     }
-    mapConfigEntries = JSON.parse(decryptedText).devices || [];
+    var parsedConfig = JSON.parse(decryptedText);
+    mapConfigEntries = parsedConfig.devices || [];
+    loadedCredentials = parsedConfig.credentials || null;
+    loadedSettings = parsedConfig.settings || {};
     mapConfigLoaded = true;
     window.showMapStatus('');
+};
+
+window.getLoadedCredentials = function() {
+    return loadedCredentials || { username: '', password: '' };
+};
+
+window.setLoadedCredentials = function(creds) {
+    loadedCredentials = creds;
+};
+
+window.getLoadedSettings = function() {
+    return loadedSettings || {};
+};
+
+window.setLoadedSettings = function(settings) {
+    loadedSettings = settings;
+};
+
+// Idempotent, session-wide "make sure the config has been fetched" gate - both Map view
+// (initMapView, above) and the Settings tab (app.js's switchSidebarTab) call this instead
+// of loadMapConfiguration directly, so the password prompt and fetch only ever happen once
+// per session regardless of which one the user opens first. A no-op once mapConfigLoaded is
+// true; retries a previously failed/cancelled attempt otherwise.
+window.ensureConfigLoaded = async function() {
+    if (mapConfigLoaded) return;
+    await window.loadMapConfiguration();
+    if (mapConfigLoaded) window.renderMapMarkers(); // no-op if Map view was never opened (leafletMap === null)
 };
 
 window.showMapStatus = function(message) {
@@ -392,6 +432,13 @@ window.renderSaveConfigButton = function() {
 };
 
 window.saveConfiguration = async function() {
+    // Config may not have loaded yet if this is triggered from the Settings tab before Map
+    // view was ever opened (or before an earlier load attempt finished) - saving now would
+    // otherwise overwrite devices/credentials/settings this session never actually fetched
+    // with empty defaults, silently wiping out everything previously saved (e.g. every
+    // placed device location). ensureConfigLoaded is a no-op once a real load has completed.
+    await window.ensureConfigLoaded();
+
     // Merge pending edits over the currently-loaded config entries. An untouched entry
     // (its key+keyType never appears in pendingConfigEdits) survives unchanged.
     //
@@ -431,24 +478,25 @@ window.saveConfiguration = async function() {
         resp = await fetch('/api/save-config', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ devices: devices }),
+            body: JSON.stringify({ devices: devices, credentials: loadedCredentials, settings: loadedSettings }),
         });
     } catch (fetchErr) {
         // Same "must never leave the user without feedback" concern as loadMapConfiguration's
         // fetch above - an unreachable server here would otherwise be an unhandled rejection
         // from the Save button's onclick with no visible sign the click did anything.
         window.showMapStatus('Could not reach the server to save (' + fetchErr.message + '). Click Save Configuration to retry.');
-        return;
+        return false;
     }
     if (!resp.ok) {
         window.showMapStatus('Save failed: HTTP ' + resp.status);
-        return;
+        return false;
     }
     mapConfigEntries = devices;
     pendingConfigEdits.clear();
     window.renderSaveConfigButton();
     window.showMapStatus('Configuration saved.');
     window.renderMapMarkers();
+    return true;
 };
 
 window.toggleUnplacedPanel = function() {
