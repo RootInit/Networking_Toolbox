@@ -26,11 +26,17 @@ param(
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 . (Join-Path $ScriptDir "Connect-JunosSsh.ps1")
 
-$CredData = Get-Content $CredentialFile -Raw | ConvertFrom-Json
-$Username = $CredData.Username
-$AskPass = New-JunosAskPass -Password $CredData.Password
-
+# Everything that touches the credential file lives INSIDE the try, so the finally below
+# always runs: reading it, and writing the askpass files derived from it. Done outside (as
+# it was), a failure between "the credential file exists" and "the try block starts" - e.g.
+# New-JunosAskPass failing because %TEMP% is full or write-locked - left the switch
+# username/password sitting in plaintext at %TEMP% with nothing left to clean it up.
+$AskPass = $null
 try {
+    $CredData = Get-Content $CredentialFile -Raw | ConvertFrom-Json
+    $Username = $CredData.Username
+    $AskPass = New-JunosAskPass -Password $CredData.Password
+
     $SshArgs = Get-JunosSshArgs -Username $Username -TargetIP $TargetIP
     Write-Host "Connecting to $TargetIP as $Username..." -ForegroundColor Cyan
 
@@ -43,6 +49,10 @@ try {
     $Process = [System.Diagnostics.Process]::Start($ProcInfo)
     $Process.WaitForExit()
 } finally {
-    Remove-JunosAskPass -AskPassContext $AskPass
+    # Null-guarded: the throw may have happened before New-JunosAskPass ever ran, and
+    # Remove-JunosAskPass dereferences .AskPassPath/.AskPassText on its argument. Both
+    # Remove-* helpers use -ErrorAction SilentlyContinue internally, so a file that was
+    # never created (or already gone) is not an error here.
+    if ($AskPass) { Remove-JunosAskPass -AskPassContext $AskPass }
     Remove-JunosCredentialFile -CredentialFile $CredentialFile
 }
