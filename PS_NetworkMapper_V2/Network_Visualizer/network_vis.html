@@ -409,10 +409,6 @@
                 <label>"Recently rebooted" cutoff (minutes)</label>
                 <div class="settings-pair"><input type="number" id="setting-recentRebootMin" min="0"></div>
             </div>
-            <div id="settings-actions">
-                <button type="button" id="settings-reset-btn" onclick="window.resetSettingsPanel()">Reset to Defaults</button>
-                <button type="button" id="settings-save-btn" onclick="window.saveSettingsPanel()">Save</button>
-            </div>
 
             <div class="settings-subhead">Graph Layout</div>
             <label style="font-size: 0.85rem; font-weight: bold;">Max children before grouping</label>
@@ -426,6 +422,14 @@
 
             <label style="font-size: 0.85rem; font-weight: bold;">Minimum branch radius (px)</label>
             <input type="number" id="minRadius" min="20" max="1000" step="10" value="250" onchange="window.setLayoutSetting()">
+
+            <!-- Bottom of the tab, not just under Thresholds - Save/Reset now cover every
+                 field above (login, thresholds, layout), not only the Thresholds section
+                 they used to sit directly beneath. -->
+            <div id="settings-actions" style="margin-top:18px;">
+                <button type="button" id="settings-reset-btn" onclick="window.resetSettingsPanel()">Reset to Defaults</button>
+                <button type="button" id="settings-save-btn" onclick="window.saveSettingsPanel()">Save</button>
+            </div>
         </div>
 
         <div id="sidebar-tab-analysis" class="sidebar-tab-content">
