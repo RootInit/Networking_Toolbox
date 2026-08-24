@@ -57,3 +57,103 @@ test('computeNeighborEdges skips neighbors with no usable ManagementIP', () => {
   const device = { DeviceIP: '10.0.0.9', Neighbors: [{ ManagementIP: 'Unknown' }] };
   assert.deepEqual(computeNeighborEdges([device]), []);
 });
+
+// --- Additional coverage added after code review (post-commit d49f9d0) ---
+//
+// The 8 tests above are the brief's original test set, kept verbatim. The tests below
+// close two gaps the review found: (1) nothing asserted the actual insertion ORDER of
+// computeDeviceClassification's result, which is what makes "two full separate passes"
+// a real, order-independent guarantee rather than an implementation detail that happens
+// to pass under one specific array ordering; (2) nothing exercised, at the topology-graph
+// level, the exact contract graph.js's buildSwitchMap depends on to safely skip a
+// possibly-missing device lookup for an unscanned placeholder.
+
+test('computeDeviceClassification: the scanned-override result is independent of array order (rules out a single interleaved pass with a shared insert-if-absent guard)', () => {
+  // Same two devices as the "lets a scanned pass override" test above, but with sw1 and
+  // sw2Scanned SWAPPED in the input array. A genuine two-full-passes implementation runs
+  // ALL of pass 1 (every device's own scanned entry, unconditionally) before pass 2 (LLDP
+  // placeholders) ever starts, so which device is listed first cannot matter. A single
+  // interleaved pass that used one common `if (!result.has(ip))` guard for both a
+  // device's own entry AND its neighbors' placeholders would NOT be order-independent -
+  // whichever reference (own-entry vs. neighbor-placeholder) is encountered first in
+  // traversal order would win, and reversing the array would flip the outcome for at
+  // least one of the two orderings. Both orderings must agree for this to be real
+  // evidence of two separate passes, not a coincidence of the one order actually tested.
+  const sw2Scanned = { DeviceIP: '10.0.0.2', Hostname: 'sw2-real', StackMembers: [], Neighbors: [] };
+  const resultReversed = computeDeviceClassification([sw2Scanned, SCANNED_STANDALONE]);
+  assert.deepEqual(resultReversed.get('10.0.0.2'), { scanned: true, isStack: false, hostname: 'sw2-real' });
+});
+
+test('computeDeviceClassification: every pass-1 (scanned) key precedes every pass-2 (placeholder) key in insertion order, even when a placeholder-triggering neighbor reference is interleaved between two scanned devices in the source array', () => {
+  // d1 (scanned) references n1 as an LLDP neighbor that is never itself scanned; d2
+  // (scanned, unrelated to n1) is listed AFTER d1 in the source array. Under two full
+  // separate passes, pass 1 walks the whole array first and inserts d1 then d2 (both
+  // scanned, in array order) - only THEN does pass 2 walk the array again and insert n1's
+  // placeholder, since it's still absent. Final order: [d1, d2, n1].
+  //
+  // A single interleaved pass (process each device's own entry, then immediately its
+  // neighbors, before moving to the next device) would instead insert d1, then n1
+  // (discovered while still processing d1), then d2 - order [d1, n1, d2]. The two
+  // structures produce different key orders for identical input; asserting the exact
+  // order pins down which structure actually ran, not just which values ended up correct.
+  const d1 = { DeviceIP: '10.0.1.1', Hostname: 'd1', Neighbors: [{ ManagementIP: '10.0.1.99', Hostname: 'n1' }] };
+  const d2 = { DeviceIP: '10.0.1.2', Hostname: 'd2', Neighbors: [] };
+  const result = computeDeviceClassification([d1, d2]);
+  assert.deepEqual(Array.from(result.keys()), ['10.0.1.1', '10.0.1.2', '10.0.1.99']);
+  assert.deepEqual(result.get('10.0.1.99'), { scanned: false, isStack: false, hostname: 'n1' });
+});
+
+test('computeDeviceClassification: a pass-2-only (unscanned) placeholder is always isStack:false, never something a caller would need real device data to compute', () => {
+  // graph.js's buildSwitchMap looks up each classified IP in a `deviceByIpLocal` map built
+  // straight from the topology array; for an unscanned placeholder IP, that lookup is
+  // guaranteed to miss (Pass 2 only placeholders an IP that never appeared as its own
+  // topology entry), so `device` is `undefined` there. buildSwitchMap only survives that
+  // by relying on `meta.isStack` short-circuiting the ternary that reads
+  // `device.StackMembers.length` before `device` is ever dereferenced. This test pins
+  // down the half of that contract that lives in topology-graph.js: an unscanned entry's
+  // isStack is unconditionally false, for every unscanned placeholder, not just this one.
+  const device = { DeviceIP: '10.0.2.1', Hostname: 'd1', Neighbors: [{ ManagementIP: '10.0.2.99', Hostname: 'ghost' }] };
+  const result = computeDeviceClassification([device]);
+  const placeholder = result.get('10.0.2.99');
+  assert.equal(placeholder.isStack, false);
+  assert.deepEqual(placeholder, { scanned: false, isStack: false, hostname: 'ghost' });
+});
+
+// This mirrors graph.js's buildSwitchMap node-construction loop (src/graph.js, the
+// `classification.forEach(...)` block) exactly, using the real exported functions above.
+// graph.js itself has no test file - like every other file in this app that touches the
+// DOM/vis-network/window globals directly, it isn't unit-testable without a browser - so
+// this is the closest committed regression coverage for that integration point,
+// specifically the `device === undefined` path for an unscanned placeholder, which
+// neither committed sample snapshot exercises (see task-3-report.md for the differential
+// check run against both real snapshots during manual verification).
+function buildSwitchMapNodeMeta(topology) {
+  const allNodeMeta = new Map();
+  const classification = computeDeviceClassification(topology);
+  const deviceByIpLocal = new Map(topology.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
+  classification.forEach((meta, ip) => {
+    const device = deviceByIpLocal.get(ip);
+    const stackIcon = meta.isStack ? `\n[VC: ${device.StackMembers.length} Node]` : '';
+    allNodeMeta.set(ip, {
+      label: meta.scanned ? `Switch\n${ip}\n(${meta.hostname})${stackIcon}` : `Switch\n${ip}\n(${meta.hostname})`,
+      shape: meta.isStack ? 'database' : 'box', isStack: meta.isStack, scanned: meta.scanned,
+      vlanCache: (device && device.TrueClients) ? device.TrueClients.map(c => String(c.VLAN_Tag)) : [],
+    });
+  });
+  return allNodeMeta;
+}
+
+test('buildSwitchMap-equivalent node-meta construction does not throw and produces a plain gray placeholder node for an unscanned neighbor (device undefined case)', () => {
+  const device = { DeviceIP: '10.0.3.1', Hostname: 'd1', Neighbors: [{ ManagementIP: '10.0.3.99', Hostname: 'ghost' }] };
+  const meta = buildSwitchMapNodeMeta([device]);
+  assert.deepEqual(meta.get('10.0.3.99'), {
+    label: 'Switch\n10.0.3.99\n(ghost)', shape: 'box', isStack: false, scanned: false, vlanCache: [],
+  });
+});
+
+test('buildSwitchMap-equivalent node-meta construction produces a correctly styled stack node for a scanned device', () => {
+  const meta = buildSwitchMapNodeMeta([SCANNED_STACK]);
+  assert.deepEqual(meta.get('10.0.0.3'), {
+    label: 'Switch\n10.0.0.3\n(sw3)\n[VC: 2 Node]', shape: 'database', isStack: true, scanned: true, vlanCache: [],
+  });
+});
