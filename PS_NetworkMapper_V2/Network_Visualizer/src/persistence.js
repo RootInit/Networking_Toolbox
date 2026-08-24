@@ -51,6 +51,16 @@ window.loadSettings = function() {
 // resolves (the real saved values, once the password prompt/fetch complete).
 window.populateSettingsInputs = function() {
     var settings = window.loadSettings();
+    // Only the four graph-layout inputs feed the diagram (graph.js's getClusterThreshold/
+    // getLayoutSettings read them live off the DOM at render time); the threshold keys don't
+    // affect layout at all. Captured as strings, straight off .value, and compared against
+    // the same afterwards - comparing .value against settings[key] would compare a string to
+    // a number and report "changed" on every single call.
+    var layoutBefore = LAYOUT_SETTING_KEYS.map(function (key) {
+        var el = document.getElementById(settingInputId(key));
+        return el ? el.value : null;
+    });
+
     Object.keys(DEFAULT_SETTINGS).forEach(key => {
         var el = document.getElementById(settingInputId(key));
         if (el) el.value = settings[key];
@@ -66,8 +76,19 @@ window.populateSettingsInputs = function() {
     // handlers (window.setClusterThreshold/window.setLayoutSetting in graph.js), and those
     // handlers are the only thing that re-lays-out the diagram for a changed layout value -
     // so without this, a loaded config showed its saved numbers in the boxes while the
-    // diagram kept the layout it was built with. Same `network` guard as saveSettingsPanel.
-    if (typeof window.renderVisibleGraph === 'function' && network) window.renderVisibleGraph();
+    // diagram kept the layout it was built with.
+    //
+    // Conditional, unlike the deliberate single-click Save/Reset paths: app.js's
+    // switchSidebarTab calls this TWICE per Settings-tab open (once immediately, once after
+    // ensureConfigLoaded resolves), so an unconditional call would mean two serialized ELK
+    // layout round-trips and a "Computing layout..." overlay flash every time the tab is
+    // opened, even when nothing changed. `network` (app.js) is null until a snapshot has
+    // been loaded, where there is nothing laid out to refresh.
+    var layoutChanged = LAYOUT_SETTING_KEYS.some(function (key, i) {
+        var el = document.getElementById(settingInputId(key));
+        return el ? el.value !== layoutBefore[i] : false;
+    });
+    if (layoutChanged && typeof window.renderVisibleGraph === 'function' && network) window.renderVisibleGraph();
 };
 
 // Loading the config MUST happen before the form is read, not after. saveConfiguration
