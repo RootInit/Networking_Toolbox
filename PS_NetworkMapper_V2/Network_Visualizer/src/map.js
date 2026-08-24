@@ -185,10 +185,117 @@ window.revealDeviceOnMap = function(ip) {
     return true;
 };
 
-// Replaced by Task 12 - intentionally records the call for Task 11's own verification
-// instead of opening the real editor.
+var editorTargetIp = null;
+var editorPendingLatLng = null;
+var pendingConfigEdits = new Map(); // key (from bestKeyForSave) -> full entry object, accumulated across edits until Save
+
+// Named (not inline) so closeLocationEditor can `off` it below - `leafletMap.once` still
+// only ever fires it a single time per registration, but without a name, re-opening the
+// editor (or opening/cancelling repeatedly without ever clicking the map) stacks up
+// once-listeners that Leaflet never got the chance to auto-remove, and each stale one would
+// still overwrite editorPendingLatLng if the map were ever clicked afterward for an
+// unrelated reason. Cheap to avoid, so it's handled explicitly rather than left as
+// benign-but-untidy.
+function onEditorMapClick(e) {
+    editorPendingLatLng = e.latlng;
+    window.showMapStatus('Pin placed at ' + e.latlng.lat.toFixed(5) + ', ' + e.latlng.lng.toFixed(5) + ' - fill in the form and click Set Pin.');
+}
+
 window.openLocationEditor = function(ip) {
-    window.__lastOpenLocationEditorIp = ip;
+    editorTargetIp = ip;
+    editorPendingLatLng = null;
+    var device = deviceByIp.get(String(ip));
+    document.getElementById('editorDeviceLabel').textContent = 'Set Location: ' + (device && device.Hostname !== 'Unknown' ? device.Hostname : ip);
+    document.getElementById('editorBuilding').value = '';
+    document.getElementById('editorRoom').value = '';
+    document.getElementById('editorNotes').value = '';
+    document.getElementById('location-editor-modal').style.display = 'flex';
+
+    leafletMap.once('click', onEditorMapClick);
+};
+
+window.closeLocationEditor = function() {
+    document.getElementById('location-editor-modal').style.display = 'none';
+    leafletMap.off('click', onEditorMapClick);
+    editorTargetIp = null;
+    editorPendingLatLng = null;
+};
+
+window.commitLocationEdit = function() {
+    if (!editorPendingLatLng) {
+        window.showMapStatus('Click a spot on the map first.');
+        return;
+    }
+    var device = deviceByIp.get(String(editorTargetIp));
+    var keyInfo = window.ConfigResolve.bestKeyForSave(device);
+    var entry = {
+        key: keyInfo.key, keyType: keyInfo.keyType,
+        lat: editorPendingLatLng.lat, lng: editorPendingLatLng.lng,
+        building: document.getElementById('editorBuilding').value,
+        room: document.getElementById('editorRoom').value,
+        notes: document.getElementById('editorNotes').value,
+    };
+    pendingConfigEdits.set(keyInfo.keyType + ':' + keyInfo.key, entry);
+    window.closeLocationEditor();
+    window.showMapStatus(pendingConfigEdits.size + ' unsaved change(s) - click Save Configuration to write them.');
+    window.renderSaveConfigButton();
+};
+
+window.renderSaveConfigButton = function() {
+    var existing = document.getElementById('mapSaveConfigBtn');
+    if (pendingConfigEdits.size === 0) {
+        if (existing) existing.remove();
+        return;
+    }
+    if (existing) { existing.textContent = 'Save Configuration (' + pendingConfigEdits.size + ')'; return; }
+    var btn = document.createElement('button');
+    btn.id = 'mapSaveConfigBtn';
+    btn.type = 'button';
+    btn.textContent = 'Save Configuration (' + pendingConfigEdits.size + ')';
+    btn.style.cssText = 'position:absolute; top:50px; right:10px; z-index:900; width:auto; padding:8px 14px;';
+    btn.onclick = window.saveConfiguration;
+    document.getElementById('mapview').parentElement.appendChild(btn);
+};
+
+window.saveConfiguration = async function() {
+    // Merge pending edits over the currently-loaded config entries: an untouched entry
+    // (its key+keyType never appears in pendingConfigEdits) survives unchanged, and a
+    // pending edit for a device that already had an entry under the *same* key+keyType
+    // replaces it in place. This does NOT collapse a device across a keyType change - an
+    // edit that resolves to a device's serial (bestKeyForSave prefers serial when
+    // available) is keyed 'serial:X', a completely different map key from any pre-existing
+    // 'hostname:Y'/'ip:Z' entry for that same physical device, so the stale entry would
+    // survive alongside the new one rather than being replaced. Harmless in practice since
+    // resolveDeviceLocation (config-resolve.js) checks serial before hostname/ip and would
+    // resolve to the newer entry either way, but it is a latent duplicate this merge does
+    // not clean up.
+    var merged = new Map(mapConfigEntries.map(function (e) { return [e.keyType + ':' + e.key, e]; }));
+    pendingConfigEdits.forEach(function (entry, k) { merged.set(k, entry); });
+    var devices = Array.from(merged.values());
+
+    var resp;
+    try {
+        resp = await fetch('/api/save-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ devices: devices }),
+        });
+    } catch (fetchErr) {
+        // Same "must never leave the user without feedback" concern as loadMapConfiguration's
+        // fetch above - an unreachable server here would otherwise be an unhandled rejection
+        // from the Save button's onclick with no visible sign the click did anything.
+        window.showMapStatus('Could not reach the server to save (' + fetchErr.message + '). Click Save Configuration to retry.');
+        return;
+    }
+    if (!resp.ok) {
+        window.showMapStatus('Save failed: HTTP ' + resp.status);
+        return;
+    }
+    mapConfigEntries = devices;
+    pendingConfigEdits.clear();
+    window.renderSaveConfigButton();
+    window.showMapStatus('Configuration saved.');
+    window.renderMapMarkers();
 };
 
 window.toggleUnplacedPanel = function() {
