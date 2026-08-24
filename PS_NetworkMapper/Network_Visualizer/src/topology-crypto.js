@@ -1,5 +1,6 @@
-// Decrypts a "PSNetworkMapper-EncryptedTopology" envelope (Start-NetworkMapper.ps1's
-// -EncryptOutput format): AES-256-CBC, key/HMAC key from PBKDF2-SHA256, encrypt-then-MAC
+// Decrypts a "PSNetworkMapper-EncryptedTopology" envelope (Start-NetworkMapper.ps1's default
+// output format - encryption is on unless -NoEncryption is passed): AES-256-CBC, key/HMAC
+// key from PBKDF2-SHA256, encrypt-then-MAC
 // with HMAC-SHA256 covering IV+ciphertext. Deliberately not AES-GCM - the PowerShell side
 // has to run under Windows PowerShell 5.1 too, whose .NET Framework has no AesGcm type, so
 // both ends use only primitives available everywhere: Aes/CBC, PBKDF2, HMAC-SHA256.
