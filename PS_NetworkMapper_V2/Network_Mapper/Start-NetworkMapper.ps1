@@ -26,6 +26,22 @@ $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 $WorkerPath = Join-Path $ScriptDir "lib\Get-JunosNodeData.ps1"
 $ConnectScriptPath = Join-Path $ScriptDir "lib\Connect-Switch.ps1"
 $VisualizerRoot = Join-Path $ScriptDir "..\Network_Visualizer"
+# Portable deployment: Network_Visualizer/src/tools/build-inline.mjs produces a single,
+# genuinely self-contained build/Network_Visualizer.html (no external .js/.css/image files
+# at all - see that script's own header comment) - drop just that one file next to THIS
+# script and the whole Network_Visualizer/ source tree becomes unnecessary. Detected here,
+# not hardcoded to always prefer it, so a normal checkout (both directories present)
+# keeps using the multi-file $VisualizerRoot exactly as before - the single file only wins
+# when it's the ONLY visualizer available. Start-MapperWebServer serves it directly, scoped
+# to this one path (see its own SingleFileVisualizerPath handling) - never by widening
+# $VisualizerRoot to $ScriptDir, which would expose every other file in Network_Mapper/
+# (lib/*.ps1 source, Mapper_Debug.log, ...) to any browser that can reach this server.
+$SingleFileVisualizerPath = Join-Path $ScriptDir "Network_Visualizer.html"
+if (Test-Path $SingleFileVisualizerPath -PathType Leaf) {
+    Write-Host "Using portable single-file visualizer: $SingleFileVisualizerPath" -ForegroundColor Cyan
+} else {
+    $SingleFileVisualizerPath = $null
+}
 # V2 shares its data (snapshot history, and now Configuration.json.enc) with the original
 # PS_NetworkMapper/ instead of forking it - see $SnapshotDir below. Only the code (this
 # webserver, the SSH-spawn action, the NDJSON ledger) is new. Configuration.json.enc lives
@@ -144,7 +160,7 @@ if (-not $NoEncryption -and $EncryptionPassword) {
 # Invoke-RescanAction already fail cleanly (pointing at the Settings tab) if the browser
 # tries an action that needs them.
 if (-not $SwitchIP) {
-    Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
+    Start-MapperWebServer -VisualizerRoot $VisualizerRoot -SingleFileVisualizerPath $SingleFileVisualizerPath -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
     return
 }
 
@@ -173,4 +189,4 @@ $CrawlResult = Invoke-FleetCrawl -StartIP $SwitchIP -AllowedScopes $AllowedScope
 # default browser to it. Runs after the crawl (not instead of it) so the freshly-written
 # snapshot is immediately available to "Load Folder of Snapshots" without a manual step -
 # this call blocks (serving requests) until Ctrl+C.
-Start-MapperWebServer -VisualizerRoot $VisualizerRoot -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
+Start-MapperWebServer -VisualizerRoot $VisualizerRoot -SingleFileVisualizerPath $SingleFileVisualizerPath -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS

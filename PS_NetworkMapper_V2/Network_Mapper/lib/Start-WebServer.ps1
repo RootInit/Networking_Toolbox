@@ -602,6 +602,25 @@ function Invoke-StaticFile {
     Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.IO.File]::ReadAllBytes($FullPath)) -ContentType $CType
 }
 
+# Serves the ONE portable single-file visualizer (Network_Visualizer/src/tools/build-inline.mjs's
+# output - see Start-NetworkMapper.ps1's SingleFileVisualizerPath detection) instead of
+# Invoke-StaticFile's whole-directory serving, when that file is what this server was told to
+# use. Deliberately narrow: only "/" and "/Network_Visualizer.html" resolve to anything - the
+# bundle has no external .js/.css/image files left to request (see that build script's own
+# header comment), so there is nothing else a real browser loading it would ever ask for.
+# Never falls through to $VisualizerRoot for an unmatched path - doing so would silently widen
+# exposure back to the whole Network_Visualizer/ directory tree the single-file mode exists to
+# avoid needing at all.
+function Invoke-SingleFileVisualizer {
+    param($Response, [string]$AbsolutePath, [string]$SingleFileVisualizerPath)
+
+    if ($AbsolutePath -ne "/" -and $AbsolutePath -ne "/Network_Visualizer.html") {
+        Send-WebResponse -Response $Response -StatusCode 404 -Bytes ([System.Text.Encoding]::UTF8.GetBytes("Not found"))
+        return
+    }
+    Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.IO.File]::ReadAllBytes($SingleFileVisualizerPath)) -ContentType "text/html; charset=utf-8"
+}
+
 # Starts the listener, opens the default browser to it, then blocks serving requests
 # (one at a time - this is a single local analyst's viewer, not a shared service, so the
 # synchronous accept loop used everywhere else needing concurrency in this repo isn't
@@ -609,6 +628,12 @@ function Invoke-StaticFile {
 function Start-MapperWebServer {
     param(
         [Parameter(Mandatory=$true)][string]$VisualizerRoot,
+        # $null/empty (the common case - a normal checkout) means "serve $VisualizerRoot the
+        # usual way"; set only when Start-NetworkMapper.ps1 found Network_Visualizer.html
+        # sitting next to itself (see that script's own detection comment) - see
+        # Invoke-SingleFileVisualizer above for why this takes over serving ENTIRELY rather
+        # than being layered on top of $VisualizerRoot.
+        [AllowNull()][AllowEmptyString()][string]$SingleFileVisualizerPath,
         [Parameter(Mandatory=$true)][string]$ConnectScriptPath,
         [Parameter(Mandatory=$true)][string]$WorkerPath,
         [Parameter(Mandatory=$true)][string]$ConfigPath,
@@ -735,6 +760,8 @@ function Start-MapperWebServer {
                         $Reader.Close()
                         Invoke-SaveConfigAction -Response $Response -Body $Body -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword
                     }
+                } elseif ($SingleFileVisualizerPath) {
+                    Invoke-SingleFileVisualizer -Response $Response -AbsolutePath $Request.Url.AbsolutePath -SingleFileVisualizerPath $SingleFileVisualizerPath
                 } else {
                     Invoke-StaticFile -Response $Response -AbsolutePath $Request.Url.AbsolutePath -VisualizerRoot $VisualizerRoot
                 }
