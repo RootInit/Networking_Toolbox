@@ -9,5 +9,22 @@
             "room": "Example Room",
             "notes": "Example notes - delete this entry, it's not real."
         }
-    ]
+    ],
+    "credentials": {
+        "username": "example-user",
+        "password": "example-password"
+    },
+    "settings": {
+        "cpuWarnPct": 70,
+        "cpuCriticalPct": 90,
+        "memWarnPct": 75,
+        "memCriticalPct": 90,
+        "crawlAgeFreshMin": 60,
+        "crawlAgeStaleMin": 1440,
+        "recentRebootMin": 60,
+        "clusterThreshold": 50,
+        "nodeSpacing": 350,
+        "leafSpacing": 250,
+        "minRadius": 250
+    }
 }

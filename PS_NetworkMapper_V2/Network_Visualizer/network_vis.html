@@ -423,9 +423,12 @@
             <label style="font-size: 0.85rem; font-weight: bold;">Minimum branch radius (px)</label>
             <input type="number" id="minRadius" min="20" max="1000" step="10" value="250" onchange="window.setLayoutSetting()">
 
-            <!-- Bottom of the tab, not just under Thresholds - Save/Reset now cover every
-                 field above (login, thresholds, layout), not only the Thresholds section
-                 they used to sit directly beneath. -->
+            <!-- Bottom of the tab, not just under Thresholds - these buttons no longer
+                 belong to the Thresholds section they used to sit directly beneath. Save
+                 writes all three groups above (login, thresholds, layout). Reset to
+                 Defaults covers only the thresholds and layout fields - it deliberately
+                 leaves the Juniper username/password alone, since "reset to defaults" has
+                 no business blanking a saved switch login. -->
             <div id="settings-actions" style="margin-top:18px;">
                 <button type="button" id="settings-reset-btn" onclick="window.resetSettingsPanel()">Reset to Defaults</button>
                 <button type="button" id="settings-save-btn" onclick="window.saveSettingsPanel()">Save</button>
