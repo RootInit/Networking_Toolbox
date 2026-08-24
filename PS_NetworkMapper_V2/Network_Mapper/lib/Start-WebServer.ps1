@@ -18,6 +18,9 @@
 # the caller's - both files live in Network_Mapper/lib/, so this resolves correctly
 # regardless of how Start-WebServer.ps1 itself gets loaded.
 . (Join-Path $PSScriptRoot "TopologyCrypto.ps1")
+# Invoke-ConnectAction (below) needs New-JunosCredentialFile. Same "dot-source directly,
+# don't rely on caller load order" reasoning as the TopologyCrypto.ps1 dot-source above.
+. (Join-Path $PSScriptRoot "Connect-JunosSsh.ps1")
 
 $script:ContentTypes = @{
     ".html" = "text/html; charset=utf-8"
@@ -83,14 +86,19 @@ function Test-SameOriginRequest {
 }
 
 # The one action a browser click can trigger server-side: launch Connect-Switch.ps1 (a
-# real interactive SSH session, askpass-injected from Auth.json) against a target IP.
-# Deliberately narrow - a fixed script, one validated parameter, no free-form command or
-# Invoke-Expression surface. $TargetIP is regex-locked to IPv4 shape before it ever
-# reaches Start-Process, so it carries no shell metacharacters even though the arguments
-# below are also passed as a single pre-quoted string rather than relying on
+# real interactive SSH session, askpass-injected via a short-lived credential file) against
+# a target IP. Deliberately narrow - a fixed script, one validated parameter, no free-form
+# command or Invoke-Expression surface. $TargetIP is regex-locked to IPv4 shape before it
+# ever reaches Start-Process, so it carries no shell metacharacters even though the
+# arguments below are also passed as a single pre-quoted string rather than relying on
 # Start-Process's own (version-dependent) array-quoting behavior.
 function Invoke-ConnectAction {
-    param($Response, [string]$Body, [string]$ConnectScriptPath, [string]$AuthFile)
+    param($Response, [string]$Body, [string]$ConnectScriptPath, [string]$JunosUsername, [string]$JunosPassword)
+
+    if ([string]::IsNullOrWhiteSpace($JunosUsername) -or [string]::IsNullOrWhiteSpace($JunosPassword)) {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "No Juniper login configured - set it in the Settings tab, then try again." }
+        return
+    }
 
     $Parsed = $null
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
@@ -102,7 +110,8 @@ function Invoke-ConnectAction {
     }
 
     try {
-        $ArgString = @("-NoExit", "-File", "`"$ConnectScriptPath`"", "-TargetIP", $TargetIP, "-AuthFile", "`"$AuthFile`"") -join ' '
+        $CredFile = New-JunosCredentialFile -Username $JunosUsername -Password $JunosPassword
+        $ArgString = @("-NoExit", "-File", "`"$ConnectScriptPath`"", "-TargetIP", $TargetIP, "-CredentialFile", "`"$CredFile`"") -join ' '
         Start-Process -FilePath "powershell.exe" -ArgumentList $ArgString | Out-Null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "launched"; ip = $TargetIP }
     } catch {
@@ -123,7 +132,12 @@ function Invoke-ConnectAction {
 # of how many concurrent authenticated SSH sessions a stuck button should be allowed to
 # fire against the fleet.
 function Invoke-RescanAction {
-    param($Response, [string]$Body, [string]$WorkerPath, [string]$AuthFile)
+    param($Response, [string]$Body, [string]$WorkerPath, [string]$JunosUsername, [string]$JunosPassword)
+
+    if ([string]::IsNullOrWhiteSpace($JunosUsername) -or [string]::IsNullOrWhiteSpace($JunosPassword)) {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "No Juniper login configured - set it in the Settings tab, then try again." }
+        return
+    }
 
     $Parsed = $null
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
@@ -131,11 +145,6 @@ function Invoke-RescanAction {
 
     if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing IP address" }
-        return
-    }
-
-    if (-not (Test-Path $AuthFile)) {
-        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Auth file missing at $AuthFile" }
         return
     }
 
@@ -159,11 +168,11 @@ function Invoke-RescanAction {
         return
     }
 
-    # -TargetIP/-AuthFile only, matching Get-JunosNodeData.ps1's fixed read-only "show ..."
-    # batch. Never -HumanReadable (that branch ends in `exit`, which would kill this
-    # runspace) and never -Log (no reason for an ad-hoc rescan to write RawDumps/).
+    # -TargetIP/-Username/-Password only, matching Get-JunosNodeData.ps1's fixed read-only
+    # "show ..." batch. Never -HumanReadable (that branch ends in `exit`, which would kill
+    # this runspace) and never -Log (no reason for an ad-hoc rescan to write RawDumps/).
     $JobId = [guid]::NewGuid().ToString()
-    $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $TargetIP).AddParameter("AuthFile", $AuthFile)
+    $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $TargetIP).AddParameter("Username", $JunosUsername).AddParameter("Password", $JunosPassword)
     $PS.RunspacePool = $script:RescanPool
     $Handle = $PS.BeginInvoke()
 
@@ -267,22 +276,14 @@ function Invoke-GetConfigAction {
 
 # Encrypts and writes Configuration.json.enc. The browser sends PLAINTEXT edited config
 # JSON - the encryption password never crosses the wire in either direction, same as
-# topology writes: this reads Auth.json's EncryptionPassword server-side, exactly like
-# Start-NetworkMapper.ps1's Write-TopologyOutput does. A fresh salt/IV is generated per
-# save (unlike a crawl's session-cached key - saves are rare/interactive, not periodic, so
-# there's no repeated-PBKDF2-cost reason to cache keys across calls here).
+# topology writes. $EncryptionPassword is the same password Start-NetworkMapper.ps1 already
+# prompted for interactively at startup (see that script's header sequence) and passed
+# straight through to Start-MapperWebServer - it is never read from a file. A fresh
+# salt/IV is generated per save (unlike a crawl's session-cached key - saves are rare/
+# interactive, not periodic, so there's no repeated-PBKDF2-cost reason to cache keys across
+# calls here).
 function Invoke-SaveConfigAction {
-    param($Response, [string]$Body, [string]$ConfigPath, [string]$AuthFile)
-
-    if (-not (Test-Path $AuthFile)) {
-        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Auth file missing at $AuthFile" }
-        return
-    }
-    $AuthData = Get-Content $AuthFile -Raw | ConvertFrom-Json
-    if (-not $AuthData.EncryptionPassword -or [string]::IsNullOrWhiteSpace($AuthData.EncryptionPassword)) {
-        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Auth.json has no EncryptionPassword set" }
-        return
-    }
+    param($Response, [string]$Body, [string]$ConfigPath, [string]$EncryptionPassword)
 
     $Parsed = $null
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
@@ -307,7 +308,7 @@ function Invoke-SaveConfigAction {
         # TopologyCrypto.ps1 in the first place (stop crypto parameters drifting between the
         # crawler and the webserver).
         $Iterations = Get-TopologyPbkdf2Iterations
-        $KeyMaterial = Get-TopologyKeyMaterial -Password $AuthData.EncryptionPassword -Salt $SaltBytes -Iterations $Iterations
+        $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $Iterations
         $Envelope = Protect-TopologyPayload -PlainJson $Body -EncKey $KeyMaterial.EncKey -MacKey $KeyMaterial.MacKey -Salt $SaltBytes -Iterations $Iterations -Format "PSNetworkMapper-EncryptedConfig"
 
         $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
@@ -351,9 +352,11 @@ function Start-MapperWebServer {
     param(
         [Parameter(Mandatory=$true)][string]$VisualizerRoot,
         [Parameter(Mandatory=$true)][string]$ConnectScriptPath,
-        [Parameter(Mandatory=$true)][string]$AuthFile,
         [Parameter(Mandatory=$true)][string]$WorkerPath,
         [Parameter(Mandatory=$true)][string]$ConfigPath,
+        [Parameter(Mandatory=$true)][string]$EncryptionPassword,
+        [string]$JunosUsername = "",
+        [string]$JunosPassword = "",
         [int]$Port = 8787
     )
 
@@ -392,7 +395,7 @@ function Start-MapperWebServer {
                         $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
                         $Body = $Reader.ReadToEnd()
                         $Reader.Close()
-                        Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -AuthFile $AuthFile
+                        Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -JunosUsername $JunosUsername -JunosPassword $JunosPassword
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/rescan") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
@@ -401,7 +404,7 @@ function Start-MapperWebServer {
                         $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
                         $Body = $Reader.ReadToEnd()
                         $Reader.Close()
-                        Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -AuthFile $AuthFile
+                        Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $JunosUsername -JunosPassword $JunosPassword
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
                     $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
@@ -415,7 +418,7 @@ function Start-MapperWebServer {
                         $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
                         $Body = $Reader.ReadToEnd()
                         $Reader.Close()
-                        Invoke-SaveConfigAction -Response $Response -Body $Body -ConfigPath $ConfigPath -AuthFile $AuthFile
+                        Invoke-SaveConfigAction -Response $Response -Body $Body -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword
                     }
                 } else {
                     Invoke-StaticFile -Response $Response -AbsolutePath $Request.Url.AbsolutePath -VisualizerRoot $VisualizerRoot
