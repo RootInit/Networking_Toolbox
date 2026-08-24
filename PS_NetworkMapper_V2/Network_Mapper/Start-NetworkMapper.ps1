@@ -47,9 +47,19 @@ if (Test-Path $SingleFileVisualizerPath -PathType Leaf) {
 # webserver, the SSH-spawn action, the NDJSON ledger) is new. Configuration.json.enc lives
 # in that shared Network_Mapper/ folder, same location it's always lived in (previously
 # anchored off -AuthFile's parent directory - now a fixed relative path, since -AuthFile no
-# longer exists).
+# longer exists) - but only when that shared checkout actually exists. A portable deployment
+# (see $SingleFileVisualizerPath above) has no sibling PS_NetworkMapper/ at all, and
+# Out-File doesn't create missing parent directories - Invoke-SaveConfigAction
+# (Start-WebServer.ps1) threw on the very first save, surfacing as a bare HTTP 500 with no
+# indication why. Test the DIRECTORY, not the file - Configuration.json.enc itself may not
+# exist yet in an otherwise-real shared checkout (nothing saved there before), which is a
+# normal "no config yet" state, not a reason to fall back.
 $SharedMapperDir = Join-Path $ScriptDir "..\..\PS_NetworkMapper\Network_Mapper"
-$ConfigPath = Join-Path $SharedMapperDir "Configuration.json.enc"
+if (Test-Path $SharedMapperDir -PathType Container) {
+    $ConfigPath = Join-Path $SharedMapperDir "Configuration.json.enc"
+} else {
+    $ConfigPath = Join-Path $ScriptDir "Configuration.json.enc"
+}
 . (Join-Path $ScriptDir "lib\Start-WebServer.ps1")
 . (Join-Path $ScriptDir "lib\TopologyCrypto.ps1")
 $DebugLog = Join-Path $ScriptDir "Mapper_Debug.log"
