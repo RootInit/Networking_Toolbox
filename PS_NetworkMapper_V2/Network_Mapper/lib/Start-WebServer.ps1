@@ -95,8 +95,13 @@ function Test-SameOriginRequest {
 # ever reaches Start-Process, so it carries no shell metacharacters even though the
 # arguments below are also passed as a single pre-quoted string rather than relying on
 # Start-Process's own (version-dependent) array-quoting behavior.
+#
+# $PowerShellExePath is resolved once by Start-MapperWebServer (below) from the CURRENT
+# process, not hardcoded - a machine with only PowerShell 7+ installed (no Windows
+# PowerShell 5.1) has no "powershell.exe" to find, and Start-Process would fail outright.
+# The default here is only a last-resort fallback if that detection itself couldn't run.
 function Invoke-ConnectAction {
-    param($Response, [string]$Body, [string]$ConnectScriptPath, [string]$JunosUsername, [string]$JunosPassword)
+    param($Response, [string]$Body, [string]$ConnectScriptPath, [string]$JunosUsername, [string]$JunosPassword, [string]$PowerShellExePath = "powershell.exe")
 
     if ([string]::IsNullOrWhiteSpace($JunosUsername) -or [string]::IsNullOrWhiteSpace($JunosPassword)) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "No Juniper login configured - set it in the Settings tab, then try again." }
@@ -119,7 +124,7 @@ function Invoke-ConnectAction {
     try {
         $CredFile = New-JunosCredentialFile -Username $JunosUsername -Password $JunosPassword
         $ArgString = @("-NoExit", "-File", "`"$ConnectScriptPath`"", "-TargetIP", $TargetIP, "-CredentialFile", "`"$CredFile`"") -join ' '
-        Start-Process -FilePath "powershell.exe" -ArgumentList $ArgString | Out-Null
+        Start-Process -FilePath $PowerShellExePath -ArgumentList $ArgString | Out-Null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "launched"; ip = $TargetIP }
     } catch {
         # Start-Process (or the credential-file write itself) failed - Connect-Switch.ps1 never
@@ -451,11 +456,34 @@ function Invoke-GetConfigAction {
     }
 }
 
+# Hands the browser the SAME encryption password Start-NetworkMapper.ps1 already prompted
+# for interactively at startup, so it can decrypt Configuration.json.enc/an encrypted
+# NetworkMap_*.json.enc without asking the operator to re-type a password they just typed
+# into this very console (see network_vis.js's window.getSessionEncryptionPassword, the only
+# caller). A deliberate exception to Invoke-SaveConfigAction's "the password never crosses
+# the wire" posture just below - accepted for the same reason /api/connect is: this server
+# already holds the real switch password in memory and will happily spawn ssh.exe with it
+# for any page reachable at localhost:$Port (see Start-WebServer.ps1's header comment on the
+# trust boundary), so exposing this SECOND, less sensitive secret to the same boundary adds
+# no new capability an attacker didn't already have. GET, not gated by
+# Test-SameOriginRequest like the state-changing endpoints: it has no side effects, and a
+# response body is unreadable by a hostile cross-origin page anyway (no CORS headers are
+# set here, so the browser's own same-origin policy blocks reading a cross-origin fetch's
+# result even though the request itself would still be sent). Returns "" (not null/absent)
+# when there's nothing to offer - a server-only launch with no Configuration.json.enc, or
+# the "continue without credentials" path where the typed password was proven wrong - the
+# browser falls straight back to prompting exactly as it did before this endpoint existed.
+function Invoke-GetSessionPasswordAction {
+    param($Response, [string]$EncryptionPassword)
+    Send-WebJson -Response $Response -StatusCode 200 -Object @{ password = [string]$EncryptionPassword }
+}
+
 # Encrypts and writes Configuration.json.enc. The browser sends PLAINTEXT edited config
-# JSON - the encryption password never crosses the wire in either direction, same as
-# topology writes. $EncryptionPassword is the same password Start-NetworkMapper.ps1 already
-# prompted for interactively at startup (see that script's header sequence) and passed
-# straight through to Start-MapperWebServer - it is never read from a file. A fresh
+# JSON - the encryption password itself is never part of THIS request in either direction
+# (see Invoke-GetSessionPasswordAction above for the one deliberate exception elsewhere),
+# same as topology writes. $EncryptionPassword is the same password Start-NetworkMapper.ps1
+# already prompted for interactively at startup (see that script's header sequence) and
+# passed straight through to Start-MapperWebServer - it is never read from a file. A fresh
 # salt/IV is generated per save (unlike a crawl's session-cached key - saves are rare/
 # interactive, not periodic, so there's no repeated-PBKDF2-cost reason to cache keys across
 # calls here).
@@ -616,6 +644,17 @@ function Start-MapperWebServer {
     $script:JunosUsername = $JunosUsername
     $script:JunosPassword = $JunosPassword
 
+    # Which host actually launched THIS process - pwsh.exe under PowerShell 7+, or
+    # powershell.exe under Windows PowerShell 5.1 - so Invoke-ConnectAction's "Launch SSH
+    # Session" opens in the same runtime rather than a hardcoded "powershell.exe" literal
+    # that doesn't exist on a machine where only pwsh is installed. Inspecting the CURRENT
+    # process needs no elevated access, so this should never fail in practice - the
+    # try/catch and Invoke-ConnectAction's own default param are only a last-resort
+    # fallback to the historical literal, never a reason to block every SSH launch on a
+    # detection quirk.
+    $PowerShellExePath = try { [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { $null }
+    if ([string]::IsNullOrWhiteSpace($PowerShellExePath)) { $PowerShellExePath = "powershell.exe" }
+
     Write-Host "`nWeb UI listening on $Prefix (localhost only - Ctrl+C to stop)" -ForegroundColor Cyan
     Start-Process $Prefix
 
@@ -633,7 +672,7 @@ function Start-MapperWebServer {
                         $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
                         $Body = $Reader.ReadToEnd()
                         $Reader.Close()
-                        Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword
+                        Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -PowerShellExePath $PowerShellExePath
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/rescan") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
@@ -660,6 +699,8 @@ function Start-MapperWebServer {
                     Invoke-ScanNetworkStatusAction -Response $Response
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/config") {
                     Invoke-GetConfigAction -Response $Response -ConfigPath $ConfigPath
+                } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/session-password") {
+                    Invoke-GetSessionPasswordAction -Response $Response -EncryptionPassword $EncryptionPassword
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/save-config") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }

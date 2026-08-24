@@ -87,23 +87,15 @@ window.startNetworkScan = async function() {
         }
     }
 
-    // Every free-text status this scan produces goes through here (the five call sites
-    // below), so mirroring once here is provably complete rather than five parallel edits.
+    // A fleet crawl runs for minutes and switching tabs mid-scan is entirely reasonable
+    // (e.g. to double-check saved credentials in Settings) - window.setStatus (utils.js)
+    // itself now mirrors to #mapStatusNote whenever #status-text isn't the currently
+    // visible tab, so every one of this scan's messages is seen wherever the user happens
+    // to be without a separate mirror call here.
     function finish(msg, color) {
         if (scanNetworkPollTimer) { clearTimeout(scanNetworkPollTimer); scanNetworkPollTimer = null; }
         if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
         window.setStatus(msg, color);
-        // setStatus writes #status-text, which lives inside #sidebar-tab-load and is
-        // display:none whenever any other sidebar tab (Search/Settings/Analysis) is active.
-        // A fleet crawl runs for minutes and switching tabs mid-scan is entirely reasonable
-        // (e.g. to double-check saved credentials in Settings) - every failure message
-        // ("Scan failed: ...", the lost-connection one, the credentials-missing 400) landed
-        // somewhere invisible. #mapStatusNote is a fixed-position overlay independent of both
-        // the sidebar tab and the center view, so mirroring here means the message is seen
-        // wherever the user happens to be. setStatus is kept as-is for anyone actually
-        // watching the Load File tab. Unguarded: network_vis.html loads map.js before
-        // app.js, and this only ever runs from a user-initiated click long after load.
-        window.showMapStatus(msg);
     }
 
     try {

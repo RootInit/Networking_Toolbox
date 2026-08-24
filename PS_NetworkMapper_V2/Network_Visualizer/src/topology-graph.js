@@ -31,6 +31,20 @@ function computeDeviceClassification(topology) {
   return result;
 }
 
+// Per-device VLAN tags seen on that device's own local clients (from its MAC table), keyed
+// by DeviceIP - shared by graph.js (the diagram's per-node vlanCache) and map.js (VLAN
+// highlighting on markers/edges) so the two views can never classify a device's VLANs
+// differently. A device with no TrueClients (unscanned neighbor placeholder, or a scanned
+// device with an empty MAC table) gets an empty array, not a missing entry.
+function computeVlanCache(topology) {
+  var result = new Map();
+  topology.forEach(function (device) {
+    if (!device || !device.DeviceIP) return;
+    result.set(String(device.DeviceIP), device.TrueClients ? device.TrueClients.map(function (c) { return String(c.VLAN_Tag); }) : []);
+  });
+  return result;
+}
+
 function computeNeighborEdges(topology) {
   var edges = [];
   var seen = new Set();
@@ -56,7 +70,7 @@ function computeNeighborEdges(topology) {
 // browser loads this same file as a classic <script>, where `module` doesn't exist, so it
 // attaches to `window.TopologyGraph` instead (see graph-layout.js for the same pattern).
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges };
+    module.exports = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache };
 } else if (typeof window !== 'undefined') {
-    window.TopologyGraph = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges };
+    window.TopologyGraph = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache };
 }

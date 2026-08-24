@@ -22,9 +22,31 @@ window.asArray = function(val) {
 };
 
 // UI Helpers
-window.setStatus = function(msg, color="blue") {
+//
+// #status-text lives inside #sidebar-tab-load (network_vis.html) and is display:none
+// whenever any other sidebar tab is active (.sidebar-tab-content only shows the one with
+// .active - see app.js's switchSidebarTab). Plenty of setStatus callers are NOT gated by
+// that tab: every drawer action (rescan, SSH launch, config export/print - drawer.js) is
+// reachable from the drawer regardless of which sidebar tab is open, and the Settings
+// tab's own Save/Reset (persistence.js) is *guaranteed* to fire while sidebar-tab-load is
+// hidden, since Settings has to be the active tab for the user to click Save at all - so
+// every one of those messages was silently invisible. Mirror through #mapStatusNote
+// (map.js's window.showMapStatus) whenever #status-text itself isn't currently visible -
+// that element is a sibling of both center-view panes, not gated by sidebar tab or
+// diagram/map view (see map.js's switchCenterView comment). Skipped when #status-text IS
+// visible so the common case (Load File tab already showing it) doesn't also flash a
+// duplicate toast over the map/diagram.
+//
+// noMirror: true opts out for a caller that already wrote a MORE detailed message straight
+// to showMapStatus itself and is now only writing a generic local pointer to #status-text
+// (see persistence.js's saveSettingsPanel) - without it, this generic echo would win the
+// race and overwrite the detailed reason the earlier call already put in #mapStatusNote.
+window.setStatus = function(msg, color="blue", opts) {
     var el = document.getElementById('status-text');
     if(el) { el.innerText = msg; el.style.color = color; }
+    if (!(opts && opts.noMirror) && (!el || el.offsetParent === null) && typeof window.showMapStatus === 'function') {
+        window.showMapStatus(msg);
+    }
 };
 
 window.formatAge = function(ms) {

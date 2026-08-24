@@ -170,6 +170,29 @@ window.promptForPassword = function(errorMsg) {
     });
 };
 
+// Start-NetworkMapper.ps1 already prompted for this exact password at the console and now
+// hands it to the browser via GET /api/session-password (Start-WebServer.ps1), so
+// readSnapshotFile (below) and map.js's loadMapConfiguration can both skip the password
+// modal on the common path instead of asking the operator to re-type a password they just
+// typed - it's the same one password for the whole session (see that script's "Network_
+// Visualizer will prompt for this same password" comment). Cached/in-flight-deduped the
+// same way map.js's ensureConfigLoaded dedupes its own fetch - loading several encrypted
+// files, or a file load racing the Settings tab's own Configuration.json.enc fetch, only
+// ever hits the endpoint once. Resolves to '' (never rejects) when the server has nothing to
+// offer - a server-only launch with no Configuration.json.enc yet, or the "continue without
+// credentials" startup path where the typed password was proven wrong - so every caller can
+// treat a falsy result as "fall back to promptForPassword", exactly as before this existed.
+var sessionPasswordPromise = null;
+window.getSessionEncryptionPassword = function() {
+    if (!sessionPasswordPromise) {
+        sessionPasswordPromise = fetch('/api/session-password')
+            .then(resp => resp.ok ? resp.json() : { password: '' })
+            .then(json => json.password || '')
+            .catch(() => '');
+    }
+    return sessionPasswordPromise;
+};
+
 window.toggleLeftPanel = function(e) {
     if (e) e.stopPropagation();
     document.getElementById('left-panel').classList.toggle('collapsed');
@@ -219,8 +242,22 @@ function readSnapshotFile(file) {
                 if (data && data.format === 'PSNetworkMapper-EncryptedTopology') {
                     var decryptedText = null;
                     var errorMsg = null;
+                    // Try the session password (see window.getSessionEncryptionPassword) once,
+                    // silently, before ever showing the modal - it's the same password
+                    // Start-NetworkMapper.ps1 encrypted this file with in the first place. Only
+                    // falls through to promptForPassword if that's unavailable/empty, or (rare -
+                    // e.g. this file was manually re-encrypted under a different password) it
+                    // fails to decrypt.
+                    var sessionPassword = await window.getSessionEncryptionPassword();
+                    var triedSessionPassword = false;
                     while (decryptedText === null) {
-                        var password = await window.promptForPassword(errorMsg); // rejects on Cancel
+                        var password;
+                        if (sessionPassword && !triedSessionPassword) {
+                            password = sessionPassword;
+                            triedSessionPassword = true;
+                        } else {
+                            password = await window.promptForPassword(errorMsg); // rejects on Cancel
+                        }
                         try {
                             decryptedText = await window.TopologyCrypto.decryptEnvelope(data, password);
                         } catch (decErr) {

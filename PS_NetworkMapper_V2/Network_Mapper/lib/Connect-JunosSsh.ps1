@@ -20,7 +20,18 @@
 function New-JunosCredentialFile {
     param([Parameter(Mandatory=$true)][string]$Username, [Parameter(Mandatory=$true)][string]$Password)
     $CredPath = Join-Path $env:TEMP "junos_cred_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).json"
-    @{ Username = $Username; Password = $Password } | ConvertTo-Json -Compress | Out-File -FilePath $CredPath -Encoding utf8
+    $Json = @{ Username = $Username; Password = $Password } | ConvertTo-Json -Compress
+    # [System.IO.File]::WriteAllText's 2-arg overload, not Out-File -Encoding utf8: "utf8"
+    # means UTF-8-WITH-BOM in Windows PowerShell 5.1 but UTF-8-WITHOUT-BOM in PowerShell
+    # Core - and the reader (Connect-Switch.ps1) is always a hardcoded powershell.exe (5.1),
+    # regardless of which runtime THIS process is running under. If this server is started
+    # under pwsh and a credential contains a non-ASCII character (ConvertTo-Json emits those
+    # raw, not \u-escaped - confirmed directly, not assumed), a BOM-less file here would hit
+    # Get-Content's ANSI-codepage fallback on the 5.1 side and silently corrupt the
+    # credential. WriteAllText(path, text) is UTF-8-without-BOM on both runtimes - same
+    # idiom New-JunosAskPass already uses for the password text file below, now applied
+    # here too so the round trip is deterministic regardless of which runtime writes it.
+    [System.IO.File]::WriteAllText($CredPath, $Json)
     return $CredPath
 }
 

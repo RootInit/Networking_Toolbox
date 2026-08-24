@@ -33,7 +33,14 @@ $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 # username/password sitting in plaintext at %TEMP% with nothing left to clean it up.
 $AskPass = $null
 try {
-    $CredData = Get-Content $CredentialFile -Raw | ConvertFrom-Json
+    # -Encoding UTF8 explicit, not the default: this always runs as Windows PowerShell 5.1
+    # (hardcoded "powershell.exe" in Invoke-ConnectAction), whose Get-Content falls back to
+    # the system ANSI code page when the file has no BOM - and New-JunosCredentialFile
+    # (Connect-JunosSsh.ps1) deliberately writes without one, since the SERVER side may be
+    # running under pwsh instead, where "utf8" means no-BOM. Forcing UTF8 here decodes
+    # correctly either way, regardless of which runtime wrote the file or whether a
+    # username/password contains a non-ASCII character.
+    $CredData = Get-Content $CredentialFile -Raw -Encoding UTF8 | ConvertFrom-Json
     $Username = $CredData.Username
     $AskPass = New-JunosAskPass -Password $CredData.Password
 

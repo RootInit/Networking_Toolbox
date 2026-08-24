@@ -104,6 +104,7 @@ window.buildSwitchMap = async function() {
 
     var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
     var deviceByIpLocal = new Map(globalTopologyData.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
+    var vlanCacheByIp = window.TopologyGraph.computeVlanCache(globalTopologyData);
 
     classification.forEach(function (meta, ip) {
         var device = deviceByIpLocal.get(ip);
@@ -113,7 +114,7 @@ window.buildSwitchMap = async function() {
                 ? `Switch\n${ip}\n(${meta.hostname})${stackIcon}`
                 : `Switch\n${ip}\n(${meta.hostname})`,
             shape: meta.isStack ? 'database' : 'box', isStack: meta.isStack, scanned: meta.scanned,
-            vlanCache: (device && device.TrueClients) ? device.TrueClients.map(c => String(c.VLAN_Tag)) : [],
+            vlanCache: vlanCacheByIp.get(ip) || [],
         });
     });
 
@@ -286,6 +287,15 @@ function edgeTrunksVlan(subtreeVlanSets, fromId, toId, vlanTag) {
 
 // 3. Global Filters
 window.applyVlanFilter = function() {
+    // Refreshes the map FIRST, before any of the diagram-only work below (which touches
+    // vis-network's nodesDataset/edgesDataset and, further down, openRightDrawer - a
+    // 7-tab drawer render that isn't bulletproof against every possible device shape). If
+    // any of that throws, a user on Map view would otherwise see the filter silently not
+    // apply to the view they're actually looking at - the exact bug this function exists to
+    // fix, just reintroduced under a different trigger. renderMapMarkers reads #vlanFilter
+    // itself and no-ops if Map view has never been opened (leafletMap === null).
+    if (typeof window.renderMapMarkers === 'function') window.renderMapMarkers();
+
     var selectedVlan = document.getElementById('vlanFilter').value;
     var scannedIps = new Set(globalTopologyData.filter(d => d && d.DeviceIP).map(d => String(d.DeviceIP)));
     var nodeUpdates = [];

@@ -319,6 +319,13 @@
            22px marker doesn't need one, and its hardcoded #fff border-color wouldn't match
            the translucent background above anyway. */
         .map-marker-label::before { display: none; }
+        /* VLAN filter applied and this device doesn't carry the selected VLAN - matches
+           applyVlanFilter's (graph.js) own faded font color (#cccccc) for a non-matching
+           diagram node, so the two views read the same way. Without this the marker circle
+           dims but its hostname label stays exactly as loud as a matching device's - on a
+           map with many markers that's the part actually carrying the visual signal, so a
+           filter that only faded the small circle read as barely working. */
+        .map-marker-label.vlan-dimmed { color: #bbbbbb; background: rgba(255,255,255,0.6); }
     </style>
 </head>
 <body>

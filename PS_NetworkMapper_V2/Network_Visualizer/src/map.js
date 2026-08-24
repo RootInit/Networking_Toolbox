@@ -179,17 +179,28 @@ window.loadMapConfiguration = async function() {
 
     var decryptedText = null;
     var errorMsg = null;
+    // Try the session password (app.js's window.getSessionEncryptionPassword) once, silently,
+    // before ever showing the modal - Start-NetworkMapper.ps1 already prompted for this exact
+    // password at the console to decrypt this same file server-side. Only falls through to
+    // promptForPassword if that's unavailable/empty, or (rare) it fails to decrypt.
+    var sessionPassword = await window.getSessionEncryptionPassword();
+    var triedSessionPassword = false;
     while (decryptedText === null) {
         var password;
-        try {
-            password = await window.promptForPassword(errorMsg);
-        } catch (cancelErr) {
-            window.showMapStatus('Location config decryption cancelled - devices will show without saved locations. Click Map again to retry.');
-            mapConfigEntries = [];
-            loadedCredentials = null;
-            loadedSettings = {};
-            mapConfigLoaded = false;
-            return;
+        if (sessionPassword && !triedSessionPassword) {
+            password = sessionPassword;
+            triedSessionPassword = true;
+        } else {
+            try {
+                password = await window.promptForPassword(errorMsg);
+            } catch (cancelErr) {
+                window.showMapStatus('Location config decryption cancelled - devices will show without saved locations. Click Map again to retry.');
+                mapConfigEntries = [];
+                loadedCredentials = null;
+                loadedSettings = {};
+                mapConfigLoaded = false;
+                return;
+            }
         }
         try {
             decryptedText = await window.TopologyCrypto.decryptEnvelope(envelope, password, ['PSNetworkMapper-EncryptedConfig']);
@@ -252,10 +263,21 @@ var MARKER_COLORS = {
     scannedStack: { background: '#D2E5FF', border: '#2B7CE9' },
     scanned: { background: '#97C2FC', border: '#2B7CE9' },
     unscanned: { background: '#E8E8E8', border: '#B0B0B0' },
+    // Matches graph.js's applyVlanFilter's own "doesn't match the selected VLAN" node
+    // color exactly - same visual language (a faded near-white circle) on both views.
+    vlanDimmed: { background: '#f2f2f2', border: '#e6e6e6' },
 };
 
-function iconForClassification(meta) {
-    var colors = !meta.scanned ? MARKER_COLORS.unscanned : (meta.isStack ? MARKER_COLORS.scannedStack : MARKER_COLORS.scanned);
+// dimmedByVlan: true when a VLAN filter is active AND this device's own local clients
+// don't carry the selected VLAN tag. Only applies to scanned devices - an unscanned
+// neighbor placeholder has no client data to test and always stays plain gray, exactly
+// like graph.js's applyVlanFilter leaves an unscanned node's background alone (it only
+// dims that node's font color there, which has no equivalent here since the marker's
+// circle never carries text - see below).
+function iconForClassification(meta, dimmedByVlan) {
+    var colors = !meta.scanned ? MARKER_COLORS.unscanned
+        : dimmedByVlan ? MARKER_COLORS.vlanDimmed
+        : (meta.isStack ? MARKER_COLORS.scannedStack : MARKER_COLORS.scanned);
     // The hostname is NOT drawn inside this circle. Two earlier attempts were: 26px with a
     // single clipped line, then 40px with wrapped text - a realistic 19-character hostname
     // ("ACCESS-SW-001.local") still needs four wrapped lines at that font size and overflows
@@ -296,6 +318,40 @@ function maybeFitBoundsToMarkers() {
     hasFitBoundsOnce = true;
 }
 
+// Bottom-up "which VLANs are reachable behind this edge" for the map's OWN edge set,
+// mirroring graph.js's computeSubtreeVlanSets/edgeTrunksVlan (see graph.js for the full
+// reasoning on why a subtree union is the right trunk-membership signal here). Duplicated
+// rather than shared: graph.js's version walks its private primaryTree/graphRoot, which are
+// vis-network-diagram state that may not even be built yet (Diagram view need never be
+// opened this session for Map view to be used) - this instead builds its own root/tree from
+// the map's own node/edge set via the same window.GraphLayout helpers scan-network.js
+// already uses for its start-IP heuristic (see bestStartIpFromActiveSnapshot).
+function computeMapVlanTrunkSets(nodeIds, edges, vlanCacheByIp) {
+    var root = window.GraphLayout.computeGraphRoot(nodeIds, edges);
+    var tree = window.GraphLayout.buildPrimaryTree(nodeIds, edges, root);
+    var result = new Map();
+    function visit(id) {
+        if (result.has(id)) return result.get(id); // guards a malformed/cyclic childrenOf, cheap either way
+        var set = new Set(vlanCacheByIp.get(id) || []);
+        result.set(id, set); // set before recursing so a cycle can't loop forever
+        (tree.childrenOf.get(id) || []).forEach(function (childId) {
+            visit(childId).forEach(function (v) { set.add(v); });
+        });
+        return set;
+    }
+    if (root) visit(root);
+    // Anything buildPrimaryTree didn't reach from root (a genuinely disconnected device)
+    // still gets its own local VLANs rather than an undefined lookup later.
+    nodeIds.forEach(function (id) { if (!result.has(id)) result.set(id, new Set(vlanCacheByIp.get(id) || [])); });
+    return result;
+}
+
+function mapEdgeTrunksVlan(subtreeVlanSets, fromId, toId, vlanTag) {
+    var fromSet = subtreeVlanSets.get(String(fromId));
+    var toSet = subtreeVlanSets.get(String(toId));
+    return !!((fromSet && fromSet.has(vlanTag)) || (toSet && toSet.has(vlanTag)));
+}
+
 window.renderMapMarkers = function() {
     // Safe to call unconditionally from anywhere in the app (a new snapshot loading, a
     // single-device rescan merging) even if Map view has never been opened this session -
@@ -311,6 +367,15 @@ window.renderMapMarkers = function() {
     var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
     var deviceByIpLocal = new Map(globalTopologyData.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
     var placedByIp = new Map(); // ip -> {lat, lng} for devices that resolved a location, used below for edges
+
+    // Same #vlanFilter <select> the diagram's own applyVlanFilter (graph.js) reads -
+    // there's only one filter control on the page, shared by both views (see
+    // network_vis.html). Read live off the DOM, same as every other render-time setting
+    // this file/graph.js already reads this way (getClusterThreshold, etc.), so a filter
+    // change is picked up on the very next render without map.js needing its own cached copy.
+    var vlanFilterEl = document.getElementById('vlanFilter');
+    var selectedVlan = vlanFilterEl ? vlanFilterEl.value : 'ALL';
+    var vlanCacheByIp = window.TopologyGraph.computeVlanCache(globalTopologyData);
 
     classification.forEach(function (meta, ip) {
         var device = deviceByIpLocal.get(ip); // undefined for an unscanned placeholder - resolveDeviceLocation needs a real device object
@@ -330,7 +395,8 @@ window.renderMapMarkers = function() {
         }
 
         placedByIp.set(ip, { lat: entry.lat, lng: entry.lng });
-        var marker = L.marker([entry.lat, entry.lng], { icon: iconForClassification(meta) }).addTo(leafletMap);
+        var dimmedByVlan = selectedVlan !== 'ALL' && !(vlanCacheByIp.get(ip) || []).includes(selectedVlan.toString());
+        var marker = L.marker([entry.lat, entry.lng], { icon: iconForClassification(meta, dimmedByVlan) }).addTo(leafletMap);
         // The hostname label lives here, not inside the marker's circle - see
         // iconForClassification's comment for why (text inside the circle either clips or
         // forces the circle - and with it the click target - to grow). permanent:true shows
@@ -345,8 +411,15 @@ window.renderMapMarkers = function() {
         // assignment - so an unescaped device-supplied hostname would be an XSS sink exactly
         // like the divIcon html was.
         if (meta.hostname !== 'Unknown') {
+            // dimmedByVlan fades the label too (see the .vlan-dimmed rule in
+            // network_vis.html) - the marker circle alone dimming wasn't enough signal: the
+            // permanent label is what a user actually reads on a map with many markers, and
+            // it used to stay exactly as loud as a matching device's regardless of the
+            // filter. Matches applyVlanFilter's (graph.js) own font-dimming for a
+            // non-matching diagram node.
             marker.bindTooltip(window.esc(meta.hostname), {
-                permanent: true, direction: 'bottom', offset: [0, 8], className: 'map-marker-label',
+                permanent: true, direction: 'bottom', offset: [0, 8],
+                className: dimmedByVlan ? 'map-marker-label vlan-dimmed' : 'map-marker-label',
             });
         }
         marker.on('click', function () { window.openRightDrawer(ip); });
@@ -374,11 +447,24 @@ window.renderMapMarkers = function() {
     });
 
     var edges = window.TopologyGraph.computeNeighborEdges(globalTopologyData);
+    // Links that trunk the selected VLAN get emphasized, every other link fades - same
+    // visual language as applyVlanFilter's edge pass (graph.js). "ALL" leaves every line at
+    // its plain default styling. Only computed when a VLAN is actually selected - the
+    // trunk-set walk is wasted work otherwise.
+    var subtreeVlanSets = selectedVlan !== 'ALL'
+        ? computeMapVlanTrunkSets(Array.from(classification.keys()), edges, vlanCacheByIp)
+        : null;
     var lines = [];
     edges.forEach(function (edge) {
         var a = placedByIp.get(edge.from), b = placedByIp.get(edge.to);
         if (!a || !b) return; // one or both ends have no resolved location - no line to draw
-        lines.push(L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: '#5b7a9d', weight: 2 }));
+        var color = '#5b7a9d', weight = 2;
+        if (subtreeVlanSets) {
+            var trunks = mapEdgeTrunksVlan(subtreeVlanSets, edge.from, edge.to, selectedVlan.toString());
+            color = trunks ? '#2B7CE9' : '#e6e6e6';
+            weight = trunks ? 3 : 1;
+        }
+        lines.push(L.polyline([[a.lat, a.lng], [b.lat, b.lng]], { color: color, weight: weight }));
     });
     window.mapEdgeLayer = L.layerGroup(lines).addTo(leafletMap);
 

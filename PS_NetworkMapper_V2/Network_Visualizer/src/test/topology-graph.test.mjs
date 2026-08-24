@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeDeviceClassification, computeNeighborEdges } from '../topology-graph.js';
+import { computeDeviceClassification, computeNeighborEdges, computeVlanCache } from '../topology-graph.js';
 
 const SCANNED_STANDALONE = {
   DeviceIP: '10.0.0.1', Hostname: 'sw1', StackMembers: [{ FPC: '0', Serial: 'ABC123', Role: 'Standalone' }],
@@ -149,6 +149,26 @@ test('buildSwitchMap-equivalent node-meta construction does not throw and produc
   assert.deepEqual(meta.get('10.0.3.99'), {
     label: 'Switch\n10.0.3.99\n(ghost)', shape: 'box', isStack: false, scanned: false, vlanCache: [],
   });
+});
+
+// --- computeVlanCache (shared by graph.js's buildSwitchMap and map.js's renderMapMarkers -
+// added so a device's VLAN set can never diverge between the diagram and the map view) ---
+
+test('computeVlanCache maps each scanned device to the VLAN tags of its own TrueClients', () => {
+  const device = { DeviceIP: '10.0.4.1', TrueClients: [{ VLAN_Tag: 10 }, { VLAN_Tag: 20 }] };
+  const result = computeVlanCache([device]);
+  assert.deepEqual(result.get('10.0.4.1'), ['10', '20']);
+});
+
+test('computeVlanCache gives an empty array (not a missing entry) for a device with no TrueClients', () => {
+  const device = { DeviceIP: '10.0.4.2' };
+  const result = computeVlanCache([device]);
+  assert.deepEqual(result.get('10.0.4.2'), []);
+});
+
+test('computeVlanCache skips a malformed entry with no DeviceIP', () => {
+  const result = computeVlanCache([{ TrueClients: [{ VLAN_Tag: 5 }] }]);
+  assert.equal(result.size, 0);
 });
 
 test('buildSwitchMap-equivalent node-meta construction produces a correctly styled stack node for a scanned device', () => {

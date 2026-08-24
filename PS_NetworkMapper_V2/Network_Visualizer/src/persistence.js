@@ -147,8 +147,12 @@ window.saveSettingsPanel = async function() {
         // saveConfiguration already wrote a detailed reason to the map status note
         // (#mapStatusNote, visible regardless of which sidebar tab or center view is
         // active - see network_vis.html) - this is just the left-panel-local echo of "it
-        // failed", not a duplicate of the reason itself.
-        window.setStatus("Settings not saved - see the status note for the error.", "red");
+        // failed", not a duplicate of the reason itself. noMirror: true because
+        // window.setStatus (utils.js) now mirrors any message to that same #mapStatusNote
+        // whenever the Settings tab has #status-text hidden (which it always does here) -
+        // without it, this generic redirect would overwrite the detailed reason above with
+        // its own "see the status note" text, pointing at itself.
+        window.setStatus("Settings not saved - see the status note for the error.", "red", { noMirror: true });
     }
 };
 
