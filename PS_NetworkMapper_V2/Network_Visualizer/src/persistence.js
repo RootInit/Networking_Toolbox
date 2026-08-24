@@ -61,9 +61,30 @@ window.populateSettingsInputs = function() {
     var passEl = document.getElementById('setting-junosPassword');
     if (userEl) userEl.value = creds.username || '';
     if (passEl) passEl.value = creds.password || '';
+
+    // Setting el.value programmatically does NOT fire the graph-layout inputs' onchange
+    // handlers (window.setClusterThreshold/window.setLayoutSetting in graph.js), and those
+    // handlers are the only thing that re-lays-out the diagram for a changed layout value -
+    // so without this, a loaded config showed its saved numbers in the boxes while the
+    // diagram kept the layout it was built with. Same `network` guard as saveSettingsPanel.
+    if (typeof window.renderVisibleGraph === 'function' && network) window.renderVisibleGraph();
 };
 
+// Loading the config MUST happen before the form is read, not after. saveConfiguration
+// calls ensureConfigLoaded internally, so reading the form and calling
+// setLoadedCredentials/setLoadedSettings first meant that - whenever the config hadn't
+// already loaded this session - that internal first load ran afterwards and overwrote the
+// values just typed with whatever was on disk (or with empties), silently discarding the
+// user's edit while still reporting "Settings saved." in green. Doing the load first makes
+// saveConfiguration's own ensureConfigLoaded call a cheap no-op, and leaves the freshly
+// typed values as the last writers.
 window.saveSettingsPanel = async function() {
+    var loaded = await window.ensureConfigLoaded();
+    if (!loaded) {
+        window.setStatus("Settings not saved - the existing configuration has not finished loading. Try again in a moment.", "red");
+        return;
+    }
+
     var settings = {};
     var invalid = false;
     Object.keys(DEFAULT_SETTINGS).forEach(key => {
@@ -91,6 +112,15 @@ window.saveSettingsPanel = async function() {
         // Thresholds affect already-rendered UI, not just future renders - refresh anything
         // currently showing threshold-driven state rather than requiring a reload.
         if (loadedSnapshots[activeSnapshotIndex]) window.renderCrawlAge(loadedSnapshots[activeSnapshotIndex].scanTimestamp);
+        // The four graph-layout settings are read live from the DOM at render time (see
+        // graph.js's getClusterThreshold/getLayoutSettings), so a saved change only becomes
+        // visible once something re-lays-out the diagram. Their onchange handlers do that
+        // for hand-typed edits; a Save (or a config load / Reset - see
+        // populateSettingsInputs and resetSettingsPanel) needs it triggered explicitly.
+        // Guarded on `network` (app.js) because nothing is laid out before a snapshot has
+        // ever been loaded, and renderVisibleGraph would then throw on the still-null
+        // nodesDataset and flash its "Computing layout..." overlay for nothing.
+        if (typeof window.renderVisibleGraph === 'function' && network) window.renderVisibleGraph();
         window.setStatus("Settings saved.", "green");
     } else {
         // saveConfiguration already wrote a detailed reason to the map status note
@@ -101,11 +131,18 @@ window.saveSettingsPanel = async function() {
     }
 };
 
+// Resets the threshold + graph-layout fields only - the Juniper username/password are
+// deliberately left alone (a "reset to defaults" has no business blanking a saved switch
+// login). Nothing is written to Configuration.json.enc until Save is clicked.
 window.resetSettingsPanel = function() {
     Object.keys(DEFAULT_SETTINGS).forEach(key => {
         var el = document.getElementById(settingInputId(key));
         if (el) el.value = DEFAULT_SETTINGS[key];
     });
+    // Same programmatic-el.value-doesn't-fire-onchange problem as populateSettingsInputs
+    // above - without this the layout inputs read as reset while the diagram keeps the
+    // layout it was last built with.
+    if (typeof window.renderVisibleGraph === 'function' && network) window.renderVisibleGraph();
 };
 
 // --- Multi-Snapshot Analysis: New Devices + Trends (see #sidebar-tab-analysis) ---

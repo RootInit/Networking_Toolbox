@@ -12,6 +12,12 @@ var mapConfigEntries = [];      // decrypted Configuration.json's devices[], or 
 var loadedCredentials = null;   // decrypted Configuration.json's credentials ({username, password}), or null
 var loadedSettings = {};        // decrypted Configuration.json's settings (partial or empty) - merge over defaults at read time
 var mapConfigLoaded = false;    // true once a GET /api/config attempt (success OR "no file yet") has completed
+// In-flight loadMapConfiguration promise, so two near-simultaneous ensureConfigLoaded
+// callers (e.g. the Settings tab being opened while Map view is still loading) share one
+// fetch+password-prompt instead of each starting their own - two prompts stacked on top of
+// each other, and two racing writes to mapConfigEntries/loadedCredentials/loadedSettings.
+// Cleared as soon as the load settles, so a failed/cancelled attempt is still retryable.
+var configLoadPromise = null;
 // True once fitBounds has ever run against real markers. renderMapMarkers is now called
 // from every place topology data can change (new snapshot, single-device rescan), not just
 // from the original three call sites - re-fitting the camera on every one of those would
@@ -202,10 +208,20 @@ window.setLoadedSettings = function(settings) {
 // of loadMapConfiguration directly, so the password prompt and fetch only ever happen once
 // per session regardless of which one the user opens first. A no-op once mapConfigLoaded is
 // true; retries a previously failed/cancelled attempt otherwise.
+// Returns whether the config is actually loaded now (true) or the attempt failed/was
+// cancelled (false). Callers that are about to WRITE the config (saveConfiguration,
+// saveSettingsPanel) must check this and bail: loadMapConfiguration resets
+// mapConfigEntries/loadedCredentials/loadedSettings to empty on failure, so proceeding
+// would POST that empty state over every previously-saved device location, the stored
+// Juniper credentials and every setting.
 window.ensureConfigLoaded = async function() {
-    if (mapConfigLoaded) return;
-    await window.loadMapConfiguration();
+    if (mapConfigLoaded) return true;
+    if (!configLoadPromise) {
+        configLoadPromise = window.loadMapConfiguration().finally(function () { configLoadPromise = null; });
+    }
+    await configLoadPromise;
     if (mapConfigLoaded) window.renderMapMarkers(); // no-op if Map view was never opened (leafletMap === null)
+    return mapConfigLoaded;
 };
 
 window.showMapStatus = function(message) {
@@ -437,8 +453,15 @@ window.saveConfiguration = async function() {
     // view was ever opened (or before an earlier load attempt finished) - saving now would
     // otherwise overwrite devices/credentials/settings this session never actually fetched
     // with empty defaults, silently wiping out everything previously saved (e.g. every
-    // placed device location). ensureConfigLoaded is a no-op once a real load has completed.
-    await window.ensureConfigLoaded();
+    // placed device location). ensureConfigLoaded is a no-op once a real load has completed,
+    // and returns false when the load itself failed or its password prompt was cancelled -
+    // in that case the in-memory state is EMPTY, not "the saved config", so saving must be
+    // refused outright rather than merged over and written.
+    var loaded = await window.ensureConfigLoaded();
+    if (!loaded) {
+        window.showMapStatus('Cannot save - the existing configuration has not loaded (password prompt was cancelled or the server could not be reached). Click Save Configuration again once it loads.');
+        return false;
+    }
 
     // Merge pending edits over the currently-loaded config entries. An untouched entry
     // (its key+keyType never appears in pendingConfigEdits) survives unchanged.
