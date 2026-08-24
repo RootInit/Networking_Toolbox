@@ -60,12 +60,10 @@ if ($Log) { Write-Host "[LOGGING ENABLED] Raw payloads will be saved to .\RawDum
 # nothing beyond Aes/Rfc2898DeriveBytes/HMACSHA256, all present on both runtimes, and
 # both algorithms are natively available in the browser's Web Crypto API on the
 # Network_Visualizer side, which decrypts this same format.
-# OWASP's current PBKDF2-HMAC-SHA256 guidance (600k, up from 310k a few years ago).
-# Safe to raise without breaking old files: iterations is stored per-file in the
-# envelope and read back from it on decrypt, not assumed - see MIN/MAX_ITERATIONS in
-# topology-crypto.js's decryptEnvelope, which accepts anything from 200k-era files up
-# through this.
-$PBKDF2_ITERATIONS = 600000
+# Shared with Start-WebServer.ps1's /api/save-config via TopologyCrypto.ps1's
+# Get-TopologyPbkdf2Iterations (dot-sourced above) - see that function's own comment for the
+# OWASP guidance and why this isn't a local literal.
+$PBKDF2_ITERATIONS = Get-TopologyPbkdf2Iterations
 $EncKeyBytes = $null; $MacKeyBytes = $null; $SaltBytes = $null
 
 # Single write path for all three call sites below (init/periodic/final) so encryption

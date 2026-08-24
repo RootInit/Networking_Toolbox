@@ -301,7 +301,12 @@ function Invoke-SaveConfigAction {
         $Rng.GetBytes($SaltBytes)
         $Rng.Dispose()
 
-        $Iterations = 600000
+        # Shared with Start-NetworkMapper.ps1's crawl-output encryption via
+        # TopologyCrypto.ps1's Get-TopologyPbkdf2Iterations (dot-sourced at the top of this
+        # file) - was a duplicated `600000` literal here, defeating the point of extracting
+        # TopologyCrypto.ps1 in the first place (stop crypto parameters drifting between the
+        # crawler and the webserver).
+        $Iterations = Get-TopologyPbkdf2Iterations
         $KeyMaterial = Get-TopologyKeyMaterial -Password $AuthData.EncryptionPassword -Salt $SaltBytes -Iterations $Iterations
         $Envelope = Protect-TopologyPayload -PlainJson $Body -EncKey $KeyMaterial.EncKey -MacKey $KeyMaterial.MacKey -Salt $SaltBytes -Iterations $Iterations -Format "PSNetworkMapper-EncryptedConfig"
 

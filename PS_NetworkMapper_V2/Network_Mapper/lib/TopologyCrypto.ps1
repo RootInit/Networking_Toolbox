@@ -7,6 +7,26 @@
 #
 # Not meant to be run directly - dot-source it.
 
+# Single source of truth for the PBKDF2 iteration count used by every encrypted write in
+# this app - topology/client/config-backup snapshots via Start-NetworkMapper.ps1, and
+# Configuration.json.enc via Start-WebServer.ps1's /api/save-config. Both call sites used to
+# each hardcode their own literal `600000`; harmless while they happened to agree, but it
+# defeated the whole point of extracting this file in the first place (stop crypto
+# parameters drifting between the crawler and the webserver). A function, not a bare
+# variable, so it resolves correctly no matter how many layers of dot-sourcing sit between
+# the caller and this file (Start-WebServer.ps1 dot-sources this file directly;
+# Start-NetworkMapper.ps1 dot-sources both Start-WebServer.ps1 and this file) - the same
+# nested dot-source chain Get-TopologyKeyMaterial/Protect-TopologyPayload below already rely
+# on successfully.
+#
+# OWASP's current PBKDF2-HMAC-SHA256 guidance (600k, up from 310k a few years ago). Safe to
+# raise without breaking old files: iterations is stored per-file in the envelope and read
+# back from it on decrypt, not assumed - see MIN/MAX_ITERATIONS in topology-crypto.js's
+# decryptEnvelope, which accepts anything from 200k-era files up through this.
+function Get-TopologyPbkdf2Iterations {
+    return 600000
+}
+
 function Get-TopologyKeyMaterial {
     param(
         [Parameter(Mandatory=$true)][string]$Password,
