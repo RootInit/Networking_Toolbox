@@ -8,11 +8,25 @@
 #
 # Not meant to be run directly - dot-source it: `. (Join-Path $PSScriptRoot "Connect-JunosSsh.ps1")`
 
-function Get-JunosAuth {
-    param([string]$AuthFile = ".\Auth.json")
-    if (-not (Test-Path $AuthFile)) { throw "Auth file missing at $AuthFile! V2 shares credentials with the original PS_NetworkMapper - copy PS_NetworkMapper\Network_Mapper\lib\Auth.example.json to PS_NetworkMapper\Network_Mapper\Auth.json and fill in real credentials." }
-    $AuthData = Get-Content $AuthFile -Raw | ConvertFrom-Json
-    return @{ Username = $AuthData.Username; Password = $AuthData.Password }
+# Writes {Username, Password} to a short-lived %TEMP% file for handoff to Connect-Switch.ps1,
+# which runs via Start-Process as a genuinely separate OS process (unlike Get-JunosNodeData.ps1,
+# which runs in-process via a runspace and receives credentials directly through
+# .AddParameter(...), never touching a file). Mirrors New-JunosAskPass's own "shortest
+# possible plaintext-on-disk window, owned by the reader, cleaned up even on error" posture -
+# not a new exposure, the same one already accepted for the SSH password itself, now also
+# covering the credential handoff into that separate process. The caller passes only the
+# returned path to Start-Process; the reader (Connect-Switch.ps1) is responsible for calling
+# Remove-JunosCredentialFile once it has read the file, in a finally block.
+function New-JunosCredentialFile {
+    param([Parameter(Mandatory=$true)][string]$Username, [Parameter(Mandatory=$true)][string]$Password)
+    $CredPath = Join-Path $env:TEMP "junos_cred_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).json"
+    @{ Username = $Username; Password = $Password } | ConvertTo-Json -Compress | Out-File -FilePath $CredPath -Encoding utf8
+    return $CredPath
+}
+
+function Remove-JunosCredentialFile {
+    param([Parameter(Mandatory=$true)][string]$CredentialFile)
+    Remove-Item -Path $CredentialFile -Force -ErrorAction SilentlyContinue
 }
 
 # Writes the plaintext-password askpass temp files SSH_ASKPASS needs and returns their
