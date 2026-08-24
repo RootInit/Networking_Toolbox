@@ -181,7 +181,7 @@ window.toggleLeftPanel = function(e) {
 // Analysis Dashboard tab widens the panel (.wide-panel) since its tables/charts don't fit
 // in the 320px other tabs use - vis-network's own container-size polling picks up the
 // resulting #mynetwork resize the same way it already does for panel collapse/expand.
-window.switchSidebarTab = function(tabId) {
+window.switchSidebarTab = async function(tabId) {
     document.querySelectorAll('.sidebar-tab-content').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.sidebar-tab').forEach(el => el.classList.remove('active'));
     document.getElementById(tabId).classList.add('active');
@@ -189,7 +189,16 @@ window.switchSidebarTab = function(tabId) {
     document.getElementById('left-panel').classList.toggle('wide-panel', tabId === 'sidebar-tab-analysis');
     activeSidebarTab = tabId;
 
-    if (tabId === 'sidebar-tab-settings') window.populateSettingsInputs();
+    if (tabId === 'sidebar-tab-settings') {
+        // Immediate paint with whatever's already known (defaults, or an earlier load this
+        // session), then widen the config-load trigger to fire here too (previously only
+        // Map view did) - both surfaces share the same ensureConfigLoaded gate (map.js), so
+        // the password prompt and fetch only ever happen once per session regardless of
+        // which one the user opens first.
+        window.populateSettingsInputs();
+        await window.ensureConfigLoaded();
+        window.populateSettingsInputs();
+    }
     if (tabId === 'sidebar-tab-analysis') window.refreshAnalysisDashboard();
 };
 

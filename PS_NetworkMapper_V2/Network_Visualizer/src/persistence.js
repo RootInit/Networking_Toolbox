@@ -8,69 +8,102 @@
 
 // --- Configurable Thresholds (see #sidebar-tab-settings) ---
 
-var SETTINGS_STORAGE_KEY = 'ps_networkmapper_settings_v1';
-// Alarm severity (Major/Minor) is deliberately not here - it maps directly to Junos's
-// own two-tier scheme, not a meaningful place for a user knob.
+// Threshold + graph-layout settings, now all persisted in the encrypted
+// Configuration.json.enc (via map.js's loaded-config object) instead of localStorage or
+// bare DOM state. Alarm severity (Major/Minor) is deliberately not here - it maps directly
+// to Junos's own two-tier scheme, not a meaningful place for a user knob. clusterThreshold/
+// nodeSpacing/leafSpacing/minRadius match network_vis.html's own static HTML defaults - kept
+// here too so resetSettingsPanel and the "not yet loaded" fallback (before Configuration.json.enc
+// has ever been fetched this session) have somewhere to fall back to.
 var DEFAULT_SETTINGS = {
     cpuWarnPct: 70, cpuCriticalPct: 90,
     memWarnPct: 75, memCriticalPct: 90,
     crawlAgeFreshMin: 60, crawlAgeStaleMin: 1440,
     recentRebootMin: 60,
+    clusterThreshold: 50, nodeSpacing: 350, leafSpacing: 250, minRadius: 250,
 };
+// The four graph-layout keys use their bare id as the DOM element id (#clusterThreshold,
+// #nodeSpacing, ...) - a naming convention that predates this file (see network_vis.html) -
+// while the threshold keys use a `setting-` prefix (#setting-cpuWarnPct, ...). This maps a
+// settings key to its actual input id so populate/save/reset can loop over one key list
+// instead of hand-writing two near-identical blocks.
+var LAYOUT_SETTING_KEYS = ['clusterThreshold', 'nodeSpacing', 'leafSpacing', 'minRadius'];
+function settingInputId(key) {
+    return LAYOUT_SETTING_KEYS.indexOf(key) === -1 ? 'setting-' + key : key;
+}
 
-// Merges saved settings over the defaults (not a bare Object.assign the other way) so a
-// version of this tool that adds a new setting later doesn't crash reading an older
-// saved blob that's simply missing that key - it just falls back to the new default.
+// Synchronous by design - utils.js's renderCrawlAge (a setInterval tick) and dashboard.js's
+// fleet-health rendering both call this on every render, long before (or entirely without)
+// the user ever opening the Map view or Settings tab that triggers the actual
+// Configuration.json.enc fetch+decrypt (see map.js's ensureConfigLoaded). Reads whatever's
+// currently in memory: DEFAULT_SETTINGS until a real config has loaded this session, the
+// real saved values after. No longer reads localStorage - settings now live in
+// Configuration.json.enc, loaded once per session by map.js's shared config machinery.
 window.loadSettings = function() {
-    try {
-        var raw = localStorage.getItem(SETTINGS_STORAGE_KEY);
-        return Object.assign({}, DEFAULT_SETTINGS, raw ? JSON.parse(raw) : {});
-    } catch (e) {
-        return Object.assign({}, DEFAULT_SETTINGS);
-    }
+    var loaded = window.getLoadedSettings ? window.getLoadedSettings() : {};
+    return Object.assign({}, DEFAULT_SETTINGS, loaded);
 };
 
-window.saveSettings = function(settings) {
-    try {
-        localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
-    } catch (e) {
-        console.warn('Could not persist settings to localStorage:', e.message);
-    }
-};
-
-// Populates the Settings tab's threshold inputs from storage - called on tab activation
-// (see window.switchSidebarTab) since there's no "open" event for an always-present tab.
+// Populates the Settings tab's inputs (thresholds, graph layout, Juniper login) from the
+// loaded config - called on tab activation (see window.switchSidebarTab) since there's no
+// "open" event for an always-present tab. Called twice per tab-open: once immediately (best
+// available values - defaults, or an earlier load) and once after ensureConfigLoaded
+// resolves (the real saved values, once the password prompt/fetch complete).
 window.populateSettingsInputs = function() {
     var settings = window.loadSettings();
     Object.keys(DEFAULT_SETTINGS).forEach(key => {
-        var el = document.getElementById('setting-' + key);
+        var el = document.getElementById(settingInputId(key));
         if (el) el.value = settings[key];
     });
+
+    var creds = window.getLoadedCredentials ? window.getLoadedCredentials() : { username: '', password: '' };
+    var userEl = document.getElementById('setting-junosUsername');
+    var passEl = document.getElementById('setting-junosPassword');
+    if (userEl) userEl.value = creds.username || '';
+    if (passEl) passEl.value = creds.password || '';
 };
 
-window.saveSettingsPanel = function() {
+window.saveSettingsPanel = async function() {
     var settings = {};
     var invalid = false;
     Object.keys(DEFAULT_SETTINGS).forEach(key => {
-        var el = document.getElementById('setting-' + key);
+        var el = document.getElementById(settingInputId(key));
         var n = el ? parseFloat(el.value) : NaN;
-        if (!Number.isFinite(n) || n < 0) { invalid = true; return; }
+        var min = LAYOUT_SETTING_KEYS.indexOf(key) === -1 ? 0 : (key === 'clusterThreshold' ? 2 : 20);
+        if (!Number.isFinite(n) || n < min) { invalid = true; return; }
         settings[key] = n;
     });
     if (invalid) {
-        window.setStatus("Settings not saved - all thresholds must be non-negative numbers.", "red");
+        window.setStatus("Settings not saved - all fields must be valid numbers within range.", "red");
         return;
     }
-    window.saveSettings(settings);
-    // Thresholds affect already-rendered UI, not just future renders - refresh anything
-    // currently showing threshold-driven state rather than requiring a reload.
-    if (loadedSnapshots[activeSnapshotIndex]) window.renderCrawlAge(loadedSnapshots[activeSnapshotIndex].scanTimestamp);
-    window.setStatus("Settings saved.", "green");
+
+    var userEl = document.getElementById('setting-junosUsername');
+    var passEl = document.getElementById('setting-junosPassword');
+    window.setLoadedCredentials({
+        username: userEl ? userEl.value : '',
+        password: passEl ? passEl.value : '',
+    });
+    window.setLoadedSettings(settings);
+
+    var ok = await window.saveConfiguration();
+    if (ok) {
+        // Thresholds affect already-rendered UI, not just future renders - refresh anything
+        // currently showing threshold-driven state rather than requiring a reload.
+        if (loadedSnapshots[activeSnapshotIndex]) window.renderCrawlAge(loadedSnapshots[activeSnapshotIndex].scanTimestamp);
+        window.setStatus("Settings saved.", "green");
+    } else {
+        // saveConfiguration already wrote a detailed reason to the map status note
+        // (#mapStatusNote, visible regardless of which sidebar tab or center view is
+        // active - see network_vis.html) - this is just the left-panel-local echo of "it
+        // failed", not a duplicate of the reason itself.
+        window.setStatus("Settings not saved - see the status note for the error.", "red");
+    }
 };
 
 window.resetSettingsPanel = function() {
     Object.keys(DEFAULT_SETTINGS).forEach(key => {
-        var el = document.getElementById('setting-' + key);
+        var el = document.getElementById(settingInputId(key));
         if (el) el.value = DEFAULT_SETTINGS[key];
     });
 };

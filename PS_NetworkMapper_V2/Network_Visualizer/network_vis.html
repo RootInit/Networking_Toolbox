@@ -381,6 +381,17 @@
         </div>
 
         <div id="sidebar-tab-settings" class="sidebar-tab-content">
+            <div class="settings-subhead">Juniper Switch Login</div>
+            <div class="settings-row">
+                <label>Username</label>
+                <input type="text" id="setting-junosUsername" autocomplete="username">
+            </div>
+            <div class="settings-row">
+                <label>Password</label>
+                <input type="password" id="setting-junosPassword" autocomplete="current-password">
+            </div>
+            <p style="font-size:0.75rem; color:#888; margin:0 0 4px;">Optional - required for Crawl, Rescan, and Launch SSH Session. Stored in the encrypted Configuration.json.enc, same as saved device locations.</p>
+
             <div class="settings-subhead">Fleet Health Thresholds</div>
             <div class="settings-row">
                 <label>RE CPU warn / critical (%)</label>
