@@ -83,3 +83,72 @@ function Protect-TopologyPayload {
         ciphertext   = [Convert]::ToBase64String($CipherBytes)
     }
 }
+
+# Mirror of Network_Visualizer/src/topology-crypto.js's decryptEnvelope, for the PowerShell
+# side - Start-NetworkMapper.ps1 needs to decrypt Configuration.json.enc at startup to read
+# stored Juniper credentials, and until now only the browser ever decrypted anything (this
+# file's other function, Protect-TopologyPayload, only ever encrypts). Verifies the HMAC
+# before decrypting (encrypt-then-MAC) so a wrong password or a tampered file fails with one
+# clear error instead of an AES-CBC padding exception.
+function Unprotect-TopologyPayload {
+    param(
+        [Parameter(Mandatory=$true)]$Envelope,
+        [Parameter(Mandatory=$true)][string]$Password,
+        [string[]]$ExpectedFormats = @("PSNetworkMapper-EncryptedTopology")
+    )
+
+    if (-not $Envelope -or $ExpectedFormats -notcontains $Envelope.format) {
+        throw "Not a recognized encrypted file (expected one of: $($ExpectedFormats -join ', '))."
+    }
+    if ($Envelope.version -ne 1) {
+        throw "Unsupported envelope version: $($Envelope.version)"
+    }
+    if ($Envelope.kdf -ne "PBKDF2-SHA256" -or $Envelope.cipher -ne "AES-256-CBC" -or $Envelope.macAlgorithm -ne "HMAC-SHA256") {
+        throw "Unsupported encryption parameters: $($Envelope.kdf)/$($Envelope.cipher)/$($Envelope.macAlgorithm)"
+    }
+    # Same bounds as topology-crypto.js's MIN_ITERATIONS/MAX_ITERATIONS - a CPU-burn guard
+    # against a tampered file forcing an absurd PBKDF2 cost, not a security boundary (a real
+    # file, current or historical, never needs to go anywhere near either edge).
+    $IterCheck = 0L
+    if (-not [long]::TryParse([string]$Envelope.iterations, [ref]$IterCheck) -or $IterCheck -lt 1000 -or $IterCheck -gt 5000000) {
+        throw "Iteration count out of range: $($Envelope.iterations)"
+    }
+
+    $SaltBytes = [Convert]::FromBase64String($Envelope.salt)
+    $IvBytes = [Convert]::FromBase64String($Envelope.iv)
+    $CipherBytes = [Convert]::FromBase64String($Envelope.ciphertext)
+    $MacBytes = [Convert]::FromBase64String($Envelope.mac)
+
+    $KeyMaterial = Get-TopologyKeyMaterial -Password $Password -Salt $SaltBytes -Iterations $IterCheck
+
+    $Hmac = [System.Security.Cryptography.HMACSHA256]::new($KeyMaterial.MacKey)
+    $ComputedMac = $Hmac.ComputeHash($IvBytes + $CipherBytes)
+    $Hmac.Dispose()
+
+    # Byte-by-byte, not a Base64-string comparison - avoids allocating strings for the sole
+    # purpose of comparing them. Not constant-time, but this app's threat model (localhost-
+    # only server, single local operator - see Start-WebServer.ps1's header comment) already
+    # accepts non-constant-time comparisons elsewhere; anyone able to measure this timing
+    # already has local code execution, which is full compromise regardless.
+    $MacOk = $ComputedMac.Length -eq $MacBytes.Length
+    if ($MacOk) {
+        for ($i = 0; $i -lt $ComputedMac.Length; $i++) {
+            if ($ComputedMac[$i] -ne $MacBytes[$i]) { $MacOk = $false; break }
+        }
+    }
+    if (-not $MacOk) { throw "Incorrect password, or the file is corrupted." }
+
+    $Aes = [System.Security.Cryptography.Aes]::Create()
+    $Aes.KeySize = 256
+    $Aes.Key = $KeyMaterial.EncKey
+    $Aes.Mode = [System.Security.Cryptography.CipherMode]::CBC
+    $Aes.Padding = [System.Security.Cryptography.PaddingMode]::PKCS7
+    $Aes.IV = $IvBytes
+
+    $Decryptor = $Aes.CreateDecryptor()
+    $PlainBytes = $Decryptor.TransformFinalBlock($CipherBytes, 0, $CipherBytes.Length)
+    $Decryptor.Dispose()
+    $Aes.Dispose()
+
+    return [System.Text.Encoding]::UTF8.GetString($PlainBytes)
+}
