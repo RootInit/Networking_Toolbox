@@ -22,6 +22,9 @@
          is handled gracefully - see window.lookupVendor in utils.js. -->
     <script type="text/javascript" src="src/vendor/oui-data.js"></script>
 
+    <!-- Leaflet (geographic map library) -->
+    <link rel="stylesheet" href="src/vendor/leaflet/leaflet.css">
+
     <style>
         :root { --primary: #2c3e50; --accent: #2B7CE9; --bg: #f4f6f9; --panel-bg: #ffffff; --border: #e0e0e0; }
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; width: 100vw; overflow: hidden; background-color: var(--bg); color: #333; }
@@ -497,13 +500,46 @@
         </div>
     </div>
 
-    <!-- CENTER PANEL: Map -->
+    <!-- CENTER PANEL: Diagram / Map -->
     <div id="center-panel">
+        <div id="center-view-toggle" class="tabs" style="flex:0 0 auto;">
+            <div class="tab active" id="btn-center-view-diagram" onclick="window.switchCenterView('diagram')">Diagram</div>
+            <div class="tab" id="btn-center-view-map" onclick="window.switchCenterView('map')">Map</div>
+        </div>
         <div id="loadingBar">
             <div class="progress-border"><div id="progress-fill" class="progress-fill"></div></div>
             <div id="progress-text" style="margin-top: 10px; font-weight: bold; color: #333;">Initializing Engine...</div>
         </div>
         <div id="mynetwork"></div>
+        <div id="mapview" style="display:none; position:absolute; inset:0; top:40px;"></div>
+        <div id="mapUnplacedPanel" style="display:none; position:absolute; top:50px; left:10px; z-index:900; background:white; border:1px solid var(--border); border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.15); max-width:320px; max-height:60vh; overflow-y:auto;">
+            <div style="padding:8px 12px; font-weight:bold; font-size:0.85rem; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; cursor:pointer;" onclick="window.toggleUnplacedPanel()">
+                <span id="mapUnplacedCount">0 devices with no location set</span>
+                <span id="mapUnplacedToggleIcon">&#9660;</span>
+            </div>
+            <div id="mapUnplacedList" style="padding:4px 0;"></div>
+        </div>
+        <div id="mapStatusNote" style="display:none; position:absolute; bottom:16px; left:16px; z-index:900; background:rgba(20,22,26,0.9); color:white; padding:8px 14px; border-radius:6px; font-size:0.82rem;"></div>
+    </div>
+
+    <!-- Location Editor (map view - see window.openLocationEditor) -->
+    <div id="location-editor-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.45); z-index:9999; justify-content:center; align-items:center;">
+        <div style="background:var(--panel-bg); width:360px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); overflow:hidden;">
+            <div class="drawer-header"><h2 id="editorDeviceLabel">Set Location</h2></div>
+            <div style="padding:18px;">
+                <p style="font-size:0.82rem; color:#666; margin:0 0 12px;">Click a spot on the map to place this device, then fill in the details below.</p>
+                <label style="font-size:0.8rem; font-weight:bold;">Building</label>
+                <input type="text" id="editorBuilding" placeholder="Building name">
+                <label style="font-size:0.8rem; font-weight:bold;">Room</label>
+                <input type="text" id="editorRoom" placeholder="Room / closet">
+                <label style="font-size:0.8rem; font-weight:bold;">Notes</label>
+                <input type="text" id="editorNotes" placeholder="Notes">
+                <div style="display:flex; gap:10px; margin-top:4px;">
+                    <button type="button" id="editorCancelBtn" style="background:#eee; color:#333;" onclick="window.closeLocationEditor()">Cancel</button>
+                    <button type="button" id="editorSaveBtn" onclick="window.commitLocationEdit()">Set Pin</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- RIGHT PANEL: Data Sidebar -->
@@ -614,6 +650,8 @@
     <script src="src/dashboard.js"></script>
     <script src="src/search.js"></script>
     <script src="src/drawer.js"></script>
+    <script src="src/vendor/leaflet/leaflet.js"></script>
+    <script src="src/map.js"></script>
     <script src="src/app.js"></script>
 </body>
 </html>
