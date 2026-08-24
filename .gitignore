@@ -24,9 +24,9 @@ PS_NetworkMapper/Network_Maps/NetworkMap_*.json.enc
 PS_NetworkMapper/Network_Mapper/Mapper_Debug.log
 PS_NetworkMapper/Network_Mapper/RawDumps/
 
-# PS_NetworkMapper_V2's Auth.json, Network_Maps/, and NDJSON device-history ledger are
-# not duplicated here - V2 shares all of that with PS_NetworkMapper/ above (see
-# Start-NetworkMapper.ps1's $AuthFile/$SnapshotDir defaults). Only its own per-run debug
+# PS_NetworkMapper_V2's Configuration.json.enc, Network_Maps/, and NDJSON device-history
+# ledger are not duplicated here - V2 shares all of that with PS_NetworkMapper/ above (see
+# Start-NetworkMapper.ps1's $SharedMapperDir/$SnapshotDir). Only its own per-run debug
 # artifacts are local to it.
 PS_NetworkMapper_V2/Network_Mapper/Mapper_Debug.log
 PS_NetworkMapper_V2/Network_Mapper/RawDumps/

@@ -105,9 +105,10 @@ window.initMapView = async function() {
 };
 
 // Fetches and decrypts Configuration.json.enc (if any). Sets mapConfigEntries/mapConfigLoaded.
-// A missing file (404, fresh checkout) is a normal empty state, not an error - matches how
-// a missing Auth.json is handled elsewhere in this app, and mapConfigLoaded=true there since
-// there's nothing to retry. A cancelled password prompt or a network/parse failure is a real
+// A missing file (404, fresh checkout) is a normal empty state, not an error - same "nothing
+// configured yet" posture the server takes toward missing Juniper credentials elsewhere in
+// this app, and mapConfigLoaded=true there since there's nothing to retry. A cancelled
+// password prompt or a network/parse failure is a real
 // failure: it's reported via showMapStatus (same "Cancelled" handling app.js's own
 // processSelectedFiles already does for the identical rejection from the topology-file
 // password prompt) and leaves mapConfigLoaded=false so switchCenterView's retry path above

@@ -4,9 +4,10 @@
 # Start-NetworkMapper.ps1. Localhost-only by design too: it binds "localhost" specifically
 # (not "+" or a NIC address), so no netsh urlacl reservation and no admin rights are
 # needed, and no auth is needed either, because the only thing this server can do beyond
-# serve static files is spawn a process with the live switch credentials in Auth.json -
-# that's only safe when "reaches this server" and "already runs as the person who owns
-# Auth.json" are the same fact, which is true for localhost and false the moment this is
+# serve static files is spawn a process with the live switch credentials it holds in memory
+# (decrypted from Configuration.json.enc at startup by Start-NetworkMapper.ps1) - that's
+# only safe when "reaches this server" and "already runs as the person who started this
+# process" are the same fact, which is true for localhost and false the moment this is
 # ever rebound to a LAN address.
 #
 # Not meant to be run directly - dot-source it, then call Start-MapperWebServer.
@@ -69,7 +70,7 @@ function Get-QueryParam {
 # "localhost" (see the header comment) only proves the CALLER runs as this user - it does
 # nothing to prove the caller is OUR page rather than a hidden form on some other site the
 # analyst has open in another tab, and either endpoint can trigger an outbound SSH session
-# using the real switch password from Auth.json. Origin (and Referer as fallback, since not
+# using the real switch password held in this process's memory. Origin (and Referer as fallback, since not
 # every browser sends Origin on a same-origin fetch) is the standard defense: both are set
 # by the browser itself from the requesting page's actual origin, so page JS cannot forge
 # them, and a bare cross-origin <form> POST still carries a truthful Origin header even
@@ -247,8 +248,7 @@ function Invoke-RescanStatusAction {
 # Serves the current Configuration.json.enc envelope as-is (still encrypted - the browser
 # decrypts client-side with a human-typed password, exactly like NetworkMap files). 404
 # with a JSON body (not the generic Invoke-StaticFile 404) so the browser can tell "no
-# config yet" (a normal, expected state on a fresh checkout, same as missing Auth.json)
-# apart from a real error.
+# config yet" (a normal, expected state on a fresh checkout) apart from a real error.
 #
 # Deliberately does NOT round-trip through ConvertFrom-Json/Send-WebJson: the brief's
 # original draft used `ConvertFrom-Json -AsHashtable` to satisfy Send-WebJson's
