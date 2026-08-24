@@ -84,7 +84,17 @@ window.switchCenterView = function(view) {
         // below) - retry it on every return to Map view instead of leaving the view wedged.
         // The Leaflet instance itself is never torn down/recreated for this - only the
         // config fetch+decrypt is re-attempted.
-        window.loadMapConfiguration().then(function () {
+        //
+        // Goes through ensureConfigLoaded, NOT loadMapConfiguration directly: the Settings
+        // tab may have loaded (or be mid-load of) the config already, and calling
+        // loadMapConfiguration here bypassed both of ensureConfigLoaded's guards - the
+        // "already loaded, don't re-prompt" one and the shared-configLoadPromise one that
+        // stops two near-simultaneous callers racing two promptForPassword calls against
+        // the same single #password-modal. The trailing renderMapMarkers is kept even though
+        // ensureConfigLoaded already renders on a successful load: it is idempotent, and
+        // keeping it means this branch behaves exactly as before for the retry-succeeds case
+        // while also covering the "another surface had already loaded it" early return.
+        window.ensureConfigLoaded().then(function () {
             window.renderMapMarkers();
         }).catch(function (err) {
             window.showMapStatus('Failed to load map: ' + err.message);
@@ -106,7 +116,15 @@ window.initMapView = async function() {
         attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
     }).addTo(leafletMap);
 
-    await window.loadMapConfiguration();
+    // ensureConfigLoaded, not loadMapConfiguration: opening the Settings tab first already
+    // loads (and password-prompts for) the config, and calling loadMapConfiguration here
+    // unconditionally re-prompted for the SAME password the moment the user then clicked
+    // Map - with cancelling that second prompt resetting mapConfigEntries/loadedCredentials/
+    // loadedSettings back to empty even though the session had already loaded them fine.
+    // ensureConfigLoaded is a no-op when the config is already loaded and dedups a still
+    // in-flight load via configLoadPromise. It does not render on that already-loaded early
+    // return, so the renderMapMarkers below is still required for the Settings-first case.
+    await window.ensureConfigLoaded();
     window.renderMapMarkers();
 };
 
@@ -356,11 +374,16 @@ window.revealDeviceOnMap = function(ip) {
 };
 
 var editorTargetIp = null;
-// keyType+':'+key (from bestKeyForSave) -> { entry, deviceIp }, accumulated across edits
-// until Save. deviceIp is carried alongside the entry (not just the entry itself) so
-// saveConfiguration can look the device back up via deviceByIp and collapse any of its
-// OTHER stale-keyed entries at save time - see saveConfiguration's own comment below for
-// why that lookup, not just the map key, is what makes the collapse possible.
+// keyType+':'+key (from bestKeyForSave) -> { entry, deviceIp, deviceKeysAtCommit },
+// accumulated across edits until Save. deviceKeysAtCommit is the device's full
+// extractDeviceKeys() set as of the moment the edit was committed, snapshotted here rather
+// than re-derived at save time: saveConfiguration uses it to collapse that device's OTHER
+// stale-keyed entries (see its own comment below for why that collapse exists at all), and
+// it used to do that by re-resolving deviceByIp.get(deviceIp) when Save was clicked. A
+// network scan or snapshot load between commit and Save replaces deviceByIp wholesale, so
+// if that IP had since been reassigned to a DIFFERENT device (fleet renumbering, DHCP
+// churn) the save-time lookup resolved the wrong device and deleted ITS saved location.
+// deviceIp is still carried for diagnostics/traceability only - nothing resolves it now.
 var pendingConfigEdits = new Map();
 
 // Named (not inline) so closeLocationEditor can `off` it below - `leafletMap.once` still
@@ -406,7 +429,12 @@ window.openLocationEditor = function(ip) {
 
 window.closeLocationEditor = function() {
     document.getElementById('location-editor-modal').style.display = 'none';
-    leafletMap.off('click', onEditorMapClick);
+    // leafletMap is null until initMapView has run, i.e. until Map view has been opened at
+    // least once this session. This is now called defensively from app.js's
+    // processSelectedFiles on EVERY file load (see there), including for users who never
+    // touch Map view - without this guard that call would throw on `.off` of null and pop
+    // the fatal-error modal, which is the exact failure class those callers exist to avoid.
+    if (leafletMap) leafletMap.off('click', onEditorMapClick);
     editorTargetIp = null;
 };
 
@@ -418,7 +446,23 @@ window.commitLocationEdit = function() {
         return;
     }
     var device = deviceByIp.get(String(editorTargetIp));
+    // The editor's backdrop is pointer-events:none, so the sidebar stays live while it's
+    // open - a Scan Network or a snapshot/folder load can therefore replace loadedSnapshots/
+    // deviceByIp out from under an open editor, leaving editorTargetIp pointing at a device
+    // that no longer exists. bestKeyForSave(undefined) throws (extractDeviceKeys dereferences
+    // .StackMembers), which the global error handler turns into the fatal-error modal over
+    // the whole page. Guard it the same way openLocationEditor already guards its own lookup.
+    // (app.js's processSelectedFiles also closes this editor pre-emptively on any new load -
+    // this is the belt to that braces, covering any other path that swaps the data.)
+    if (!device) {
+        window.closeLocationEditor();
+        window.showMapStatus('That device is no longer in the currently loaded data (the topology was reloaded or rescanned while this editor was open) - the location was not saved. Reopen the editor from the device on the current map.');
+        return;
+    }
     var keyInfo = window.ConfigResolve.bestKeyForSave(device);
+    // Snapshotted at COMMIT time, not re-resolved at save time - see pendingConfigEdits's
+    // declaration comment above and saveConfiguration's use of it below.
+    var deviceKeysAtCommit = window.ConfigResolve.extractDeviceKeys(device);
     var entry = {
         key: keyInfo.key, keyType: keyInfo.keyType,
         lat: lat, lng: lng,
@@ -426,7 +470,9 @@ window.commitLocationEdit = function() {
         room: document.getElementById('editorRoom').value,
         notes: document.getElementById('editorNotes').value,
     };
-    pendingConfigEdits.set(keyInfo.keyType + ':' + keyInfo.key, { entry: entry, deviceIp: String(editorTargetIp) });
+    pendingConfigEdits.set(keyInfo.keyType + ':' + keyInfo.key, {
+        entry: entry, deviceIp: String(editorTargetIp), deviceKeysAtCommit: deviceKeysAtCommit,
+    });
     window.closeLocationEditor();
     window.showMapStatus(pendingConfigEdits.size + ' unsaved change(s) - click Save Configuration to write them.');
     window.renderSaveConfigButton();
@@ -478,21 +524,27 @@ window.saveConfiguration = async function() {
     // by a DIFFERENT device before that device's own serial is captured, resolution could
     // silently attach the new device to the old device's stale saved location.
     //
-    // extractDeviceKeys(device) gives the device's full set of CURRENT candidate keys
-    // (serial/hostname/ip, whichever are non-null) - not just the one key this particular
-    // edit happens to be saved under - so this removes every one of them from `merged`,
-    // regardless of which tier the device used to be keyed by, before inserting the new
-    // entry under its (possibly different) current key.
+    // pending.deviceKeysAtCommit is the device's full set of candidate keys (serial/
+    // hostname/ip, whichever were non-null) as extractDeviceKeys saw them at the moment this
+    // edit was committed - not just the one key this particular edit happens to be saved
+    // under - so this removes every one of them from `merged`, regardless of which tier the
+    // device used to be keyed by, before inserting the new entry under its (possibly
+    // different) key.
+    //
+    // This used to re-resolve the device here via deviceByIp.get(pending.deviceIp), i.e. at
+    // SAVE time. A scan or snapshot load between commit and Save replaces deviceByIp
+    // wholesale, so if that IP had been reassigned to a different device in the meantime,
+    // the lookup returned the WRONG device and this loop deleted that innocent third
+    // device's saved location while still writing the pending edit under its own correct
+    // key. Snapshotting the keys at commit time removes the re-resolution entirely: the
+    // collapse now always operates on the device the user was actually editing.
     var merged = new Map(mapConfigEntries.map(function (e) { return [e.keyType + ':' + e.key, e]; }));
     pendingConfigEdits.forEach(function (pending) {
-        var device = deviceByIp.get(pending.deviceIp);
-        if (device) {
-            var keys = window.ConfigResolve.extractDeviceKeys(device);
-            ['serial', 'hostname', 'ip'].forEach(function (keyType) {
-                var value = keys[keyType];
-                if (value !== null && value !== undefined) merged.delete(keyType + ':' + value);
-            });
-        }
+        var keys = pending.deviceKeysAtCommit;
+        ['serial', 'hostname', 'ip'].forEach(function (keyType) {
+            var value = keys[keyType];
+            if (value !== null && value !== undefined) merged.delete(keyType + ':' + value);
+        });
         merged.set(pending.entry.keyType + ':' + pending.entry.key, pending.entry);
     });
     var devices = Array.from(merged.values());

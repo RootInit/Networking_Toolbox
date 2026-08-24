@@ -286,6 +286,16 @@ window.processSelectedFiles = async function(files) {
     btn.disabled = true;
     if (folderBtn) folderBtn.disabled = true;
     window.closeDrawer();
+    // Same "reset any open per-device UI before swapping the underlying data" reasoning as
+    // closeDrawer above. This function reassigns loadedSnapshots/deviceByIp wholesale (a
+    // manual load, a folder load, or the synthesized file scan-network.js feeds in after a
+    // completed scan), and the map's location editor stays fully usable while that happens -
+    // its backdrop is pointer-events:none, so the sidebar is still clickable with the editor
+    // open. Left open, its editorTargetIp would then point into data that no longer exists.
+    // Unguarded like the window.renderMapMarkers() call in setActiveSnapshot above:
+    // network_vis.html loads map.js before app.js, and closeLocationEditor itself tolerates
+    // Map view never having been opened (leafletMap === null).
+    window.closeLocationEditor();
 
     var newSnapshots = [];
     var skipped = []; // {name, reason}[] - only used/reported for multi-file batches
