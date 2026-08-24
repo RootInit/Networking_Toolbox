@@ -704,9 +704,44 @@ function Start-MapperWebServer {
     Write-Host "`nWeb UI listening on $Prefix (localhost only - Ctrl+C to stop)" -ForegroundColor Cyan
     Start-Process $Prefix
 
+    # Console progress for browser-triggered scans - Invoke-ScanNetworkAction runs the fleet
+    # crawl in a background runspace, so Invoke-FleetCrawl.ps1's own Write-Host calls never
+    # reach this console (unlike the CLI path in Start-NetworkMapper.ps1, which calls it
+    # directly on the main thread). Piggybacks on the 250ms accept-loop tick below since
+    # that is the only point the main thread is free to touch the console between requests.
+    $script:ScanProgressSnapshot = $null
     try {
         while ($Listener.IsListening) {
-            $Context = $Listener.GetContext()   # blocks until a request arrives
+            # BeginGetContext/WaitOne(250) replaces a blocking GetContext() call. The
+            # blocking call never returned control to the PowerShell engine, so it gave
+            # Ctrl+C no statement boundary to act on - the process just ignored it. Polling
+            # on a timeout hands control back every 250ms, which is what makes Ctrl+C work;
+            # no custom Ctrl+C handler is needed (or used) here. A raw
+            # [Console]::add_CancelKeyPress handler throws, because that event fires on a
+            # thread with no PowerShell runspace attached; a Register-ObjectEvent handler
+            # doesn't throw, but its action never runs while the thread is stuck inside a
+            # single blocking call, so it silently never fires either.
+            $AsyncResult = $Listener.BeginGetContext($null, $null)
+            while (-not $AsyncResult.AsyncWaitHandle.WaitOne(250)) {
+                if ($script:PendingScanNetwork) {
+                    $Progress = $script:PendingScanNetwork.ProgressTable
+                    if ($Progress.Done) {
+                        if ($script:ScanProgressSnapshot -ne 'done') {
+                            Write-Host "`r[Scan] Complete - $($Progress.Visited) device(s) visited.                        " -ForegroundColor Green
+                            $script:ScanProgressSnapshot = 'done'
+                        }
+                    } else {
+                        $Snapshot = "$($Progress.Visited)|$($Progress.QueueDepth)|$($Progress.ActiveJobs)"
+                        if ($Snapshot -ne $script:ScanProgressSnapshot) {
+                            Write-Host "`r[Scan] Visited: $($Progress.Visited)  Queue: $($Progress.QueueDepth)  Active: $($Progress.ActiveJobs)    " -NoNewline -ForegroundColor Cyan
+                            $script:ScanProgressSnapshot = $Snapshot
+                        }
+                    }
+                } elseif ($script:ScanProgressSnapshot) {
+                    $script:ScanProgressSnapshot = $null
+                }
+            }
+            $Context = $Listener.EndGetContext($AsyncResult)
             $Request = $Context.Request
             $Response = $Context.Response
 
