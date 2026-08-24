@@ -499,6 +499,28 @@ function Invoke-SaveConfigAction {
         $Envelope = Protect-TopologyPayload -PlainJson $Body -EncKey $KeyMaterial.EncKey -MacKey $KeyMaterial.MacKey -Salt $SaltBytes -Iterations $Iterations -Format "PSNetworkMapper-EncryptedConfig"
 
         $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
+
+        # Push the just-saved Juniper credentials into the running server's live copies (see
+        # Start-MapperWebServer's $script:JunosUsername/$script:JunosPassword) so /api/connect,
+        # /api/rescan and /api/scan-network start using them immediately - without this, the
+        # server kept serving requests with whatever was decrypted from disk at process start,
+        # so saving credentials in the Settings tab appeared to work but changed nothing until
+        # the operator restarted Start-NetworkMapper.ps1.
+        #
+        # Deliberately after the file write, inside this try: a save that failed to reach disk
+        # must not leave the process running credentials that were never actually persisted.
+        # Also deliberately a presence check on `credentials` - a body that only carries
+        # `devices` (or sends credentials:null, which map.js's saveConfiguration does whenever
+        # nothing has been loaded into loadedCredentials) leaves the in-memory copies alone
+        # rather than nulling out working credentials. An explicitly-blank {username:"",
+        # password:""} DOES clear them, which is the honest reading of "the operator saved
+        # empty credentials" - the actions then report "No Juniper login configured" as they
+        # would on a fresh install.
+        if ($Parsed.credentials) {
+            $script:JunosUsername = [string]$Parsed.credentials.username
+            $script:JunosPassword = [string]$Parsed.credentials.password
+        }
+
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "saved" }
     } catch {
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to save configuration: $_" }
@@ -580,6 +602,19 @@ function Start-MapperWebServer {
     $script:PendingScan = $null
     $script:OrphanedScans = [System.Collections.Generic.List[object]]::new()
     $script:PendingScanNetwork = $null
+    # The Juniper credentials the accept loop below hands to /api/connect, /api/rescan and
+    # /api/scan-network. The -JunosUsername/-JunosPassword parameters are only the SEED:
+    # Start-NetworkMapper.ps1 decrypts them out of Configuration.json.enc once, before this
+    # server ever starts, so passing those frozen locals straight into every request meant
+    # credentials saved from the browser's Settings tab (Invoke-SaveConfigAction, below)
+    # never reached the running server. A fresh install stayed stuck on "No Juniper login
+    # configured" until the whole PowerShell process was restarted, and a rotated password
+    # was worse - IsNullOrWhiteSpace still passed, so scans/rescans really started and then
+    # failed confusingly against the stale credentials. Script-scoped so
+    # Invoke-SaveConfigAction can update them live, same cross-function pattern as
+    # $script:PendingScan above.
+    $script:JunosUsername = $JunosUsername
+    $script:JunosPassword = $JunosPassword
 
     Write-Host "`nWeb UI listening on $Prefix (localhost only - Ctrl+C to stop)" -ForegroundColor Cyan
     Start-Process $Prefix
@@ -598,7 +633,7 @@ function Start-MapperWebServer {
                         $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
                         $Body = $Reader.ReadToEnd()
                         $Reader.Close()
-                        Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -JunosUsername $JunosUsername -JunosPassword $JunosPassword
+                        Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/rescan") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
@@ -607,7 +642,7 @@ function Start-MapperWebServer {
                         $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
                         $Body = $Reader.ReadToEnd()
                         $Reader.Close()
-                        Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $JunosUsername -JunosPassword $JunosPassword
+                        Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
                     $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
@@ -619,7 +654,7 @@ function Start-MapperWebServer {
                         $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
                         $Body = $Reader.ReadToEnd()
                         $Reader.Close()
-                        Invoke-ScanNetworkAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations $Iterations
+                        Invoke-ScanNetworkAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations $Iterations
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/scan-network/status") {
                     Invoke-ScanNetworkStatusAction -Response $Response
