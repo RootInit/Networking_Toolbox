@@ -181,7 +181,12 @@ var MARKER_COLORS = {
 
 function iconForClassification(meta) {
     var colors = !meta.scanned ? MARKER_COLORS.unscanned : (meta.isStack ? MARKER_COLORS.scannedStack : MARKER_COLORS.scanned);
-    var size = 26;
+    // Was 26px/8px-single-line, which clipped real hostnames (e.g. "ACCESS-SW-042.local")
+    // mid-word - bumped to 40px and switched the label to wrap onto up to 2 lines (below)
+    // instead of truncating, while staying small enough that clustered markers (see the
+    // reported screenshot - markers sitting close together along a road) don't overlap
+    // each other's labels.
+    var size = 40;
     // meta.hostname is device-supplied (LLDP/DNS data this app doesn't control) and this
     // html string is rendered via Leaflet's innerHTML-based divIcon, unlike vis-network's
     // canvas-drawn (fillText) diagram labels - escape with the same window.esc (utils.js)
@@ -189,8 +194,9 @@ function iconForClassification(meta) {
     var label = meta.hostname !== 'Unknown' ? window.esc(meta.hostname) : '';
     var html = '<div style="width:' + size + 'px;height:' + size + 'px;border-radius:' + (meta.isStack ? '30%' : '50%') +
         ';background:' + colors.background + ';border:2px solid ' + colors.border +
-        ';display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;' +
-        'color:#333;text-align:center;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.4);">' + label + '</div>';
+        ';display:flex;align-items:center;justify-content:center;font-size:8px;font-weight:700;line-height:1.05;' +
+        'color:#333;text-align:center;overflow:hidden;box-sizing:border-box;padding:2px;' +
+        'white-space:normal;word-break:break-word;box-shadow:0 1px 3px rgba(0,0,0,0.4);">' + label + '</div>';
     return L.divIcon({ className: '', html: html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
 
