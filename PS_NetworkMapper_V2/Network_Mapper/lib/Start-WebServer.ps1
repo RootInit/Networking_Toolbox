@@ -68,16 +68,28 @@ function Get-QueryParam {
     return $null
 }
 
-# CSRF guard for the two state-changing endpoints (/api/connect, /api/rescan). Binding to
-# "localhost" (see the header comment) only proves the CALLER runs as this user - it does
-# nothing to prove the caller is OUR page rather than a hidden form on some other site the
-# analyst has open in another tab, and either endpoint can trigger an outbound SSH session
-# using the real switch password held in this process's memory. Origin (and Referer as fallback, since not
-# every browser sends Origin on a same-origin fetch) is the standard defense: both are set
-# by the browser itself from the requesting page's actual origin, so page JS cannot forge
-# them, and a bare cross-origin <form> POST still carries a truthful Origin header even
-# though it needs no CORS preflight to fire. Fail closed - neither header present means
-# this wasn't a browser navigating from our own page, so it's refused too.
+# CSRF/DNS-rebinding guard, applied to every endpoint that either changes state
+# (/api/connect, /api/rescan, /api/scan-network, /api/save-config) or hands back something
+# sensitive on a bare GET (/api/session-password - see that endpoint's own comment; the
+# criterion is "sensitive or state-changing", not "state-changing" alone, which is the gap
+# that endpoint originally shipped with). Binding to "localhost" (see the header comment)
+# only proves the CALLER runs as this user - it does nothing to prove the caller is OUR page
+# rather than a hidden form (or a fetch after a DNS-rebinding attack rebinds some other
+# hostname to 127.0.0.1) on some other site the analyst has open in another tab, and several
+# of these endpoints can trigger an outbound SSH session or hand back the encryption password
+# itself. Origin (and Referer as fallback, since not every browser sends Origin on a
+# same-origin fetch) is the standard defense: both are set by the browser itself from the
+# requesting page's actual origin, so page JS cannot forge them, and a bare cross-origin
+# <form> POST (or a rebound fetch) still carries a truthful Origin header even though it
+# needs no CORS preflight to fire. Fail closed - neither header present means this wasn't a
+# browser navigating from our own page, so it's refused too.
+#
+# What this does NOT cover: a hostile process already running as a DIFFERENT, unprivileged
+# OS user on the same machine (Fast User Switching, RDP, a shared lab box). Origin/Referer
+# are meaningful only when a real browser is enforcing them - a raw script talking straight
+# to this HttpListener can set any Origin header it likes. That gap is pre-existing and
+# app-wide (this whole server has no authentication - see the header comment on why localhost
+# binding was judged sufficient), not something this check claims to close.
 function Test-SameOriginRequest {
     param($Request, [int]$Port)
     $Expected = "http://localhost:$Port"
@@ -461,18 +473,27 @@ function Invoke-GetConfigAction {
 # NetworkMap_*.json.enc without asking the operator to re-type a password they just typed
 # into this very console (see network_vis.js's window.getSessionEncryptionPassword, the only
 # caller). A deliberate exception to Invoke-SaveConfigAction's "the password never crosses
-# the wire" posture just below - accepted for the same reason /api/connect is: this server
-# already holds the real switch password in memory and will happily spawn ssh.exe with it
-# for any page reachable at localhost:$Port (see Start-WebServer.ps1's header comment on the
-# trust boundary), so exposing this SECOND, less sensitive secret to the same boundary adds
-# no new capability an attacker didn't already have. GET, not gated by
-# Test-SameOriginRequest like the state-changing endpoints: it has no side effects, and a
-# response body is unreadable by a hostile cross-origin page anyway (no CORS headers are
-# set here, so the browser's own same-origin policy blocks reading a cross-origin fetch's
-# result even though the request itself would still be sent). Returns "" (not null/absent)
-# when there's nothing to offer - a server-only launch with no Configuration.json.enc, or
-# the "continue without credentials" path where the typed password was proven wrong - the
-# browser falls straight back to prompting exactly as it did before this endpoint existed.
+# the wire" posture just below.
+#
+# GATED by Test-SameOriginRequest (see the accept loop below and that function's own
+# comment) even though this is a read-only GET - it originally shipped without that gate on
+# the reasoning that "no side effects + no CORS headers means a hostile page can't read the
+# response." That reasoning was wrong: a DNS-rebinding attack rebinds some OTHER hostname to
+# 127.0.0.1, and a `fetch('/api/session-password')` made relative to that page's OWN
+# (rebound) origin is same-origin from the browser's point of view, so the ordinary CORS
+# same-origin-read restriction never engages at all - the request goes straight to this
+# server as an entirely unremarkable same-origin fetch. Unlike /api/connect (whose worst case
+# is one visible, ephemeral SSH window popping open while the server is running),
+# a leaked password here is silent and durable: decrypts Configuration.json.enc and every
+# archived encrypted snapshot offline, indefinitely, long after this server has stopped.
+# Origin-checking closes the DNS-rebinding/browser-CSRF vector; it does NOT close a hostile
+# process already running as a different OS user on the same machine, which can set any
+# Origin header it wants - see Test-SameOriginRequest's own comment on that residual gap.
+#
+# Returns "" (not null/absent) when there's nothing to offer - a server-only launch with no
+# Configuration.json.enc, or the "continue without credentials" path where the typed
+# password was proven wrong - the browser falls straight back to prompting exactly as it did
+# before this endpoint existed.
 function Invoke-GetSessionPasswordAction {
     param($Response, [string]$EncryptionPassword)
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ password = [string]$EncryptionPassword }
@@ -700,7 +721,11 @@ function Start-MapperWebServer {
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/config") {
                     Invoke-GetConfigAction -Response $Response -ConfigPath $ConfigPath
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/session-password") {
-                    Invoke-GetSessionPasswordAction -Response $Response -EncryptionPassword $EncryptionPassword
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        Invoke-GetSessionPasswordAction -Response $Response -EncryptionPassword $EncryptionPassword
+                    }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/save-config") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
