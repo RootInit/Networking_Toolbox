@@ -174,6 +174,35 @@ window.renderResultsList = function(rows, opts) {
 // switched snapshots, opening the wrong device's drawer against the wrong snapshot's tree
 // (deviceByIp.get(x) returning undefined for a device that's real in its own snapshot).
 var goToSearchResultGeneration = 0;
+
+// Reveals a device in whichever center view is currently active - diagram (select+focus
+// on the vis-network canvas, today's original behavior) or map (pan/zoom to its marker,
+// or a status note if it has no resolved location). Either branch is followed by
+// openRightDrawer in the caller - the details drawer is identical regardless of which
+// view revealed the device (see the geo-map-view design spec's "Search & details-drawer
+// parity").
+window.revealDeviceInActiveView = function(ip) {
+    if (activeCenterView === 'map') {
+        var revealed = window.revealDeviceOnMap(ip);
+        if (!revealed) window.showMapStatus('No location set for this device.');
+        else window.showMapStatus('');
+        return;
+    }
+    try {
+        // A device with no LLDP neighbors at all (isolated, or the only device in its
+        // snapshot) has no path from the graph root, so it's never part of the
+        // "visible" tree renderVisibleGraph computes - vis-network throws selecting a
+        // node it was never given. That's a real, separate gap in the graph/tree logic,
+        // not something to paper over with a suppressed exception - but the drawer
+        // opening below is strictly more important than the camera animation up here,
+        // and one throwing must never block the other.
+        network.selectNodes([ip]);
+        network.focus(ip, { scale: 1.0, animation: { duration: 500 } });
+    } catch (e) {
+        console.warn(`Could not select/focus "${ip}" on the graph (likely not part of the visible tree):`, e.message);
+    }
+};
+
 window.goToSearchResult = function(targetIp, tab, snapshotIndex) {
     var myGeneration = ++goToSearchResultGeneration;
     (async () => {
@@ -184,19 +213,7 @@ window.goToSearchResult = function(targetIp, tab, snapshotIndex) {
         window.GraphLayout.expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, getClusterThreshold());
         await window.renderVisibleGraph();
         if (myGeneration !== goToSearchResultGeneration) return;
-        try {
-            // A device with no LLDP neighbors at all (isolated, or the only device in its
-            // snapshot) has no path from the graph root, so it's never part of the
-            // "visible" tree renderVisibleGraph computes - vis-network throws selecting a
-            // node it was never given. That's a real, separate gap in the graph/tree logic,
-            // not something to paper over with a suppressed exception - but the drawer
-            // opening below is strictly more important than the camera animation up here,
-            // and one throwing must never block the other.
-            network.selectNodes([targetIp]);
-            network.focus(targetIp, { scale: 1.0, animation: { duration: 500 } });
-        } catch (e) {
-            console.warn(`Could not select/focus "${targetIp}" on the graph (likely not part of the visible tree):`, e.message);
-        }
+        window.revealDeviceInActiveView(targetIp);
         window.openRightDrawer(targetIp);
         if (tab) window.switchTab(tab);
     })();
