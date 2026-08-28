@@ -208,6 +208,65 @@ function Invoke-RescanAction {
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; jobId = $JobId; ip = $TargetIP }
 }
 
+# Quick reachability check - a handful of ICMP echoes against one device's management IP.
+# Synchronous: Test-Connection with a small -Count returns in a couple seconds worst case
+# (unlike Invoke-RescanAction's SSH batch), so this doesn't need the job-queue/poll dance -
+# the accept loop is only blocked for the ping's own short timeout, same as any other
+# single-request action here.
+function Invoke-PingAction {
+    param($Response, [string]$Body)
+
+    $Parsed = $null
+    try { $Parsed = $Body | ConvertFrom-Json } catch {}
+    $TargetIP = if ($Parsed) { [string]$Parsed.ip } else { $null }
+
+    # Same strict dotted-quad check Invoke-ConnectAction/Invoke-RescanAction use - this
+    # value is never passed through a shell, only as a bound -TargetName parameter to
+    # Test-Connection below, but the validation still matters: it's what stops a malformed
+    # body from reaching Test-Connection with something other than a real IP at all (a
+    # hostname, a flag-looking string, etc.) and turning this into a generic "resolve
+    # and probe anything" endpoint.
+    if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing IP address" }
+        return
+    }
+
+    try {
+        # -Quiet is avoided: it collapses the whole result to one bool with no latency/loss
+        # detail. Plain Test-Connection returns one reply object per echo (PS 5.1's
+        # Win32_PingStatus-backed cmdlet) or a richer summary object (PS 7's redesigned
+        # cmdlet) - both expose ResponseTime/Latency and a per-reply success flag, so this
+        # reads defensively across either shape rather than assuming one. Parameter set
+        # genuinely differs between the two: PS 7+ renamed -ComputerName to -TargetName and
+        # added -TimeoutSeconds; PS 5.1 has neither and would throw "parameter cannot be
+        # found" if passed them - same pwsh-vs-powershell.exe split this file already
+        # branches on elsewhere (see the SSH-launch host-detection comment above).
+        if ($PSVersionTable.PSVersion.Major -ge 6) {
+            $Results = Test-Connection -TargetName $TargetIP -Count 4 -TimeoutSeconds 2 -ErrorAction Stop
+        } else {
+            $Results = Test-Connection -ComputerName $TargetIP -Count 4 -ErrorAction Stop
+        }
+    } catch {
+        # Total loss throws on both versions rather than returning empty replies - either
+        # way, "could not complete the ping" is reported as zero replies, not a 500, since a
+        # fully unreachable device is the expected, common result this endpoint exists to
+        # report, not a server error.
+        $Results = @()
+    }
+
+    $ReplyCount = @($Results | Where-Object { $_ }).Count
+    $Latencies = @($Results | ForEach-Object {
+        if ($null -ne $_.PSObject.Properties['Latency']) { $_.Latency }
+        elseif ($null -ne $_.PSObject.Properties['ResponseTime']) { $_.ResponseTime }
+    } | Where-Object { $null -ne $_ })
+
+    $AvgLatency = if ($Latencies.Count -gt 0) { [math]::Round(($Latencies | Measure-Object -Average).Average, 1) } else { $null }
+
+    Send-WebJson -Response $Response -StatusCode 200 -Object @{
+        ip = $TargetIP; alive = ($ReplyCount -gt 0); sent = 4; received = $ReplyCount; avgLatencyMs = $AvgLatency
+    }
+}
+
 # Polled by the browser every ~2s while a rescan is outstanding.
 function Invoke-RescanStatusAction {
     param($Response, [string]$JobId)
@@ -780,6 +839,15 @@ function Start-MapperWebServer {
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
                     $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
                     Invoke-RescanStatusAction -Response $Response -JobId $JobId
+                } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/ping") {
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
+                        $Body = $Reader.ReadToEnd()
+                        $Reader.Close()
+                        Invoke-PingAction -Response $Response -Body $Body
+                    }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/scan-network") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }

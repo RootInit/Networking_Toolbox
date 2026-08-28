@@ -61,7 +61,17 @@
         #left-panel-body { flex: 1 1 auto; display: flex; flex-direction: row; min-width: 0; overflow: hidden; }
         
         /* RIGHT PANEL IS BACK */
-        #right-panel { width: 500px; min-width: 500px; background: var(--panel-bg); box-shadow: -2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: none; flex-direction: column; box-sizing: border-box; border-left: 1px solid var(--border); }
+        #right-panel { width: 500px; min-width: 280px; max-width: 90vw; background: var(--panel-bg); box-shadow: -2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: none; flex-direction: column; box-sizing: border-box; border-left: 1px solid var(--border); }
+
+        /* Drag-resize handle for #right-panel - a thin strip on its left edge, dragged via
+           window.startRightPanelResize (app.js), which tracks the pointer continuously
+           rather than toggling between two fixed states like #panel-handle does for the
+           left panel. display is toggled in lockstep with #right-panel itself (see
+           window.openRightDrawer/closeDrawer in drawer.js) - `display:none` here is just
+           the default before the drawer has ever opened. */
+        #right-panel-handle { flex: 0 0 6px; width: 6px; cursor: col-resize; background: transparent; z-index: 11; display: none; }
+        #right-panel-handle:hover, #right-panel-handle.dragging { background: var(--accent); opacity: 0.4; }
+        body.resizing-right-panel { cursor: col-resize; user-select: none; }
         
         #mynetwork { width: 100%; height: 100%; background: #ffffff; }
         
@@ -196,15 +206,27 @@
         .drawer-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
         .drawer-header h2 { color: white; margin: 0; font-size: 1.2rem; }
         .close-btn { cursor: pointer; font-size: 1.5rem; font-weight: bold; line-height: 1; transition: 0.2s;}
-        #rescanBtn, #copyConnectBtn, #printReportBtn { width: auto; margin: 0; padding: 6px 12px; font-size: 0.75rem; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.4); }
-        #rescanBtn:hover, #copyConnectBtn:hover, #printReportBtn:hover { background: rgba(255,255,255,0.28); }
-        #rescanBtn:disabled { opacity: 0.6; cursor: default; }
+        #rescanBtn, #pingBtn, #copyConnectBtn, #printReportBtn { width: auto; margin: 0; padding: 6px 12px; font-size: 0.75rem; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.4); }
+        #rescanBtn:hover, #pingBtn:hover, #copyConnectBtn:hover, #printReportBtn:hover { background: rgba(255,255,255,0.28); }
+        #rescanBtn:disabled, #pingBtn:disabled { opacity: 0.6; cursor: default; }
         .close-btn:hover { color: #ff6b6b; }
 
-        /* Config diff (see window.renderConfigDiff) - display set output is a flat,
-           order-independent statement list, so this is a set-difference view, not a
-           positional line diff: a line either only appears in the old config, only in
-           the new one, or is unchanged (unchanged lines aren't shown at all). */
+        /* Config diff (see window.renderConfigDiff / computeLineDiff in dashboard.js) - a
+           git-style side-by-side view: two line-numbered columns (old on the left, new on
+           the right) aligned by a real LCS positional diff, with unchanged lines shown in
+           both columns and +/- rows shaded like `git diff --color-words`. Falls back to the
+           old flat set-difference rendering (.config-diff-line) only when the pair of
+           configs is too large for the O(n*m) alignment - see CONFIG_DIFF_CELL_LIMIT. */
+        .config-diff-table { display: table; width: 100%; border-collapse: collapse; font-family: monospace; font-size: 0.78rem; }
+        .config-diff-row { display: table-row; }
+        .config-diff-row:hover { filter: brightness(0.97); }
+        .config-diff-linenum { display: table-cell; padding: 1px 8px; text-align: right; color: #999; user-select: none; white-space: nowrap; border-right: 1px solid #eee; vertical-align: top; }
+        .config-diff-cell { display: table-cell; padding: 1px 8px; white-space: pre; vertical-align: top; }
+        .config-diff-cell.new-side { border-left: 1px solid #eee; }
+        .config-diff-row.added .config-diff-linenum.new-side, .config-diff-row.added .config-diff-cell.new-side { background: #eafaf1; color: #1e7a45; }
+        .config-diff-row.removed .config-diff-linenum.old-side, .config-diff-row.removed .config-diff-cell.old-side { background: #fdecea; color: #c0392b; }
+        #config-diff-content { overflow-x: auto; }
+
         .config-diff-line { padding: 1px 8px; white-space: pre-wrap; word-break: break-word; }
         .config-diff-line.added { background: #eafaf1; color: #1e7a45; }
         .config-diff-line.removed { background: #fdecea; color: #c0392b; }
@@ -257,6 +279,9 @@
         td { padding: 8px; border-bottom: 1px solid #eee; word-break: break-word; }
         tr:hover { background-color: #f9f9f9; }
         
+        .link-btn { background: none; border: none; color: #2B7CE9; cursor: pointer; padding: 0; font-size: 0.75rem; text-decoration: underline; }
+        .link-btn:hover { color: #1a5cb0; }
+
         .badge { padding: 2px 6px; border-radius: 3px; font-size: 0.7rem; font-weight: bold; color: white; display: inline-block;}
         .badge.green { background-color: #27ae60; }
         .badge.red { background-color: #e74c3c; }
@@ -515,7 +540,7 @@
                 </div>
                 <p style="font-size: 0.78rem; color: #888; margin: 0 0 12px;">Every local account found in captured configs, for human review - usernames are never auto-flagged as suspicious. The one objective check made here is whether centralized RADIUS/TACACS+ authentication is configured at all.</p>
                 <table id="accounts-table">
-                    <thead><tr><th>Device</th><th>Username</th><th>Class</th><th>Centralized Auth</th></tr></thead>
+                    <thead><tr><th>Username</th><th>Class</th><th>Centralized Auth</th><th>Switches</th></tr></thead>
                     <tbody id="accounts-tbody"></tbody>
                 </table>
             </div>
@@ -573,8 +598,9 @@
         <div id="mynetwork"></div>
         <div id="mapview" style="display:none; position:absolute; inset:0; top:40px;"></div>
         <div id="mapUnplacedPanel" style="display:none; position:absolute; top:50px; left:10px; z-index:1001; background:white; border:1px solid var(--border); border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.15); max-width:320px; max-height:60vh; overflow-y:auto;">
-            <div style="padding:8px 12px; font-weight:bold; font-size:0.85rem; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; cursor:pointer;" onclick="window.toggleUnplacedPanel()">
+            <div style="padding:8px 12px; font-weight:bold; font-size:0.85rem; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:8px; cursor:pointer;" onclick="window.toggleUnplacedPanel()">
                 <span id="mapUnplacedCount">0 devices with no location set</span>
+                <button type="button" id="mapUnplacedExportBtn" style="display:none; width:auto; margin:0; padding:3px 8px; font-size:0.68rem; font-weight:normal;" title="Export this list (hostname, serial, model, etc.) as a CSV" onclick="event.stopPropagation(); window.exportUnplacedDevicesCsv();">Export CSV</button>
                 <span id="mapUnplacedToggleIcon">&#9660;</span>
             </div>
             <div id="mapUnplacedList" style="padding:4px 0;"></div>
@@ -588,10 +614,17 @@
             <div class="drawer-header"><h2 id="editorDeviceLabel">Set Location</h2></div>
             <div style="padding:18px;">
                 <p style="font-size:0.82rem; color:#666; margin:0 0 12px;">Click a spot on the map to place this device, or type coordinates directly below, then fill in the details.</p>
+                <!-- type="text" + inputmode="decimal", not type="number": a Washington-state
+                     device needs a NEGATIVE longitude, and type="number"'s virtual keypad on
+                     iOS Safari (and several Android keyboards) has no minus-sign key at all -
+                     someone setting a pin from a phone/tablet while standing in the wiring
+                     closet could never enter a negative value. pattern is validated on submit
+                     by commitLocationEdit's own parseFloat/isFinite check below, not by the
+                     browser - it's just a hint for browsers that render one from `pattern`. -->
                 <label style="font-size:0.8rem; font-weight:bold;">Latitude</label>
-                <input type="number" step="any" id="editorLat" placeholder="e.g. 47.653500">
+                <input type="text" inputmode="decimal" pattern="-?\d*\.?\d*" id="editorLat" placeholder="e.g. 47.653500">
                 <label style="font-size:0.8rem; font-weight:bold;">Longitude</label>
-                <input type="number" step="any" id="editorLng" placeholder="e.g. -122.306800">
+                <input type="text" inputmode="decimal" pattern="-?\d*\.?\d*" id="editorLng" placeholder="e.g. -122.306800">
                 <label style="font-size:0.8rem; font-weight:bold;">Building</label>
                 <input type="text" id="editorBuilding" placeholder="Building name">
                 <label style="font-size:0.8rem; font-weight:bold;">Room</label>
@@ -607,6 +640,7 @@
     </div>
 
     <!-- RIGHT PANEL: Data Sidebar -->
+    <div id="right-panel-handle" onmousedown="window.startRightPanelResize(event)" title="Drag to resize"></div>
     <div id="right-panel">
         <div class="drawer-header">
             <div class="drawer-header-top">
@@ -615,6 +649,7 @@
             </div>
             <div class="drawer-header-actions">
                 <button type="button" id="rescanBtn" onclick="window.rescanDevice()" title="Re-run the diagnostic scan for just this device, without a full fleet crawl">Re-scan</button>
+                <button type="button" id="pingBtn" onclick="window.pingDevice()" title="Send a quick ICMP ping to this device's management IP to check reachability">Ping</button>
                 <button type="button" id="copyConnectBtn" onclick="window.copyConnectCommand()" title="Launch an interactive SSH session to this device via the local webserver">Launch SSH Session</button>
                 <button type="button" id="printReportBtn" onclick="window.printDeviceReport()" title="Open a printable report for this device in a new tab">Print Report</button>
             </div>

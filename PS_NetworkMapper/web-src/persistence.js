@@ -231,13 +231,16 @@ window.updateDeviceHistory = function() {
 };
 
 // --- Reliability Heatmap history (see #analysis-tab-reliability) ---
-// Cross-session per-device history, keyed by DeviceIP (not client MAC) - same "recompute
-// by re-walking every loaded snapshot, merge into whatever's already in localStorage"
-// pattern as window.updateDeviceHistory, so loading more historical snapshots later only
-// enriches this, never loses it. Reboot detection persists the same idea renderTrendChart
-// already draws as a same-session-only marker (Uptime changing between snapshots), but
-// kept across sessions here via a stored lastKnownUptime per device.
-var ALARM_HISTORY_STORAGE_KEY = 'ps_networkmapper_alarm_history_v1';
+// Cross-session per-device history, keyed by window.resolveDeviceIdentity (not DeviceIP, not
+// client MAC) - same "recompute by re-walking every loaded snapshot, merge into whatever's
+// already in localStorage" pattern as window.updateDeviceHistory, so loading more historical
+// snapshots later only enriches this, never loses it. Reboot detection persists the same idea
+// renderTrendChart already draws as a same-session-only marker (Uptime changing between
+// snapshots), but kept across sessions here via a stored lastKnownUptime per device.
+// Storage key bumped to _v2 (was DeviceIP-keyed under _v1) - the old entries are simply
+// abandoned rather than merged under the new identity keys, so a renumbered device's
+// pre-existing IP-keyed history doesn't silently mix into two different-shaped records.
+var ALARM_HISTORY_STORAGE_KEY = 'ps_networkmapper_alarm_history_v2';
 
 function loadAlarmHistory() {
     try {
@@ -269,7 +272,7 @@ function saveAlarmHistory(history) {
 // the record on ordinary repeated use.
 window.updateAlarmHistory = function() {
     var history = loadAlarmHistory();
-    var lastUptimeSeen = {}; // deviceIp -> uptime string, scoped to this call only
+    var lastUptimeSeen = {}; // identity -> uptime string, scoped to this call only
 
     loadedSnapshots
         .filter(s => s.scanTimestamp)
@@ -279,18 +282,22 @@ window.updateAlarmHistory = function() {
             var date = snapshot.scanTimestamp.slice(0, 10);
             (snapshot.topology || []).forEach(device => {
                 if (!device || !device.DeviceIP) return;
-                var ip = String(device.DeviceIP);
-                if (!history[ip]) history[ip] = { days: {} };
-                var entry = history[ip];
+                var identity = window.resolveDeviceIdentity(device);
+                if (!history[identity]) history[identity] = { days: {} };
+                var entry = history[identity];
                 var alarmCount = window.asArray(device.Alarms).length;
-                var prevUptime = lastUptimeSeen[ip] || null;
+                var prevUptime = lastUptimeSeen[identity] || null;
                 var rebootedToday = !!(device.Uptime && device.Uptime !== "Unknown" && prevUptime && device.Uptime !== prevUptime);
 
                 if (!entry.days[date]) entry.days[date] = { alarmCount: 0, rebooted: false };
                 entry.days[date].alarmCount = Math.max(entry.days[date].alarmCount, alarmCount);
                 entry.days[date].rebooted = entry.days[date].rebooted || rebootedToday;
+                // Latest-known label/IP, for populateReliabilityDeviceSelect's dropdown text -
+                // ascending date order means the last write here really is the most recent.
+                entry.lastHostname = (device.Hostname && device.Hostname !== "Unknown") ? device.Hostname : entry.lastHostname;
+                entry.lastIp = String(device.DeviceIP);
 
-                if (device.Uptime && device.Uptime !== "Unknown") lastUptimeSeen[ip] = device.Uptime;
+                if (device.Uptime && device.Uptime !== "Unknown") lastUptimeSeen[identity] = device.Uptime;
             });
         });
 

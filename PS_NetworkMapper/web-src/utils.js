@@ -158,7 +158,22 @@ window.normalizePort = function(port) {
 // this feature) upgrades confidence from a generic "multiple devices" guess to a
 // confirmed phone ID when a MED phone/AP block exists on the same port.
 //
-// Returns Map<normalizedPort, {confidence: 'confirmed'|'possible', medDescription, clients}>.
+// Returns Map<normalizedPort, {confidence: 'confirmed'|'likely'|'possible', medDescription, clients}>.
+//
+// Confidence tiers, most to least certain:
+//   confirmed - LLDP-MED identified an actual phone/AP on this port.
+//   likely    - 2+ MACs on this port span 2+ VLANs. Not normal for a plain access port
+//               (a phone tagging voice VLAN while passing an untagged PC through on the
+//               data VLAN is exactly this shape) even with no MED confirmation.
+//   possible  - 2+ MACs on this port, all on the SAME VLAN - the far more common real-world
+//               case (an unmanaged hub/switch feeding two PCs, a PC + printer, etc., none of
+//               which retag anything). Originally excluded here on the theory that VLAN
+//               diversity was the daisy-chain signal, but that theory only covers the
+//               phone-with-passthrough-PC case - it made this tier fire on effectively
+//               nothing in fleets where daisy-chains are mostly same-VLAN hubs, which is the
+//               common case. Kept as its own weaker tier (not folded into 'likely') since a
+//               same-VLAN multi-MAC port is somewhat more likely to also be a stale mac-table
+//               entry from a device that recently moved ports, which VLAN diversity rules out.
 window.detectDaisyChains = function(device) {
     var medByPort = new Map();
     window.asArray(device.MedNeighbors).forEach(m => {
@@ -175,17 +190,35 @@ window.detectDaisyChains = function(device) {
     var result = new Map();
     byPort.forEach((clients, port) => {
         var distinctMacs = new Set(clients.map(c => String(c.MAC).toLowerCase()));
+        if (distinctMacs.size < 2) return;
         var distinctVlans = new Set(clients.map(c => String(c.VLAN_Tag)));
-        if (distinctMacs.size < 2 || distinctVlans.size < 2) return;
 
         var med = medByPort.get(port);
+        var confidence = med ? 'confirmed' : (distinctVlans.size >= 2 ? 'likely' : 'possible');
         result.set(port, {
-            confidence: med ? 'confirmed' : 'possible',
+            confidence: confidence,
             medDescription: med ? med.Description : null,
             clients: clients,
         });
     });
     return result;
+};
+
+// Stable cross-snapshot device identity, for every feature that has to recognize "the same
+// physical switch" across TIME (Topology Diff, the Trends chart, the Reliability heatmap,
+// the Config-Changed dashboard card, and the Config tab's "this device, other capture"
+// picker) rather than within one snapshot. DeviceIP is a fine unique key WITHIN a single
+// snapshot (it can't collide there) but is exactly the wrong choice across snapshots - a
+// DHCP renewal or a deliberate renumbering makes a continuously-managed switch look like one
+// device disappearing and a different one appearing, which corrupts all five of those
+// features' history. Reuses window.ConfigResolve.bestKeyForSave (config-resolve.js) - the
+// SAME serial > hostname > IP priority the geo-map location feature already uses to survive
+// exactly this - instead of a second, independently-maintained notion of "identity" that
+// could quietly drift from that one. Returns a single string ("keyType:key") suitable as a
+// Map/object key or a <select> option value.
+window.resolveDeviceIdentity = function(device) {
+    var k = window.ConfigResolve.bestKeyForSave(device);
+    return k.keyType + ':' + k.key;
 };
 
 // Shared badge markup for a daisy-chain hit, used by both renderInterfaces (once per
@@ -194,7 +227,10 @@ window.renderDaisyChainBadge = function(chain) {
     if (chain.confidence === 'confirmed') {
         return `<span class="daisy-badge confirmed" title="LLDP-MED identified: ${esc(chain.medDescription)}">Phone + PC (confirmed)</span>`;
     }
-    return `<span class="daisy-badge possible" title="${chain.clients.length} devices on different VLANs share this port - likely a daisy-chained phone, but could be an unmanaged hub. No LLDP-MED confirmation seen.">Multiple devices (possible daisy-chain)</span>`;
+    if (chain.confidence === 'likely') {
+        return `<span class="daisy-badge possible" title="${chain.clients.length} devices on different VLANs share this port - likely a daisy-chained phone, but could be an unmanaged hub. No LLDP-MED confirmation seen.">Multiple devices (likely daisy-chain)</span>`;
+    }
+    return `<span class="daisy-badge possible" title="${chain.clients.length} devices share this port, all on the same VLAN - likely an unmanaged hub/switch. Weaker signal than different-VLAN sharing: could also be a stale mac-table entry from a device that recently moved ports.">Multiple devices (possible daisy-chain)</span>`;
 };
 
 // `indeterminate` marks a phase that can't report real fractional progress (an index

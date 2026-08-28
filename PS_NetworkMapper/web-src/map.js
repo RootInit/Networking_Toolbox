@@ -705,19 +705,27 @@ window.toggleUnplacedPanel = function() {
     icon.innerHTML = collapsed ? '&#9660;' : '&#9650;';
 };
 
+// Snapshotted by the render below so window.exportUnplacedDevicesCsv doesn't need its own
+// copy of the classification/placedByIp filtering logic - always exports exactly what the
+// panel is currently showing.
+var unplacedDevicesForExport = [];
+
 window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, placedByIp) {
     var listEl = document.getElementById('mapUnplacedList');
     var countEl = document.getElementById('mapUnplacedCount');
+    var exportBtn = document.getElementById('mapUnplacedExportBtn');
     listEl.innerHTML = '';
 
     var unplaced = [];
     classification.forEach(function (meta, ip) {
         if (!meta.scanned) return;          // only scanned devices are ever geo-taggable (see Task 4's key resolution - an unscanned neighbor has no chassis data to key by)
         if (placedByIp.has(ip)) return;      // already has a resolved location
-        unplaced.push({ ip: ip, meta: meta });
+        unplaced.push({ ip: ip, meta: meta, device: deviceByIpLocal.get(ip) });
     });
 
     countEl.textContent = unplaced.length + ' device' + (unplaced.length === 1 ? '' : 's') + ' with no location set';
+    unplacedDevicesForExport = unplaced;
+    if (exportBtn) exportBtn.style.display = unplaced.length > 0 ? '' : 'none';
 
     unplaced.forEach(function (row) {
         var rowEl = document.createElement('div');
@@ -734,4 +742,30 @@ window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, pla
         rowEl.querySelector('button').addEventListener('click', function () { window.openLocationEditor(row.ip); });
         listEl.appendChild(rowEl);
     });
+};
+
+// CSV of exactly what the Unplaced Devices list is currently showing - handed to whoever is
+// walking the building placing pins, so they have a paper/spreadsheet worklist (hostname +
+// serial to find the right unit on-site) instead of having to keep this panel open and
+// scrolled to the right spot the whole time. Serial comes from the same StackMembers
+// extraction config-resolve.js already uses for location-key resolution (extractDeviceKeys) -
+// not reimplemented here - so "the serial this row would be saved under" and "the serial in
+// this export" can never drift apart.
+window.exportUnplacedDevicesCsv = function() {
+    if (unplacedDevicesForExport.length === 0) return;
+    var rows = [['Hostname', 'IP', 'Serial', 'Model', 'Junos Version', 'Uptime']];
+    unplacedDevicesForExport.forEach(function (row) {
+        var device = row.device;
+        var keys = device ? window.ConfigResolve.extractDeviceKeys(device) : null;
+        var model = (device && device.StackMembers && device.StackMembers[0]) ? device.StackMembers[0].Model : '';
+        rows.push([
+            row.meta.hostname !== 'Unknown' ? row.meta.hostname : '',
+            row.ip,
+            (keys && keys.serial) ? keys.serial : '',
+            model || '',
+            device ? device.JunosVersion : '',
+            device ? device.Uptime : '',
+        ]);
+    });
+    downloadCsv('unplaced_devices.csv', rows);
 };

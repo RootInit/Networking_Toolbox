@@ -7,6 +7,8 @@
 
 window.closeDrawer = function() {
     document.getElementById('right-panel').style.display = 'none';
+    var handle = document.getElementById('right-panel-handle');
+    if (handle) handle.style.display = 'none';
     currentSelectedNodeData = null;
     if (network) network.unselectAll();
 };
@@ -141,6 +143,39 @@ window.rescanDevice = async function() {
     poll();
 };
 
+// Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes against
+// this device's management IP, synchronous (unlike /api/rescan, a ping is a couple seconds
+// at most, not worth a job-queue/poll dance for).
+window.pingDevice = async function() {
+    var ip = document.getElementById('drawer-title').innerText;
+    if (!ip) return;
+    var btn = document.getElementById('pingBtn');
+    var original = btn ? btn.textContent : null;
+
+    try {
+        if (btn) { btn.disabled = true; btn.textContent = 'Pinging...'; }
+        var resp = await fetch('/api/ping', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip: ip })
+        });
+        var result = await resp.json();
+        if (!resp.ok) {
+            window.setStatus("Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status)), "red");
+            return;
+        }
+        if (result.alive) {
+            window.setStatus(ip + " is reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + " replies).", "green");
+        } else {
+            window.setStatus(ip + " did not respond to ping (" + result.received + "/" + result.sent + " replies).", "red");
+        }
+    } catch (e) {
+        window.setStatus("Could not ping " + ip + ": " + e.message, "red");
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+    }
+};
+
 // Client-side port of Start-NetworkMapper.ps1's Update-ClientIpCorrelation. A
 // single-device rescan only ever has that one switch's own local ARP table - a
 // downstream client's IP is usually resolved from the L3 gateway's ARP table instead,
@@ -229,9 +264,12 @@ window.openRightDrawer = function(ip) {
     var panel = document.getElementById('right-panel');
     document.getElementById('drawer-title').innerText = ip;
 
+    var handle = document.getElementById('right-panel-handle');
+
     if (!currentSelectedNodeData) {
         document.getElementById('summary-content').innerHTML = `<div style="color:red; padding:20px;">No diagnostic data found (Unscanned Node).</div>`;
         panel.style.display = 'flex';
+        if (handle) handle.style.display = 'block';
         return;
     }
 
@@ -243,6 +281,7 @@ window.openRightDrawer = function(ip) {
     window.renderConfig();
 
     panel.style.display = 'flex';
+    if (handle) handle.style.display = 'block';
 };
 
 window.renderSummary = function() {
@@ -383,7 +422,7 @@ window.renderClients = function() {
 
             var vendorInfo = window.lookupVendor(c.MAC);
             var vendorStr = vendorInfo.vendor
-                ? `<br><span class="vendor-tag vendor-${vendorInfo.category.toLowerCase().replace('/', '-')}" title="${esc(vendorInfo.vendor)}">${esc(vendorInfo.category)}</span>`
+                ? `<br><span class="vendor-tag vendor-${vendorInfo.category.toLowerCase().replace('/', '-')}" title="Category: ${esc(vendorInfo.category)}">${esc(vendorInfo.vendor)}</span>`
                 : "";
 
             var chain = daisyChains.get(window.normalizePort(c.Port));
@@ -449,6 +488,14 @@ window.renderConfig = function() {
 // actually reads.
 var configCompareTarget = null; // {idx, ip} of the device/snapshot being diffed against, or null
 
+// idx (in loadedSnapshots) -> that OTHER snapshot's own DeviceIP for the currently-open
+// device - NOT necessarily the same IP the drawer is showing right now. Populated by
+// populateConfigCompareSelect below, read by selectConfigCompareSnapshot: a device matched
+// by identity (serial/hostname) can easily have had a different IP in an older capture, and
+// this is what lets renderConfigDiff's own DeviceIP-based lookup (unchanged, see below)
+// still find it in that specific snapshot.
+var sameDeviceIpByIdx = {};
+
 // (a) only - the "This device, other capture" list. Small and bounded (one entry per
 // OTHER loaded snapshot that has this same device with real config), so a plain select is
 // still the right control here; it's (b), searching potentially hundreds of other
@@ -461,6 +508,7 @@ window.populateConfigCompareSelect = function() {
     if (!container || !select) return;
 
     configCompareTarget = null;
+    sameDeviceIpByIdx = {};
     if (searchInput) searchInput.value = '';
     if (searchResults) searchResults.innerHTML = '';
 
@@ -474,12 +522,17 @@ window.populateConfigCompareSelect = function() {
         return;
     }
 
-    var ip = String(d.DeviceIP);
+    // Matched by window.resolveDeviceIdentity (serial > hostname > IP), not a literal IP
+    // comparison - a device renumbered since an older capture is still "this same device"
+    // for compare purposes; it would otherwise silently disappear from this list the moment
+    // its IP changed, with no error, just fewer options than expected.
+    var identity = window.resolveDeviceIdentity(d);
     var sameDeviceOptions = [];
     loadedSnapshots.forEach((snap, idx) => {
         if (idx === activeSnapshotIndex) return;
-        var other = (snap.topology || []).find(dev => dev && String(dev.DeviceIP) === ip);
+        var other = (snap.topology || []).find(dev => dev && dev.DeviceIP && window.resolveDeviceIdentity(dev) === identity);
         if (other && other.Configuration && other.Configuration !== "Unknown") {
+            sameDeviceIpByIdx[idx] = String(other.DeviceIP);
             sameDeviceOptions.push({
                 idx: idx,
                 ts: snap.scanTimestamp ? new Date(snap.scanTimestamp).getTime() : 0,
@@ -506,7 +559,15 @@ window.selectConfigCompareSnapshot = function() {
     if (searchInput) searchInput.value = '';
     if (searchResults) searchResults.innerHTML = '';
 
-    configCompareTarget = select.value ? { idx: parseInt(select.value, 10), ip: String(currentSelectedNodeData.DeviceIP) } : null;
+    // ip comes from sameDeviceIpByIdx (that OTHER snapshot's own DeviceIP for this device),
+    // NOT currentSelectedNodeData.DeviceIP - those two can legitimately differ when the
+    // device was renumbered between the two captures being compared. Falls back to the
+    // active device's IP only as a last resort (should never actually trigger, since every
+    // <option> value here came from a key populateConfigCompareSelect just wrote).
+    var idx = select.value ? parseInt(select.value, 10) : null;
+    configCompareTarget = select.value
+        ? { idx: idx, ip: sameDeviceIpByIdx[idx] || String(currentSelectedNodeData.DeviceIP) }
+        : null;
     window.renderConfigDiff();
 };
 
@@ -601,17 +662,47 @@ window.renderConfigDiff = function() {
     var otherIp = configCompareTarget.ip;
     var d = currentSelectedNodeData;
     var other = otherSnap && (otherSnap.topology || []).find(dev => dev && String(dev.DeviceIP) === otherIp);
-    var diff = configSetDiff(other ? other.Configuration : '', d.Configuration);
-    var isCrossDevice = otherIp !== String(d.DeviceIP);
+    var otherConfig = other ? other.Configuration : '';
+    // Identity-based, not otherIp !== d.DeviceIP - the "This device, other capture" picker
+    // (populateConfigCompareSelect) can legitimately hand back a capture where this same
+    // physical switch had a different IP, and that must NOT trip the "two different
+    // switches" cross-device banner below.
+    var isCrossDevice = !other || window.resolveDeviceIdentity(other) !== window.resolveDeviceIdentity(d);
+    var otherLabel = esc(other && other.Hostname && other.Hostname !== "Unknown" ? other.Hostname : otherIp);
 
     var header = isCrossDevice
-        ? `<div class="config-diff-header">Comparing against <strong>${esc(other && other.Hostname && other.Hostname !== "Unknown" ? other.Hostname : otherIp)}</strong> (${esc(otherIp)}) &mdash; these are two different switches, not a change history, so a large diff is expected. <code>+</code> = only on this device, <code>-</code> = only on ${esc(other && other.Hostname && other.Hostname !== "Unknown" ? other.Hostname : otherIp)}.</div>`
-        : '';
+        ? `<div class="config-diff-header">Comparing against <strong>${otherLabel}</strong> (${esc(otherIp)}) &mdash; these are two different switches, not a change history, so a large diff is expected. Left = ${otherLabel}, right = this device.</div>`
+        : '<div class="config-diff-header">Left = previous snapshot, right = this device&apos;s current configuration.</div>';
 
-    diffEl.innerHTML = header + ((diff.added.length === 0 && diff.removed.length === 0)
-        ? '<div class="config-diff-empty">No differences - configuration is identical between these two.</div>'
-        : diff.removed.map(l => `<div class="config-diff-line removed">- ${esc(l)}</div>`).join('')
-          + diff.added.map(l => `<div class="config-diff-line added">+ ${esc(l)}</div>`).join(''));
+    var lineRows = computeLineDiff(otherConfig, d.Configuration);
+    var bodyHtml;
+    if (lineRows === null) {
+        // Configs too large for the O(n*m) positional diff (see CONFIG_DIFF_CELL_LIMIT) -
+        // fall back to the flat, order-independent set diff instead of hanging the tab.
+        var diff = configSetDiff(otherConfig, d.Configuration);
+        bodyHtml = (diff.added.length === 0 && diff.removed.length === 0)
+            ? '<div class="config-diff-empty">No differences - configuration is identical between these two.</div>'
+            : '<div class="config-diff-header">These configs are too large to align line-by-line - showing an unordered set difference instead.</div>'
+              + diff.removed.map(l => `<div class="config-diff-line removed">- ${esc(l)}</div>`).join('')
+              + diff.added.map(l => `<div class="config-diff-line added">+ ${esc(l)}</div>`).join('');
+    } else if (lineRows.every(r => r.type === 'equal')) {
+        bodyHtml = '<div class="config-diff-empty">No differences - configuration is identical between these two.</div>';
+    } else {
+        bodyHtml = '<div class="config-diff-table">' + lineRows.map(r => {
+            var oldNum = r.oldNum !== null ? r.oldNum : '';
+            var newNum = r.newNum !== null ? r.newNum : '';
+            var oldContent = r.oldLine !== null ? esc(r.oldLine) : '';
+            var newContent = r.newLine !== null ? esc(r.newLine) : '';
+            return `<div class="config-diff-row ${r.type}">`
+                + `<div class="config-diff-linenum old-side">${oldNum}</div>`
+                + `<div class="config-diff-cell old-side">${oldContent}</div>`
+                + `<div class="config-diff-linenum new-side">${newNum}</div>`
+                + `<div class="config-diff-cell new-side">${newContent}</div>`
+                + `</div>`;
+        }).join('') + '</div>';
+    }
+
+    diffEl.innerHTML = header + bodyHtml;
     diffEl.style.display = 'block';
     rawEl.style.display = 'none';
 };

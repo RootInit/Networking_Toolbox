@@ -198,6 +198,72 @@ window.toggleLeftPanel = function(e) {
     document.getElementById('left-panel').classList.toggle('collapsed');
 };
 
+// Drag-resize for #right-panel (the device detail drawer). Unlike the left panel's
+// collapse/expand toggle, this tracks the pointer continuously, so #center-panel (flex-grow)
+// shrinks/grows in real time as the user drags - vis-network's own resize handling already
+// picks that up live (see the ResizeObserver comment near IGNORED_ERROR_MESSAGES above), but
+// Leaflet does not self-observe its container, so Map view needs an explicit
+// invalidateSize() call while dragging or its tiles freeze at the pre-drag size.
+window.startRightPanelResize = function(e) {
+    e.preventDefault();
+    var panel = document.getElementById('right-panel');
+    var handle = document.getElementById('right-panel-handle');
+    var startX = e.clientX;
+    var startWidth = panel.getBoundingClientRect().width;
+    document.body.classList.add('resizing-right-panel');
+    handle.classList.add('dragging');
+
+    function onMove(moveEvent) {
+        // Dragging the LEFT edge of a RIGHT-docked panel: moving the pointer left (negative
+        // dx) grows the panel, so width goes up as dx goes down - hence the negation.
+        var dx = moveEvent.clientX - startX;
+        var newWidth = startWidth - dx;
+        var maxWidth = window.innerWidth * 0.9;
+        newWidth = Math.max(280, Math.min(maxWidth, newWidth));
+        panel.style.width = newWidth + 'px';
+
+        if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
+    }
+
+    function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.classList.remove('resizing-right-panel');
+        handle.classList.remove('dragging');
+        if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
+        if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
+        try { localStorage.setItem('rightPanelWidth', String(panel.getBoundingClientRect().width)); } catch (err) {}
+    }
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+};
+
+// Restores a previously dragged width on load, same "remember what the user set last time"
+// treatment as the rest of the app's settings (persistence.js) - a plain localStorage read
+// since this is a pure display preference, not part of Configuration.json's saved state.
+(function restoreRightPanelWidth() {
+    try {
+        var saved = parseFloat(localStorage.getItem('rightPanelWidth'));
+        if (Number.isFinite(saved) && saved >= 280) {
+            document.getElementById('right-panel').style.width = saved + 'px';
+        }
+    } catch (err) {}
+})();
+
+// Browser-window resize (not the panel drag above, which handles its own live updates) -
+// vis-network picks this up on its own via its container ResizeObserver, but Leaflet does
+// not self-observe, so without this a window resize/maximize leaves Map view's tiles sized
+// to whatever the viewport was when it was last opened. Debounced since 'resize' fires
+// continuously while a window is actively being dragged by its OS-level edge.
+var windowResizeDebounce = null;
+window.addEventListener('resize', function() {
+    clearTimeout(windowResizeDebounce);
+    windowResizeDebounce = setTimeout(function() {
+        if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
+    }, 150);
+});
+
 // Sidebar tabs (Load File / Search / Settings / Analysis Dashboard). Panes stay in the
 // DOM when hidden (display:none, not removed), so getElementById-based reads elsewhere
 // (getClusterThreshold, getLayoutSettings) work regardless of which tab is active. The

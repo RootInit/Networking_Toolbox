@@ -1419,7 +1419,17 @@ svg.leaflet-image-layer.leaflet-interactive path {
         #left-panel-body { flex: 1 1 auto; display: flex; flex-direction: row; min-width: 0; overflow: hidden; }
         
         /* RIGHT PANEL IS BACK */
-        #right-panel { width: 500px; min-width: 500px; background: var(--panel-bg); box-shadow: -2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: none; flex-direction: column; box-sizing: border-box; border-left: 1px solid var(--border); }
+        #right-panel { width: 500px; min-width: 280px; max-width: 90vw; background: var(--panel-bg); box-shadow: -2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: none; flex-direction: column; box-sizing: border-box; border-left: 1px solid var(--border); }
+
+        /* Drag-resize handle for #right-panel - a thin strip on its left edge, dragged via
+           window.startRightPanelResize (app.js), which tracks the pointer continuously
+           rather than toggling between two fixed states like #panel-handle does for the
+           left panel. display is toggled in lockstep with #right-panel itself (see
+           window.openRightDrawer/closeDrawer in drawer.js) - `display:none` here is just
+           the default before the drawer has ever opened. */
+        #right-panel-handle { flex: 0 0 6px; width: 6px; cursor: col-resize; background: transparent; z-index: 11; display: none; }
+        #right-panel-handle:hover, #right-panel-handle.dragging { background: var(--accent); opacity: 0.4; }
+        body.resizing-right-panel { cursor: col-resize; user-select: none; }
         
         #mynetwork { width: 100%; height: 100%; background: #ffffff; }
         
@@ -1554,15 +1564,27 @@ svg.leaflet-image-layer.leaflet-interactive path {
         .drawer-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
         .drawer-header h2 { color: white; margin: 0; font-size: 1.2rem; }
         .close-btn { cursor: pointer; font-size: 1.5rem; font-weight: bold; line-height: 1; transition: 0.2s;}
-        #rescanBtn, #copyConnectBtn, #printReportBtn { width: auto; margin: 0; padding: 6px 12px; font-size: 0.75rem; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.4); }
-        #rescanBtn:hover, #copyConnectBtn:hover, #printReportBtn:hover { background: rgba(255,255,255,0.28); }
-        #rescanBtn:disabled { opacity: 0.6; cursor: default; }
+        #rescanBtn, #pingBtn, #copyConnectBtn, #printReportBtn { width: auto; margin: 0; padding: 6px 12px; font-size: 0.75rem; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.4); }
+        #rescanBtn:hover, #pingBtn:hover, #copyConnectBtn:hover, #printReportBtn:hover { background: rgba(255,255,255,0.28); }
+        #rescanBtn:disabled, #pingBtn:disabled { opacity: 0.6; cursor: default; }
         .close-btn:hover { color: #ff6b6b; }
 
-        /* Config diff (see window.renderConfigDiff) - display set output is a flat,
-           order-independent statement list, so this is a set-difference view, not a
-           positional line diff: a line either only appears in the old config, only in
-           the new one, or is unchanged (unchanged lines aren't shown at all). */
+        /* Config diff (see window.renderConfigDiff / computeLineDiff in dashboard.js) - a
+           git-style side-by-side view: two line-numbered columns (old on the left, new on
+           the right) aligned by a real LCS positional diff, with unchanged lines shown in
+           both columns and +/- rows shaded like `git diff --color-words`. Falls back to the
+           old flat set-difference rendering (.config-diff-line) only when the pair of
+           configs is too large for the O(n*m) alignment - see CONFIG_DIFF_CELL_LIMIT. */
+        .config-diff-table { display: table; width: 100%; border-collapse: collapse; font-family: monospace; font-size: 0.78rem; }
+        .config-diff-row { display: table-row; }
+        .config-diff-row:hover { filter: brightness(0.97); }
+        .config-diff-linenum { display: table-cell; padding: 1px 8px; text-align: right; color: #999; user-select: none; white-space: nowrap; border-right: 1px solid #eee; vertical-align: top; }
+        .config-diff-cell { display: table-cell; padding: 1px 8px; white-space: pre; vertical-align: top; }
+        .config-diff-cell.new-side { border-left: 1px solid #eee; }
+        .config-diff-row.added .config-diff-linenum.new-side, .config-diff-row.added .config-diff-cell.new-side { background: #eafaf1; color: #1e7a45; }
+        .config-diff-row.removed .config-diff-linenum.old-side, .config-diff-row.removed .config-diff-cell.old-side { background: #fdecea; color: #c0392b; }
+        #config-diff-content { overflow-x: auto; }
+
         .config-diff-line { padding: 1px 8px; white-space: pre-wrap; word-break: break-word; }
         .config-diff-line.added { background: #eafaf1; color: #1e7a45; }
         .config-diff-line.removed { background: #fdecea; color: #c0392b; }
@@ -1615,6 +1637,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
         td { padding: 8px; border-bottom: 1px solid #eee; word-break: break-word; }
         tr:hover { background-color: #f9f9f9; }
         
+        .link-btn { background: none; border: none; color: #2B7CE9; cursor: pointer; padding: 0; font-size: 0.75rem; text-decoration: underline; }
+        .link-btn:hover { color: #1a5cb0; }
+
         .badge { padding: 2px 6px; border-radius: 3px; font-size: 0.7rem; font-weight: bold; color: white; display: inline-block;}
         .badge.green { background-color: #27ae60; }
         .badge.red { background-color: #e74c3c; }
@@ -1873,7 +1898,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
                 </div>
                 <p style="font-size: 0.78rem; color: #888; margin: 0 0 12px;">Every local account found in captured configs, for human review - usernames are never auto-flagged as suspicious. The one objective check made here is whether centralized RADIUS/TACACS+ authentication is configured at all.</p>
                 <table id="accounts-table">
-                    <thead><tr><th>Device</th><th>Username</th><th>Class</th><th>Centralized Auth</th></tr></thead>
+                    <thead><tr><th>Username</th><th>Class</th><th>Centralized Auth</th><th>Switches</th></tr></thead>
                     <tbody id="accounts-tbody"></tbody>
                 </table>
             </div>
@@ -1931,8 +1956,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
         <div id="mynetwork"></div>
         <div id="mapview" style="display:none; position:absolute; inset:0; top:40px;"></div>
         <div id="mapUnplacedPanel" style="display:none; position:absolute; top:50px; left:10px; z-index:1001; background:white; border:1px solid var(--border); border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.15); max-width:320px; max-height:60vh; overflow-y:auto;">
-            <div style="padding:8px 12px; font-weight:bold; font-size:0.85rem; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; cursor:pointer;" onclick="window.toggleUnplacedPanel()">
+            <div style="padding:8px 12px; font-weight:bold; font-size:0.85rem; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:8px; cursor:pointer;" onclick="window.toggleUnplacedPanel()">
                 <span id="mapUnplacedCount">0 devices with no location set</span>
+                <button type="button" id="mapUnplacedExportBtn" style="display:none; width:auto; margin:0; padding:3px 8px; font-size:0.68rem; font-weight:normal;" title="Export this list (hostname, serial, model, etc.) as a CSV" onclick="event.stopPropagation(); window.exportUnplacedDevicesCsv();">Export CSV</button>
                 <span id="mapUnplacedToggleIcon">&#9660;</span>
             </div>
             <div id="mapUnplacedList" style="padding:4px 0;"></div>
@@ -1946,10 +1972,17 @@ svg.leaflet-image-layer.leaflet-interactive path {
             <div class="drawer-header"><h2 id="editorDeviceLabel">Set Location</h2></div>
             <div style="padding:18px;">
                 <p style="font-size:0.82rem; color:#666; margin:0 0 12px;">Click a spot on the map to place this device, or type coordinates directly below, then fill in the details.</p>
+                <!-- type="text" + inputmode="decimal", not type="number": a Washington-state
+                     device needs a NEGATIVE longitude, and type="number"'s virtual keypad on
+                     iOS Safari (and several Android keyboards) has no minus-sign key at all -
+                     someone setting a pin from a phone/tablet while standing in the wiring
+                     closet could never enter a negative value. pattern is validated on submit
+                     by commitLocationEdit's own parseFloat/isFinite check below, not by the
+                     browser - it's just a hint for browsers that render one from `pattern`. -->
                 <label style="font-size:0.8rem; font-weight:bold;">Latitude</label>
-                <input type="number" step="any" id="editorLat" placeholder="e.g. 47.653500">
+                <input type="text" inputmode="decimal" pattern="-?\d*\.?\d*" id="editorLat" placeholder="e.g. 47.653500">
                 <label style="font-size:0.8rem; font-weight:bold;">Longitude</label>
-                <input type="number" step="any" id="editorLng" placeholder="e.g. -122.306800">
+                <input type="text" inputmode="decimal" pattern="-?\d*\.?\d*" id="editorLng" placeholder="e.g. -122.306800">
                 <label style="font-size:0.8rem; font-weight:bold;">Building</label>
                 <input type="text" id="editorBuilding" placeholder="Building name">
                 <label style="font-size:0.8rem; font-weight:bold;">Room</label>
@@ -1965,6 +1998,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
     </div>
 
     <!-- RIGHT PANEL: Data Sidebar -->
+    <div id="right-panel-handle" onmousedown="window.startRightPanelResize(event)" title="Drag to resize"></div>
     <div id="right-panel">
         <div class="drawer-header">
             <div class="drawer-header-top">
@@ -1973,6 +2007,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
             </div>
             <div class="drawer-header-actions">
                 <button type="button" id="rescanBtn" onclick="window.rescanDevice()" title="Re-run the diagnostic scan for just this device, without a full fleet crawl">Re-scan</button>
+                <button type="button" id="pingBtn" onclick="window.pingDevice()" title="Send a quick ICMP ping to this device's management IP to check reachability">Ping</button>
                 <button type="button" id="copyConnectBtn" onclick="window.copyConnectCommand()" title="Launch an interactive SSH session to this device via the local webserver">Launch SSH Session</button>
                 <button type="button" id="printReportBtn" onclick="window.printDeviceReport()" title="Open a printable report for this device in a new tab">Print Report</button>
             </div>
@@ -2226,7 +2261,22 @@ window.normalizePort = function(port) {
 // this feature) upgrades confidence from a generic "multiple devices" guess to a
 // confirmed phone ID when a MED phone/AP block exists on the same port.
 //
-// Returns Map<normalizedPort, {confidence: 'confirmed'|'possible', medDescription, clients}>.
+// Returns Map<normalizedPort, {confidence: 'confirmed'|'likely'|'possible', medDescription, clients}>.
+//
+// Confidence tiers, most to least certain:
+//   confirmed - LLDP-MED identified an actual phone/AP on this port.
+//   likely    - 2+ MACs on this port span 2+ VLANs. Not normal for a plain access port
+//               (a phone tagging voice VLAN while passing an untagged PC through on the
+//               data VLAN is exactly this shape) even with no MED confirmation.
+//   possible  - 2+ MACs on this port, all on the SAME VLAN - the far more common real-world
+//               case (an unmanaged hub/switch feeding two PCs, a PC + printer, etc., none of
+//               which retag anything). Originally excluded here on the theory that VLAN
+//               diversity was the daisy-chain signal, but that theory only covers the
+//               phone-with-passthrough-PC case - it made this tier fire on effectively
+//               nothing in fleets where daisy-chains are mostly same-VLAN hubs, which is the
+//               common case. Kept as its own weaker tier (not folded into 'likely') since a
+//               same-VLAN multi-MAC port is somewhat more likely to also be a stale mac-table
+//               entry from a device that recently moved ports, which VLAN diversity rules out.
 window.detectDaisyChains = function(device) {
     var medByPort = new Map();
     window.asArray(device.MedNeighbors).forEach(m => {
@@ -2243,17 +2293,35 @@ window.detectDaisyChains = function(device) {
     var result = new Map();
     byPort.forEach((clients, port) => {
         var distinctMacs = new Set(clients.map(c => String(c.MAC).toLowerCase()));
+        if (distinctMacs.size < 2) return;
         var distinctVlans = new Set(clients.map(c => String(c.VLAN_Tag)));
-        if (distinctMacs.size < 2 || distinctVlans.size < 2) return;
 
         var med = medByPort.get(port);
+        var confidence = med ? 'confirmed' : (distinctVlans.size >= 2 ? 'likely' : 'possible');
         result.set(port, {
-            confidence: med ? 'confirmed' : 'possible',
+            confidence: confidence,
             medDescription: med ? med.Description : null,
             clients: clients,
         });
     });
     return result;
+};
+
+// Stable cross-snapshot device identity, for every feature that has to recognize "the same
+// physical switch" across TIME (Topology Diff, the Trends chart, the Reliability heatmap,
+// the Config-Changed dashboard card, and the Config tab's "this device, other capture"
+// picker) rather than within one snapshot. DeviceIP is a fine unique key WITHIN a single
+// snapshot (it can't collide there) but is exactly the wrong choice across snapshots - a
+// DHCP renewal or a deliberate renumbering makes a continuously-managed switch look like one
+// device disappearing and a different one appearing, which corrupts all five of those
+// features' history. Reuses window.ConfigResolve.bestKeyForSave (config-resolve.js) - the
+// SAME serial > hostname > IP priority the geo-map location feature already uses to survive
+// exactly this - instead of a second, independently-maintained notion of "identity" that
+// could quietly drift from that one. Returns a single string ("keyType:key") suitable as a
+// Map/object key or a <select> option value.
+window.resolveDeviceIdentity = function(device) {
+    var k = window.ConfigResolve.bestKeyForSave(device);
+    return k.keyType + ':' + k.key;
 };
 
 // Shared badge markup for a daisy-chain hit, used by both renderInterfaces (once per
@@ -2262,7 +2330,10 @@ window.renderDaisyChainBadge = function(chain) {
     if (chain.confidence === 'confirmed') {
         return `<span class="daisy-badge confirmed" title="LLDP-MED identified: ${esc(chain.medDescription)}">Phone + PC (confirmed)</span>`;
     }
-    return `<span class="daisy-badge possible" title="${chain.clients.length} devices on different VLANs share this port - likely a daisy-chained phone, but could be an unmanaged hub. No LLDP-MED confirmation seen.">Multiple devices (possible daisy-chain)</span>`;
+    if (chain.confidence === 'likely') {
+        return `<span class="daisy-badge possible" title="${chain.clients.length} devices on different VLANs share this port - likely a daisy-chained phone, but could be an unmanaged hub. No LLDP-MED confirmation seen.">Multiple devices (likely daisy-chain)</span>`;
+    }
+    return `<span class="daisy-badge possible" title="${chain.clients.length} devices share this port, all on the same VLAN - likely an unmanaged hub/switch. Weaker signal than different-VLAN sharing: could also be a stale mac-table entry from a device that recently moved ports.">Multiple devices (possible daisy-chain)</span>`;
 };
 
 // `indeterminate` marks a phase that can't report real fractional progress (an index
@@ -2619,13 +2690,16 @@ window.updateDeviceHistory = function() {
 };
 
 // --- Reliability Heatmap history (see #analysis-tab-reliability) ---
-// Cross-session per-device history, keyed by DeviceIP (not client MAC) - same "recompute
-// by re-walking every loaded snapshot, merge into whatever's already in localStorage"
-// pattern as window.updateDeviceHistory, so loading more historical snapshots later only
-// enriches this, never loses it. Reboot detection persists the same idea renderTrendChart
-// already draws as a same-session-only marker (Uptime changing between snapshots), but
-// kept across sessions here via a stored lastKnownUptime per device.
-var ALARM_HISTORY_STORAGE_KEY = 'ps_networkmapper_alarm_history_v1';
+// Cross-session per-device history, keyed by window.resolveDeviceIdentity (not DeviceIP, not
+// client MAC) - same "recompute by re-walking every loaded snapshot, merge into whatever's
+// already in localStorage" pattern as window.updateDeviceHistory, so loading more historical
+// snapshots later only enriches this, never loses it. Reboot detection persists the same idea
+// renderTrendChart already draws as a same-session-only marker (Uptime changing between
+// snapshots), but kept across sessions here via a stored lastKnownUptime per device.
+// Storage key bumped to _v2 (was DeviceIP-keyed under _v1) - the old entries are simply
+// abandoned rather than merged under the new identity keys, so a renumbered device's
+// pre-existing IP-keyed history doesn't silently mix into two different-shaped records.
+var ALARM_HISTORY_STORAGE_KEY = 'ps_networkmapper_alarm_history_v2';
 
 function loadAlarmHistory() {
     try {
@@ -2657,7 +2731,7 @@ function saveAlarmHistory(history) {
 // the record on ordinary repeated use.
 window.updateAlarmHistory = function() {
     var history = loadAlarmHistory();
-    var lastUptimeSeen = {}; // deviceIp -> uptime string, scoped to this call only
+    var lastUptimeSeen = {}; // identity -> uptime string, scoped to this call only
 
     loadedSnapshots
         .filter(s => s.scanTimestamp)
@@ -2667,18 +2741,22 @@ window.updateAlarmHistory = function() {
             var date = snapshot.scanTimestamp.slice(0, 10);
             (snapshot.topology || []).forEach(device => {
                 if (!device || !device.DeviceIP) return;
-                var ip = String(device.DeviceIP);
-                if (!history[ip]) history[ip] = { days: {} };
-                var entry = history[ip];
+                var identity = window.resolveDeviceIdentity(device);
+                if (!history[identity]) history[identity] = { days: {} };
+                var entry = history[identity];
                 var alarmCount = window.asArray(device.Alarms).length;
-                var prevUptime = lastUptimeSeen[ip] || null;
+                var prevUptime = lastUptimeSeen[identity] || null;
                 var rebootedToday = !!(device.Uptime && device.Uptime !== "Unknown" && prevUptime && device.Uptime !== prevUptime);
 
                 if (!entry.days[date]) entry.days[date] = { alarmCount: 0, rebooted: false };
                 entry.days[date].alarmCount = Math.max(entry.days[date].alarmCount, alarmCount);
                 entry.days[date].rebooted = entry.days[date].rebooted || rebootedToday;
+                // Latest-known label/IP, for populateReliabilityDeviceSelect's dropdown text -
+                // ascending date order means the last write here really is the most recent.
+                entry.lastHostname = (device.Hostname && device.Hostname !== "Unknown") ? device.Hostname : entry.lastHostname;
+                entry.lastIp = String(device.DeviceIP);
 
-                if (device.Uptime && device.Uptime !== "Unknown") lastUptimeSeen[ip] = device.Uptime;
+                if (device.Uptime && device.Uptime !== "Unknown") lastUptimeSeen[identity] = device.Uptime;
             });
         });
 
@@ -3301,6 +3379,51 @@ function configSetDiff(oldText, newText) {
     };
 }
 
+// Real (Myers/LCS) positional line diff for the Config tab's git-style side-by-side view -
+// unlike configSetDiff above, this cares about WHICH lines are common, not just whether a
+// line exists on both sides, so the side-by-side view can align unchanged lines next to each
+// other and only shade the actual +/- rows, the way `git diff --color` reads. Standard
+// dynamic-programming LCS: dp[i][j] = length of the longest common subsequence of
+// oldLines[i:] and newLines[j:], then a single backtrack from (0,0) reconstructs the
+// alignment. O(n*m) time and space - fine for real switch configs (typically a few hundred
+// to a couple thousand "display set" lines), but the ROW_LIMIT guard below caps it before an
+// unusually huge pair of configs (or two wildly different devices being compared) turns into
+// a multi-hundred-MB table and locks up the tab.
+var CONFIG_DIFF_CELL_LIMIT = 4000000; // ~16MB of Int32Array at 4 bytes/cell
+function computeLineDiff(oldText, newText) {
+    var oldLines = String(oldText || '').split('\n');
+    var newLines = String(newText || '').split('\n');
+    var n = oldLines.length, m = newLines.length;
+
+    if (n * m > CONFIG_DIFF_CELL_LIMIT) return null; // caller falls back to the flat set diff
+
+    var dp = new Array(n + 1);
+    for (var i = 0; i <= n; i++) dp[i] = new Int32Array(m + 1);
+    for (i = n - 1; i >= 0; i--) {
+        for (var j = m - 1; j >= 0; j--) {
+            dp[i][j] = oldLines[i] === newLines[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+        }
+    }
+
+    var rows = [];
+    var ii = 0, jj = 0;
+    while (ii < n && jj < m) {
+        if (oldLines[ii] === newLines[jj]) {
+            rows.push({ type: 'equal', oldNum: ii + 1, newNum: jj + 1, oldLine: oldLines[ii], newLine: newLines[jj] });
+            ii++; jj++;
+        } else if (dp[ii + 1][jj] >= dp[ii][jj + 1]) {
+            rows.push({ type: 'removed', oldNum: ii + 1, newNum: null, oldLine: oldLines[ii], newLine: null });
+            ii++;
+        } else {
+            rows.push({ type: 'added', oldNum: null, newNum: jj + 1, oldLine: null, newLine: newLines[jj] });
+            jj++;
+        }
+    }
+    while (ii < n) { rows.push({ type: 'removed', oldNum: ii + 1, newNum: null, oldLine: oldLines[ii], newLine: null }); ii++; }
+    while (jj < m) { rows.push({ type: 'added', oldNum: null, newNum: jj + 1, oldLine: null, newLine: newLines[jj] }); jj++; }
+    return rows;
+}
+
 // For every device with a real config backup in 2+ loaded snapshots, compares its two
 // MOST RECENT captures (by scanTimestamp) and flags whether they differ at all - cheap
 // string equality, not a full diff (the actual line-level diff is computed lazily, only
@@ -3308,23 +3431,29 @@ function configSetDiff(oldText, newText) {
 // which is active, same as window.updateDeviceHistory - "did this change since last time"
 // is a cross-snapshot question, not a single-snapshot one.
 function computeConfigChanges() {
-    var byDevice = new Map(); // deviceIp -> [{idx, ts, config, hostname}]
+    // Keyed by window.resolveDeviceIdentity, not DeviceIP - otherwise a device renumbered
+    // between two captures never accumulates 2+ entries under the same key at all, so a real
+    // config change on that device goes completely undetected (not just mis-attributed).
+    var byDevice = new Map(); // identity -> [{idx, ts, config, hostname, ip}]
     loadedSnapshots.forEach((snap, idx) => {
         if (!snap.scanTimestamp) return;
         (snap.topology || []).forEach(d => {
             if (!d || !d.DeviceIP || !d.Configuration || d.Configuration === "Unknown") return;
-            var ip = String(d.DeviceIP);
-            if (!byDevice.has(ip)) byDevice.set(ip, []);
-            byDevice.get(ip).push({ idx: idx, ts: new Date(snap.scanTimestamp).getTime(), config: d.Configuration, hostname: d.Hostname });
+            var identity = window.resolveDeviceIdentity(d);
+            if (!byDevice.has(identity)) byDevice.set(identity, []);
+            byDevice.get(identity).push({ idx: idx, ts: new Date(snap.scanTimestamp).getTime(), config: d.Configuration, hostname: d.Hostname, ip: String(d.DeviceIP) });
         });
     });
 
     var changed = [];
-    byDevice.forEach((entries, ip) => {
+    byDevice.forEach((entries, identity) => {
         if (entries.length < 2) return;
         entries.sort((a, b) => b.ts - a.ts);
         if (entries[0].config !== entries[1].config) {
-            changed.push({ deviceIp: ip, hostname: entries[0].hostname, newIdx: entries[0].idx, oldIdx: entries[1].idx });
+            // deviceIp is the NEWEST capture's IP - the current, drill-down-clickable
+            // identity for opening this device's drawer right now, even though the older
+            // capture being diffed against may have shown a different IP.
+            changed.push({ deviceIp: entries[0].ip, hostname: entries[0].hostname, newIdx: entries[0].idx, oldIdx: entries[1].idx });
         }
     });
     return changed;
@@ -3479,15 +3608,21 @@ window.renderNewDevicesTable = function() {
 
 window.populateTrendDeviceSelect = function() {
     var select = document.getElementById('trendDeviceSelect');
-    var deviceMap = new Map(); // ip -> hostname, from whichever loaded snapshot last saw it
+    // Keyed by window.resolveDeviceIdentity, same reasoning as populateReliabilityDeviceSelect
+    // above - a device's CPU/memory/alarm/client trend line should stay one continuous
+    // series across a renumbering, not fork into two partial series under two different IPs.
+    var deviceMap = new Map(); // identity -> {hostname, ip}, from whichever loaded snapshot last saw it
     loadedSnapshots.slice()
         .sort((a, b) => new Date(a.scanTimestamp || 0) - new Date(b.scanTimestamp || 0))
-        .forEach(s => s.topology.forEach(d => { if (d && d.DeviceIP) deviceMap.set(String(d.DeviceIP), d.Hostname || 'Unknown'); }));
+        .forEach(s => s.topology.forEach(d => {
+            if (!d || !d.DeviceIP) return;
+            deviceMap.set(window.resolveDeviceIdentity(d), { hostname: d.Hostname || 'Unknown', ip: String(d.DeviceIP) });
+        }));
 
-    var ips = Array.from(deviceMap.keys()).sort((a, b) => window.GraphLayout.compareIpIds(a, b));
+    var identities = Array.from(deviceMap.keys()).sort((a, b) => window.GraphLayout.compareIpIds(deviceMap.get(a).ip, deviceMap.get(b).ip));
     var prevValue = select.value;
-    select.innerHTML = ips.map(ip => `<option value="${esc(ip)}">${esc(ip)} (${esc(deviceMap.get(ip))})</option>`).join('');
-    if (ips.includes(prevValue)) select.value = prevValue;
+    select.innerHTML = identities.map(id => `<option value="${esc(id)}">${esc(deviceMap.get(id).ip)} (${esc(deviceMap.get(id).hostname)})</option>`).join('');
+    if (identities.includes(prevValue)) select.value = prevValue;
 };
 
 var TREND_METRIC_LABELS = { cpu: 'RE CPU %', mem: 'RE Memory %', alarms: 'Alarm Count', clients: 'Client Count' };
@@ -3507,7 +3642,10 @@ window.renderTrendChart = function() {
     var canvas = document.getElementById('trendCanvas');
     var ctx = canvas.getContext('2d');
     var metric = document.getElementById('trendMetricSelect').value;
-    var deviceIp = document.getElementById('trendDeviceSelect').value;
+    // Despite the name, this is now an identity key (window.resolveDeviceIdentity), not a
+    // literal IP - see populateTrendDeviceSelect's own comment. Kept as `deviceIp` below only
+    // where it's genuinely still comparing against a real DeviceIP (the reboot-marker pass).
+    var deviceIdentity = document.getElementById('trendDeviceSelect').value;
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.font = '13px sans-serif';
@@ -3519,14 +3657,14 @@ window.renderTrendChart = function() {
         ctx.fillText(msg, canvas.width / 2, canvas.height / 2);
     }
 
-    if (!deviceIp) { centeredMessage('No devices available - load 2+ snapshots first.'); return; }
+    if (!deviceIdentity) { centeredMessage('No devices available - load 2+ snapshots first.'); return; }
 
     var points = loadedSnapshots
         .filter(s => s.scanTimestamp)
         .slice()
         .sort((a, b) => new Date(a.scanTimestamp) - new Date(b.scanTimestamp))
         .map(s => {
-            var device = s.topology.find(d => d && String(d.DeviceIP) === deviceIp);
+            var device = s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity);
             if (!device) return null;
             var v = trendMetricValue(device, metric);
             return (v === null || isNaN(v)) ? null : { t: new Date(s.scanTimestamp), v: v };
@@ -3585,7 +3723,7 @@ window.renderTrendChart = function() {
         .filter(s => s.scanTimestamp)
         .slice()
         .sort((a, b) => new Date(a.scanTimestamp) - new Date(b.scanTimestamp))
-        .map(s => ({ t: new Date(s.scanTimestamp), device: s.topology.find(d => d && String(d.DeviceIP) === deviceIp) }))
+        .map(s => ({ t: new Date(s.scanTimestamp), device: s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity) }))
         .filter(entry => entry.device);
 
     ctx.strokeStyle = '#c0392b';
@@ -3623,11 +3761,14 @@ window.renderTrendChart = function() {
         ctx.fill();
     });
 
-    // Title
+    // Title - the selected <option>'s own text ("10.0.0.1 (hostname)", from
+    // populateTrendDeviceSelect), not deviceIdentity itself: that's an opaque
+    // "serial:SYN..." /"hostname:..." string, meaningless to read on a chart title.
+    var selectedOption = document.getElementById('trendDeviceSelect').selectedOptions[0];
     ctx.fillStyle = '#2c3e50';
     ctx.font = 'bold 13px sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText(`${TREND_METRIC_LABELS[metric]} — ${deviceIp}`, pad.left, 18);
+    ctx.fillText(`${TREND_METRIC_LABELS[metric]} — ${selectedOption ? selectedOption.textContent : deviceIdentity}`, pad.left, 18);
 };
 
 // --- Local Account Audit (see #analysis-tab-accounts) ---
@@ -3649,6 +3790,31 @@ function hasCentralizedAuth(configText) {
     return /set system authentication-order[^\r\n]*\b(radius|tacplus)\b/i.test(configText);
 }
 
+// Groups the flat (device, username, class) audit rows by username+class - the same local
+// account defined identically on every switch in the fleet is the common case, and a table
+// with one row per device drowns that pattern under hundreds of duplicate-looking rows. The
+// group key intentionally does NOT fold in `centralized` (that's a per-device fact, not part
+// of the account's identity) - see the mixed-badge handling below for how a group whose
+// member devices disagree on it is surfaced instead of silently picking one.
+function groupLocalAccounts(rows) {
+    var groups = new Map(); // "username class" -> {username, cls, entries: [{device, centralized}]}
+    rows.forEach(r => {
+        var key = r.username + ' ' + r.cls;
+        if (!groups.has(key)) groups.set(key, { username: r.username, cls: r.cls, entries: [] });
+        groups.get(key).entries.push({ device: r.device, centralized: r.centralized });
+    });
+    return Array.from(groups.values());
+}
+
+window.toggleAccountGroup = function(key) {
+    var row = document.getElementById('acct-devices-' + key);
+    if (!row) return;
+    var collapsed = row.style.display === 'none';
+    row.style.display = collapsed ? '' : 'none';
+    var btn = document.getElementById('acct-toggle-' + key);
+    if (btn) btn.textContent = collapsed ? 'Hide switches ▴' : 'Show switches ▾';
+};
+
 window.renderLocalAccountsAudit = function() {
     var tbody = document.getElementById('accounts-tbody');
     var noAuthEl = document.getElementById('accounts-noauth-count');
@@ -3667,14 +3833,34 @@ window.renderLocalAccountsAudit = function() {
     });
 
     if (noAuthEl) noAuthEl.textContent = noAuthCount;
+    // Kept as the (account, device) instance count, not distinct-account count - this is an
+    // audit total ("how many local-login exposures exist across the fleet"), and collapsing
+    // it to the grouped-row count would understate that by exactly the amount grouping saves
+    // on screen.
     if (totalEl) totalEl.textContent = rows.length;
 
-    tbody.innerHTML = rows.length ? rows.map(r => `<tr>
-        <td>${esc(r.device.Hostname || r.device.DeviceIP)}</td>
-        <td style="font-family:monospace;">${esc(r.username)}</td>
-        <td>${esc(r.cls)}</td>
-        <td>${r.centralized ? '<span class="badge green">Yes</span>' : '<span class="badge warn-badge">No</span>'}</td>
-    </tr>`).join('') : `<tr><td colspan="4" style="text-align:center;">No local accounts found (no config backups loaded, or none define local users).</td></tr>`;
+    var groups = groupLocalAccounts(rows).sort((a, b) => a.username.localeCompare(b.username) || a.cls.localeCompare(b.cls));
+
+    tbody.innerHTML = groups.length ? groups.map((g, i) => {
+        var key = 'g' + i;
+        var allCentralized = g.entries.every(e => e.centralized);
+        var noneCentralized = g.entries.every(e => !e.centralized);
+        var authBadge = allCentralized ? '<span class="badge green">Yes</span>'
+            : noneCentralized ? '<span class="badge warn-badge">No</span>'
+            : '<span class="badge warn-badge" title="Centralized auth is configured on some but not all of these switches">Mixed</span>';
+        var deviceList = g.entries.map(e => `<div>${esc(e.device.Hostname || e.device.DeviceIP)} ${e.centralized ? '<span class="badge green" style="font-size:0.65rem;">centralized auth</span>' : '<span class="badge warn-badge" style="font-size:0.65rem;">no centralized auth</span>'}</div>`).join('');
+
+        return `<tr>
+            <td style="font-family:monospace;">${esc(g.username)}</td>
+            <td>${esc(g.cls)}</td>
+            <td>${authBadge}</td>
+            <td>
+                ${g.entries.length} switch${g.entries.length === 1 ? '' : 'es'}
+                ${g.entries.length > 1 ? `<button type="button" id="acct-toggle-${key}" class="link-btn" onclick="window.toggleAccountGroup('${key}')" style="margin-left:8px;">Show switches ▾</button>` : ''}
+                <div id="acct-devices-${key}" style="display:${g.entries.length > 1 ? 'none' : ''}; margin-top:4px; font-size:0.8rem; color:#666;">${deviceList}</div>
+            </td>
+        </tr>`;
+    }).join('') : `<tr><td colspan="4" style="text-align:center;">No local accounts found (no config backups loaded, or none define local users).</td></tr>`;
 };
 
 // --- Topology Diff (see #analysis-tab-topodiff) - a pure per-snapshot set difference,
@@ -3704,11 +3890,20 @@ window.populateTopologyDiffSelects = function() {
     toSel.value = opts.some(o => String(o.idx) === prevTo) ? prevTo : String(opts[opts.length - 1].idx);
 };
 
-// Edge identity matches window.buildSwitchMap's own convention exactly (sorted
-// [deviceIp, neighborIp] pair) so "added/removed link" here means the same thing the
-// interactive graph's edges mean - built independently per snapshot, not from the live
-// allEdges global, since two snapshots need two independent sets to diff against each other.
+// Edge identity matches window.buildSwitchMap's own convention (sorted [deviceIp,
+// neighborIp] pair) for DISPLAY (e.from/e.to still show real, current IPs, same as the
+// interactive graph), but the map KEY is built from window.resolveDeviceIdentity where
+// possible - a link between two devices that are each still there, just renumbered since the
+// other snapshot, must not read as "link removed" + "link added" on top of the (correctly
+// suppressed) device churn. A neighbor that was never itself crawled has no device object to
+// resolve an identity from in this snapshot - IP is genuinely the only identifier available
+// for it, so it's kept as a plain IP key in that case, same tiered "best identity available"
+// approach as window.ConfigResolve.
 function snapshotEdgeSet(snapshot) {
+    var ipToIdentity = new Map();
+    (snapshot.topology || []).forEach(d => { if (d && d.DeviceIP) ipToIdentity.set(String(d.DeviceIP), window.resolveDeviceIdentity(d)); });
+    function keyFor(ip) { return ipToIdentity.get(ip) || ('ip:' + ip); }
+
     var edges = new Map();
     (snapshot.topology || []).forEach(device => {
         if (!device || !device.DeviceIP) return;
@@ -3716,7 +3911,7 @@ function snapshotEdgeSet(snapshot) {
         window.asArray(device.Neighbors).forEach(n => {
             var neighborIp = String(n.ManagementIP);
             if (!neighborIp || neighborIp === "Unknown" || neighborIp === "0.0.0.0") return;
-            var key = [switchIp, neighborIp].sort().join('-');
+            var key = [keyFor(switchIp), keyFor(neighborIp)].sort().join('-');
             if (!edges.has(key)) edges.set(key, { from: switchIp, to: neighborIp, localPort: n.LocalPort, remotePort: n.RemotePort });
         });
     });
@@ -3742,20 +3937,28 @@ window.renderTopologyDiff = function() {
         return;
     }
 
-    var fromByIp = new Map((fromSnap.topology || []).filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
-    var toByIp = new Map((toSnap.topology || []).filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
+    // Keyed by window.resolveDeviceIdentity, not DeviceIP - a device that kept its serial/
+    // hostname but changed IP between these two snapshots is neither "removed" nor "added",
+    // it's the same device (see the IP Changed section below, which is exactly the
+    // information a raw add+remove pair would have destroyed).
+    var fromByKey = new Map((fromSnap.topology || []).filter(d => d && d.DeviceIP).map(d => [window.resolveDeviceIdentity(d), d]));
+    var toByKey = new Map((toSnap.topology || []).filter(d => d && d.DeviceIP).map(d => [window.resolveDeviceIdentity(d), d]));
 
-    var devicesAdded = Array.from(toByIp.keys()).filter(ip => !fromByIp.has(ip));
-    var devicesRemoved = Array.from(fromByIp.keys()).filter(ip => !toByIp.has(ip));
+    var devicesAdded = Array.from(toByKey.keys()).filter(key => !fromByKey.has(key));
+    var devicesRemoved = Array.from(fromByKey.keys()).filter(key => !toByKey.has(key));
+    var devicesReIpd = Array.from(toByKey.keys())
+        .filter(key => fromByKey.has(key))
+        .map(key => ({ key: key, from: fromByKey.get(key), to: toByKey.get(key) }))
+        .filter(pair => String(pair.from.DeviceIP) !== String(pair.to.DeviceIP));
 
     var fromEdges = snapshotEdgeSet(fromSnap);
     var toEdges = snapshotEdgeSet(toSnap);
     var edgesAdded = Array.from(toEdges.keys()).filter(k => !fromEdges.has(k)).map(k => toEdges.get(k));
     var edgesRemoved = Array.from(fromEdges.keys()).filter(k => !toEdges.has(k)).map(k => fromEdges.get(k));
 
-    function deviceLabel(ip, byIp) {
-        var d = byIp.get(ip);
-        return `${esc(d && d.Hostname ? d.Hostname : 'Unknown')} <span style="color:#999;">(${esc(ip)})</span>`;
+    function deviceLabel(key, byKey) {
+        var d = byKey.get(key);
+        return `${esc(d && d.Hostname ? d.Hostname : 'Unknown')} <span style="color:#999;">(${esc(d ? d.DeviceIP : '')})</span>`;
     }
     function edgeLabel(e) {
         return `${esc(e.from)} <b>${esc(e.localPort || '?')}</b> ↔ <b>${esc(e.remotePort || '?')}</b> ${esc(e.to)}`;
@@ -3768,9 +3971,13 @@ window.renderTopologyDiff = function() {
     }
 
     var html = '<div class="fleet-dashboard-columns">'
-        + '<div>' + section('Devices Added', devicesAdded.map(ip => deviceLabel(ip, toByIp)), 'None.') + '</div>'
-        + '<div>' + section('Devices Removed', devicesRemoved.map(ip => deviceLabel(ip, fromByIp)), 'None.') + '</div>'
-        + '</div><div class="fleet-dashboard-columns">'
+        + '<div>' + section('Devices Added', devicesAdded.map(key => deviceLabel(key, toByKey)), 'None.') + '</div>'
+        + '<div>' + section('Devices Removed', devicesRemoved.map(key => deviceLabel(key, fromByKey)), 'None.') + '</div>'
+        + '</div>'
+        + section('IP Changed (same device)', devicesReIpd.map(pair =>
+            `${esc(pair.to.Hostname && pair.to.Hostname !== 'Unknown' ? pair.to.Hostname : 'Unknown')} <span style="color:#999;">${esc(pair.from.DeviceIP)} &rarr; ${esc(pair.to.DeviceIP)}</span>`
+          ), 'None.')
+        + '<div class="fleet-dashboard-columns">'
         + '<div>' + section('Links Added', edgesAdded.map(edgeLabel), 'None.') + '</div>'
         + '<div>' + section('Links Removed', edgesRemoved.map(edgeLabel), 'None.') + '</div>'
         + '</div>';
@@ -3799,11 +4006,18 @@ function extractSubnetsFromConfigs(devices) {
         var text = d.Configuration;
         var m;
 
-        var irbToSubnet = new Map(); // irb unit -> {ip, prefix}, scoped to this device only
-        var irbRe = /set interfaces irb\.(\d+)[^\r\n]*family inet address (\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})/g;
-        while ((m = irbRe.exec(text)) !== null) irbToSubnet.set(m[1], { ip: m[2], prefix: parseInt(m[3], 10) });
+        // "display set" always spells the logical unit out as "... unit N family inet
+        // address ..." - never as the dotted "irb.N" shorthand that only appears when an
+        // interface name is used as a REFERENCE (e.g. the l3-interface line below). Also
+        // matches "vlan unit N ..." for the older EX2200/3200/4200-style RVI, which uses
+        // "vlan" instead of "irb" as the routed-VLAN interface name. Keyed by "irb.N"/
+        // "vlan.N" (matching l3-interface's own reference form) so both interface types
+        // can coexist in one fleet without colliding on unit number alone.
+        var irbToSubnet = new Map(); // "irb.N" or "vlan.N" -> {ip, prefix}, scoped to this device only
+        var irbRe = /set interfaces (irb|vlan) unit (\d+)[^\r\n]*family inet address (\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})/g;
+        while ((m = irbRe.exec(text)) !== null) irbToSubnet.set(m[1] + '.' + m[2], { ip: m[3], prefix: parseInt(m[4], 10) });
 
-        var vlanRe = /set vlans (\S+) l3-interface irb\.(\d+)/g;
+        var vlanRe = /set vlans (\S+) l3-interface ((?:irb|vlan)\.\d+)/g;
         while ((m = vlanRe.exec(text)) !== null) {
             var vlanName = m[1], irbUnit = m[2];
             var subnet = irbToSubnet.get(irbUnit);
@@ -3900,15 +4114,23 @@ window.renderIpSpaceUtilization = function() {
 window.populateReliabilityDeviceSelect = function() {
     var select = document.getElementById('reliabilityDeviceSelect');
     if (!select) return;
-    var deviceMap = new Map();
+    // Keyed by window.resolveDeviceIdentity (serial > hostname > IP, matching
+    // window.updateAlarmHistory) rather than DeviceIP - a renumbered device stays one entry
+    // in this dropdown instead of splitting into an old-IP ghost and a new-IP "device" with
+    // no history. Label shows the latest-known hostname/IP for readability; sorted by that
+    // latest IP too, since that's what an operator actually recognizes a device by on sight.
+    var deviceMap = new Map(); // identity -> {hostname, ip}
     loadedSnapshots.slice()
         .sort((a, b) => new Date(a.scanTimestamp || 0) - new Date(b.scanTimestamp || 0))
-        .forEach(s => s.topology.forEach(d => { if (d && d.DeviceIP) deviceMap.set(String(d.DeviceIP), d.Hostname || 'Unknown'); }));
+        .forEach(s => s.topology.forEach(d => {
+            if (!d || !d.DeviceIP) return;
+            deviceMap.set(window.resolveDeviceIdentity(d), { hostname: d.Hostname || 'Unknown', ip: String(d.DeviceIP) });
+        }));
 
-    var ips = Array.from(deviceMap.keys()).sort((a, b) => window.GraphLayout.compareIpIds(a, b));
+    var identities = Array.from(deviceMap.keys()).sort((a, b) => window.GraphLayout.compareIpIds(deviceMap.get(a).ip, deviceMap.get(b).ip));
     var prevValue = select.value;
-    select.innerHTML = ips.map(ip => `<option value="${esc(ip)}">${esc(ip)} (${esc(deviceMap.get(ip))})</option>`).join('');
-    if (ips.includes(prevValue)) select.value = prevValue;
+    select.innerHTML = identities.map(id => `<option value="${esc(id)}">${esc(deviceMap.get(id).ip)} (${esc(deviceMap.get(id).hostname)})</option>`).join('');
+    if (identities.includes(prevValue)) select.value = prevValue;
 };
 
 window.renderReliabilityHeatmap = function() {
@@ -4019,7 +4241,7 @@ window.drillDownStat = function(kind) {
             window.detectDaisyChains(d).forEach((chain, port) => {
                 rows.push({
                     line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">/ ${esc(port)}</span>`,
-                    line2Html: chain.confidence === 'confirmed' ? 'Phone + PC (confirmed)' : `${chain.clients.length} devices (possible daisy-chain)`,
+                    line2Html: chain.confidence === 'confirmed' ? 'Phone + PC (confirmed)' : `${chain.clients.length} devices (${chain.confidence} daisy-chain)`,
                     onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex),
                 });
             });
@@ -4296,6 +4518,8 @@ window.goToSearchResult = function(targetIp, tab, snapshotIndex) {
 
 window.closeDrawer = function() {
     document.getElementById('right-panel').style.display = 'none';
+    var handle = document.getElementById('right-panel-handle');
+    if (handle) handle.style.display = 'none';
     currentSelectedNodeData = null;
     if (network) network.unselectAll();
 };
@@ -4430,6 +4654,39 @@ window.rescanDevice = async function() {
     poll();
 };
 
+// Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes against
+// this device's management IP, synchronous (unlike /api/rescan, a ping is a couple seconds
+// at most, not worth a job-queue/poll dance for).
+window.pingDevice = async function() {
+    var ip = document.getElementById('drawer-title').innerText;
+    if (!ip) return;
+    var btn = document.getElementById('pingBtn');
+    var original = btn ? btn.textContent : null;
+
+    try {
+        if (btn) { btn.disabled = true; btn.textContent = 'Pinging...'; }
+        var resp = await fetch('/api/ping', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ip: ip })
+        });
+        var result = await resp.json();
+        if (!resp.ok) {
+            window.setStatus("Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status)), "red");
+            return;
+        }
+        if (result.alive) {
+            window.setStatus(ip + " is reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + " replies).", "green");
+        } else {
+            window.setStatus(ip + " did not respond to ping (" + result.received + "/" + result.sent + " replies).", "red");
+        }
+    } catch (e) {
+        window.setStatus("Could not ping " + ip + ": " + e.message, "red");
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+    }
+};
+
 // Client-side port of Start-NetworkMapper.ps1's Update-ClientIpCorrelation. A
 // single-device rescan only ever has that one switch's own local ARP table - a
 // downstream client's IP is usually resolved from the L3 gateway's ARP table instead,
@@ -4518,9 +4775,12 @@ window.openRightDrawer = function(ip) {
     var panel = document.getElementById('right-panel');
     document.getElementById('drawer-title').innerText = ip;
 
+    var handle = document.getElementById('right-panel-handle');
+
     if (!currentSelectedNodeData) {
         document.getElementById('summary-content').innerHTML = `<div style="color:red; padding:20px;">No diagnostic data found (Unscanned Node).</div>`;
         panel.style.display = 'flex';
+        if (handle) handle.style.display = 'block';
         return;
     }
 
@@ -4532,6 +4792,7 @@ window.openRightDrawer = function(ip) {
     window.renderConfig();
 
     panel.style.display = 'flex';
+    if (handle) handle.style.display = 'block';
 };
 
 window.renderSummary = function() {
@@ -4672,7 +4933,7 @@ window.renderClients = function() {
 
             var vendorInfo = window.lookupVendor(c.MAC);
             var vendorStr = vendorInfo.vendor
-                ? `<br><span class="vendor-tag vendor-${vendorInfo.category.toLowerCase().replace('/', '-')}" title="${esc(vendorInfo.vendor)}">${esc(vendorInfo.category)}</span>`
+                ? `<br><span class="vendor-tag vendor-${vendorInfo.category.toLowerCase().replace('/', '-')}" title="Category: ${esc(vendorInfo.category)}">${esc(vendorInfo.vendor)}</span>`
                 : "";
 
             var chain = daisyChains.get(window.normalizePort(c.Port));
@@ -4738,6 +4999,14 @@ window.renderConfig = function() {
 // actually reads.
 var configCompareTarget = null; // {idx, ip} of the device/snapshot being diffed against, or null
 
+// idx (in loadedSnapshots) -> that OTHER snapshot's own DeviceIP for the currently-open
+// device - NOT necessarily the same IP the drawer is showing right now. Populated by
+// populateConfigCompareSelect below, read by selectConfigCompareSnapshot: a device matched
+// by identity (serial/hostname) can easily have had a different IP in an older capture, and
+// this is what lets renderConfigDiff's own DeviceIP-based lookup (unchanged, see below)
+// still find it in that specific snapshot.
+var sameDeviceIpByIdx = {};
+
 // (a) only - the "This device, other capture" list. Small and bounded (one entry per
 // OTHER loaded snapshot that has this same device with real config), so a plain select is
 // still the right control here; it's (b), searching potentially hundreds of other
@@ -4750,6 +5019,7 @@ window.populateConfigCompareSelect = function() {
     if (!container || !select) return;
 
     configCompareTarget = null;
+    sameDeviceIpByIdx = {};
     if (searchInput) searchInput.value = '';
     if (searchResults) searchResults.innerHTML = '';
 
@@ -4763,12 +5033,17 @@ window.populateConfigCompareSelect = function() {
         return;
     }
 
-    var ip = String(d.DeviceIP);
+    // Matched by window.resolveDeviceIdentity (serial > hostname > IP), not a literal IP
+    // comparison - a device renumbered since an older capture is still "this same device"
+    // for compare purposes; it would otherwise silently disappear from this list the moment
+    // its IP changed, with no error, just fewer options than expected.
+    var identity = window.resolveDeviceIdentity(d);
     var sameDeviceOptions = [];
     loadedSnapshots.forEach((snap, idx) => {
         if (idx === activeSnapshotIndex) return;
-        var other = (snap.topology || []).find(dev => dev && String(dev.DeviceIP) === ip);
+        var other = (snap.topology || []).find(dev => dev && dev.DeviceIP && window.resolveDeviceIdentity(dev) === identity);
         if (other && other.Configuration && other.Configuration !== "Unknown") {
+            sameDeviceIpByIdx[idx] = String(other.DeviceIP);
             sameDeviceOptions.push({
                 idx: idx,
                 ts: snap.scanTimestamp ? new Date(snap.scanTimestamp).getTime() : 0,
@@ -4795,7 +5070,15 @@ window.selectConfigCompareSnapshot = function() {
     if (searchInput) searchInput.value = '';
     if (searchResults) searchResults.innerHTML = '';
 
-    configCompareTarget = select.value ? { idx: parseInt(select.value, 10), ip: String(currentSelectedNodeData.DeviceIP) } : null;
+    // ip comes from sameDeviceIpByIdx (that OTHER snapshot's own DeviceIP for this device),
+    // NOT currentSelectedNodeData.DeviceIP - those two can legitimately differ when the
+    // device was renumbered between the two captures being compared. Falls back to the
+    // active device's IP only as a last resort (should never actually trigger, since every
+    // <option> value here came from a key populateConfigCompareSelect just wrote).
+    var idx = select.value ? parseInt(select.value, 10) : null;
+    configCompareTarget = select.value
+        ? { idx: idx, ip: sameDeviceIpByIdx[idx] || String(currentSelectedNodeData.DeviceIP) }
+        : null;
     window.renderConfigDiff();
 };
 
@@ -4890,17 +5173,47 @@ window.renderConfigDiff = function() {
     var otherIp = configCompareTarget.ip;
     var d = currentSelectedNodeData;
     var other = otherSnap && (otherSnap.topology || []).find(dev => dev && String(dev.DeviceIP) === otherIp);
-    var diff = configSetDiff(other ? other.Configuration : '', d.Configuration);
-    var isCrossDevice = otherIp !== String(d.DeviceIP);
+    var otherConfig = other ? other.Configuration : '';
+    // Identity-based, not otherIp !== d.DeviceIP - the "This device, other capture" picker
+    // (populateConfigCompareSelect) can legitimately hand back a capture where this same
+    // physical switch had a different IP, and that must NOT trip the "two different
+    // switches" cross-device banner below.
+    var isCrossDevice = !other || window.resolveDeviceIdentity(other) !== window.resolveDeviceIdentity(d);
+    var otherLabel = esc(other && other.Hostname && other.Hostname !== "Unknown" ? other.Hostname : otherIp);
 
     var header = isCrossDevice
-        ? `<div class="config-diff-header">Comparing against <strong>${esc(other && other.Hostname && other.Hostname !== "Unknown" ? other.Hostname : otherIp)}</strong> (${esc(otherIp)}) &mdash; these are two different switches, not a change history, so a large diff is expected. <code>+</code> = only on this device, <code>-</code> = only on ${esc(other && other.Hostname && other.Hostname !== "Unknown" ? other.Hostname : otherIp)}.</div>`
-        : '';
+        ? `<div class="config-diff-header">Comparing against <strong>${otherLabel}</strong> (${esc(otherIp)}) &mdash; these are two different switches, not a change history, so a large diff is expected. Left = ${otherLabel}, right = this device.</div>`
+        : '<div class="config-diff-header">Left = previous snapshot, right = this device&apos;s current configuration.</div>';
 
-    diffEl.innerHTML = header + ((diff.added.length === 0 && diff.removed.length === 0)
-        ? '<div class="config-diff-empty">No differences - configuration is identical between these two.</div>'
-        : diff.removed.map(l => `<div class="config-diff-line removed">- ${esc(l)}</div>`).join('')
-          + diff.added.map(l => `<div class="config-diff-line added">+ ${esc(l)}</div>`).join(''));
+    var lineRows = computeLineDiff(otherConfig, d.Configuration);
+    var bodyHtml;
+    if (lineRows === null) {
+        // Configs too large for the O(n*m) positional diff (see CONFIG_DIFF_CELL_LIMIT) -
+        // fall back to the flat, order-independent set diff instead of hanging the tab.
+        var diff = configSetDiff(otherConfig, d.Configuration);
+        bodyHtml = (diff.added.length === 0 && diff.removed.length === 0)
+            ? '<div class="config-diff-empty">No differences - configuration is identical between these two.</div>'
+            : '<div class="config-diff-header">These configs are too large to align line-by-line - showing an unordered set difference instead.</div>'
+              + diff.removed.map(l => `<div class="config-diff-line removed">- ${esc(l)}</div>`).join('')
+              + diff.added.map(l => `<div class="config-diff-line added">+ ${esc(l)}</div>`).join('');
+    } else if (lineRows.every(r => r.type === 'equal')) {
+        bodyHtml = '<div class="config-diff-empty">No differences - configuration is identical between these two.</div>';
+    } else {
+        bodyHtml = '<div class="config-diff-table">' + lineRows.map(r => {
+            var oldNum = r.oldNum !== null ? r.oldNum : '';
+            var newNum = r.newNum !== null ? r.newNum : '';
+            var oldContent = r.oldLine !== null ? esc(r.oldLine) : '';
+            var newContent = r.newLine !== null ? esc(r.newLine) : '';
+            return `<div class="config-diff-row ${r.type}">`
+                + `<div class="config-diff-linenum old-side">${oldNum}</div>`
+                + `<div class="config-diff-cell old-side">${oldContent}</div>`
+                + `<div class="config-diff-linenum new-side">${newNum}</div>`
+                + `<div class="config-diff-cell new-side">${newContent}</div>`
+                + `</div>`;
+        }).join('') + '</div>';
+    }
+
+    diffEl.innerHTML = header + bodyHtml;
     diffEl.style.display = 'block';
     rawEl.style.display = 'none';
 };
@@ -5927,19 +6240,27 @@ window.toggleUnplacedPanel = function() {
     icon.innerHTML = collapsed ? '&#9660;' : '&#9650;';
 };
 
+// Snapshotted by the render below so window.exportUnplacedDevicesCsv doesn't need its own
+// copy of the classification/placedByIp filtering logic - always exports exactly what the
+// panel is currently showing.
+var unplacedDevicesForExport = [];
+
 window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, placedByIp) {
     var listEl = document.getElementById('mapUnplacedList');
     var countEl = document.getElementById('mapUnplacedCount');
+    var exportBtn = document.getElementById('mapUnplacedExportBtn');
     listEl.innerHTML = '';
 
     var unplaced = [];
     classification.forEach(function (meta, ip) {
         if (!meta.scanned) return;          // only scanned devices are ever geo-taggable (see Task 4's key resolution - an unscanned neighbor has no chassis data to key by)
         if (placedByIp.has(ip)) return;      // already has a resolved location
-        unplaced.push({ ip: ip, meta: meta });
+        unplaced.push({ ip: ip, meta: meta, device: deviceByIpLocal.get(ip) });
     });
 
     countEl.textContent = unplaced.length + ' device' + (unplaced.length === 1 ? '' : 's') + ' with no location set';
+    unplacedDevicesForExport = unplaced;
+    if (exportBtn) exportBtn.style.display = unplaced.length > 0 ? '' : 'none';
 
     unplaced.forEach(function (row) {
         var rowEl = document.createElement('div');
@@ -5956,6 +6277,32 @@ window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, pla
         rowEl.querySelector('button').addEventListener('click', function () { window.openLocationEditor(row.ip); });
         listEl.appendChild(rowEl);
     });
+};
+
+// CSV of exactly what the Unplaced Devices list is currently showing - handed to whoever is
+// walking the building placing pins, so they have a paper/spreadsheet worklist (hostname +
+// serial to find the right unit on-site) instead of having to keep this panel open and
+// scrolled to the right spot the whole time. Serial comes from the same StackMembers
+// extraction config-resolve.js already uses for location-key resolution (extractDeviceKeys) -
+// not reimplemented here - so "the serial this row would be saved under" and "the serial in
+// this export" can never drift apart.
+window.exportUnplacedDevicesCsv = function() {
+    if (unplacedDevicesForExport.length === 0) return;
+    var rows = [['Hostname', 'IP', 'Serial', 'Model', 'Junos Version', 'Uptime']];
+    unplacedDevicesForExport.forEach(function (row) {
+        var device = row.device;
+        var keys = device ? window.ConfigResolve.extractDeviceKeys(device) : null;
+        var model = (device && device.StackMembers && device.StackMembers[0]) ? device.StackMembers[0].Model : '';
+        rows.push([
+            row.meta.hostname !== 'Unknown' ? row.meta.hostname : '',
+            row.ip,
+            (keys && keys.serial) ? keys.serial : '',
+            model || '',
+            device ? device.JunosVersion : '',
+            device ? device.Uptime : '',
+        ]);
+    });
+    downloadCsv('unplaced_devices.csv', rows);
 };
 
 </script>
@@ -6159,6 +6506,72 @@ window.toggleLeftPanel = function(e) {
     if (e) e.stopPropagation();
     document.getElementById('left-panel').classList.toggle('collapsed');
 };
+
+// Drag-resize for #right-panel (the device detail drawer). Unlike the left panel's
+// collapse/expand toggle, this tracks the pointer continuously, so #center-panel (flex-grow)
+// shrinks/grows in real time as the user drags - vis-network's own resize handling already
+// picks that up live (see the ResizeObserver comment near IGNORED_ERROR_MESSAGES above), but
+// Leaflet does not self-observe its container, so Map view needs an explicit
+// invalidateSize() call while dragging or its tiles freeze at the pre-drag size.
+window.startRightPanelResize = function(e) {
+    e.preventDefault();
+    var panel = document.getElementById('right-panel');
+    var handle = document.getElementById('right-panel-handle');
+    var startX = e.clientX;
+    var startWidth = panel.getBoundingClientRect().width;
+    document.body.classList.add('resizing-right-panel');
+    handle.classList.add('dragging');
+
+    function onMove(moveEvent) {
+        // Dragging the LEFT edge of a RIGHT-docked panel: moving the pointer left (negative
+        // dx) grows the panel, so width goes up as dx goes down - hence the negation.
+        var dx = moveEvent.clientX - startX;
+        var newWidth = startWidth - dx;
+        var maxWidth = window.innerWidth * 0.9;
+        newWidth = Math.max(280, Math.min(maxWidth, newWidth));
+        panel.style.width = newWidth + 'px';
+
+        if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
+    }
+
+    function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.classList.remove('resizing-right-panel');
+        handle.classList.remove('dragging');
+        if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
+        if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
+        try { localStorage.setItem('rightPanelWidth', String(panel.getBoundingClientRect().width)); } catch (err) {}
+    }
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+};
+
+// Restores a previously dragged width on load, same "remember what the user set last time"
+// treatment as the rest of the app's settings (persistence.js) - a plain localStorage read
+// since this is a pure display preference, not part of Configuration.json's saved state.
+(function restoreRightPanelWidth() {
+    try {
+        var saved = parseFloat(localStorage.getItem('rightPanelWidth'));
+        if (Number.isFinite(saved) && saved >= 280) {
+            document.getElementById('right-panel').style.width = saved + 'px';
+        }
+    } catch (err) {}
+})();
+
+// Browser-window resize (not the panel drag above, which handles its own live updates) -
+// vis-network picks this up on its own via its container ResizeObserver, but Leaflet does
+// not self-observe, so without this a window resize/maximize leaves Map view's tiles sized
+// to whatever the viewport was when it was last opened. Debounced since 'resize' fires
+// continuously while a window is actively being dragged by its OS-level edge.
+var windowResizeDebounce = null;
+window.addEventListener('resize', function() {
+    clearTimeout(windowResizeDebounce);
+    windowResizeDebounce = setTimeout(function() {
+        if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
+    }, 150);
+});
 
 // Sidebar tabs (Load File / Search / Settings / Analysis Dashboard). Panes stay in the
 // DOM when hidden (display:none, not removed), so getElementById-based reads elsewhere
