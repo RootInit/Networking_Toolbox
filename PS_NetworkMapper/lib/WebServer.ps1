@@ -520,7 +520,16 @@ function Invoke-GetConfigAction {
     }
 
     try {
-        $Raw = Get-Content $ConfigPath -Raw
+        # -Encoding UTF8 explicit, not the default: same class of bug as
+        # Get-JunosNodeData.ps1's ssh stdout/stderr reads (see that file's own comment) -
+        # Get-Content -Raw with no -Encoding falls back to the system's ANSI codepage on any
+        # BOM-less UTF-8 file (e.g. one written under pwsh 7+, where -Encoding utf8 means
+        # NO BOM, then later read back here under Windows PowerShell 5.1 - a very real split
+        # given this server can run under either runtime). A Building/Room/Notes field with
+        # a non-ASCII character (map location editor) would get silently mis-decoded here,
+        # then re-encoded as UTF8 bytes for the browser - corrupting exactly the kind of
+        # text this endpoint exists to serve, not just failing loudly.
+        $Raw = Get-Content $ConfigPath -Raw -Encoding UTF8
         Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Raw)) -ContentType "application/json; charset=utf-8"
     } catch {
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to read configuration file: $_" }

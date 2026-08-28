@@ -75,7 +75,11 @@ if ($NoEncryption) {
     # JSON, no envelope/decrypt step involved.
     if (Test-Path $ConfigPath) {
         try {
-            $ConfigParsed = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+            # -Encoding UTF8 explicit - see Invoke-GetConfigAction's (WebServer.ps1) own
+            # comment on this same class of bug: Get-Content -Raw with no -Encoding falls
+            # back to the system ANSI codepage on a BOM-less file, silently corrupting any
+            # non-ASCII Building/Room/Notes text a -NoEncryption Configuration.json can hold.
+            $ConfigParsed = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($ConfigParsed.credentials) {
                 $JunosUsername = $ConfigParsed.credentials.username
                 $JunosPassword = $ConfigParsed.credentials.password
@@ -105,7 +109,12 @@ if ($NoEncryption) {
         while ($null -eq $DecryptedConfigJson -and $Attempts -lt 3) {
             $Attempts++
             try {
-                $Envelope = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+                # -Encoding UTF8 explicit, same reasoning as the -NoEncryption branch above -
+                # the envelope's own JSON fields (salt/iv/mac/ciphertext) are pure base64/
+                # ASCII so this specific read can't itself corrupt them, but a consistent
+                # encoding here is still correct and cheap insurance against this file ever
+                # gaining a non-ASCII field.
+                $Envelope = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
                 $DecryptedConfigJson = Unprotect-TopologyPayload -Envelope $Envelope -Password $EncryptionPassword -ExpectedFormats @("PSNetworkMapper-EncryptedConfig")
             } catch {
                 Write-Host "Failed to decrypt Configuration.json.enc: $_" -ForegroundColor Red
