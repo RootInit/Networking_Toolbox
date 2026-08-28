@@ -1,5 +1,5 @@
 # The fleet crawl loop, extracted from Start-NetworkMapper.ps1 so both the CLI crawl path
-# and Start-WebServer.ps1's async /api/scan-network endpoint (see that file's
+# and WebServer.ps1's async /api/scan-network endpoint (see that file's
 # Invoke-ScanNetworkAction) can run the identical logic instead of two copies drifting
 # apart. This is a behavior-preserving extraction, not a rewrite - the queue/BFS/
 # runspace-pool/periodic-write/timeout logic below is unchanged from the original inline
@@ -39,11 +39,18 @@ function Invoke-FleetCrawl {
     )
 
     $Encrypted = $null -ne $EncKey
+    # Called from ~8 places throughout the crawl loop, several outside any try/catch of
+    # their own - a bare Out-File here (e.g. a read-only/full log directory) would throw
+    # and take the whole crawl down over a logging failure, exactly the "one error kills
+    # the entire run" mode this file otherwise guards against everywhere else. Swallow it:
+    # losing one debug-log line is not worth losing the crawl.
     function Write-DebugLogLocal {
         param([string]$Message)
-        if ($DebugLogPath) { "[$(Get-Date -Format 'HH:mm:ss')] $Message" | Out-File -FilePath $DebugLogPath -Append -Encoding utf8 }
+        if ($DebugLogPath) {
+            try { "[$(Get-Date -Format 'HH:mm:ss')] $Message" | Out-File -FilePath $DebugLogPath -Append -Encoding utf8 } catch {}
+        }
     }
-    if ($DebugLogPath) { "=== Fleet Crawl Debug Log - $(Get-Date) ===" | Out-File -FilePath $DebugLogPath -Force }
+    if ($DebugLogPath) { try { "=== Fleet Crawl Debug Log - $(Get-Date) ===" | Out-File -FilePath $DebugLogPath -Force } catch {} }
 
     # Single write path for all three call sites below (init/periodic/final) so encryption
     # only has to be wired in once instead of duplicated three times.
@@ -126,6 +133,12 @@ function Invoke-FleetCrawl {
     $Enqueued.Add($StartIP) | Out-Null
     $LastWriteTime = Get-Date
     $PendingWrites = 0
+    # Guards the device-history ledger specifically (see Write-DeviceHistoryLedgerLocal's
+    # own "exactly one ledger line per run" comment): the final-write block and the
+    # emergency salvage in the outer catch can both reach a ledger write in the same run
+    # if a throw/Ctrl+C lands between the final write succeeding and the function
+    # returning - without this flag that's a double-write, one NDJSON line per device.
+    $LedgerWritten = $false
 
     Write-TopologyOutputLocal -Topology @() -Path $OutputFile -ScanTimestampIso $ScanTimestampIso
 
@@ -139,19 +152,35 @@ function Invoke-FleetCrawl {
                 $NextIP = $Queue.Dequeue()
                 if (!$Visited.Add($NextIP)) { continue }
 
-                $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $NextIP).AddParameter("Username", $Username).AddParameter("Password", $Password)
-                if ($Log) { $PS.AddParameter("Log") | Out-Null }
+                # A faulted runspace pool (or any other Create()/BeginInvoke() failure)
+                # must not take the whole crawl down - it's not this device's fault the
+                # pool is unhealthy, but the fix is the same either way: log it, drop this
+                # one IP (it's already in $Visited so it won't loop forever), keep going.
+                # Reset before the try, not just declared by the assignment inside it: $PS
+                # is scoped to the whole function (PowerShell doesn't rescope per while
+                # iteration), so without this a Create()/AddCommand() throw here would
+                # leave $PS pointing at the PREVIOUS iteration's instance - one already
+                # added to $Jobs and running - and the catch below would then Dispose() a
+                # live job out from under itself.
+                $PS = $null
+                try {
+                    $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $NextIP).AddParameter("Username", $Username).AddParameter("Password", $Password)
+                    if ($Log) { $PS.AddParameter("Log") | Out-Null }
 
-                $PS.RunspacePool = $RunspacePool
-                $Handle = $PS.BeginInvoke()
-                $Jobs.Add([PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $NextIP; StartTime = (Get-Date) })
+                    $PS.RunspacePool = $RunspacePool
+                    $Handle = $PS.BeginInvoke()
+                    $Jobs.Add([PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $NextIP; StartTime = (Get-Date) })
+                } catch {
+                    Write-DebugLogLocal "ORCHESTRATOR ERROR: failed to start job for $($NextIP): $_"
+                    Write-Host "`n[!] Failed to start job for $($NextIP): $_" -ForegroundColor Red
+                    if ($PS) { try { $PS.Dispose() } catch {} }
+                }
             }
 
             Write-Host "`r[Threads: $($Jobs.Count)/$MaxConcurrent] [Queue: $($Queue.Count)] [Done: $($TopologyList.Count)]    " -NoNewline -ForegroundColor Cyan
             $ProgressTable.Visited = $Visited.Count
             $ProgressTable.QueueDepth = $Queue.Count
             $ProgressTable.ActiveJobs = $Jobs.Count
-            $ProgressTable.Done = $TopologyList.Count
 
             # 2. Process Jobs (Completed OR Hung)
             $JobsToRemove = @()
@@ -159,6 +188,7 @@ function Invoke-FleetCrawl {
             foreach ($Job in $Jobs) {
                 if (-not $Job.Handle.IsCompleted -and ((Get-Date) - $Job.StartTime).TotalSeconds -gt 65) {
                     Write-DebugLogLocal "ORCHESTRATOR TIMEOUT: Abandoning hung thread for $($Job.IP)"
+                    Write-Host "`n[!] Timed out waiting on $($Job.IP) - abandoning and continuing." -ForegroundColor Red
                     $JobsToRemove += $Job
                     continue
                 }
@@ -167,14 +197,35 @@ function Invoke-FleetCrawl {
                     try {
                         $Result = $Job.PS.EndInvoke($Job.Handle)
 
+                        # Non-terminating errors inside the worker (e.g. a caught exception
+                        # it logged via Write-LogMsg, or something Junos-parsing-related
+                        # that wrote to the error stream instead of throwing) don't fail
+                        # EndInvoke and would otherwise never surface anywhere.
+                        if ($Job.PS.HadErrors) {
+                            foreach ($ErrRecord in $Job.PS.Streams.Error) {
+                                Write-DebugLogLocal "WORKER ERROR STREAM ($($Job.IP)): $ErrRecord"
+                            }
+                        }
+
                         if ($Result -and $Result.Node) {
                             $Node = $Result.Node
                             if ($Result.Logs) { foreach ($LogLine in $Result.Logs) { Write-DebugLogLocal $LogLine } }
 
                             Write-Host "`n[+] Finished $($Job.IP) ($($Node.Hostname)) - $($Node.Neighbors.Count) Neighbors, $($Node.Clients.Count) Clients" -ForegroundColor Green
 
+                            # Recorded before the neighbor loop below, not after: this
+                            # node's own interfaces/clients/ARP data already came back
+                            # successfully by this point, and a malformed neighbor entry
+                            # (unexpected ManagementIP shape, etc.) throwing partway through
+                            # that loop must not cost the node its already-collected data -
+                            # it would otherwise be silently dropped into the catch below
+                            # along with the (unrelated) enqueue failure.
+                            $TopologyList.Add($Node)
+                            $PendingWrites++
+
                             foreach ($Neigh in $Node.Neighbors) {
                                 $NIP = $Neigh.ManagementIP
+                                if ([string]::IsNullOrEmpty($NIP)) { continue }
                                 $InScope = $false
                                 foreach ($Scope in $AllowedScopes) { if ($NIP.StartsWith($Scope)) { $InScope = $true; break } }
 
@@ -184,12 +235,17 @@ function Invoke-FleetCrawl {
                                     Write-DebugLogLocal "ENQUEUED: $NIP"
                                 }
                             }
-
-                            $TopologyList.Add($Node)
-                            $PendingWrites++
+                        } else {
+                            # The worker returned nothing (or a result with no Node) without
+                            # EndInvoke throwing - shouldn't happen given Get-JunosNodeData's
+                            # own try/catch always returns a Node, but if it ever does, the
+                            # device must not vanish from the log with zero explanation.
+                            Write-DebugLogLocal "ORCHESTRATOR WARNING: $($Job.IP) produced no result (worker returned nothing)."
+                            Write-Host "`n[!] $($Job.IP) produced no result - skipping." -ForegroundColor Red
                         }
                     } catch {
                         Write-DebugLogLocal "ORCHESTRATOR ERROR parsing result from $($Job.IP): $_"
+                        Write-Host "`n[!] Error processing result from $($Job.IP): $_" -ForegroundColor Red
                     } finally {
                         $JobsToRemove += $Job
                     }
@@ -199,7 +255,7 @@ function Invoke-FleetCrawl {
             # 3. Clean up processed or hung jobs
             foreach ($DeadJob in $JobsToRemove) {
                 try { $DeadJob.PS.Stop() } catch { Write-DebugLogLocal "Stop() failed for $($DeadJob.IP): $_" }
-                $DeadJob.PS.Dispose()
+                try { $DeadJob.PS.Dispose() } catch { Write-DebugLogLocal "Dispose() failed for $($DeadJob.IP): $_" }
                 $Jobs.Remove($DeadJob) | Out-Null
             }
 
@@ -220,12 +276,24 @@ function Invoke-FleetCrawl {
             Start-Sleep -Milliseconds 250
         }
 
-        if ($PendingWrites -gt 0) {
-            Update-ClientIpCorrelationLocal -Topology $TopologyList
-            Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-            Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
+        # Unlike the periodic write at step 4, this one has no "next cycle" to retry on -
+        # it's the last write this run gets. A failure here (disk full, path went away
+        # mid-run, permissions) must not stop the crawl from reporting completion and
+        # returning $TopologyList in memory - the caller (WebServer.ps1's status poll, or
+        # Start-NetworkMapper.ps1's CLI path) still gets the real data even if the on-disk
+        # snapshot is stale.
+        try {
+            if ($PendingWrites -gt 0) {
+                Update-ClientIpCorrelationLocal -Topology $TopologyList
+                Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
+                Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
+            }
+            Write-DeviceHistoryLedgerLocal -Topology $TopologyList -LedgerPath $DeviceHistoryLedger -ScanTimestampIso $ScanTimestampIso
+            $LedgerWritten = $true
+        } catch {
+            Write-DebugLogLocal "FINAL WRITE FAILED: $_"
+            Write-Host "`n[!] Final snapshot/ledger write failed: $_" -ForegroundColor Red
         }
-        Write-DeviceHistoryLedgerLocal -Topology $TopologyList -LedgerPath $DeviceHistoryLedger -ScanTimestampIso $ScanTimestampIso
 
         Write-Host "`n`n=================================================" -ForegroundColor Cyan
         Write-Host "Mapping Complete! Processed $($Visited.Count) devices." -ForegroundColor Green
@@ -235,6 +303,50 @@ function Invoke-FleetCrawl {
 
         $ProgressTable.Done = $true
         return @{ Topology = $TopologyList; ScanTimestampIso = $ScanTimestampIso; OutputFile = $OutputFile; VisitedCount = $Visited.Count }
+    }
+    catch {
+        # A genuinely unexpected throw somewhere in the loop above (not one of the
+        # per-device paths already caught individually) used to fall straight through to
+        # the finally below and out of the function - losing the in-memory $TopologyList,
+        # skipping the final write/ledger entirely, and never setting ProgressTable.Done
+        # (so a web-triggered scan would poll forever). Make a best-effort attempt to save
+        # whatever was already collected before this still re-throws, so a mid-crawl bug
+        # costs at most the devices not yet visited - not the ones already gathered.
+        #
+        # NOT reached by Ctrl+C (verified against pwsh: a pipeline-stop terminates the
+        # runspace immediately, skipping catch entirely - only the finally below runs) -
+        # this only covers a genuine unexpected exception in the orchestrator loop itself.
+        Write-DebugLogLocal "ORCHESTRATOR FATAL: unhandled error in crawl loop: $_"
+        Write-Host "`n[!] Unexpected crawl error: $_" -ForegroundColor Red
+        try {
+            if ($TopologyList.Count -gt 0) {
+                Update-ClientIpCorrelationLocal -Topology $TopologyList
+                # Temp file + Move-Item, same as every other write path (init/periodic/
+                # final) - not a direct write to $OutputFile. The condition that lands here
+                # is often disk-full or a vanished directory, i.e. exactly the condition
+                # that can make a direct write fail PARTWAY, replacing a good prior
+                # snapshot with a truncated one. Move-Item only replaces $OutputFile once
+                # the temp file is fully and successfully written.
+                Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
+                Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
+                # Guarded on $LedgerWritten: the throw/Ctrl+C that landed us here could have
+                # happened AFTER the final-write block above already appended this same
+                # $TopologyList to the ledger (between that write succeeding and the
+                # function actually returning) - without this guard every device would get
+                # two NDJSON lines for one run. The snapshot write above needs no equivalent
+                # guard; temp+Move-Item is naturally idempotent (just re-overwrites the same
+                # file), unlike an append-only ledger.
+                if (-not $LedgerWritten) {
+                    Write-DeviceHistoryLedgerLocal -Topology $TopologyList -LedgerPath $DeviceHistoryLedger -ScanTimestampIso $ScanTimestampIso
+                    $LedgerWritten = $true
+                }
+                Write-Host "[!] Salvaged $($TopologyList.Count) already-crawled device(s) to $OutputFile before aborting." -ForegroundColor Yellow
+            }
+        } catch {
+            Write-DebugLogLocal "ORCHESTRATOR FATAL: emergency salvage write also failed: $_"
+        }
+        $ProgressTable.Done = $true
+        throw
     }
     finally {
         $RunspacePool.Close(); $RunspacePool.Dispose()

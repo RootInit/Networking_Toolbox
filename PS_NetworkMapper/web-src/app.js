@@ -171,7 +171,7 @@ window.promptForPassword = function(errorMsg) {
 };
 
 // Start-NetworkMapper.ps1 already prompted for this exact password at the console and now
-// hands it to the browser via GET /api/session-password (Start-WebServer.ps1), so
+// hands it to the browser via GET /api/session-password (WebServer.ps1), so
 // readSnapshotFile (below) and map.js's loadMapConfiguration can both skip the password
 // modal on the common path instead of asking the operator to re-type a password they just
 // typed - it's the same one password for the whole session (see that script's "Network_
@@ -298,10 +298,9 @@ window.forceLoadFolder = async function() {
         window.setStatus("Please select a folder.", "red");
         return;
     }
-    // A folder picker returns EVERY file in the directory, not just snapshots - the
-    // PS_NetworkMapper root also holds Auth.json (real switch credentials, not a
-    // topology file, but it does end in ".json" so a looser filter would try to load it
-    // and fail confusingly). Match the actual naming convention Start-NetworkMapper.ps1
+    // A folder picker returns EVERY file in the directory, not just snapshots - a stray
+    // non-snapshot ".json" file in the picked folder would otherwise be loaded and fail
+    // confusingly. Match the actual naming convention Start-NetworkMapper.ps1
     // writes ("NetworkMap_<timestamp>.json[.enc]") instead of any file ending in .json,
     // and explicitly exclude its in-progress ".tmp.json(.enc)" files (picking the folder
     // mid-crawl would otherwise load a partial snapshot as if it were a finished one).

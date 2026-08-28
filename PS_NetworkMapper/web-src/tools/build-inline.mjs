@@ -1,17 +1,18 @@
-// Inlines every <script src="..."> and <link rel="stylesheet"> in network_vis.html into a
-// single, genuinely self-contained build/Network_Visualizer.html - no external .js/.css
+// Inlines every <script src="..."> and <link rel="stylesheet"> in index.html into a
+// single, genuinely self-contained ../lib/Network_Visualizer.html - no external .js/.css
 // files, and no image files either (a stylesheet's own url(...) references are embedded as
 // base64 data URIs). For distributing/opening the visualizer as one file instead of the
-// app's own multi-file layout, or for Start-NetworkMapper.ps1 to serve directly when this
-// file sits next to it (see that script's own SingleFileVisualizer detection). Not part of
-// the app - run manually from this directory:
-//   node src/tools/build-inline.mjs
+// app's own multi-file layout, or for Start-NetworkMapper.ps1 to serve directly (see that
+// script's own SingleFileVisualizer detection) - a release ships only Start-NetworkMapper.ps1
+// + lib/ (this output included), never web-src/. Not part of the app - run manually from
+// this directory:
+//   node tools/build-inline.mjs
 //
-// Output is checked in (build/ is NOT gitignored) - unlike this repo's other generated
-// artifacts (oui-data.js, Configuration.json.enc), the whole point of this one is to be
-// grabbable straight from the repo (or copied on its own, with nothing else) without anyone
-// needing to run Node first. Re-run this script and commit the result after any change to
-// network_vis.html, src/*.js, or src/vendor/leaflet/leaflet.css - nothing regenerates it
+// Output is checked in (lib/ is NOT gitignored for this file) - unlike this repo's other
+// generated artifacts (oui-data.js, Configuration.json.enc), the whole point of this one is
+// to be grabbable straight from the repo (or copied on its own, with nothing else) without
+// anyone needing to run Node first. Re-run this script and commit the result after any
+// change to index.html, *.js, or vendor/leaflet/leaflet.css - nothing regenerates it
 // automatically.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -19,9 +20,9 @@ import { dirname, extname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const toolsDir = dirname(fileURLToPath(import.meta.url));
-const visualizerRoot = resolve(toolsDir, '..', '..'); // src/tools/ -> src/ -> Network_Visualizer/
-const htmlPath = process.argv[2] ? resolve(process.argv[2]) : join(visualizerRoot, 'network_vis.html');
-const buildDir = join(dirname(htmlPath), 'build');
+const visualizerRoot = resolve(toolsDir, '..'); // tools/ -> web-src/
+const htmlPath = process.argv[2] ? resolve(process.argv[2]) : join(visualizerRoot, 'index.html');
+const buildDir = resolve(visualizerRoot, '..', 'lib'); // web-src/ -> PS_NetworkMapper/ -> lib/
 const outPath = join(buildDir, 'Network_Visualizer.html');
 
 if (!existsSync(htmlPath)) {

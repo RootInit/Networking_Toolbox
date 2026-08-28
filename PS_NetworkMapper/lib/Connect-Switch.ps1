@@ -1,16 +1,16 @@
 # Opens a genuine interactive SSH session to a Juniper switch, using credentials handed off
-# via a short-lived -CredentialFile (written by Start-WebServer.ps1's Invoke-ConnectAction
+# via a short-lived -CredentialFile (written by WebServer.ps1's Invoke-ConnectAction
 # right before launching this script) - for when you just want to log in and look around,
 # rather than run the full scripted crawl (Get-JunosNodeData.ps1) or wait for a topology map.
 # A browser page still can't spawn a process directly (no such API exists in any mainstream
-# browser), but in V2 the "Launch SSH Session" button now gets there indirectly: it POSTs to
-# the local Start-WebServer.ps1 server, which is itself a PowerShell process and runs this
+# browser), so the "Launch SSH Session" button gets there indirectly: it POSTs to
+# the local WebServer.ps1 server, which is itself a PowerShell process and runs this
 # script via Start-Process on the browser's behalf. Kept as a real -TargetIP parameter (not
 # something request-controlled beyond that already-validated IP) so this is still just as
 # safe to run by hand.
 #
 # Uses the same SSH_ASKPASS password-injection approach as the crawler (see
-# Connect-JunosSsh.ps1), but attaches ssh.exe directly to this console instead of
+# SshHelpers.ps1), but attaches ssh.exe directly to this console instead of
 # redirecting its output to temp files and feeding it scripted commands - that's a
 # genuinely different shape of invocation, not shared with the crawler beyond the
 # askpass setup itself.
@@ -24,7 +24,7 @@ param(
 )
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
-. (Join-Path $ScriptDir "Connect-JunosSsh.ps1")
+. (Join-Path $ScriptDir "SshHelpers.ps1")
 
 # Everything that touches the credential file lives INSIDE the try, so the finally below
 # always runs: reading it, and writing the askpass files derived from it. Done outside (as
@@ -36,7 +36,7 @@ try {
     # -Encoding UTF8 explicit, not the default: this always runs as Windows PowerShell 5.1
     # (hardcoded "powershell.exe" in Invoke-ConnectAction), whose Get-Content falls back to
     # the system ANSI code page when the file has no BOM - and New-JunosCredentialFile
-    # (Connect-JunosSsh.ps1) deliberately writes without one, since the SERVER side may be
+    # (SshHelpers.ps1) deliberately writes without one, since the SERVER side may be
     # running under pwsh instead, where "utf8" means no-BOM. Forcing UTF8 here decodes
     # correctly either way, regardless of which runtime wrote the file or whether a
     # username/password contains a non-ASCII character.

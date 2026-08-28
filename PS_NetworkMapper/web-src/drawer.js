@@ -24,12 +24,12 @@ window.switchTab = function(tabId) {
     }
 };
 
-// SSH quick-connect: V1 could only copy a command to the clipboard (no browser API can
-// spawn a process). V2 is served by Start-WebServer.ps1 - itself a PowerShell process on
-// the analyst's own machine - so this can POST to that server's one fixed action instead:
+// SSH quick-connect: a browser page can't spawn a process itself (no such API exists), but
+// this is served by WebServer.ps1 - itself a PowerShell process on the analyst's own
+// machine - so this can POST to that server's one fixed action instead:
 // /api/connect launches lib\Connect-Switch.ps1 (a real interactive SSH session) against
 // the given IP via Start-Process. Only works because the server is localhost-only; see
-// Start-WebServer.ps1's header comment.
+// WebServer.ps1's header comment.
 window.copyConnectCommand = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
@@ -54,7 +54,7 @@ window.copyConnectCommand = async function() {
 
 // On-demand single-device rescan: re-runs the same fixed read-only diagnostic batch
 // Get-JunosNodeData.ps1 already runs for a full crawl, against just this one IP, via
-// Start-WebServer.ps1's /api/rescan (async - see that endpoint's own comment for why a
+// WebServer.ps1's /api/rescan (async - see that endpoint's own comment for why a
 // synchronous call would freeze the whole server). Works for the "Unscanned Node"
 // placeholder case too (a device only ever seen as an LLDP neighbor) - that's a
 // legitimate rescan target, not just a refresh of already-scanned data.

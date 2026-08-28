@@ -1,5 +1,5 @@
 // "Scan Network" button (#sidebar-tab-load): kicks off a full fleet crawl from the browser
-// via Start-WebServer.ps1's async POST /api/scan-network + GET /api/scan-network/status
+// via WebServer.ps1's async POST /api/scan-network + GET /api/scan-network/status
 // (see that file's Invoke-ScanNetworkAction/Invoke-ScanNetworkStatusAction). Reads
 // loadedSnapshots/globalTopologyData (app.js), calls into window.processSelectedFiles
 // (app.js) to load the finished scan through the exact same pipeline a manually-uploaded

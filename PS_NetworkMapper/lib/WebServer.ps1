@@ -16,14 +16,14 @@
 # Dot-sourced here directly rather than relying on the caller (Start-NetworkMapper.ps1)
 # having already loaded it first, so this file's correctness doesn't depend on caller load
 # order. $PSScriptRoot inside a dot-sourced file resolves to that file's own directory, not
-# the caller's - both files live in Network_Mapper/lib/, so this resolves correctly
-# regardless of how Start-WebServer.ps1 itself gets loaded.
+# the caller's - both files live in lib/, so this resolves correctly
+# regardless of how WebServer.ps1 itself gets loaded.
 . (Join-Path $PSScriptRoot "TopologyCrypto.ps1")
 # Invoke-ConnectAction (below) needs New-JunosCredentialFile. Same "dot-source directly,
 # don't rely on caller load order" reasoning as the TopologyCrypto.ps1 dot-source above.
-. (Join-Path $PSScriptRoot "Connect-JunosSsh.ps1")
+. (Join-Path $PSScriptRoot "SshHelpers.ps1")
 # Invoke-ScanNetworkAction (below) needs Invoke-FleetCrawl.
-. (Join-Path $PSScriptRoot "Invoke-FleetCrawl.ps1")
+. (Join-Path $PSScriptRoot "FleetCrawl.ps1")
 
 $script:ContentTypes = @{
     ".html" = "text/html; charset=utf-8"
@@ -254,7 +254,7 @@ function Invoke-RescanStatusAction {
 
     $Elapsed = ((Get-Date) - $Job.StartTime).TotalSeconds
     if ($Elapsed -gt 90) {
-        # Deliberately not force-stopped. New-JunosAskPass (Connect-JunosSsh.ps1) writes
+        # Deliberately not force-stopped. New-JunosAskPass (SshHelpers.ps1) writes
         # the real switch password to a plaintext %TEMP% file, cleaned up only by the
         # worker's own `finally { Remove-JunosAskPass ... }`. A pipeline .Stop()'d while
         # blocked inside Process.WaitForExit (a synchronous native call) isn't guaranteed
@@ -346,7 +346,7 @@ function Invoke-ScanNetworkAction {
     # top of this file) - a fresh [powershell]::Create() runspace does NOT inherit that by
     # default, so the function definition has to travel into the new runspace explicitly.
     $InitialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-    $FleetCrawlPath = Join-Path $PSScriptRoot "Invoke-FleetCrawl.ps1"
+    $FleetCrawlPath = Join-Path $PSScriptRoot "FleetCrawl.ps1"
     $InitialState.StartupScripts.Add($FleetCrawlPath) | Out-Null
     $Runspace = [runspacefactory]::CreateRunspace($InitialState)
     $Runspace.Open()
@@ -424,7 +424,7 @@ function Invoke-ScanNetworkStatusAction {
             $Job.Collected = $true
         }
 
-        # -Depth 100 matches Invoke-FleetCrawl.ps1's Write-TopologyOutputLocal (the
+        # -Depth 100 matches FleetCrawl.ps1's Write-TopologyOutputLocal (the
         # file-write path) - this endpoint serializes the exact same device-object shape
         # inline, and the old -Depth 30 here risked ConvertTo-Json silently truncating a
         # deeply-nested topology into type-name strings past the depth limit.
@@ -509,14 +509,17 @@ function Invoke-GetSessionPasswordAction {
 # interactive, not periodic, so there's no repeated-PBKDF2-cost reason to cache keys across
 # calls here).
 function Invoke-SaveConfigAction {
-    param($Response, [string]$Body, [string]$ConfigPath, [string]$EncryptionPassword)
+    param($Response, [string]$Body, [string]$ConfigPath, [string]$EncryptionPassword, [switch]$NoEncryption)
 
     # Fail closed. Start-NetworkMapper.ps1 blanks the password when Configuration.json.enc
     # could not be decrypted at startup and the operator chose to continue anyway - the
     # password typed there is proven wrong, and re-encrypting the whole file under it would
     # permanently and silently change the file's real password to a string nobody has a
-    # record of, locking every future session out of its own config.
-    if ([string]::IsNullOrWhiteSpace($EncryptionPassword)) {
+    # record of, locking every future session out of its own config. Doesn't apply in
+    # -NoEncryption mode: there is no password to have failed to decrypt, since
+    # Start-NetworkMapper.ps1 never prompted for one and $ConfigPath points at a plaintext
+    # Configuration.json instead.
+    if (-not $NoEncryption -and [string]::IsNullOrWhiteSpace($EncryptionPassword)) {
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "No working encryption password for this session - Configuration.json.enc could not be decrypted at startup, so saving is disabled to avoid rewriting the file under an unverified password. Restart Start-NetworkMapper.ps1 with the correct password." }
         return
     }
@@ -533,21 +536,27 @@ function Invoke-SaveConfigAction {
     }
 
     try {
-        $SaltBytes = [byte[]]::new(16)
-        $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-        $Rng.GetBytes($SaltBytes)
-        $Rng.Dispose()
+        if ($NoEncryption) {
+            # Plain pass-through - re-serialize (not a raw $Body | Out-File) so the file on
+            # disk is consistently formatted regardless of what the browser sent.
+            $Parsed | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
+        } else {
+            $SaltBytes = [byte[]]::new(16)
+            $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+            $Rng.GetBytes($SaltBytes)
+            $Rng.Dispose()
 
-        # Shared with Start-NetworkMapper.ps1's crawl-output encryption via
-        # TopologyCrypto.ps1's Get-TopologyPbkdf2Iterations (dot-sourced at the top of this
-        # file) - was a duplicated `600000` literal here, defeating the point of extracting
-        # TopologyCrypto.ps1 in the first place (stop crypto parameters drifting between the
-        # crawler and the webserver).
-        $Iterations = Get-TopologyPbkdf2Iterations
-        $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $Iterations
-        $Envelope = Protect-TopologyPayload -PlainJson $Body -EncKey $KeyMaterial.EncKey -MacKey $KeyMaterial.MacKey -Salt $SaltBytes -Iterations $Iterations -Format "PSNetworkMapper-EncryptedConfig"
+            # Shared with Start-NetworkMapper.ps1's crawl-output encryption via
+            # TopologyCrypto.ps1's Get-TopologyPbkdf2Iterations (dot-sourced at the top of this
+            # file) - was a duplicated `600000` literal here, defeating the point of extracting
+            # TopologyCrypto.ps1 in the first place (stop crypto parameters drifting between the
+            # crawler and the webserver).
+            $Iterations = Get-TopologyPbkdf2Iterations
+            $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $Iterations
+            $Envelope = Protect-TopologyPayload -PlainJson $Body -EncKey $KeyMaterial.EncKey -MacKey $KeyMaterial.MacKey -Salt $SaltBytes -Iterations $Iterations -Format "PSNetworkMapper-EncryptedConfig"
 
-        $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
+            $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
+        }
 
         # Push the just-saved Juniper credentials into the running server's live copies (see
         # Start-MapperWebServer's $script:JunosUsername/$script:JunosPassword) so /api/connect,
@@ -576,14 +585,14 @@ function Invoke-SaveConfigAction {
     }
 }
 
-# Serves a file under $VisualizerRoot, defaulting "/" to network_vis.html. Resolves the
+# Serves a file under $VisualizerRoot, defaulting "/" to index.html. Resolves the
 # request path to an absolute path and rejects anything that lands outside
 # $VisualizerRoot (../ traversal, absolute-path requests) before it ever touches disk.
 function Invoke-StaticFile {
     param($Response, [string]$AbsolutePath, [string]$VisualizerRoot)
 
     $RelPath = $AbsolutePath.TrimStart('/')
-    if ([string]::IsNullOrWhiteSpace($RelPath)) { $RelPath = "network_vis.html" }
+    if ([string]::IsNullOrWhiteSpace($RelPath)) { $RelPath = "index.html" }
 
     $RootFull = [System.IO.Path]::GetFullPath($VisualizerRoot)
     if (-not $RootFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) { $RootFull += [System.IO.Path]::DirectorySeparatorChar }
@@ -602,7 +611,7 @@ function Invoke-StaticFile {
     Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.IO.File]::ReadAllBytes($FullPath)) -ContentType $CType
 }
 
-# Serves the ONE portable single-file visualizer (Network_Visualizer/src/tools/build-inline.mjs's
+# Serves the ONE portable single-file visualizer (web-src/tools/build-inline.mjs's
 # output - see Start-NetworkMapper.ps1's SingleFileVisualizerPath detection) instead of
 # Invoke-StaticFile's whole-directory serving, when that file is what this server was told to
 # use. Deliberately narrow: only "/" and "/Network_Visualizer.html" resolve to anything - the
@@ -627,6 +636,10 @@ function Invoke-SingleFileVisualizer {
 # needed here) until Ctrl+C.
 function Start-MapperWebServer {
     param(
+        # Mirrors Start-NetworkMapper.ps1's own -NoEncryption switch - passed through so
+        # Invoke-SaveConfigAction knows to write a plaintext Configuration.json instead of
+        # requiring/using $EncryptionPassword.
+        [switch]$NoEncryption,
         [Parameter(Mandatory=$true)][string]$VisualizerRoot,
         # $null/empty (the common case - a normal checkout) means "serve $VisualizerRoot the
         # usual way"; set only when Start-NetworkMapper.ps1 found Network_Visualizer.html
@@ -705,7 +718,7 @@ function Start-MapperWebServer {
     Start-Process $Prefix
 
     # Console progress for browser-triggered scans - Invoke-ScanNetworkAction runs the fleet
-    # crawl in a background runspace, so Invoke-FleetCrawl.ps1's own Write-Host calls never
+    # crawl in a background runspace, so FleetCrawl.ps1's own Write-Host calls never
     # reach this console (unlike the CLI path in Start-NetworkMapper.ps1, which calls it
     # directly on the main thread). Piggybacks on the 250ms accept-loop tick below since
     # that is the only point the main thread is free to touch the console between requests.
@@ -793,7 +806,7 @@ function Start-MapperWebServer {
                         $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
                         $Body = $Reader.ReadToEnd()
                         $Reader.Close()
-                        Invoke-SaveConfigAction -Response $Response -Body $Body -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword
+                        Invoke-SaveConfigAction -Response $Response -Body $Body -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -NoEncryption:$NoEncryption
                     }
                 } elseif ($SingleFileVisualizerPath) {
                     Invoke-SingleFileVisualizer -Response $Response -AbsolutePath $Request.Url.AbsolutePath -SingleFileVisualizerPath $SingleFileVisualizerPath

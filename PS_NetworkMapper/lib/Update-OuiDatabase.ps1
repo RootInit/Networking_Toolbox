@@ -1,5 +1,5 @@
 # Fetches the full IEEE MAC-vendor (OUI) registry and writes it as a vendored JS asset
-# for Network_Visualizer to look up client vendors from. Deliberately a separate script
+# for web-src (the Network_Visualizer app) to look up client vendors from. Deliberately a separate script
 # from the crawler: this is the only piece of PS_NetworkMapper that needs internet
 # egress (to IEEE), which the switch-crawling scripts never do and shouldn't need to -
 # a real network-boundary reason to keep it isolated, not just tidiness. Re-run this
@@ -13,9 +13,9 @@
 # another PowerShell script.
 [CmdletBinding()]
 param(
-    # $PSScriptRoot is Network_Mapper/lib/ - the target is the sibling top-level
-    # Network_Visualizer/ folder's src/vendor/, two levels up and back down.
-    [string]$OutputPath = (Join-Path $PSScriptRoot "..\..\Network_Visualizer\src\vendor\oui-data.js")
+    # $PSScriptRoot is PS_NetworkMapper/lib/ - the target is the sibling top-level
+    # web-src/ folder's vendor/, one level up and back down.
+    [string]$OutputPath = (Join-Path $PSScriptRoot "..\web-src\vendor\oui-data.js")
 )
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12

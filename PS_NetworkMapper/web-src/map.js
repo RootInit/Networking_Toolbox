@@ -177,38 +177,46 @@ window.loadMapConfiguration = async function() {
         return;
     }
 
-    var decryptedText = null;
-    var errorMsg = null;
-    // Try the session password (app.js's window.getSessionEncryptionPassword) once, silently,
-    // before ever showing the modal - Start-NetworkMapper.ps1 already prompted for this exact
-    // password at the console to decrypt this same file server-side. Only falls through to
-    // promptForPassword if that's unavailable/empty, or (rare) it fails to decrypt.
-    var sessionPassword = await window.getSessionEncryptionPassword();
-    var triedSessionPassword = false;
-    while (decryptedText === null) {
-        var password;
-        if (sessionPassword && !triedSessionPassword) {
-            password = sessionPassword;
-            triedSessionPassword = true;
-        } else {
+    var parsedConfig;
+    // A -NoEncryption server run writes/serves Configuration.json as plain
+    // {devices, credentials, settings} JSON directly - no envelope, no password. Same
+    // format check app.js's readSnapshotFile uses for plain vs. encrypted topology files.
+    if (envelope && envelope.format === 'PSNetworkMapper-EncryptedConfig') {
+        var decryptedText = null;
+        var errorMsg = null;
+        // Try the session password (app.js's window.getSessionEncryptionPassword) once, silently,
+        // before ever showing the modal - Start-NetworkMapper.ps1 already prompted for this exact
+        // password at the console to decrypt this same file server-side. Only falls through to
+        // promptForPassword if that's unavailable/empty, or (rare) it fails to decrypt.
+        var sessionPassword = await window.getSessionEncryptionPassword();
+        var triedSessionPassword = false;
+        while (decryptedText === null) {
+            var password;
+            if (sessionPassword && !triedSessionPassword) {
+                password = sessionPassword;
+                triedSessionPassword = true;
+            } else {
+                try {
+                    password = await window.promptForPassword(errorMsg);
+                } catch (cancelErr) {
+                    window.showMapStatus('Location config decryption cancelled - devices will show without saved locations. Click Map again to retry.');
+                    mapConfigEntries = [];
+                    loadedCredentials = null;
+                    loadedSettings = {};
+                    mapConfigLoaded = false;
+                    return;
+                }
+            }
             try {
-                password = await window.promptForPassword(errorMsg);
-            } catch (cancelErr) {
-                window.showMapStatus('Location config decryption cancelled - devices will show without saved locations. Click Map again to retry.');
-                mapConfigEntries = [];
-                loadedCredentials = null;
-                loadedSettings = {};
-                mapConfigLoaded = false;
-                return;
+                decryptedText = await window.TopologyCrypto.decryptEnvelope(envelope, password, ['PSNetworkMapper-EncryptedConfig']);
+            } catch (decErr) {
+                errorMsg = decErr.message;
             }
         }
-        try {
-            decryptedText = await window.TopologyCrypto.decryptEnvelope(envelope, password, ['PSNetworkMapper-EncryptedConfig']);
-        } catch (decErr) {
-            errorMsg = decErr.message;
-        }
+        parsedConfig = JSON.parse(decryptedText);
+    } else {
+        parsedConfig = envelope;
     }
-    var parsedConfig = JSON.parse(decryptedText);
     mapConfigEntries = parsedConfig.devices || [];
     loadedCredentials = parsedConfig.credentials || null;
     loadedSettings = parsedConfig.settings || {};

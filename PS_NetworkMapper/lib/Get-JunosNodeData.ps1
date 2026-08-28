@@ -16,7 +16,7 @@ param (
 )
 
 $WorkerScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
-. (Join-Path $WorkerScriptDir "Connect-JunosSsh.ps1")
+. (Join-Path $WorkerScriptDir "SshHelpers.ps1")
 
 $AskPass = New-JunosAskPass -Password $Password
 
@@ -30,55 +30,73 @@ function Write-LogMsg { param([string]$msg) $Logs.Add("[$TargetIP] $msg") }
 function Invoke-InteractiveBatch {
     $TempOut = Join-Path $env:TEMP "ssh_out_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
     $TempErr = Join-Path $env:TEMP "ssh_err_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
-    
+
     $SshArgs = Get-JunosSshArgs -Username $Username -TargetIP $TargetIP
     $ProcInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ssh.exe $($SshArgs -join ' ') > `"$TempOut`" 2> `"$TempErr`"")
     $ProcInfo.UseShellExecute = $false; $ProcInfo.CreateNoWindow = $true
     $ProcInfo.RedirectStandardInput = $true
 
     foreach ($EnvKey in $AskPass.EnvironmentVariables.Keys) { $ProcInfo.EnvironmentVariables[$EnvKey] = $AskPass.EnvironmentVariables[$EnvKey] }
-    
-    if ($HumanReadable) { Write-Host "  -> Establishing Interactive Shell & Injecting Commands..." -ForegroundColor DarkGray }
-    
-    $Process = [System.Diagnostics.Process]::Start($ProcInfo)
-    
-    $Process.StandardInput.WriteLine("set cli screen-length 0")
-    $Process.StandardInput.WriteLine("show version")
-    $Process.StandardInput.WriteLine("show virtual-chassis")
-    $Process.StandardInput.WriteLine("show chassis hardware")
-    $Process.StandardInput.WriteLine("show route 0/0 exact")
-    $Process.StandardInput.WriteLine("show interfaces terse")
-    $Process.StandardInput.WriteLine("show interfaces descriptions")
-    $Process.StandardInput.WriteLine("show spanning-tree interface")
-    $Process.StandardInput.WriteLine("show poe interface")
-    $Process.StandardInput.WriteLine("show dot1x interface")
-    $Process.StandardInput.WriteLine("show lldp neighbors detail")
-    $Process.StandardInput.WriteLine("show vlans")
-    $Process.StandardInput.WriteLine("show ethernet-switching table")
-    $Process.StandardInput.WriteLine("show arp no-resolve")
-    # These four are appended last, after the ARP table the client-IP correlation
-    # depends on: if a slow switch trips the hard timeout below, it truncates only
-    # this optional data instead of corrupting client IPs. Config backup is last of the
-    # four specifically because it's the largest output of anything in this batch (a
-    # full device config, potentially thousands of lines on a big stack) - a timeout
-    # should cost the config backup before it costs uptime/alarms/RE-health.
-    $Process.StandardInput.WriteLine("show system uptime")
-    $Process.StandardInput.WriteLine("show chassis alarms")
-    $Process.StandardInput.WriteLine("show chassis routing-engine")
-    $Process.StandardInput.WriteLine("show configuration | display set")
-    $Process.StandardInput.WriteLine("quit")
-    $Process.StandardInput.Close()
 
-    $Process.WaitForExit(50000) | Out-Null
-    if (-not $Process.HasExited) { $Process.Kill(); Write-LogMsg "TIMEOUT on interactive batch." }
-    
-    $Output = if (Test-Path $TempOut) { Get-Content $TempOut -Raw } else { "" }
-    $Error  = if (Test-Path $TempErr) { Get-Content $TempErr -Raw } else { "" }
-    
-    if (Test-Path $TempOut) { Remove-Item $TempOut -Force -ErrorAction SilentlyContinue }
-    if (Test-Path $TempErr) { Remove-Item $TempErr -Force -ErrorAction SilentlyContinue }
-    
-    return @{ Output = $Output; Error = $Error }
+    if ($HumanReadable) { Write-Host "  -> Establishing Interactive Shell & Injecting Commands..." -ForegroundColor DarkGray }
+
+    $Process = $null
+    # The 19 StandardInput.WriteLine calls below assume the pipe stays open for all of
+    # them - if ssh.exe exits immediately (bad host, refused connection, askpass
+    # rejected), the pipe breaks and the first write after that throws. The temp-file
+    # reads and their Remove-Item cleanup are inside this same try (not after it): a
+    # throw from a broken pipe must still reach the finally below, or $TempOut/$TempErr
+    # are never deleted - a steady %TEMP% leak across a crawl that keeps hitting
+    # unreachable devices - and stderr (the one thing that would explain the failure)
+    # never gets read at all. The outer try/catch (see below) still catches the throw
+    # itself; this block only guarantees cleanup runs regardless.
+    $Output = ""; $ErrText = ""
+    try {
+        $Process = [System.Diagnostics.Process]::Start($ProcInfo)
+
+        $Process.StandardInput.WriteLine("set cli screen-length 0")
+        $Process.StandardInput.WriteLine("show version")
+        $Process.StandardInput.WriteLine("show virtual-chassis")
+        $Process.StandardInput.WriteLine("show chassis hardware")
+        $Process.StandardInput.WriteLine("show route 0/0 exact")
+        $Process.StandardInput.WriteLine("show interfaces terse")
+        $Process.StandardInput.WriteLine("show interfaces descriptions")
+        $Process.StandardInput.WriteLine("show spanning-tree interface")
+        $Process.StandardInput.WriteLine("show poe interface")
+        $Process.StandardInput.WriteLine("show dot1x interface")
+        $Process.StandardInput.WriteLine("show lldp neighbors detail")
+        $Process.StandardInput.WriteLine("show vlans")
+        $Process.StandardInput.WriteLine("show ethernet-switching table")
+        $Process.StandardInput.WriteLine("show arp no-resolve")
+        # These four are appended last, after the ARP table the client-IP correlation
+        # depends on: if a slow switch trips the hard timeout below, it truncates only
+        # this optional data instead of corrupting client IPs. Config backup is last of the
+        # four specifically because it's the largest output of anything in this batch (a
+        # full device config, potentially thousands of lines on a big stack) - a timeout
+        # should cost the config backup before it costs uptime/alarms/RE-health.
+        $Process.StandardInput.WriteLine("show system uptime")
+        $Process.StandardInput.WriteLine("show chassis alarms")
+        $Process.StandardInput.WriteLine("show chassis routing-engine")
+        $Process.StandardInput.WriteLine("show configuration | display set")
+        $Process.StandardInput.WriteLine("quit")
+        $Process.StandardInput.Close()
+
+        $Process.WaitForExit(50000) | Out-Null
+        if (-not $Process.HasExited) { $Process.Kill(); Write-LogMsg "TIMEOUT on interactive batch." }
+
+        $Output = if (Test-Path $TempOut) { Get-Content $TempOut -Raw } else { "" }
+        # Named $ErrText, not $Error - $Error is PowerShell's automatic variable holding
+        # the session's error record history; shadowing it here previously made every
+        # subsequent $Error.Count / $Error[0] check in this scope look at ssh's stderr
+        # text instead.
+        $ErrText = if (Test-Path $TempErr) { Get-Content $TempErr -Raw } else { "" }
+    } finally {
+        if ($Process) { $Process.Dispose() }
+        if (Test-Path $TempOut) { Remove-Item $TempOut -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $TempErr) { Remove-Item $TempErr -Force -ErrorAction SilentlyContinue }
+    }
+
+    return @{ Output = $Output; Error = $ErrText }
 }
 
 $NodeData = @{
@@ -124,8 +142,17 @@ try {
     }
 
     if ([string]::IsNullOrWhiteSpace($RawOutput)) {
-        if ($HumanReadable) { Write-Host "  [!] CRITICAL ERROR: Switch returned empty payload." -ForegroundColor Red }
-        Write-LogMsg "CRITICAL: Switch returned empty payload."
+        # ssh's stderr is the only thing that actually says WHY - "Connection timed out",
+        # "Permission denied", "Host key verification failed", etc. Without logging it, an
+        # unreachable/misauthenticating switch and every other empty-payload cause are
+        # indistinguishable in the debug log. Truncated so one pathological/looping stderr
+        # dump can't blow up the log for a single device.
+        $ErrSummary = if (-not [string]::IsNullOrWhiteSpace($Result.Error)) {
+            $Trimmed = $Result.Error.Trim()
+            if ($Trimmed.Length -gt 500) { $Trimmed.Substring(0, 500) + "...(truncated)" } else { $Trimmed }
+        } else { "(no stderr output captured)" }
+        if ($HumanReadable) { Write-Host "  [!] CRITICAL ERROR: Switch returned empty payload. ssh said: $ErrSummary" -ForegroundColor Red }
+        Write-LogMsg "CRITICAL: Switch returned empty payload. ssh stderr: $ErrSummary"
         # Every other field here was already initialized array-shaped above; Interfaces is
         # the one exception - it starts as a hashtable (built up keyed by port name while
         # parsing) and only gets converted to an array at the very end, a step this early
@@ -171,8 +198,11 @@ try {
         # "contact admin@example.com > for support" could match a bare prompt-shape pattern
         # and truncate the capture early - it can't also spell out the literal word "quit"
         # immediately after by coincidence. `\z` remains as the fallback for the rare case
-        # the echo isn't present at all (e.g. the connection dropped before it arrived).
-        elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+\S+@\S+[>#]\s*quit\b|\z)') { $DataDict["CONFIG"] = $Matches.content }
+        # the echo isn't present at all (e.g. the connection dropped before it arrived). The
+        # optional `{master:0}`-shaped group absorbs a Virtual Chassis prompt prefix line
+        # that can appear immediately before the quit echo on a VC member, so it isn't left
+        # dangling inside the captured config text.
+        elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+(?:{[^}]+}[\r\n]+)?\S+@\S+[>#]\s*quit\b|\z)') { $DataDict["CONFIG"] = $Matches.content }
     }
 
     # --- Parse Identity ---
@@ -196,7 +226,7 @@ try {
                 if ($Line -match "\b([A-Z0-9]{10,})\b") { $serial = $Matches[1] }
                 
                 $model = "Unknown"
-                if ($Line -match "\b(ex\d{4}[^\s]*)\b") { $model = $Matches[1] }
+                if ($Line -match "\b(ex\d{4}[^\s]*|qfx\d{4}[^\s]*|srx\d{4}[^\s]*)\b") { $model = $Matches[1] }
                 
                 if ($serial -ne "Unknown") {
                     $NodeData.StackMembers += [PSCustomObject]@{ FPC = $Matches.id; Model = $model; Serial = $serial; Role = $role }

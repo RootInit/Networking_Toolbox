@@ -1,17 +1,12 @@
-# Real credentials - only Network_Mapper/lib/Auth.example.json (placeholder template) is
-# tracked. The real Auth.json a user creates from it lives next to Start-NetworkMapper.ps1
-# (its default -AuthFile ".\Auth.json" is CWD-relative, and Network_Mapper/ is where you'd
-# actually invoke that script from), not in lib/ with the template.
-PS_NetworkMapper/Network_Mapper/Auth.json
-
-# Real device-location data - only Network_Mapper/lib/Configuration.example.json
-# (placeholder template) is tracked. Written by /api/save-config (Start-WebServer.ps1),
-# same sensitivity class as Auth.json above.
-PS_NetworkMapper/Network_Mapper/Configuration.json.enc
+# Real device-location data - only Configuration.example.json (placeholder template) is
+# tracked. Written by /api/save-config (Start-WebServer.ps1). Configuration.json is the
+# -NoEncryption-mode plaintext equivalent - same sensitivity, ignored for the same reason.
+PS_NetworkMapper/Configuration.json.enc
+PS_NetworkMapper/Configuration.json
 
 # Scraper output - contains real internal topology/IP data, not fixtures. Every real crawl
-# writes into the shared Network_Maps/ folder (see Start-NetworkMapper.ps1's $SnapshotDir),
-# named NetworkMap_<timestamp>.json(.enc) or ...tmp... while a write is in progress. The two
+# writes into the Network_Maps/ folder (see Start-NetworkMapper.ps1's $SnapshotDir), named
+# NetworkMap_<timestamp>.json(.enc) or ...tmp... while a write is in progress. The two
 # shipped sample snapshots happen to follow that same naming convention on purpose (so
 # "Load Folder of Snapshots" can load them together to demo the multi-snapshot/diff
 # features) - the explicit `!` exceptions below are the only tracked files matching the
@@ -21,15 +16,8 @@ PS_NetworkMapper/Network_Maps/NetworkMap_*.json.enc
 !PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-13_091500.json
 !PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-20_143207.json
 !PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-20_143207.json.enc
-PS_NetworkMapper/Network_Mapper/Mapper_Debug.log
-PS_NetworkMapper/Network_Mapper/RawDumps/
-
-# PS_NetworkMapper_V2's Configuration.json.enc, Network_Maps/, and NDJSON device-history
-# ledger are not duplicated here - V2 shares all of that with PS_NetworkMapper/ above (see
-# Start-NetworkMapper.ps1's $SharedMapperDir/$SnapshotDir). Only its own per-run debug
-# artifacts are local to it.
-PS_NetworkMapper_V2/Network_Mapper/Mapper_Debug.log
-PS_NetworkMapper_V2/Network_Mapper/RawDumps/
+PS_NetworkMapper/Mapper_Debug.log
+PS_NetworkMapper/RawDumps/
 
 # Local git worktrees used for isolated feature-plan execution (superpowers:using-git-worktrees).
 .worktrees/

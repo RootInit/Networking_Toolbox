@@ -1,21 +1,21 @@
 #
 # Shared AES-256-CBC + PBKDF2-SHA256 + HMAC-SHA256 (encrypt-then-MAC) envelope logic,
-# used by both Start-NetworkMapper.ps1 (topology snapshot writes) and Start-WebServer.ps1
+# used by both Start-NetworkMapper.ps1 (topology snapshot writes) and WebServer.ps1
 # (Configuration.json.enc writes via /api/save-config) - extracted so this crypto exists
 # in exactly one place instead of drifting between the crawler and the webserver.
-# Mirrors Network_Visualizer/src/topology-crypto.js's decryptEnvelope on the browser side.
+# Mirrors web-src/topology-crypto.js's decryptEnvelope on the browser side.
 #
 # Not meant to be run directly - dot-source it.
 
 # Single source of truth for the PBKDF2 iteration count used by every encrypted write in
 # this app - topology/client/config-backup snapshots via Start-NetworkMapper.ps1, and
-# Configuration.json.enc via Start-WebServer.ps1's /api/save-config. Both call sites used to
+# Configuration.json.enc via WebServer.ps1's /api/save-config. Both call sites used to
 # each hardcode their own literal `600000`; harmless while they happened to agree, but it
 # defeated the whole point of extracting this file in the first place (stop crypto
 # parameters drifting between the crawler and the webserver). A function, not a bare
 # variable, so it resolves correctly no matter how many layers of dot-sourcing sit between
-# the caller and this file (Start-WebServer.ps1 dot-sources this file directly;
-# Start-NetworkMapper.ps1 dot-sources both Start-WebServer.ps1 and this file) - the same
+# the caller and this file (WebServer.ps1 dot-sources this file directly;
+# Start-NetworkMapper.ps1 dot-sources both WebServer.ps1 and this file) - the same
 # nested dot-source chain Get-TopologyKeyMaterial/Protect-TopologyPayload below already rely
 # on successfully.
 #
@@ -84,7 +84,7 @@ function Protect-TopologyPayload {
     }
 }
 
-# Mirror of Network_Visualizer/src/topology-crypto.js's decryptEnvelope, for the PowerShell
+# Mirror of web-src/topology-crypto.js's decryptEnvelope, for the PowerShell
 # side - Start-NetworkMapper.ps1 needs to decrypt Configuration.json.enc at startup to read
 # stored Juniper credentials, and until now only the browser ever decrypted anything (this
 # file's other function, Protect-TopologyPayload, only ever encrypts). Verifies the HMAC
@@ -127,7 +127,7 @@ function Unprotect-TopologyPayload {
 
     # Byte-by-byte, not a Base64-string comparison - avoids allocating strings for the sole
     # purpose of comparing them. Not constant-time, but this app's threat model (localhost-
-    # only server, single local operator - see Start-WebServer.ps1's header comment) already
+    # only server, single local operator - see WebServer.ps1's header comment) already
     # accepts non-constant-time comparisons elsewhere; anyone able to measure this timing
     # already has local code execution, which is full compromise regardless.
     $MacOk = $ComputedMac.Length -eq $MacBytes.Length

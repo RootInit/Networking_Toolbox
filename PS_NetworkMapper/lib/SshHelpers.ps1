@@ -6,7 +6,7 @@
 # directly-attached console with neither. Forcing those into one shared function would
 # hide, not remove, the real difference between the two.
 #
-# Not meant to be run directly - dot-source it: `. (Join-Path $PSScriptRoot "Connect-JunosSsh.ps1")`
+# Not meant to be run directly - dot-source it: `. (Join-Path $PSScriptRoot "SshHelpers.ps1")`
 
 # Writes {Username, Password} to a short-lived %TEMP% file for handoff to Connect-Switch.ps1,
 # which runs via Start-Process as a genuinely separate OS process (unlike Get-JunosNodeData.ps1,
