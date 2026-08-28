@@ -53,10 +53,9 @@ $ConfigPath = Join-Path $ScriptDir $(if ($NoEncryption) { "Configuration.json" }
 . (Join-Path $ScriptDir "lib\WebServer.ps1")
 . (Join-Path $ScriptDir "lib\TopologyCrypto.ps1")
 $DebugLog = Join-Path $ScriptDir "Mapper_Debug.log"
-# Snapshots and the NDJSON device-history ledger live in the sibling Network_Maps/ folder.
+# Snapshots live in the sibling Network_Maps/ folder.
 $SnapshotDir = Join-Path $ScriptDir "Network_Maps"
 if (-not (Test-Path $SnapshotDir)) { New-Item -ItemType Directory -Path $SnapshotDir -Force | Out-Null }
-$DeviceHistoryLedger = Join-Path $SnapshotDir "device_history.ndjson"
 
 # Converts a SecureString to plaintext - the standard cross-runtime idiom (works
 # identically on Windows PowerShell 5.1 and pwsh 7+, unlike manually marshaling the BSTR,
@@ -183,7 +182,7 @@ if (-not $NoEncryption -and $EncryptionPassword) {
 # Invoke-RescanAction already fail cleanly (pointing at the Settings tab) if the browser
 # tries an action that needs them.
 if (-not $SwitchIP) {
-    Start-MapperWebServer -NoEncryption:$NoEncryption -VisualizerRoot $VisualizerRoot -SingleFileVisualizerPath $SingleFileVisualizerPath -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
+    Start-MapperWebServer -NoEncryption:$NoEncryption -VisualizerRoot $VisualizerRoot -SingleFileVisualizerPath $SingleFileVisualizerPath -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
     return
 }
 
@@ -204,7 +203,7 @@ if (-not (Test-Path $WorkerPath)) { Write-Host "Worker script missing at $Worker
 $CrawlProgress = @{}  # unused by the CLI path (nothing polls it) - passed only because Invoke-FleetCrawl requires it
 $CrawlResult = Invoke-FleetCrawl -StartIP $SwitchIP -AllowedScopes $AllowedScopes -MaxConcurrent $MaxConcurrent `
     -WorkerPath $WorkerPath -Username $JunosUsername -Password $JunosPassword `
-    -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -ProgressTable $CrawlProgress `
+    -SnapshotDir $SnapshotDir -ProgressTable $CrawlProgress `
     -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS `
     -DebugLogPath $DebugLog -Log:$Log
 
@@ -212,4 +211,4 @@ $CrawlResult = Invoke-FleetCrawl -StartIP $SwitchIP -AllowedScopes $AllowedScope
 # default browser to it. Runs after the crawl (not instead of it) so the freshly-written
 # snapshot is immediately available to "Load Folder of Snapshots" without a manual step -
 # this call blocks (serving requests) until Ctrl+C.
-Start-MapperWebServer -NoEncryption:$NoEncryption -VisualizerRoot $VisualizerRoot -SingleFileVisualizerPath $SingleFileVisualizerPath -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
+Start-MapperWebServer -NoEncryption:$NoEncryption -VisualizerRoot $VisualizerRoot -SingleFileVisualizerPath $SingleFileVisualizerPath -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS

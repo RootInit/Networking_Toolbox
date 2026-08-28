@@ -352,7 +352,7 @@ function Invoke-RescanStatusAction {
 # a second click while one is running is refused with a 409, not queued or stacked.
 function Invoke-ScanNetworkAction {
     param($Response, [string]$Body, [string]$WorkerPath, [string]$JunosUsername, [string]$JunosPassword,
-          [string]$MaxConcurrent, [string[]]$AllowedScopes, [string]$SnapshotDir, [string]$DeviceHistoryLedger,
+          [string]$MaxConcurrent, [string[]]$AllowedScopes, [string]$SnapshotDir,
           [byte[]]$EncKey, [byte[]]$MacKey, [byte[]]$Salt, [int]$Iterations)
 
     if ([string]::IsNullOrWhiteSpace($JunosUsername) -or [string]::IsNullOrWhiteSpace($JunosPassword)) {
@@ -409,7 +409,6 @@ function Invoke-ScanNetworkAction {
         AddParameter("Username", $JunosUsername).
         AddParameter("Password", $JunosPassword).
         AddParameter("SnapshotDir", $SnapshotDir).
-        AddParameter("DeviceHistoryLedger", $DeviceHistoryLedger).
         AddParameter("ProgressTable", $ProgressTable).
         AddParameter("DebugLogPath", $DebugLogPath)
     if ($EncKey) { $PS.AddParameter("EncKey", $EncKey).AddParameter("MacKey", $MacKey).AddParameter("Salt", $Salt).AddParameter("Iterations", $Iterations) | Out-Null }
@@ -744,7 +743,6 @@ function Start-MapperWebServer {
         [Parameter(Mandatory=$true)][int]$MaxConcurrent,
         [Parameter(Mandatory=$true)][string[]]$AllowedScopes,
         [Parameter(Mandatory=$true)][string]$SnapshotDir,
-        [Parameter(Mandatory=$true)][string]$DeviceHistoryLedger,
         [byte[]]$EncKey,
         [byte[]]$MacKey,
         [byte[]]$Salt,
@@ -877,7 +875,7 @@ function Start-MapperWebServer {
                         $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
                         $Body = $Reader.ReadToEnd()
                         $Reader.Close()
-                        Invoke-ScanNetworkAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -DeviceHistoryLedger $DeviceHistoryLedger -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations $Iterations
+                        Invoke-ScanNetworkAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations $Iterations
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/scan-network/status") {
                     Invoke-ScanNetworkStatusAction -Response $Response

@@ -19,7 +19,6 @@ function Invoke-FleetCrawl {
         [Parameter(Mandatory=$true)][string]$Username,
         [Parameter(Mandatory=$true)][string]$Password,
         [Parameter(Mandatory=$true)][string]$SnapshotDir,
-        [Parameter(Mandatory=$true)][string]$DeviceHistoryLedger,
         # Mandatory even for a caller that never reads it (the CLI path) - keeps the
         # function's contract uniform rather than branching internally on whether progress
         # reporting was requested. The web path (Task 3) shares this SAME hashtable
@@ -88,31 +87,6 @@ function Invoke-FleetCrawl {
         }
     }
 
-    # Appends one NDJSON line per device to the shared history ledger - additive to, not a
-    # replacement for, the full JSON/enc snapshot written above. Only called once, at the
-    # very end of a completed crawl - not on every 5-second periodic write - so each device
-    # gets exactly one ledger line per run, not one per partial flush.
-    function Write-DeviceHistoryLedgerLocal {
-        param([System.Collections.Generic.List[object]]$Topology, [string]$LedgerPath, [string]$ScanTimestampIso)
-        $Lines = foreach ($Device in $Topology) {
-            [ordered]@{
-                ts         = $ScanTimestampIso
-                ip         = $Device.DeviceIP
-                hostname   = $Device.Hostname
-                junosVer   = $Device.JunosVersion
-                uptime     = $Device.Uptime
-                alarmCount = @($Device.Alarms).Count
-                cpuPct     = $Device.MasterCpuUtilization
-                memPct     = $Device.MasterMemoryUtilization
-            } | ConvertTo-Json -Depth 5 -Compress
-        }
-        # AppendAllLines with an explicit BOM-less UTF8Encoding, not Add-Content -Encoding
-        # utf8 - see Start-NetworkMapper.ps1's own original comment on this for why (BOM
-        # inconsistency between PS 5.1 and 7+ would otherwise corrupt later lines for
-        # per-line consumers).
-        if ($Lines) { [System.IO.File]::AppendAllLines($LedgerPath, [string[]]$Lines, [System.Text.UTF8Encoding]::new($false)) }
-    }
-
     $ScanDateTime = Get-Date
     $ScanTimestamp = $ScanDateTime.ToString("yyyy-MM-dd_HHmmss")
     $ScanTimestampIso = $ScanDateTime.ToString("o")
@@ -133,12 +107,6 @@ function Invoke-FleetCrawl {
     $Enqueued.Add($StartIP) | Out-Null
     $LastWriteTime = Get-Date
     $PendingWrites = 0
-    # Guards the device-history ledger specifically (see Write-DeviceHistoryLedgerLocal's
-    # own "exactly one ledger line per run" comment): the final-write block and the
-    # emergency salvage in the outer catch can both reach a ledger write in the same run
-    # if a throw/Ctrl+C lands between the final write succeeding and the function
-    # returning - without this flag that's a double-write, one NDJSON line per device.
-    $LedgerWritten = $false
 
     Write-TopologyOutputLocal -Topology @() -Path $OutputFile -ScanTimestampIso $ScanTimestampIso
 
@@ -288,17 +256,14 @@ function Invoke-FleetCrawl {
                 Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
                 Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
             }
-            Write-DeviceHistoryLedgerLocal -Topology $TopologyList -LedgerPath $DeviceHistoryLedger -ScanTimestampIso $ScanTimestampIso
-            $LedgerWritten = $true
         } catch {
             Write-DebugLogLocal "FINAL WRITE FAILED: $_"
-            Write-Host "`n[!] Final snapshot/ledger write failed: $_" -ForegroundColor Red
+            Write-Host "`n[!] Final snapshot write failed: $_" -ForegroundColor Red
         }
 
         Write-Host "`n`n=================================================" -ForegroundColor Cyan
         Write-Host "Mapping Complete! Processed $($Visited.Count) devices." -ForegroundColor Green
         Write-Host "Topology saved to: $OutputFile" -ForegroundColor White
-        Write-Host "Device history appended to: $DeviceHistoryLedger" -ForegroundColor White
         Write-Host "=================================================" -ForegroundColor Cyan
 
         $ProgressTable.Done = $true
@@ -308,7 +273,7 @@ function Invoke-FleetCrawl {
         # A genuinely unexpected throw somewhere in the loop above (not one of the
         # per-device paths already caught individually) used to fall straight through to
         # the finally below and out of the function - losing the in-memory $TopologyList,
-        # skipping the final write/ledger entirely, and never setting ProgressTable.Done
+        # skipping the final write entirely, and never setting ProgressTable.Done
         # (so a web-triggered scan would poll forever). Make a best-effort attempt to save
         # whatever was already collected before this still re-throws, so a mid-crawl bug
         # costs at most the devices not yet visited - not the ones already gathered.
@@ -329,17 +294,6 @@ function Invoke-FleetCrawl {
                 # the temp file is fully and successfully written.
                 Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
                 Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
-                # Guarded on $LedgerWritten: the throw/Ctrl+C that landed us here could have
-                # happened AFTER the final-write block above already appended this same
-                # $TopologyList to the ledger (between that write succeeding and the
-                # function actually returning) - without this guard every device would get
-                # two NDJSON lines for one run. The snapshot write above needs no equivalent
-                # guard; temp+Move-Item is naturally idempotent (just re-overwrites the same
-                # file), unlike an append-only ledger.
-                if (-not $LedgerWritten) {
-                    Write-DeviceHistoryLedgerLocal -Topology $TopologyList -LedgerPath $DeviceHistoryLedger -ScanTimestampIso $ScanTimestampIso
-                    $LedgerWritten = $true
-                }
                 Write-Host "[!] Salvaged $($TopologyList.Count) already-crawled device(s) to $OutputFile before aborting." -ForegroundColor Yellow
             }
         } catch {
