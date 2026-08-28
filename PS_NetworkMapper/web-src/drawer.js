@@ -151,9 +151,20 @@ window.pingDevice = async function() {
     if (!ip) return;
     var btn = document.getElementById('pingBtn');
     var original = btn ? btn.textContent : null;
+    // Written to directly, not just window.setStatus (still called below for consistency
+    // with every other drawer action) - #status-text lives in the left sidebar's Load File
+    // tab, which is easy to not be looking at while sitting in THIS panel on the right; see
+    // #pingResult's own comment in index.html.
+    var resultEl = document.getElementById('pingResult');
+    function showResult(msg, cls) {
+        if (!resultEl) return;
+        resultEl.textContent = msg;
+        resultEl.className = cls || '';
+    }
 
     try {
         if (btn) { btn.disabled = true; btn.textContent = 'Pinging...'; }
+        showResult('Pinging...', '');
         var resp = await fetch('/api/ping', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -161,16 +172,24 @@ window.pingDevice = async function() {
         });
         var result = await resp.json();
         if (!resp.ok) {
-            window.setStatus("Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status)), "red");
+            var errMsg = "Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status));
+            showResult(errMsg, 'red');
+            window.setStatus(errMsg, "red");
             return;
         }
         if (result.alive) {
+            var okMsg = "Reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + ")";
+            showResult(okMsg, 'green');
             window.setStatus(ip + " is reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + " replies).", "green");
         } else {
+            var failMsg = "No response (" + result.received + "/" + result.sent + ")";
+            showResult(failMsg, 'red');
             window.setStatus(ip + " did not respond to ping (" + result.received + "/" + result.sent + " replies).", "red");
         }
     } catch (e) {
-        window.setStatus("Could not ping " + ip + ": " + e.message, "red");
+        var exMsg = "Could not ping " + ip + ": " + e.message;
+        showResult(exMsg, 'red');
+        window.setStatus(exMsg, "red");
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = original; }
     }
@@ -263,6 +282,10 @@ window.openRightDrawer = function(ip) {
     currentSelectedNodeData = deviceByIp.get(String(ip));
     var panel = document.getElementById('right-panel');
     document.getElementById('drawer-title').innerText = ip;
+    // A stale "Reachable"/"No response" from whatever device was open before this one would
+    // otherwise still be sitting there, silently mislabeled as belonging to the new device.
+    var pingResultEl = document.getElementById('pingResult');
+    if (pingResultEl) { pingResultEl.textContent = ''; pingResultEl.className = ''; }
 
     var handle = document.getElementById('right-panel-handle');
 

@@ -233,28 +233,41 @@ function Invoke-PingAction {
 
     try {
         # -Quiet is avoided: it collapses the whole result to one bool with no latency/loss
-        # detail. Plain Test-Connection returns one reply object per echo (PS 5.1's
-        # Win32_PingStatus-backed cmdlet) or a richer summary object (PS 7's redesigned
-        # cmdlet) - both expose ResponseTime/Latency and a per-reply success flag, so this
-        # reads defensively across either shape rather than assuming one. Parameter set
-        # genuinely differs between the two: PS 7+ renamed -ComputerName to -TargetName and
-        # added -TimeoutSeconds; PS 5.1 has neither and would throw "parameter cannot be
-        # found" if passed them - same pwsh-vs-powershell.exe split this file already
-        # branches on elsewhere (see the SSH-launch host-detection comment above).
+        # detail. Parameter set genuinely differs between the two PowerShell generations
+        # (PS 7+ renamed -ComputerName to -TargetName and added -TimeoutSeconds; PS 5.1 has
+        # neither and would throw "parameter cannot be found" if passed them - same
+        # pwsh-vs-powershell.exe split this file already branches on elsewhere), and so does
+        # what a FAILED probe looks like in the output - confirmed directly against a real
+        # unreachable target on PS 7, not assumed from docs:
+        #   - PS 7+'s redesigned cmdlet returns ONE OBJECT PER PING regardless of outcome -
+        #     a timed-out probe is a normal pipeline object with Status='TimedOut' and
+        #     Latency=0, not an error and not a missing object. Counting every non-null
+        #     object here (the original version of this code) therefore reported a fully
+        #     dead device as 4/4 replies received - the opposite of what this endpoint
+        #     exists to show. Must filter on Status -eq 'Success' explicitly.
+        #   - PS 5.1's classic Win32_PingStatus-backed cmdlet does the reverse: a successful
+        #     ping is a normal pipeline object, but a FAILED one is written to the error
+        #     stream instead of returned as an object at all - so plain assignment already
+        #     collects successes only, with no Status field to filter on. -ErrorAction Stop
+        #     here would be actively wrong: it turns the first failed probe into a
+        #     script-terminating exception, discarding any EARLIER successes already
+        #     collected (a 2-of-4 partial loss would misreport as 0/4) - SilentlyContinue
+        #     lets every probe run and just suppresses the per-failure error records this
+        #     endpoint doesn't need to surface.
         if ($PSVersionTable.PSVersion.Major -ge 6) {
-            $Results = Test-Connection -TargetName $TargetIP -Count 4 -TimeoutSeconds 2 -ErrorAction Stop
+            $AllResults = Test-Connection -TargetName $TargetIP -Count 4 -TimeoutSeconds 2 -ErrorAction SilentlyContinue
+            $Results = @($AllResults | Where-Object { $_.Status -eq 'Success' })
         } else {
-            $Results = Test-Connection -ComputerName $TargetIP -Count 4 -ErrorAction Stop
+            $Results = @(Test-Connection -ComputerName $TargetIP -Count 4 -ErrorAction SilentlyContinue)
         }
     } catch {
-        # Total loss throws on both versions rather than returning empty replies - either
-        # way, "could not complete the ping" is reported as zero replies, not a 500, since a
-        # fully unreachable device is the expected, common result this endpoint exists to
-        # report, not a server error.
+        # Belt-and-braces only at this point (e.g. Test-Connection itself missing/broken) -
+        # reported as zero replies, not a 500, since a fully unreachable device is the
+        # expected, common result this endpoint exists to report, not a server error.
         $Results = @()
     }
 
-    $ReplyCount = @($Results | Where-Object { $_ }).Count
+    $ReplyCount = $Results.Count
     $Latencies = @($Results | ForEach-Object {
         if ($null -ne $_.PSObject.Properties['Latency']) { $_.Latency }
         elseif ($null -ne $_.PSObject.Properties['ResponseTime']) { $_.ResponseTime }

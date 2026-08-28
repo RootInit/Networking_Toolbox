@@ -1565,6 +1565,9 @@ svg.leaflet-image-layer.leaflet-interactive path {
         .drawer-header h2 { color: white; margin: 0; font-size: 1.2rem; }
         .close-btn { cursor: pointer; font-size: 1.5rem; font-weight: bold; line-height: 1; transition: 0.2s;}
         #rescanBtn, #pingBtn, #copyConnectBtn, #printReportBtn { width: auto; margin: 0; padding: 6px 12px; font-size: 0.75rem; background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.4); }
+        #pingResult { font-size: 0.78rem; font-weight: bold; padding: 4px 8px; border-radius: 4px; }
+        #pingResult.green { background: rgba(39,174,96,0.25); color: #eafaf1; }
+        #pingResult.red { background: rgba(231,76,60,0.25); color: #fdecea; }
         #rescanBtn:hover, #pingBtn:hover, #copyConnectBtn:hover, #printReportBtn:hover { background: rgba(255,255,255,0.28); }
         #rescanBtn:disabled, #pingBtn:disabled { opacity: 0.6; cursor: default; }
         .close-btn:hover { color: #ff6b6b; }
@@ -1972,17 +1975,24 @@ svg.leaflet-image-layer.leaflet-interactive path {
             <div class="drawer-header"><h2 id="editorDeviceLabel">Set Location</h2></div>
             <div style="padding:18px;">
                 <p style="font-size:0.82rem; color:#666; margin:0 0 12px;">Click a spot on the map to place this device, or type coordinates directly below, then fill in the details.</p>
-                <!-- type="text" + inputmode="decimal", not type="number": a Washington-state
-                     device needs a NEGATIVE longitude, and type="number"'s virtual keypad on
-                     iOS Safari (and several Android keyboards) has no minus-sign key at all -
-                     someone setting a pin from a phone/tablet while standing in the wiring
-                     closet could never enter a negative value. pattern is validated on submit
-                     by commitLocationEdit's own parseFloat/isFinite check below, not by the
-                     browser - it's just a hint for browsers that render one from `pattern`. -->
+                <!-- type="text", no inputmode, not type="number": a Washington-state device
+                     needs a NEGATIVE longitude. type="number"'s virtual keypad on iOS Safari
+                     (and several Android keyboards) has no minus-sign key at all. The first
+                     fix here swapped to type="text" but paired it with inputmode="decimal" -
+                     which turns out to have the SAME problem: the HTML spec defines
+                     inputmode="decimal" as "a numeric keyboard... but not the plus or minus
+                     key, since this is intended for non-negative decimal numbers", so it
+                     suppresses the minus key too, on desktop soft keyboards as well as
+                     mobile. There is no inputmode value for "signed decimal" - omitting the
+                     attribute entirely (falls back to a normal text keyboard, which every
+                     platform renders with a minus key) is the only reliable option. pattern
+                     is validated on submit by commitLocationEdit's own parseFloat/isFinite
+                     check below, not by the browser - it's just a hint for browsers that
+                     render one from `pattern`. -->
                 <label style="font-size:0.8rem; font-weight:bold;">Latitude</label>
-                <input type="text" inputmode="decimal" pattern="-?\d*\.?\d*" id="editorLat" placeholder="e.g. 47.653500">
+                <input type="text" pattern="-?\d*\.?\d*" id="editorLat" placeholder="e.g. 47.653500">
                 <label style="font-size:0.8rem; font-weight:bold;">Longitude</label>
-                <input type="text" inputmode="decimal" pattern="-?\d*\.?\d*" id="editorLng" placeholder="e.g. -122.306800">
+                <input type="text" pattern="-?\d*\.?\d*" id="editorLng" placeholder="e.g. -122.306800">
                 <label style="font-size:0.8rem; font-weight:bold;">Building</label>
                 <input type="text" id="editorBuilding" placeholder="Building name">
                 <label style="font-size:0.8rem; font-weight:bold;">Room</label>
@@ -2010,6 +2020,13 @@ svg.leaflet-image-layer.leaflet-interactive path {
                 <button type="button" id="pingBtn" onclick="window.pingDevice()" title="Send a quick ICMP ping to this device's management IP to check reachability">Ping</button>
                 <button type="button" id="copyConnectBtn" onclick="window.copyConnectCommand()" title="Launch an interactive SSH session to this device via the local webserver">Launch SSH Session</button>
                 <button type="button" id="printReportBtn" onclick="window.printDeviceReport()" title="Open a printable report for this device in a new tab">Print Report</button>
+                <!-- Dedicated result readout right next to the button that triggers it,
+                     not just window.setStatus (drawer.js's window.pingDevice still calls
+                     that too, for consistency with every other drawer action) - #status-text
+                     lives in the LEFT sidebar's Load File tab and only mirrors to a floating
+                     note when that tab is hidden, so on its own it's easy to fire-and-miss
+                     while looking at THIS panel on the right. -->
+                <span id="pingResult"></span>
             </div>
         </div>
         
@@ -4662,9 +4679,20 @@ window.pingDevice = async function() {
     if (!ip) return;
     var btn = document.getElementById('pingBtn');
     var original = btn ? btn.textContent : null;
+    // Written to directly, not just window.setStatus (still called below for consistency
+    // with every other drawer action) - #status-text lives in the left sidebar's Load File
+    // tab, which is easy to not be looking at while sitting in THIS panel on the right; see
+    // #pingResult's own comment in index.html.
+    var resultEl = document.getElementById('pingResult');
+    function showResult(msg, cls) {
+        if (!resultEl) return;
+        resultEl.textContent = msg;
+        resultEl.className = cls || '';
+    }
 
     try {
         if (btn) { btn.disabled = true; btn.textContent = 'Pinging...'; }
+        showResult('Pinging...', '');
         var resp = await fetch('/api/ping', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -4672,16 +4700,24 @@ window.pingDevice = async function() {
         });
         var result = await resp.json();
         if (!resp.ok) {
-            window.setStatus("Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status)), "red");
+            var errMsg = "Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status));
+            showResult(errMsg, 'red');
+            window.setStatus(errMsg, "red");
             return;
         }
         if (result.alive) {
+            var okMsg = "Reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + ")";
+            showResult(okMsg, 'green');
             window.setStatus(ip + " is reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + " replies).", "green");
         } else {
+            var failMsg = "No response (" + result.received + "/" + result.sent + ")";
+            showResult(failMsg, 'red');
             window.setStatus(ip + " did not respond to ping (" + result.received + "/" + result.sent + " replies).", "red");
         }
     } catch (e) {
-        window.setStatus("Could not ping " + ip + ": " + e.message, "red");
+        var exMsg = "Could not ping " + ip + ": " + e.message;
+        showResult(exMsg, 'red');
+        window.setStatus(exMsg, "red");
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = original; }
     }
@@ -4774,6 +4810,10 @@ window.openRightDrawer = function(ip) {
     currentSelectedNodeData = deviceByIp.get(String(ip));
     var panel = document.getElementById('right-panel');
     document.getElementById('drawer-title').innerText = ip;
+    // A stale "Reachable"/"No response" from whatever device was open before this one would
+    // otherwise still be sitting there, silently mislabeled as belonging to the new device.
+    var pingResultEl = document.getElementById('pingResult');
+    if (pingResultEl) { pingResultEl.textContent = ''; pingResultEl.className = ''; }
 
     var handle = document.getElementById('right-panel-handle');
 
