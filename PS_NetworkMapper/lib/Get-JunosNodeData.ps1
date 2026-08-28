@@ -84,12 +84,20 @@ function Invoke-InteractiveBatch {
         $Process.WaitForExit(50000) | Out-Null
         if (-not $Process.HasExited) { $Process.Kill(); Write-LogMsg "TIMEOUT on interactive batch." }
 
-        $Output = if (Test-Path $TempOut) { Get-Content $TempOut -Raw } else { "" }
+        # -Encoding UTF8 explicit, not the default: ssh.exe's redirected stdout/stderr is the
+        # remote device's raw byte stream verbatim (cmd.exe's `>`/`2>` redirection does no
+        # codepage translation), and Junos emits UTF-8 for anything outside ASCII (hostnames,
+        # login-message banners, etc). Get-Content's no-BOM default is the system's ANSI
+        # codepage, not UTF-8 - on a non-Western-European locale that mismatch turns every
+        # multi-byte UTF-8 sequence into a run of wrong-but-valid characters (commonly
+        # rendering as CJK ideographs once written back out and viewed), corrupting every
+        # log line and Configuration dump that ever passes through a non-ASCII byte.
+        $Output = if (Test-Path $TempOut) { Get-Content $TempOut -Raw -Encoding UTF8 } else { "" }
         # Named $ErrText, not $Error - $Error is PowerShell's automatic variable holding
         # the session's error record history; shadowing it here previously made every
         # subsequent $Error.Count / $Error[0] check in this scope look at ssh's stderr
         # text instead.
-        $ErrText = if (Test-Path $TempErr) { Get-Content $TempErr -Raw } else { "" }
+        $ErrText = if (Test-Path $TempErr) { Get-Content $TempErr -Raw -Encoding UTF8 } else { "" }
     } finally {
         if ($Process) { $Process.Dispose() }
         if (Test-Path $TempOut) { Remove-Item $TempOut -Force -ErrorAction SilentlyContinue }
@@ -137,7 +145,7 @@ try {
         # "show configuration | display set" is written last in Invoke-InteractiveBatch
         # specifically so this "to the end" replacement is safe - nothing else follows it.
         $RedactedOutput = $RawOutput -replace '(?ms)(^.*>\s*show\s+configuration\s*\|\s*display\s+set[^\r\n]*[\r\n]+).*\z', '$1[CONFIGURATION REDACTED - not written to RawDumps by design; see the Configuration field in NetworkMap output]'
-        $RedactedOutput | Out-File $RawLogPath -Force
+        $RedactedOutput | Out-File $RawLogPath -Force -Encoding utf8
         Write-LogMsg "Raw payload saved to $RawLogPath (configuration output redacted)"
     }
 
@@ -190,19 +198,27 @@ try {
         # Unlike every section above, nothing with "show " follows this one - "quit" does -
         # so the -split boundary above can't bound it and a greedy (?s).* would swallow the
         # trailing "user@switch> quit" echo (and any "Connection closed" text after it) into
-        # the config itself. Stop non-greedily at the next CLI prompt line instead - anchored
-        # on the LITERAL "quit" that's echoed there (Invoke-InteractiveBatch always sends it
-        # immediately after this command, see above), not just any prompt-shaped line. A
-        # generic `\S+@\S+[>#]` pattern alone is not safe: Junos places no restriction on
-        # `set system login message` banner text, so a banner containing something like
-        # "contact admin@example.com > for support" could match a bare prompt-shape pattern
-        # and truncate the capture early - it can't also spell out the literal word "quit"
-        # immediately after by coincidence. `\z` remains as the fallback for the rare case
-        # the echo isn't present at all (e.g. the connection dropped before it arrived). The
-        # optional `{master:0}`-shaped group absorbs a Virtual Chassis prompt prefix line
-        # that can appear immediately before the quit echo on a VC member, so it isn't left
-        # dangling inside the captured config text.
-        elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+(?:{[^}]+}[\r\n]+)?\S+@\S+[>#]\s*quit\b|\z)') { $DataDict["CONFIG"] = $Matches.content }
+        # the config itself. Stop non-greedily at the next CLI prompt line instead, anchored
+        # on it being the LAST thing in the captured stream (`\z` at the very end of the
+        # optional trailing group), not on the literal word "quit" following it - large
+        # configs routinely hit Invoke-InteractiveBatch's 50s WaitForExit timeout with the
+        # prompt already flushed to the temp file but the "quit" echo (sent immediately
+        # after, see above) not yet written before Kill() fires, which used to fall through
+        # to the `\z` fallback below on effectively every real device and leave the trailing
+        # "{master:N}\nuser@host>" prompt lines stuck in the saved Configuration text. A
+        # generic `\S+@\S+[>#]` pattern alone would still be unsafe as a MID-content anchor
+        # (Junos places no restriction on `set system login message` banner text, so a
+        # banner containing something like "contact admin@example.com > for support" could
+        # match a bare prompt-shape pattern and truncate the capture early) - requiring it be
+        # immediately followed by nothing but the rest of the string (`(?s).*` then `\z`)
+        # instead of requiring literal "quit" keeps that same safety without depending on an
+        # echo that often never arrives: real config content is never itself the last thing
+        # before end-of-stream. The optional `{master:0}`-shaped group absorbs a Virtual
+        # Chassis prompt prefix line that can appear immediately before the trailing prompt
+        # on a VC member, so it isn't left dangling inside the captured config text. The
+        # bare `\z` alternative remains as the fallback for the genuinely rare case no
+        # trailing prompt line ever arrives at all (e.g. the connection dropped mid-command).
+        elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+(?:{[^}]+}[\r\n]+)?\S+@\S+[>#](?s).*)?\z') { $DataDict["CONFIG"] = $Matches.content }
     }
 
     # --- Parse Identity ---
@@ -391,11 +407,28 @@ try {
         }
     }
 
+    # Physical ports where an LLDP neighbor with a management IP was seen - i.e. another
+    # switch/router, not a phone/AP (those land in MedNeighbors, handled separately below).
+    # A trunk/uplink to a downstream switch shows up in THIS switch's own MAC table exactly
+    # like a directly attached host: one row per MAC the downstream switch has ever learned,
+    # which for an access-layer uplink can be hundreds of unrelated clients. Excluded here so
+    # Clients reflects devices this switch is actually the access point for, not everything
+    # reachable through it. MedNeighbor ports are deliberately NOT excluded - a phone with a
+    # PC daisy-chained into its own switch port legitimately puts two real client MACs on one
+    # port, which detectDaisyChains (utils.js) depends on still seeing both of.
+    $UplinkPorts = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($Neigh in $NodeData.Neighbors) {
+        if ($Neigh.LocalPort -ne "Unknown") { [void]$UplinkPorts.Add(($Neigh.LocalPort -replace "\.\d+$","")) }
+    }
+
     # --- Build Clients from the MAC table (primary source - this is what a switch
     # actually knows about its own connected devices). IP comes from local ARP when
     # available; otherwise "Unknown" until the orchestrator's global enrichment pass. ---
     foreach ($MacKey in $RawMacs.Keys) {
         $Entry = $RawMacs[$MacKey]
+        $physPort = $Entry.Port -replace "\.\d+$",""
+        if ($UplinkPorts.Contains($physPort)) { continue }
+
         $Client = @{
             IP = if ($ArpDict.ContainsKey($MacKey)) { $ArpDict[$MacKey] } else { "Unknown" }
             MAC = $MacKey; Port = $Entry.Port; PortDesc = "Unknown"
@@ -403,7 +436,6 @@ try {
             Dot1x_User = "Unknown"; Dot1x_State = "Unknown"
         }
 
-        $physPort = $Client.Port -replace "\.\d+$",""
         if ($NodeData.Interfaces.ContainsKey($physPort)) { $Client.PortDesc = $NodeData.Interfaces[$physPort].Desc }
         if ($Dot1xDict.ContainsKey($MacKey)) {
             $Client.Dot1x_User = $Dot1xDict[$MacKey].User; $Client.Dot1x_State = $Dot1xDict[$MacKey].State

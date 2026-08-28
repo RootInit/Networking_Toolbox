@@ -111,9 +111,14 @@ window.switchCenterView = function(view) {
 
 window.initMapView = async function() {
     leafletMap = L.map('mapview', { zoomControl: true }).setView([0, 0], 2);
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    // CARTO's basemaps.cartocdn.com free/anonymous tiles now require a registered API key -
+    // requests without one still load but are watermarked "api key required". Standard OSM
+    // tile servers remain free and keyless (subject to OSM's usage policy, fine for this
+    // app's internal/low-volume use) and need no {r} retina placeholder - the standard tile
+    // server doesn't serve @2x tiles the way CARTO's did.
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
-        attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+        attribution: '&copy; OpenStreetMap contributors'
     }).addTo(leafletMap);
 
     // ensureConfigLoaded, not loadMapConfiguration: opening the Settings tab first already

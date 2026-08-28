@@ -635,11 +635,17 @@ window.downloadDeviceConfig = function() {
 };
 
 // Printable device report - same "device needs to be replaced or restored" motivation as
-// the config backup itself, but a full paper/PDF copy of everything captured about a
-// device, not just its config. Opens a self-contained document in a new tab (no library,
-// same "hand-roll it" pattern as everything else) with a visible Print button rather than
-// auto-firing window.print() on open - avoids popup/timing edge cases around a new
-// window's print dialog firing before content has settled, and lets the user review first.
+// the config backup itself, but everything ELSE captured about a device: identity,
+// hardware, alarms, neighbors, interfaces, clients. Deliberately excludes the config
+// backup text - SNMP communities, RADIUS/TACACS+ shared secrets, local user secrets live
+// in there (same sensitivity call Get-JunosNodeData.ps1's RawDumps redaction already
+// makes), and a printed/PDF'd report is exactly the kind of copy that ends up left on a
+// shared printer or emailed around. The config export button elsewhere in this file is
+// the deliberate, single-purpose way to get that text out. Opens a self-contained document
+// in a new tab (no library, same "hand-roll it" pattern as everything else) with a visible
+// Print button rather than auto-firing window.print() on open - avoids popup/timing edge
+// cases around a new window's print dialog firing before content has settled, and lets the
+// user review first.
 window.printDeviceReport = function() {
     var d = currentSelectedNodeData;
     if (!d) { window.setStatus("No device selected.", "red"); return; }
@@ -698,9 +704,6 @@ ${table(['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description'], interfaces.map(i
 
 <h2>Clients</h2>
 ${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(c => row([esc(c.IP), esc(c.MAC), esc(c.Port), esc(c.VLAN_Tag), esc(c.Dot1x_User), esc(c.Dot1x_State)])), 'No clients')}
-
-<h2>Configuration Backup</h2>
-<pre>${(d.Configuration && d.Configuration !== "Unknown") ? esc(d.Configuration) : 'No configuration backup available for this device.'}</pre>
 
 </body></html>`;
 
