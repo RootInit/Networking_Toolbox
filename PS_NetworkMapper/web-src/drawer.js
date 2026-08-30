@@ -111,10 +111,9 @@ window.rescanDevice = async function() {
         // browser never gives up before the server has had a chance to report one.
         if (Date.now() - pollStart > 100000) { finish("Rescan timed out waiting for a response.", "red"); return; }
 
-        var statusResp, status;
+        var statusResp;
         try {
             statusResp = await fetch('/api/rescan/status?jobId=' + encodeURIComponent(jobId));
-            status = await statusResp.json();
         } catch (e) {
             finish("Lost connection to the local server - retry once it's running again.", "red");
             return;
@@ -122,6 +121,19 @@ window.rescanDevice = async function() {
 
         if (statusResp.status === 404) {
             finish("Rescan job expired or the server restarted - try again.", "red");
+            return;
+        }
+
+        var status;
+        try {
+            status = await statusResp.json();
+        } catch (e) {
+            finish("Lost connection to the local server - retry once it's running again.", "red");
+            return;
+        }
+
+        if (!statusResp.ok) {
+            finish("Rescan failed: " + (status.reason || ('HTTP ' + statusResp.status)) + " - existing data left unchanged.", "red");
             return;
         }
         if (status.status === 'timeout') {

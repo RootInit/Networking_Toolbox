@@ -345,7 +345,10 @@ function readSnapshotFile(file) {
             }
         };
 
-        reader.readAsText(file);
+        // Explicit UTF-8 - readAsText() defaults to the platform's guess when omitted, and
+        // Start-NetworkMapper.ps1 always writes snapshots as UTF-8 (see its own -Encoding
+        // UTF8 comments), so this must match or non-ASCII hostnames/notes mis-decode silently.
+        reader.readAsText(file, 'UTF-8');
     });
 }
 

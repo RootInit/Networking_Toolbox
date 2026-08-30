@@ -4639,10 +4639,9 @@ window.rescanDevice = async function() {
         // browser never gives up before the server has had a chance to report one.
         if (Date.now() - pollStart > 100000) { finish("Rescan timed out waiting for a response.", "red"); return; }
 
-        var statusResp, status;
+        var statusResp;
         try {
             statusResp = await fetch('/api/rescan/status?jobId=' + encodeURIComponent(jobId));
-            status = await statusResp.json();
         } catch (e) {
             finish("Lost connection to the local server - retry once it's running again.", "red");
             return;
@@ -4650,6 +4649,19 @@ window.rescanDevice = async function() {
 
         if (statusResp.status === 404) {
             finish("Rescan job expired or the server restarted - try again.", "red");
+            return;
+        }
+
+        var status;
+        try {
+            status = await statusResp.json();
+        } catch (e) {
+            finish("Lost connection to the local server - retry once it's running again.", "red");
+            return;
+        }
+
+        if (!statusResp.ok) {
+            finish("Rescan failed: " + (status.reason || ('HTTP ' + statusResp.status)) + " - existing data left unchanged.", "red");
             return;
         }
         if (status.status === 'timeout') {
@@ -5523,10 +5535,9 @@ window.startNetworkScan = async function() {
 
     var pollStart = Date.now();
     var poll = async function() {
-        var statusResp, status;
+        var statusResp;
         try {
             statusResp = await fetch('/api/scan-network/status');
-            status = await statusResp.json();
         } catch (e) {
             finish("Lost connection to the local server - the scan may still be running server-side.", "red");
             return;
@@ -5534,6 +5545,19 @@ window.startNetworkScan = async function() {
 
         if (statusResp.status === 404) {
             finish("Scan job expired or the server restarted.", "red");
+            return;
+        }
+
+        var status;
+        try {
+            status = await statusResp.json();
+        } catch (e) {
+            finish("Lost connection to the local server - the scan may still be running server-side.", "red");
+            return;
+        }
+
+        if (!statusResp.ok) {
+            finish("Scan failed: " + (status.reason || ('HTTP ' + statusResp.status)), "red");
             return;
         }
         if (status.status === 'running') {
@@ -6694,7 +6718,10 @@ function readSnapshotFile(file) {
             }
         };
 
-        reader.readAsText(file);
+        // Explicit UTF-8 - readAsText() defaults to the platform's guess when omitted, and
+        // Start-NetworkMapper.ps1 always writes snapshots as UTF-8 (see its own -Encoding
+        // UTF8 comments), so this must match or non-ASCII hostnames/notes mis-decode silently.
+        reader.readAsText(file, 'UTF-8');
     });
 }
 

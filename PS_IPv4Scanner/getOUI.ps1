@@ -24,4 +24,4 @@ foreach($Line in $LatestOUIs -split '[\r\n]')
     }
 }
 
-Out-File -InputObject $Output -FilePath "$PSScriptRoot\oui.txt"
+Out-File -InputObject $Output -FilePath "$PSScriptRoot\oui.txt" -Encoding utf8

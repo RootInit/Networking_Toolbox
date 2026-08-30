@@ -381,10 +381,13 @@ Process {
 
             Write-Verbose -Message "Read oui.txt and fill hash table..."
 
-            foreach ($Line in Get-Content -Path $OUIListPath) {
+            foreach ($Line in Get-Content -Path $OUIListPath -Encoding UTF8) {
                 if (-not([String]::IsNullOrEmpty($Line))) {
+                    $HashTableData = $Line.Split('|')
+                    if ($HashTableData.Count -lt 2 -or [String]::IsNullOrEmpty($HashTableData[0])) {
+                        continue # Malformed line (e.g. missing '|' separator) - skip rather than insert a null vendor
+                    }
                     try {
-                        $HashTableData = $Line.Split('|')
                         $OUIHashTable.Add($HashTableData[0], $HashTableData[1])
                     }
                     catch [System.ArgumentException] { } # Catch if mac is already added to hash table
@@ -458,7 +461,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
     catch {
         Write-Host "error $($_.Exception.Message)"
         $Status = "Down"
-        break
     }
 }
              
@@ -490,11 +492,11 @@ for ($i = 0; $i -lt $Tries; $i++) {
         $ResponseTime = [String]::Empty 
         $TTL = $null
 
-        if ($ExtendedInformations -and ($Status -eq "Up")) {
+        if ($ExtendedInformations -and ($Status -eq "Up") -and ($Port -eq 0)) {
             try {
-                $BufferSize = $PingResult.Buffer.Length
-                $ResponseTime = $PingResult.RoundtripTime
-                $TTL = $PingResult.Options.Ttl
+                $BufferSize = $Result.Buffer.Length
+                $ResponseTime = $Result.RoundtripTime
+                $TTL = $Result.Options.Ttl
             }
             catch { } # Failed to get extended informations
         }	
@@ -628,7 +630,7 @@ for ($i = 0; $i -lt $Tries; $i++) {
                         Vendor       = $Vendor  
                         BufferSize   = $Job_Result.BufferSize
                         ResponseTime = $Job_Result.ResponseTime
-                        TTL          = $ResuJob_Resultlt.TTL
+                        TTL          = $Job_Result.TTL
                     } | Select-Object -Property $PropertiesToDisplay
                 }
                 else {

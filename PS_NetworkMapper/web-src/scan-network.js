@@ -117,10 +117,9 @@ window.startNetworkScan = async function() {
 
     var pollStart = Date.now();
     var poll = async function() {
-        var statusResp, status;
+        var statusResp;
         try {
             statusResp = await fetch('/api/scan-network/status');
-            status = await statusResp.json();
         } catch (e) {
             finish("Lost connection to the local server - the scan may still be running server-side.", "red");
             return;
@@ -128,6 +127,19 @@ window.startNetworkScan = async function() {
 
         if (statusResp.status === 404) {
             finish("Scan job expired or the server restarted.", "red");
+            return;
+        }
+
+        var status;
+        try {
+            status = await statusResp.json();
+        } catch (e) {
+            finish("Lost connection to the local server - the scan may still be running server-side.", "red");
+            return;
+        }
+
+        if (!statusResp.ok) {
+            finish("Scan failed: " + (status.reason || ('HTTP ' + statusResp.status)), "red");
             return;
         }
         if (status.status === 'running') {
