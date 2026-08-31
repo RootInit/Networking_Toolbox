@@ -324,10 +324,22 @@ try {
     }
 
     # --- Parse VLANs ---
+    # "show vlans" is "VLAN name  Tag  Interfaces" on a switch with no explicit
+    # routing-instance, but gains a leading "Routing instance" column ("Routing instance
+    # VLAN name  Tag  Interfaces") on one where VLANs live under e.g. default-switch -
+    # detect which layout is present from the header rather than assuming one, or every
+    # line silently fails to match on whichever layout wasn't assumed and VLAN_Tag ends
+    # up "Unknown" for every client (VLAN_Name is unaffected - it's read straight off the
+    # MAC table, not through this lookup - so a mismatch here shows up as "VLAN_Name is
+    # right everywhere but VLAN_Tag/the VLAN filter is not").
     $VlanDict = @{}
+    $HasRoutingInstanceColumn = $DataDict["VLANS"] -match "(?im)^\s*Routing instance\s"
     foreach ($Line in ($DataDict["VLANS"] -split "`n")) {
-        # "Name  Tag  Interfaces" - match name+tag only, since the interface field isn't numeric.
-        if ($Line -match "^(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = $Matches.tag }
+        if ($HasRoutingInstanceColumn) {
+            if ($Line -match "^\S+\s+(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = $Matches.tag }
+        } else {
+            if ($Line -match "^(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = $Matches.tag }
+        }
     }
 
     # --- Parse MAC Table ---
