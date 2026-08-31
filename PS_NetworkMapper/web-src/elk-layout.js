@@ -1,18 +1,8 @@
-// Computes positions for the currently-visible subgraph via
-// GraphLayout.computeRecursiveRadialLayout (graph-layout.js) - despite the filename, ELK
-// is no longer used for the primary path. It was originally: this file wrapped a vendored
-// ELK.js instance, and computeRecursiveRadialLayout was a post-process applied on top of
-// ELK's own output. ELK's structural placement was replaced entirely once it was confirmed
-// (via headless-browser screenshot, not just reasoning) to collapse whole depth levels
-// near the root when the network's full leaf tier was exposed at once - see
-// graph-layout.js's header comment on computeRecursiveRadialLayout for the full history.
-// The file keeps its name so callers (app.js, network_vis.html's <script> tag) don't need
-// to change; `window.ElkLayout` is what's actually referenced elsewhere.
-//
-// computeGridFallback remains as the last-resort safety net if computeRecursiveRadialLayout
-// ever throws or the visible set is pathologically large enough to hit the timeout below -
-// it needs no browser globals, so it (and this file generally) still imports cleanly under
-// `node --test`, unlike the vendored ELK bundle this file used to depend on.
+// Computes positions for the visible subgraph via GraphLayout.computeRecursiveRadialLayout
+// (graph-layout.js). Despite the filename, ELK.js is no longer used - it collapsed depth
+// levels near the root with a full leaf tier exposed. Kept as `window.ElkLayout`/this
+// filename so callers (app.js, network_vis.html) don't need to change.
+// computeGridFallback is the last-resort safety net if the layout throws or times out.
 
 const NODE_WIDTH = 160;
 const NODE_HEIGHT = 50;
@@ -34,10 +24,8 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   if (visibleNodeIds.length === 0) return new Map();
 
   const doLayout = async () => {
-    // Yield once before the synchronous crunch below - computeRecursiveRadialLayout has
-    // no awaits of its own, so without this the caller's "Computing layout..." progress
-    // text (see doRenderVisibleGraph in app.js) would never get a chance to paint before
-    // the main thread blocks for however long the layout takes.
+    // Yield once so the caller's "Computing layout..." text can paint before the
+    // synchronous layout crunch blocks the main thread.
     await new Promise(r => setTimeout(r, 0));
     const childrenOf = new Map();
     visibleEdges.forEach(e => {
@@ -59,9 +47,7 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
       var textEl = document.getElementById('fatal-error-text');
       var modalEl = document.getElementById('fatal-error-modal');
       if (textEl && modalEl) {
-        // err.message could in principle come from somewhere not fully in this app's
-        // control - build the message via textContent rather than concatenating it into
-        // innerHTML, so it can never be interpreted as markup.
+        // Build via textContent, not innerHTML, so err.message can't be interpreted as markup.
         textEl.innerHTML = 'Layout engine failed, showing a basic grid instead of the normal tree view.<br><br>';
         var errMsgEl = document.createElement('span');
         errMsgEl.textContent = (err && err.message) ? err.message : String(err);
@@ -73,7 +59,6 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   }
 }
 
-// See graph-layout.js's matching footer for why this isn't `export`/`type="module"`.
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { computeGridFallback, computeLayout };
 } else if (typeof window !== 'undefined') {

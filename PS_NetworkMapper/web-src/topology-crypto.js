@@ -1,11 +1,7 @@
 // Decrypts a "PSNetworkMapper-EncryptedTopology" envelope (Start-NetworkMapper.ps1's default
-// output format - encryption is on unless -NoEncryption is passed): AES-256-CBC, key/HMAC
-// key from PBKDF2-SHA256, encrypt-then-MAC
-// with HMAC-SHA256 covering IV+ciphertext. Deliberately not AES-GCM - the PowerShell side
-// has to run under Windows PowerShell 5.1 too, whose .NET Framework has no AesGcm type, so
-// both ends use only primitives available everywhere: Aes/CBC, PBKDF2, HMAC-SHA256.
-// Self-contained (no dependency on any other file in this app) - see app.js's
-// window.promptForPassword / readSnapshotFile for the only caller.
+// output unless -NoEncryption): AES-256-CBC, key/HMAC key from PBKDF2-SHA256, encrypt-then-MAC
+// with HMAC-SHA256 over IV+ciphertext. Not AES-GCM: must also run under Windows PowerShell
+// 5.1, whose .NET Framework lacks AesGcm. Self-contained; only caller is app.js.
 var TopologyCrypto = (function() {
     function b64ToBytes(b64) {
         var bin = atob(b64);
@@ -29,16 +25,13 @@ var TopologyCrypto = (function() {
             baseKey, 512
         );
         var keyMaterial = new Uint8Array(bits);
-        // Same 32/32 split as Protect-TopologyPayload in Start-NetworkMapper.ps1 - must match.
+        // Same 32/32 split as Protect-TopologyPayload in Start-NetworkMapper.ps1.
         return { encKeyBytes: keyMaterial.slice(0, 32), macKeyBytes: keyMaterial.slice(32, 64) };
     }
 
-    // Bounds on iterations from an untrusted file: must stay <= the lowest iteration
-    // count any real file was ever encrypted with (currently 200,000, incl. the sample
-    // map already shared), or those files stop decrypting. The upper bound exists only
-    // to stop a maliciously-crafted file from forcing an absurd PBKDF2 cost on whoever
-    // opens it - it's a CPU-burn guard, not a security boundary (raising it doesn't
-    // weaken anything; a real file just never needs to go anywhere near this high).
+    // MIN must stay <= any real file's iteration count (currently 200,000) or it stops
+    // decrypting. MAX is just a CPU-burn guard against a maliciously-crafted file, not a
+    // security boundary.
     var MIN_ITERATIONS = 1000;
     var MAX_ITERATIONS = 5000000;
 
@@ -53,8 +46,7 @@ var TopologyCrypto = (function() {
         if (envelope.kdf !== 'PBKDF2-SHA256' || envelope.cipher !== 'AES-256-CBC' || envelope.macAlgorithm !== 'HMAC-SHA256') {
             throw new Error(`Unsupported encryption parameters: ${envelope.kdf}/${envelope.cipher}/${envelope.macAlgorithm}`);
         }
-        // Validate type AND range - a tampered envelope could carry a string, a float,
-        // or a huge number for iterations, none of which the range check alone catches.
+        // Validate type AND range - a tampered envelope could carry a string or float.
         if (!Number.isInteger(envelope.iterations) || envelope.iterations < MIN_ITERATIONS || envelope.iterations > MAX_ITERATIONS) {
             throw new Error(`Iteration count out of range: ${envelope.iterations}`);
         }
@@ -66,9 +58,8 @@ var TopologyCrypto = (function() {
 
         var keys = await deriveKeyMaterial(password, saltBytes, envelope.iterations);
 
-        // Verify the MAC before decrypting (encrypt-then-MAC) - a wrong password or a
-        // corrupted/tampered file fails here with a clear error instead of feeding
-        // AES-CBC garbage ciphertext and producing a confusing padding exception.
+        // Verify MAC before decrypting: a wrong password fails clearly here instead of
+        // producing a confusing AES-CBC padding exception.
         var macKey = await crypto.subtle.importKey('raw', keys.macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
         var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, concatBytes(ivBytes, cipherBytes));
         if (!macOk) throw new Error('Incorrect password, or the file is corrupted.');

@@ -1,9 +1,7 @@
-// The right-hand device detail drawer: all seven tabs (Summary/Hardware/Alarms/Neighbors/
-// Interfaces/Clients/Config), CSV/config export, the printable report, and the drawer's
-// own open/close/tab-switch chrome. Reads currentSelectedNodeData/deviceByIp/
-// loadedSnapshots/activeSnapshotIndex/searchHighlightQuery (app.js), calls
-// window.asArray/lookupVendor/detectDaisyChains/renderDaisyChainBadge/setStatus
-// (utils.js), and configSetDiff (dashboard.js, plain function - see its own comment).
+// Right-hand device detail drawer: tabs (Summary/Hardware/Alarms/Neighbors/Interfaces/
+// Clients/Config), CSV/config export, printable report, and drawer open/close/tab-switch.
+// Reads currentSelectedNodeData/deviceByIp/loadedSnapshots/activeSnapshotIndex/
+// searchHighlightQuery from app.js.
 
 window.closeDrawer = function() {
     document.getElementById('right-panel').style.display = 'none';
@@ -26,12 +24,9 @@ window.switchTab = function(tabId) {
     }
 };
 
-// SSH quick-connect: a browser page can't spawn a process itself (no such API exists), but
-// this is served by WebServer.ps1 - itself a PowerShell process on the analyst's own
-// machine - so this can POST to that server's one fixed action instead:
-// /api/connect launches lib\Connect-Switch.ps1 (a real interactive SSH session) against
-// the given IP via Start-Process. Only works because the server is localhost-only; see
-// WebServer.ps1's header comment.
+// SSH quick-connect: POSTs to WebServer.ps1's /api/connect, which launches
+// lib\Connect-Switch.ps1 as a real interactive SSH session via Start-Process. Only works
+// because the server is localhost-only.
 window.copyConnectCommand = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
@@ -54,12 +49,9 @@ window.copyConnectCommand = async function() {
     }
 };
 
-// On-demand single-device rescan: re-runs the same fixed read-only diagnostic batch
-// Get-JunosNodeData.ps1 already runs for a full crawl, against just this one IP, via
-// WebServer.ps1's /api/rescan (async - see that endpoint's own comment for why a
-// synchronous call would freeze the whole server). Works for the "Unscanned Node"
-// placeholder case too (a device only ever seen as an LLDP neighbor) - that's a
-// legitimate rescan target, not just a refresh of already-scanned data.
+// On-demand single-device rescan: re-runs Get-JunosNodeData.ps1's diagnostic batch against
+// just this IP via WebServer.ps1's /api/rescan (async, polled below). Also works for the
+// "Unscanned Node" placeholder case (a device only ever seen as an LLDP neighbor).
 var rescanPollTimer = null;
 
 window.rescanDevice = async function() {
@@ -84,11 +76,8 @@ window.rescanDevice = async function() {
         });
         var result = await resp.json();
         if (resp.status === 409 && result.jobId) {
-            // Only one rescan slot exists server-side. Attaching is only safe when it's
-            // OUR device already in flight (e.g. a double-click) - the server hands back
-            // which IP the running job is actually for, and if it's a different device,
-            // silently attaching would poll that job to completion and then report ITS
-            // result under this device's name once merged/messaged.
+            // Only one rescan slot exists server-side; only attach if it's our own device
+            // already in flight, not someone else's running job.
             if (result.ip !== ip) {
                 finish("A rescan of " + result.ip + " is already running - try again once it finishes.", "red");
                 return;
@@ -107,8 +96,7 @@ window.rescanDevice = async function() {
 
     var pollStart = Date.now();
     var poll = async function() {
-        // Client-side ceiling stays above the server's own ~90s hard timeout so the
-        // browser never gives up before the server has had a chance to report one.
+        // Stays above the server's own ~90s hard timeout.
         if (Date.now() - pollStart > 100000) { finish("Rescan timed out waiting for a response.", "red"); return; }
 
         var statusResp;
@@ -155,18 +143,15 @@ window.rescanDevice = async function() {
     poll();
 };
 
-// Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes against
-// this device's management IP, synchronous (unlike /api/rescan, a ping is a couple seconds
-// at most, not worth a job-queue/poll dance for).
+// Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes,
+// synchronous since it's only a couple seconds (unlike /api/rescan's poll dance).
 window.pingDevice = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
     var btn = document.getElementById('pingBtn');
     var original = btn ? btn.textContent : null;
-    // Written to directly, not just window.setStatus (still called below for consistency
-    // with every other drawer action) - #status-text lives in the left sidebar's Load File
-    // tab, which is easy to not be looking at while sitting in THIS panel on the right; see
-    // #pingResult's own comment in index.html.
+    // Written directly (in addition to window.setStatus below) since the sidebar's
+    // #status-text is easy to not be looking at from this panel.
     var resultEl = document.getElementById('pingResult');
     function showResult(msg, cls) {
         if (!resultEl) return;
@@ -207,22 +192,19 @@ window.pingDevice = async function() {
     }
 };
 
-// Client-side port of Start-NetworkMapper.ps1's Update-ClientIpCorrelation. A
-// single-device rescan only ever has that one switch's own local ARP table - a
-// downstream client's IP is usually resolved from the L3 gateway's ARP table instead,
-// which the full crawl correlates once across every device. Without re-running that same
-// two-pass correlation after a merge, a client that showed a real IP (from the original
-// crawl) would flip back to "Unknown" after "refreshing" its access switch - the exact
-// opposite of what this feature is for.
+// Client-side port of Start-NetworkMapper.ps1's Update-ClientIpCorrelation. A single-device
+// rescan only has that switch's own ARP table; client IPs are usually resolved from the L3
+// gateway's ARP table instead, so this must re-run across the whole topology after a merge
+// or a client would flip back to "Unknown".
 function correlateClientIps(topology) {
     var globalArpMap = new Map();
     topology.forEach(device => {
-        (device.ArpEntries || []).forEach(arp => {
+        window.asArray(device.ArpEntries).forEach(arp => {
             if (arp && arp.MAC && arp.IP) globalArpMap.set(arp.MAC, arp.IP);
         });
     });
     topology.forEach(device => {
-        (device.Clients || []).forEach(client => {
+        window.asArray(device.Clients).forEach(client => {
             if (client && client.IP === "Unknown" && globalArpMap.has(client.MAC)) {
                 client.IP = globalArpMap.get(client.MAC);
             }
@@ -230,19 +212,16 @@ function correlateClientIps(topology) {
     });
 }
 
-// Merges a successful rescan result into the active snapshot's in-memory state only -
-// never written back to the on-disk snapshot file. Two independent reasons: the loaded
-// file may be encrypted and its password is deliberately not retained after use, and
-// snapshot immutability is load-bearing for Topology Diff and cross-snapshot config
-// compare elsewhere in this app. The rescanned data lives only in this tab, only for this
-// session; RescannedAt (shown in the Summary tab) makes that ephemerality visible instead
-// of surprising.
+// Merges a rescan result into the active snapshot's in-memory state only, never written
+// back to disk: the loaded file's password isn't retained, and snapshot immutability is
+// load-bearing for Topology Diff and cross-snapshot config compare. RescannedAt (shown in
+// Summary) surfaces that ephemerality.
 window.mergeRescannedDevice = function(freshDevice) {
     if (!freshDevice || !freshDevice.DeviceIP || activeSnapshotIndex < 0) return;
     var ip = String(freshDevice.DeviceIP);
     var topology = loadedSnapshots[activeSnapshotIndex].topology; // same array globalTopologyData references
 
-    freshDevice.TrueClients = freshDevice.Clients || [];
+    freshDevice.TrueClients = window.asArray(freshDevice.Clients);
     freshDevice.RescannedAt = new Date().toISOString();
 
     var index = topology.findIndex(d => d && String(d.DeviceIP) === ip);
@@ -254,39 +233,29 @@ window.mergeRescannedDevice = function(freshDevice) {
 
     correlateClientIps(topology);
 
-    // buildSearchIndex() replaces snapshot.deviceByIp with a brand-new Map rather than
-    // mutating the existing one - re-pointing the module-level deviceByIp variable here
-    // is required, not optional, or search click-through would keep serving the stale
-    // object even though the drawer itself is showing fresh data.
+    // buildSearchIndex() replaces snapshot.deviceByIp with a new Map rather than mutating
+    // it, so the module-level deviceByIp must be re-pointed here or search would serve stale data.
     window.buildSearchIndex();
     deviceByIp = loadedSnapshots[activeSnapshotIndex].deviceByIp;
 
     window.extractVlans();
 
-    // Gated on the drawer's own displayed IP, not on currentSelectedNodeData - for the
-    // "Unscanned Node" placeholder case (the whole other reason to rescan something),
-    // currentSelectedNodeData is null (openRightDrawer never set it, that's exactly why
-    // the placeholder message shows), so checking it here would silently skip the
-    // re-render on precisely the case this feature advertises supporting.
+    // Gated on the drawer's displayed IP, not currentSelectedNodeData - for the "Unscanned
+    // Node" placeholder case, currentSelectedNodeData is null, so checking it would skip
+    // the re-render on exactly the case this feature is for.
     var drawerIp = document.getElementById('drawer-title').innerText;
     var drawerOpen = document.getElementById('right-panel').style.display !== 'none';
     if (drawerOpen && drawerIp === ip) {
         window.openRightDrawer(ip); // deviceByIp now resolves to freshDevice - re-renders every tab from it
     }
 
-    // Deliberately not a full window.buildSwitchMap() rebuild - that destroys the
-    // vis.Network instance, resetting pan/zoom and collapsing every manually-expanded
-    // cluster, for a feature whose whole pitch is a quick single-node refresh. Known
-    // limitation: a structural change (new/removed LLDP neighbor) won't show as a new
-    // edge until the graph is fully reloaded.
+    // Not a full window.buildSwitchMap() rebuild - that would reset pan/zoom and collapse
+    // manually-expanded clusters. Known limitation: a structural change (new/removed LLDP
+    // neighbor) won't show as a new edge until the graph is fully reloaded.
     if (window.refreshNodeVisual) window.refreshNodeVisual(ip);
 
-    // Same "the map has its own rendering of this data" reasoning as setActiveSnapshot
-    // (app.js) - a rescanned device's freshly-resolved location (or a chassis serial that
-    // now resolves where it didn't before) should show up on the map too, not just the
-    // diagram. No-op if Map view was never opened this session (renderMapMarkers's own
-    // leafletMap===null guard) and does not reset the user's pan/zoom if it has been
-    // (hasFitBoundsOnce in map.js).
+    // Keeps the Map view in sync too; no-op if Map was never opened this session, and
+    // doesn't reset pan/zoom if it has been.
     if (window.renderMapMarkers) window.renderMapMarkers();
 };
 
@@ -294,8 +263,7 @@ window.openRightDrawer = function(ip) {
     currentSelectedNodeData = deviceByIp.get(String(ip));
     var panel = document.getElementById('right-panel');
     document.getElementById('drawer-title').innerText = ip;
-    // A stale "Reachable"/"No response" from whatever device was open before this one would
-    // otherwise still be sitting there, silently mislabeled as belonging to the new device.
+    // Clear any stale "Reachable"/"No response" left from the previously open device.
     var pingResultEl = document.getElementById('pingResult');
     if (pingResultEl) { pingResultEl.textContent = ''; pingResultEl.className = ''; }
 
@@ -338,7 +306,7 @@ window.renderSummary = function() {
         <div class="summary-item"><label>IP Address</label><div>${esc(d.DeviceIP) || 'N/A'}</div></div>
         <div class="summary-item"><label>Junos OS</label><div>${esc(d.JunosVersion) || 'N/A'}</div></div>
         <div class="summary-item"><label>Gateway</label><div>${esc(d.Gateway) || 'N/A'}</div></div>
-        <div class="summary-item"><label>Connected Neighbors</label><div>${d.Neighbors ? d.Neighbors.length : 0} Switches</div></div>
+        <div class="summary-item"><label>Connected Neighbors</label><div>${window.asArray(d.Neighbors).length} Switches</div></div>
         <div class="summary-item"><label>Uptime</label><div>${esc(d.Uptime) || 'N/A'}</div></div>
         <div class="summary-item"><label>Last Configured</label><div>${esc(d.LastConfigured) || 'N/A'} by ${esc(d.LastConfiguredBy) || 'N/A'}</div></div>
         <div class="summary-item"><label>RE CPU / Memory</label><div>${esc(d.MasterCpuUtilization) || 'N/A'} / ${esc(d.MasterMemoryUtilization) || 'N/A'}</div></div>
@@ -361,8 +329,9 @@ window.renderSummary = function() {
 window.renderStack = function() {
     var tbody = document.getElementById('stack-tbody');
     var html = "";
-    if (currentSelectedNodeData.StackMembers && currentSelectedNodeData.StackMembers.length > 0) {
-        currentSelectedNodeData.StackMembers.forEach(sm => {
+    var stackMembers = window.asArray(currentSelectedNodeData.StackMembers);
+    if (stackMembers.length > 0) {
+        stackMembers.forEach(sm => {
             var roleBadge = String(sm.Role).includes("Master") ? "green" : (String(sm.Role).includes("Backup") ? "accent" : "gray");
             html += `<tr>
                 <td><b>${esc(sm.FPC) || "?"}</b></td>
@@ -378,8 +347,9 @@ window.renderStack = function() {
 window.renderNeighbors = function() {
     var tbody = document.getElementById('neighbors-tbody');
     var html = "";
-    if (currentSelectedNodeData.Neighbors && currentSelectedNodeData.Neighbors.length > 0) {
-        currentSelectedNodeData.Neighbors.forEach(n => {
+    var neighborRows = window.asArray(currentSelectedNodeData.Neighbors);
+    if (neighborRows.length > 0) {
+        neighborRows.forEach(n => {
             html += `<tr>
                 <td><b>${esc(n.LocalPort) || "?"}</b></td>
                 <td>${esc(n.Hostname) || "Unknown"}<br><span style="font-family:monospace; color:#666; font-size:0.75rem;">${esc(n.ManagementIP) || "Unknown"}</span></td>
@@ -397,8 +367,8 @@ window.renderInterfaces = function() {
     var daisyChains = window.detectDaisyChains(currentSelectedNodeData);
     var html = "";
 
-    if (currentSelectedNodeData.Interfaces && Array.isArray(currentSelectedNodeData.Interfaces)) {
-        currentSelectedNodeData.Interfaces.forEach(intf => {
+    if (currentSelectedNodeData.Interfaces) {
+        window.asArray(currentSelectedNodeData.Interfaces).forEach(intf => {
             if (!intf.Port || String(intf.Port).includes('.')) return;
 
             if (hideDown && String(intf.Link).toLowerCase() !== "up") return;
@@ -430,8 +400,9 @@ window.renderClients = function() {
     var daisyChains = window.detectDaisyChains(currentSelectedNodeData);
     var html = "";
 
-    if (currentSelectedNodeData.TrueClients && currentSelectedNodeData.TrueClients.length > 0) {
-        var clients = currentSelectedNodeData.TrueClients;
+    var trueClientRows = window.asArray(currentSelectedNodeData.TrueClients);
+    if (trueClientRows.length > 0) {
+        var clients = trueClientRows;
 
         if (vlanFilter !== "ALL") {
             clients = clients.filter(c => String(c.VLAN_Tag) === vlanFilter.toString());
@@ -503,8 +474,8 @@ function downloadBlob(filename, content, mimeType) {
     URL.revokeObjectURL(url);
 }
 
-// Config backup (see Get-JunosNodeData.ps1's Invoke-ConfigBackup) - stored verbatim, so
-// this tab just displays/copies/downloads it as-is, no parsing or reformatting.
+// Config backup is stored verbatim (see Get-JunosNodeData.ps1's Invoke-ConfigBackup); this
+// tab just displays/copies/downloads it as-is.
 window.renderConfig = function() {
     var el = document.getElementById('config-content');
     if (!el) return;
@@ -513,28 +484,19 @@ window.renderConfig = function() {
     window.populateConfigCompareSelect();
 };
 
-// Config diff (see configSetDiff in dashboard.js) - lets this device's Config tab compare
-// its current config against either (a) the SAME device's config from another loaded
-// snapshot (the <select>, since that list is always small - one entry per other capture),
-// or (b) a DIFFERENT device's config from ANY loaded snapshot (the search box) - e.g.
-// diffing a misconfigured switch against a known-good one, on a fleet too large to browse
-// as a flat dropdown. The two controls are mutually exclusive - picking one clears the
-// other - and both write into the same configCompareTarget state that renderConfigDiff
-// actually reads.
+// Config diff (see configSetDiff in dashboard.js) - lets the Config tab compare this
+// device's config against either (a) the SAME device from another snapshot (the <select>)
+// or (b) a DIFFERENT device from any snapshot (the search box). The two controls are
+// mutually exclusive and both write into configCompareTarget, which renderConfigDiff reads.
 var configCompareTarget = null; // {idx, ip} of the device/snapshot being diffed against, or null
 
-// idx (in loadedSnapshots) -> that OTHER snapshot's own DeviceIP for the currently-open
-// device - NOT necessarily the same IP the drawer is showing right now. Populated by
-// populateConfigCompareSelect below, read by selectConfigCompareSnapshot: a device matched
-// by identity (serial/hostname) can easily have had a different IP in an older capture, and
-// this is what lets renderConfigDiff's own DeviceIP-based lookup (unchanged, see below)
-// still find it in that specific snapshot.
+// idx (in loadedSnapshots) -> that OTHER snapshot's DeviceIP for the currently-open device,
+// which can differ from the drawer's current IP if the device was renumbered between
+// captures. Populated below, read by selectConfigCompareSnapshot.
 var sameDeviceIpByIdx = {};
 
-// (a) only - the "This device, other capture" list. Small and bounded (one entry per
-// OTHER loaded snapshot that has this same device with real config), so a plain select is
-// still the right control here; it's (b), searching potentially hundreds of other
-// devices, that a flat list stopped being usable for.
+// (a) only - "This device, other capture". Bounded to one entry per other snapshot, so a
+// plain select still works here (unlike (b), which needs the search box).
 window.populateConfigCompareSelect = function() {
     var container = document.getElementById('configCompareContainer');
     var select = document.getElementById('configCompareSelect');
@@ -557,10 +519,8 @@ window.populateConfigCompareSelect = function() {
         return;
     }
 
-    // Matched by window.resolveDeviceIdentity (serial > hostname > IP), not a literal IP
-    // comparison - a device renumbered since an older capture is still "this same device"
-    // for compare purposes; it would otherwise silently disappear from this list the moment
-    // its IP changed, with no error, just fewer options than expected.
+    // Matched by identity (serial > hostname > IP), not literal IP, so a device renumbered
+    // since an older capture still shows up as "this same device".
     var identity = window.resolveDeviceIdentity(d);
     var sameDeviceOptions = [];
     loadedSnapshots.forEach((snap, idx) => {
@@ -584,9 +544,8 @@ window.populateConfigCompareSelect = function() {
     window.renderConfigDiff();
 };
 
-// The <select> changed - either back to "raw config only", or to a different capture of
-// THIS same device. Clears whatever the search box had selected, since only one compare
-// target can be active.
+// The <select> changed - either back to "raw config only" or to a different capture of
+// this same device. Clears the search box since only one compare target can be active.
 window.selectConfigCompareSnapshot = function() {
     var select = document.getElementById('configCompareSelect');
     var searchInput = document.getElementById('configCompareSearch');
@@ -594,11 +553,8 @@ window.selectConfigCompareSnapshot = function() {
     if (searchInput) searchInput.value = '';
     if (searchResults) searchResults.innerHTML = '';
 
-    // ip comes from sameDeviceIpByIdx (that OTHER snapshot's own DeviceIP for this device),
-    // NOT currentSelectedNodeData.DeviceIP - those two can legitimately differ when the
-    // device was renumbered between the two captures being compared. Falls back to the
-    // active device's IP only as a last resort (should never actually trigger, since every
-    // <option> value here came from a key populateConfigCompareSelect just wrote).
+    // ip comes from sameDeviceIpByIdx, not currentSelectedNodeData.DeviceIP - those can
+    // differ if the device was renumbered between captures. Fallback should never trigger.
     var idx = select.value ? parseInt(select.value, 10) : null;
     configCompareTarget = select.value
         ? { idx: idx, ip: sameDeviceIpByIdx[idx] || String(currentSelectedNodeData.DeviceIP) }
@@ -606,12 +562,8 @@ window.selectConfigCompareSnapshot = function() {
     window.renderConfigDiff();
 };
 
-// Live-filters every OTHER device (by hostname or IP substring) across every loaded
-// snapshot - not just the active one, since a search box (unlike a flat dropdown) stays
-// usable regardless of fleet size, so there's no reason left to restrict it to one
-// capture. Capped at MAX_RESULTS so a broad query on a large fleet doesn't dump hundreds
-// of rows into the DOM at once; narrowing the query is the intended way to get past that,
-// same tradeoff a global search box makes.
+// Live-filters every other device (by hostname or IP substring) across every loaded
+// snapshot. Capped at MAX_RESULTS so a broad query doesn't dump hundreds of rows into the DOM.
 var CONFIG_COMPARE_MAX_RESULTS = 25;
 window.searchConfigCompareDevices = function() {
     var input = document.getElementById('configCompareSearch');
@@ -619,8 +571,7 @@ window.searchConfigCompareDevices = function() {
     if (!input || !resultsEl) return;
     var query = input.value.trim();
 
-    // Typing invalidates whatever was previously selected (search or dropdown) - the
-    // input no longer reflects a resolved device, it reflects an in-progress query.
+    // Typing invalidates whatever was previously selected (search or dropdown).
     configCompareTarget = null;
     var select = document.getElementById('configCompareSelect');
     if (select) select.value = '';
@@ -664,9 +615,8 @@ window.searchConfigCompareDevices = function() {
     }
 };
 
-// A search result was clicked - resolve it to a compare target, reflect the pick back
-// into the search box (so it reads like a resolved selection, not a live query), and
-// collapse the results list.
+// A search result was clicked - resolve it to a compare target, reflect the pick into the
+// search box, and collapse the results list.
 window.selectConfigCompareDevice = function(idx, ip) {
     configCompareTarget = { idx: idx, ip: ip };
 
@@ -698,10 +648,8 @@ window.renderConfigDiff = function() {
     var d = currentSelectedNodeData;
     var other = otherSnap && (otherSnap.topology || []).find(dev => dev && String(dev.DeviceIP) === otherIp);
     var otherConfig = other ? other.Configuration : '';
-    // Identity-based, not otherIp !== d.DeviceIP - the "This device, other capture" picker
-    // (populateConfigCompareSelect) can legitimately hand back a capture where this same
-    // physical switch had a different IP, and that must NOT trip the "two different
-    // switches" cross-device banner below.
+    // Identity-based, not otherIp !== d.DeviceIP - the "same device, other capture" case
+    // can have a different IP and must not trip the cross-device banner below.
     var isCrossDevice = !other || window.resolveDeviceIdentity(other) !== window.resolveDeviceIdentity(d);
     var otherLabel = esc(other && other.Hostname && other.Hostname !== "Unknown" ? other.Hostname : otherIp);
 
@@ -712,8 +660,8 @@ window.renderConfigDiff = function() {
     var lineRows = computeLineDiff(otherConfig, d.Configuration);
     var bodyHtml;
     if (lineRows === null) {
-        // Configs too large for the O(n*m) positional diff (see CONFIG_DIFF_CELL_LIMIT) -
-        // fall back to the flat, order-independent set diff instead of hanging the tab.
+        // Too large for the O(n*m) positional diff (see CONFIG_DIFF_CELL_LIMIT) - fall
+        // back to a flat, order-independent set diff.
         var diff = configSetDiff(otherConfig, d.Configuration);
         bodyHtml = (diff.added.length === 0 && diff.removed.length === 0)
             ? '<div class="config-diff-empty">No differences - configuration is identical between these two.</div>'
@@ -760,18 +708,11 @@ window.downloadDeviceConfig = function() {
     downloadBlob(`${ip}_config.txt`, config, 'text/plain;charset=utf-8;');
 };
 
-// Printable device report - same "device needs to be replaced or restored" motivation as
-// the config backup itself, but everything ELSE captured about a device: identity,
-// hardware, alarms, neighbors, interfaces, clients. Deliberately excludes the config
-// backup text - SNMP communities, RADIUS/TACACS+ shared secrets, local user secrets live
-// in there (same sensitivity call Get-JunosNodeData.ps1's RawDumps redaction already
-// makes), and a printed/PDF'd report is exactly the kind of copy that ends up left on a
-// shared printer or emailed around. The config export button elsewhere in this file is
-// the deliberate, single-purpose way to get that text out. Opens a self-contained document
-// in a new tab (no library, same "hand-roll it" pattern as everything else) with a visible
-// Print button rather than auto-firing window.print() on open - avoids popup/timing edge
-// cases around a new window's print dialog firing before content has settled, and lets the
-// user review first.
+// Printable device report: identity/hardware/alarms/neighbors/interfaces/clients.
+// Deliberately excludes the config backup text - it can hold SNMP communities and
+// RADIUS/TACACS+ secrets, too sensitive for something that gets printed/emailed around; use
+// the config export button for that. Opens in a new tab with a visible Print button rather
+// than auto-firing window.print(), to avoid popup/timing issues and let the user review first.
 window.printDeviceReport = function() {
     var d = currentSelectedNodeData;
     if (!d) { window.setStatus("No device selected.", "red"); return; }
@@ -779,8 +720,8 @@ window.printDeviceReport = function() {
     var alarms = window.asArray(d.Alarms);
     var stack = window.asArray(d.StackMembers);
     var neighbors = window.asArray(d.Neighbors);
-    var interfaces = Array.isArray(d.Interfaces) ? d.Interfaces : [];
-    var clients = d.TrueClients || d.Clients || [];
+    var interfaces = window.asArray(d.Interfaces);
+    var clients = window.asArray(d.TrueClients || d.Clients);
 
     function row(cells) { return `<tr>${cells.map(c => `<td>${c}</td>`).join('')}</tr>`; }
     function table(headers, rows, emptyText) {
@@ -833,13 +774,9 @@ ${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(
 
 </body></html>`;
 
-    // A Blob URL navigation target, not document.write() - every dynamic field above is
-    // already run through esc() (same escaping this codebase uses everywhere else for
-    // device-supplied strings like hostnames/LLDP descriptions before innerHTML), so this
-    // isn't fixing a missing-escape bug - it's just the cleaner, non-deprecated mechanism.
-    // Deliberately NOT revoked: the new tab needs the URL to stay valid for as long as the
-    // user keeps it open to review/print, unlike the click-and-forget CSV/config downloads
-    // elsewhere in this file that revoke immediately after triggering a save.
+    // Blob URL navigation target rather than document.write(). Deliberately not revoked
+    // (unlike the click-and-forget downloads below) - the new tab needs it to stay valid
+    // while the user reviews/prints.
     var blob = new Blob([html], { type: 'text/html' });
     var url = URL.createObjectURL(blob);
     var reportWindow = window.open(url, '_blank');
@@ -854,7 +791,7 @@ window.exportInterfacesCsv = function() {
     var hideDown = document.getElementById('hideDownPorts').checked;
     var rows = [['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description']];
 
-    (currentSelectedNodeData.Interfaces || []).forEach(intf => {
+    window.asArray(currentSelectedNodeData.Interfaces).forEach(intf => {
         if (!intf.Port || String(intf.Port).includes('.')) return;
         if (hideDown && String(intf.Link).toLowerCase() !== "up") return;
         var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
@@ -867,7 +804,7 @@ window.exportInterfacesCsv = function() {
 window.exportClientsCsv = function() {
     if (!currentSelectedNodeData) { window.setStatus("Select a switch first.", "red"); return; }
     var vlanFilter = document.getElementById('vlanFilter').value;
-    var clients = (currentSelectedNodeData.TrueClients || []).slice();
+    var clients = window.asArray(currentSelectedNodeData.TrueClients).slice();
 
     if (vlanFilter !== "ALL") { clients = clients.filter(c => String(c.VLAN_Tag) === vlanFilter.toString()); }
     clients.sort((a, b) => {

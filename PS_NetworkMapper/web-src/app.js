@@ -1,28 +1,17 @@
-// App entry point: the global error handler, the core session state every other file in
-// this app reads and mutates (network/globalTopologyData/loadedSnapshots/
-// activeSnapshotIndex/searchIndex/deviceByIp/currentSelectedNodeData/etc. - declared once
-// here since they're genuinely cross-cutting, not owned by any one feature), file loading
-// (including the encrypted-file password flow), snapshot switching, and app-shell chrome
-// (sidebar collapse/tabs). Everything else lives in its own file - see utils.js,
-// topology-crypto.js, persistence.js, graph.js, dashboard.js, search.js, drawer.js - all
-// classic scripts sharing this same global scope (see graph-layout.js's footer comment
-// for why this app avoids ES modules), loaded via plain <script> tags in
-// network_vis.html.
+// App entry point: global error handler, core cross-cutting session state, file loading
+// (incl. encrypted-file password flow), snapshot switching, and app-shell chrome.
+// Other features live in utils.js, topology-crypto.js, persistence.js, graph.js,
+// dashboard.js, search.js, drawer.js - all classic scripts sharing this global scope,
+// loaded via <script> tags in network_vis.html.
 
 /**
  * Global Error Catcher
  */
-// "ResizeObserver loop completed with undelivered notifications" (and the older Firefox
-// wording "ResizeObserver loop limit exceeded") is a benign browser warning, not an
-// application error - it fires whenever an observed element's size changes faster than
-// the observer callback can keep up for one frame, which vis-network's internal
-// ResizeObserver on #mynetwork does constantly during the left panel's CSS width
-// transition (collapse/expand, or switching into/out of the wide Analysis Dashboard
-// panel). Chromium dispatches it as a real `error` event on window, which is why it was
-// reaching this handler and popping the fatal-error modal over the whole canvas on every
-// panel toggle - the graph was still there underneath the whole time. Every major browser
-// vendor and framework (Chrome DevTools itself, Next.js, Vite, etc.) explicitly ignores
-// this exact message for the same reason: it never indicates a real bug.
+// "ResizeObserver loop completed/limit exceeded" is a benign browser warning, not a real
+// error - vis-network's ResizeObserver on #mynetwork triggers it during panel CSS width
+// transitions, and Chromium dispatches it as a window `error` event, which was popping
+// the fatal-error modal over the graph on every panel toggle. Ignore it, like every major
+// browser/framework does.
 var IGNORED_ERROR_MESSAGES = /ResizeObserver loop/;
 window.onerror = function(message, source, lineno, colno, error) {
     if (IGNORED_ERROR_MESSAGES.test(message)) return true;
@@ -49,33 +38,24 @@ var searchHighlightQuery = "";
 
 // Multi-snapshot state. loadedSnapshots holds every snapshot from the most recent
 // "Render Topology" / "Load Folder" action; activeSnapshotIndex picks which one drives
-// the graph/drawer view (globalTopologyData/deviceByIp always mirror it - see
-// window.setActiveSnapshot). Search spans every loaded snapshot regardless of which is
-// active (see search.js's buildSearchIndex) - only the rendered graph is single-snapshot.
+// the graph/drawer view (globalTopologyData/deviceByIp mirror it - see setActiveSnapshot).
+// Search spans every loaded snapshot regardless of which is active; only the rendered
+// graph is single-snapshot.
 var loadedSnapshots = [];   // {sourceFile, scanTimestamp, topology, deviceByIp}[]
 var activeSnapshotIndex = -1;
-// Which sidebar tab (Load File / Search / Settings / Analysis Dashboard) is showing -
-// see window.switchSidebarTab. Used so a file load can refresh the Analysis Dashboard
-// live when it's already the visible tab, instead of only on tab-switch.
+// Which sidebar tab is showing (see window.switchSidebarTab).
 var activeSidebarTab = 'sidebar-tab-load';
-// Which center-panel view (Diagram / Map) is showing - see window.switchCenterView in
-// map.js. Same cross-cutting UI-mode pattern as activeSidebarTab above.
+// Which center-panel view (Diagram / Map) is showing - see map.js's switchCenterView.
 var activeCenterView = 'diagram';
 
-// Search index (see search.js's window.buildSearchIndex / window.performGlobalSearch) -
-// built once per file load instead of re-scanning every device's nested StackMembers/
-// TrueClients arrays (and re-lowercasing every field) on every search. deviceByIp turns
-// the O(devices) linear scan every drawer open used to do into an O(1) lookup. deviceByIp
-// itself is reassigned (not rebuilt) to whichever loadedSnapshots[i].deviceByIp is
-// currently active - openRightDrawer/search click-through for the active snapshot need no
-// changes for that.
+// Search index, built once per file load rather than re-scanning every device on every
+// search (see search.js). deviceByIp gives O(1) drawer lookups and is reassigned (not
+// rebuilt) to whichever loadedSnapshots[i].deviceByIp is currently active.
 var searchIndex = [];   // {deviceIp, snapshotIndex, field, value, valueLower}[]
 var deviceByIp = new Map();
 
-// Switches which loaded snapshot drives the graph/drawer view. Search always spans every
-// loaded snapshot no matter which is active (see search.js's buildSearchIndex) - this only
-// changes what's rendered as the topology graph and what deviceByIp/openRightDrawer
-// resolve against, by reassigning the reference rather than rebuilding anything.
+// Switches which loaded snapshot drives the graph/drawer view (search still spans all
+// loaded snapshots regardless).
 window.setActiveSnapshot = async function(index) {
     if (!loadedSnapshots[index]) return;
     activeSnapshotIndex = index;
@@ -92,18 +72,12 @@ window.setActiveSnapshot = async function(index) {
     var switcher = document.getElementById('snapshotSwitcher');
     if (switcher) switcher.value = String(index);
 
-    // The map view (map.js) has its own rendering of this same topology data - without
-    // this, switching snapshots only ever rebuilt the diagram, so a Map view opened before
-    // this switch (or before any snapshot was ever loaded) would keep showing whatever it
-    // showed last, silently, for the rest of the session. renderMapMarkers is a no-op if
-    // Map view has never been initialized this session (see its own leafletMap===null
-    // guard), and re-renders in place (no camera reset) if it has.
+    // Map view (map.js) renders this same topology separately, so it needs its own
+    // refresh on snapshot switch. No-op if Map view was never opened (leafletMap===null).
     window.renderMapMarkers();
 };
 
-// Shows the snapshot picker only when more than one snapshot is loaded - for the common
-// single-file case this stays hidden and nothing about the UI changes from before
-// multi-snapshot loading existed.
+// Shows the snapshot picker only when more than one snapshot is loaded.
 window.renderSnapshotSwitcher = function() {
     var container = document.getElementById('snapshotSwitcherContainer');
     var select = document.getElementById('snapshotSwitcher');
@@ -151,8 +125,7 @@ window.promptForPassword = function(errorMsg) {
             input.removeEventListener('keydown', onKeydown);
         }
         function onUnlock() {
-            // Capture before clearing - cleanup() only hides the modal, this drops the
-            // password out of the DOM the moment it's no longer needed there.
+            // Capture before clearing - drops the password out of the DOM immediately.
             var value = input.value;
             input.value = '';
             cleanup();
@@ -170,18 +143,11 @@ window.promptForPassword = function(errorMsg) {
     });
 };
 
-// Start-NetworkMapper.ps1 already prompted for this exact password at the console and now
-// hands it to the browser via GET /api/session-password (WebServer.ps1), so
-// readSnapshotFile (below) and map.js's loadMapConfiguration can both skip the password
-// modal on the common path instead of asking the operator to re-type a password they just
-// typed - it's the same one password for the whole session (see that script's "Network_
-// Visualizer will prompt for this same password" comment). Cached/in-flight-deduped the
-// same way map.js's ensureConfigLoaded dedupes its own fetch - loading several encrypted
-// files, or a file load racing the Settings tab's own Configuration.json.enc fetch, only
-// ever hits the endpoint once. Resolves to '' (never rejects) when the server has nothing to
-// offer - a server-only launch with no Configuration.json.enc yet, or the "continue without
-// credentials" startup path where the typed password was proven wrong - so every caller can
-// treat a falsy result as "fall back to promptForPassword", exactly as before this existed.
+// Start-NetworkMapper.ps1 already prompted for this password at the console and hands it
+// to the browser via GET /api/session-password, so callers can skip re-prompting on the
+// common path. Cached/in-flight-deduped so multiple encrypted-file loads only hit the
+// endpoint once. Resolves to '' (never rejects) when the server has nothing to offer, so
+// callers can treat a falsy result as "fall back to promptForPassword".
 var sessionPasswordPromise = null;
 window.getSessionEncryptionPassword = function() {
     if (!sessionPasswordPromise) {
@@ -198,12 +164,9 @@ window.toggleLeftPanel = function(e) {
     document.getElementById('left-panel').classList.toggle('collapsed');
 };
 
-// Drag-resize for #right-panel (the device detail drawer). Unlike the left panel's
-// collapse/expand toggle, this tracks the pointer continuously, so #center-panel (flex-grow)
-// shrinks/grows in real time as the user drags - vis-network's own resize handling already
-// picks that up live (see the ResizeObserver comment near IGNORED_ERROR_MESSAGES above), but
-// Leaflet does not self-observe its container, so Map view needs an explicit
-// invalidateSize() call while dragging or its tiles freeze at the pre-drag size.
+// Drag-resize for #right-panel. vis-network picks up the resulting #center-panel resize
+// on its own, but Leaflet does not self-observe its container, so Map view needs an
+// explicit invalidateSize() call while dragging or its tiles freeze at the pre-drag size.
 window.startRightPanelResize = function(e) {
     e.preventDefault();
     var panel = document.getElementById('right-panel');
@@ -214,8 +177,8 @@ window.startRightPanelResize = function(e) {
     handle.classList.add('dragging');
 
     function onMove(moveEvent) {
-        // Dragging the LEFT edge of a RIGHT-docked panel: moving the pointer left (negative
-        // dx) grows the panel, so width goes up as dx goes down - hence the negation.
+        // Dragging the left edge of a right-docked panel: leftward movement grows it,
+        // hence the negation.
         var dx = moveEvent.clientX - startX;
         var newWidth = startWidth - dx;
         var maxWidth = window.innerWidth * 0.9;
@@ -239,9 +202,8 @@ window.startRightPanelResize = function(e) {
     document.addEventListener('mouseup', onUp);
 };
 
-// Restores a previously dragged width on load, same "remember what the user set last time"
-// treatment as the rest of the app's settings (persistence.js) - a plain localStorage read
-// since this is a pure display preference, not part of Configuration.json's saved state.
+// Restores a previously dragged width on load - a display preference, not part of
+// Configuration.json's saved state, so a plain localStorage read.
 (function restoreRightPanelWidth() {
     try {
         var saved = parseFloat(localStorage.getItem('rightPanelWidth'));
@@ -251,11 +213,9 @@ window.startRightPanelResize = function(e) {
     } catch (err) {}
 })();
 
-// Browser-window resize (not the panel drag above, which handles its own live updates) -
-// vis-network picks this up on its own via its container ResizeObserver, but Leaflet does
-// not self-observe, so without this a window resize/maximize leaves Map view's tiles sized
-// to whatever the viewport was when it was last opened. Debounced since 'resize' fires
-// continuously while a window is actively being dragged by its OS-level edge.
+// Browser-window resize: vis-network picks this up via its own ResizeObserver, but
+// Leaflet doesn't self-observe, so Map view needs an explicit invalidateSize(). Debounced
+// since 'resize' fires continuously during an active drag.
 var windowResizeDebounce = null;
 window.addEventListener('resize', function() {
     clearTimeout(windowResizeDebounce);
@@ -264,12 +224,10 @@ window.addEventListener('resize', function() {
     }, 150);
 });
 
-// Sidebar tabs (Load File / Search / Settings / Analysis Dashboard). Panes stay in the
-// DOM when hidden (display:none, not removed), so getElementById-based reads elsewhere
-// (getClusterThreshold, getLayoutSettings) work regardless of which tab is active. The
-// Analysis Dashboard tab widens the panel (.wide-panel) since its tables/charts don't fit
-// in the 320px other tabs use - vis-network's own container-size polling picks up the
-// resulting #mynetwork resize the same way it already does for panel collapse/expand.
+// Sidebar tabs. Panes stay in the DOM when hidden (display:none, not removed), so
+// getElementById-based reads elsewhere (getClusterThreshold, getLayoutSettings) work
+// regardless of which tab is active. Analysis Dashboard widens the panel since its
+// tables/charts don't fit the 320px other tabs use.
 window.switchSidebarTab = async function(tabId) {
     document.querySelectorAll('.sidebar-tab-content').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('.sidebar-tab').forEach(el => el.classList.remove('active'));
@@ -279,11 +237,9 @@ window.switchSidebarTab = async function(tabId) {
     activeSidebarTab = tabId;
 
     if (tabId === 'sidebar-tab-settings') {
-        // Immediate paint with whatever's already known (defaults, or an earlier load this
-        // session), then widen the config-load trigger to fire here too (previously only
-        // Map view did) - both surfaces share the same ensureConfigLoaded gate (map.js), so
-        // the password prompt and fetch only ever happen once per session regardless of
-        // which one the user opens first.
+        // Immediate paint with whatever's already known, then load config (shares
+        // map.js's ensureConfigLoaded gate, so the fetch/password-prompt happens once
+        // per session regardless of which surface opens it first).
         window.populateSettingsInputs();
         await window.ensureConfigLoaded();
         window.populateSettingsInputs();
@@ -294,8 +250,7 @@ window.switchSidebarTab = async function(tabId) {
 // 1. File Loading & Parsing
 
 // Reads and (if needed) decrypts one File into a {sourceFile, scanTimestamp, topology}
-// snapshot record. Shared by forceLoadFile and forceLoadFolder so there's exactly one
-// place that knows the on-disk format, instead of two copies drifting apart over time.
+// snapshot record. Shared by forceLoadFile and forceLoadFolder.
 function readSnapshotFile(file) {
     return new Promise((resolve, reject) => {
         var reader = new FileReader();
@@ -308,12 +263,8 @@ function readSnapshotFile(file) {
                 if (data && data.format === 'PSNetworkMapper-EncryptedTopology') {
                     var decryptedText = null;
                     var errorMsg = null;
-                    // Try the session password (see window.getSessionEncryptionPassword) once,
-                    // silently, before ever showing the modal - it's the same password
-                    // Start-NetworkMapper.ps1 encrypted this file with in the first place. Only
-                    // falls through to promptForPassword if that's unavailable/empty, or (rare -
-                    // e.g. this file was manually re-encrypted under a different password) it
-                    // fails to decrypt.
+                    // Try the session password silently first; only fall through to
+                    // promptForPassword if it's unavailable or fails to decrypt.
                     var sessionPassword = await window.getSessionEncryptionPassword();
                     var triedSessionPassword = false;
                     while (decryptedText === null) {
@@ -335,9 +286,8 @@ function readSnapshotFile(file) {
 
                 if (!data.Topology) throw new Error(`"${file.name}": missing 'Topology' array.`);
 
-                // Clients arrive pre-correlated (MAC table + cross-device ARP enrichment
-                // done server-side by Start-NetworkMapper.ps1); the visualizer just displays them.
-                data.Topology.forEach(device => { device.TrueClients = device.Clients || []; });
+                // Clients arrive pre-correlated server-side; the visualizer just displays them.
+                data.Topology.forEach(device => { device.TrueClients = window.asArray(device.Clients); });
 
                 resolve({ sourceFile: file.name, scanTimestamp: data.ScanTimestamp || null, topology: data.Topology });
             } catch (err) {
@@ -345,9 +295,7 @@ function readSnapshotFile(file) {
             }
         };
 
-        // Explicit UTF-8 - readAsText() defaults to the platform's guess when omitted, and
-        // Start-NetworkMapper.ps1 always writes snapshots as UTF-8 (see its own -Encoding
-        // UTF8 comments), so this must match or non-ASCII hostnames/notes mis-decode silently.
+        // Explicit UTF-8 - platform default guess would mis-decode non-ASCII hostnames/notes.
         reader.readAsText(file, 'UTF-8');
     });
 }
@@ -367,12 +315,9 @@ window.forceLoadFolder = async function() {
         window.setStatus("Please select a folder.", "red");
         return;
     }
-    // A folder picker returns EVERY file in the directory, not just snapshots - a stray
-    // non-snapshot ".json" file in the picked folder would otherwise be loaded and fail
-    // confusingly. Match the actual naming convention Start-NetworkMapper.ps1
-    // writes ("NetworkMap_<timestamp>.json[.enc]") instead of any file ending in .json,
-    // and explicitly exclude its in-progress ".tmp.json(.enc)" files (picking the folder
-    // mid-crawl would otherwise load a partial snapshot as if it were a finished one).
+    // A folder picker returns every file in the directory - filter to the actual
+    // NetworkMap_<timestamp>.json[.enc] naming convention, excluding in-progress
+    // .tmp.json(.enc) files that a mid-crawl folder pick could otherwise load as finished.
     var files = Array.from(input.files).filter(f =>
         /^NetworkMap_.*\.json(\.enc)?$/i.test(f.name) && !/\.tmp\.json(\.enc)?$/i.test(f.name)
     );
@@ -383,33 +328,23 @@ window.forceLoadFolder = async function() {
     await window.processSelectedFiles(files);
 };
 
-// Shared by forceLoadFile and forceLoadFolder - the only place that turns a list of File
-// objects into loadedSnapshots plus the active graph/search state.
+// Shared by forceLoadFile and forceLoadFolder - turns a list of File objects into
+// loadedSnapshots plus the active graph/search state.
 window.processSelectedFiles = async function(files) {
     var btn = document.getElementById('loadBtn');
     var folderBtn = document.getElementById('loadFolderBtn');
     btn.disabled = true;
     if (folderBtn) folderBtn.disabled = true;
     window.closeDrawer();
-    // Same "reset any open per-device UI before swapping the underlying data" reasoning as
-    // closeDrawer above. This function reassigns loadedSnapshots/deviceByIp wholesale (a
-    // manual load, a folder load, or the synthesized file scan-network.js feeds in after a
-    // completed scan), and the map's location editor stays fully usable while that happens -
-    // its backdrop is pointer-events:none, so the sidebar is still clickable with the editor
-    // open. Left open, its editorTargetIp would then point into data that no longer exists.
-    // Unguarded like the window.renderMapMarkers() call in setActiveSnapshot above:
-    // network_vis.html loads map.js before app.js, and closeLocationEditor itself tolerates
-    // Map view never having been opened (leafletMap === null).
+    // Reset the map's location editor too, before loadedSnapshots/deviceByIp are reassigned
+    // wholesale - left open, its editorTargetIp would point into data that no longer exists.
     window.closeLocationEditor();
 
     var newSnapshots = [];
     var skipped = []; // {name, reason}[] - only used/reported for multi-file batches
     var parseSucceeded = false;
-    // Single file keeps the exact original behavior: any failure (bad JSON, wrong
-    // format, decrypt cancelled) aborts the whole load with no data shown - unchanged
-    // from before multi-file loading existed. A multi-file/folder batch is more
-    // forgiving: one bad or cancelled file (e.g. a folder picker sweeping up something
-    // that isn't actually a snapshot) shouldn't throw away every other file already read.
+    // Single file: any failure aborts the whole load with no data shown. A multi-file/
+    // folder batch is more forgiving - one bad or cancelled file shouldn't discard the rest.
     var tolerateFailures = files.length > 1;
 
     try {
@@ -441,9 +376,8 @@ window.processSelectedFiles = async function(files) {
         await nextPaint();
         window.buildSearchIndex();
 
-        // Active = most recently captured snapshot. Files with no ScanTimestamp (they
-        // predate that field) fall back to selection order, preferring later ones, so a
-        // mixed batch still lands on something reasonable instead of an arbitrary pick.
+        // Active = most recently captured snapshot. Files with no ScanTimestamp fall back
+        // to selection order, preferring later ones.
         var bestIndex = 0, bestTime = -Infinity;
         loadedSnapshots.forEach((s, idx) => {
             var t = s.scanTimestamp ? new Date(s.scanTimestamp).getTime() : NaN;
@@ -453,10 +387,8 @@ window.processSelectedFiles = async function(files) {
 
         window.renderSnapshotSwitcher();
         window.updateDeviceHistory();
-        // Analysis Dashboard is a permanent tab now (not a button gated on having a
-        // snapshot loaded - its own empty states handle "nothing loaded yet"). If it's
-        // already the visible tab, refresh it now instead of leaving it stale until the
-        // user clicks away and back.
+        // Refresh Analysis Dashboard now if it's already the visible tab, rather than
+        // leaving it stale until the user clicks away and back.
         if (activeSidebarTab === 'sidebar-tab-analysis') window.refreshAnalysisDashboard();
         window.showProgress("Rendering Topology...", 100, true);
         await nextPaint();

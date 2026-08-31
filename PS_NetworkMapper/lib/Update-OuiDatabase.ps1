@@ -1,20 +1,10 @@
-# Fetches the full IEEE MAC-vendor (OUI) registry and writes it as a vendored JS asset
-# for web-src (the Network_Visualizer app) to look up client vendors from. Deliberately a separate script
-# from the crawler: this is the only piece of PS_NetworkMapper that needs internet
-# egress (to IEEE), which the switch-crawling scripts never do and shouldn't need to -
-# a real network-boundary reason to keep it isolated, not just tidiness. Re-run this
-# occasionally to pick up newly-registered vendors; nothing else in the repo depends on
-# it running automatically.
-#
-# Modeled on the sibling PS_IPv4Scanner/getOUI.ps1, which already does this exact
-# IEEE-fetch-and-parse job for a different tool in this repo - same source, same TLS/
-# User-Agent handling, same "base 16" line format - just written out as a JS asset
-# instead of a pipe-delimited text file, since the consumer here is a browser, not
-# another PowerShell script.
+# Fetches the full IEEE MAC-vendor (OUI) registry and writes it as a vendored JS asset for
+# web-src to look up client vendors from. Kept separate from the crawler since it's the only
+# part of PS_NetworkMapper that needs internet egress. Re-run occasionally to pick up newly
+# registered vendors; nothing else depends on it running automatically.
 [CmdletBinding()]
 param(
-    # $PSScriptRoot is PS_NetworkMapper/lib/ - the target is the sibling top-level
-    # web-src/ folder's vendor/, one level up and back down.
+    # $PSScriptRoot is PS_NetworkMapper/lib/; target is the sibling web-src/vendor/.
     [string]$OutputPath = (Join-Path $PSScriptRoot "..\web-src\vendor\oui-data.js")
 )
 
@@ -24,11 +14,14 @@ $Session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 $Headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36" }
 
 Write-Host "Fetching IEEE OUI registry (standards-oui.ieee.org/oui/oui.txt)..." -ForegroundColor Cyan
-$RawText = (Invoke-WebRequest -Uri "https://standards-oui.ieee.org/oui/oui.txt" -WebSession $Session -Headers $Headers).Content
+try {
+    $RawText = (Invoke-WebRequest -Uri "https://standards-oui.ieee.org/oui/oui.txt" -WebSession $Session -Headers $Headers).Content
+} catch {
+    throw "Failed to fetch the IEEE OUI registry: $_"
+}
 
-# Real line format (confirmed against the live endpoint):
-#   286FB9     (base 16)\t\tNokia Shanghai Bell Co., Ltd.
-# Address lines that follow each entry don't match this pattern and are skipped for free.
+# Real line format: "286FB9     (base 16)\t\tNokia Shanghai Bell Co., Ltd." - address
+# lines that follow each entry don't match this pattern and are skipped for free.
 $Entries = [ordered]@{}
 foreach ($Line in ($RawText -split "[\r\n]")) {
     if ($Line -match "^(?<prefix>[A-Fa-f0-9]{6})\s*\(base 16\)\s*(?<vendor>.+)$") {
@@ -40,9 +33,14 @@ foreach ($Line in ($RawText -split "[\r\n]")) {
 
 if ($Entries.Count -eq 0) { throw "Parsed zero OUI entries - IEEE's response format may have changed. Inspect the raw response before assuming the fetch itself failed." }
 
-# JSON is a strict subset of JS object-literal syntax, so ConvertTo-Json's output can be
-# assigned directly to window.OUI_DATABASE without any hand-escaping of vendor names that
-# contain quotes/backslashes/etc.
+# The real registry has 30k+ entries; a dropped connection mid-download still yields a
+# well-formed prefix of it, which would silently pass the zero-count check above and
+# overwrite a good database with an incomplete one. Below this threshold, treat it as a
+# failed/partial fetch rather than a legitimately shrunk registry.
+if ($Entries.Count -lt 10000) { throw "Only parsed $($Entries.Count) OUI entries (expected 30,000+) - the download likely failed partway through. Not overwriting $OutputPath." }
+
+# JSON is a strict subset of JS object-literal syntax, so this can be assigned directly to
+# window.OUI_DATABASE with no hand-escaping needed.
 $JsonBody = $Entries | ConvertTo-Json -Depth 2 -Compress
 
 $OutputDir = Split-Path $OutputPath -Parent

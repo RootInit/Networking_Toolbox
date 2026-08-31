@@ -1,14 +1,21 @@
-//
-// Matches a scanned device to its Configuration.json location entry (if any). Keyed by
-// chassis serial first (survives IP renumbering/hostname changes/reimaging - only the
-// physical unit's own identity), hostname second, DeviceIP only as a last resort for the
-// rare device whose chassis hardware never got parsed. See the geo-map-view design spec
-// for why DeviceIP alone isn't durable enough for this file specifically (the rest of the
-// app still keys by DeviceIP - that's a separate, existing, much larger concern).
+// Matches a scanned device to its Configuration.json location entry. Keyed by chassis
+// serial first (survives IP/hostname changes/reimaging), then hostname, then DeviceIP
+// as a last resort.
+
+// Local copy of utils.js's window.asArray - this file also runs under plain Node (see the
+// dual-mode export below), where window.asArray doesn't exist. PowerShell's ConvertTo-Json
+// serializes a single-element array as a bare object, so a standalone (non-stacked) switch's
+// StackMembers - normally exactly one entry - arrives as {..} instead of [{..}] and must be
+// normalized before .forEach, or every standalone device throws here.
+function asArray(val) {
+  if (Array.isArray(val)) return val;
+  if (val === null || val === undefined) return [];
+  return [val];
+}
 
 function extractDeviceKeys(device) {
   var serial = null;
-  (device.StackMembers || []).forEach(function (member) {
+  asArray(device.StackMembers).forEach(function (member) {
     if (member && (member.Role === 'Standalone' || member.Role === 'Master') && member.Serial) {
       serial = member.Serial;
     }

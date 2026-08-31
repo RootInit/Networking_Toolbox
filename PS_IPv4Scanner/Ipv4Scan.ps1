@@ -288,25 +288,20 @@ Begin {
                 }                  
             }
             
-            # Get CIDR Address by parsing it into an IP-Address
             $CIDRAddress = [System.Net.IPAddress]::Parse([System.Convert]::ToUInt64(("1" * $CIDR).PadRight(32, "0"), 2))
         
             # Binary AND ... this is how subnets work.
             $NetworkID_bAND = $IPv4Address.Address -band $CIDRAddress.Address
 
-            # Return an array of bytes. Then join them.
             $NetworkID = [System.Net.IPAddress]::Parse([System.BitConverter]::GetBytes([UInt32]$NetworkID_bAND) -join ("."))
             
             # Get HostBits based on SubnetBits (CIDR) // Hostbits (32 - /24 = 8 -> 00000000000000000000000011111111)
             $HostBits = ('1' * (32 - $CIDR)).PadLeft(32, "0")
             
-            # Convert Bits to Int64
             $AvailableIPs = [Convert]::ToInt64($HostBits, 2)
 
-            # Convert Network Address to Int64
             $NetworkID_Int64 = (Convert-IPv4Address -IPv4Address $NetworkID.ToString()).Int64
 
-            # Convert add available IPs and parse into IPAddress
             $Broadcast = [System.Net.IPAddress]::Parse((Convert-IPv4Address -Int64 ($NetworkID_Int64 + $AvailableIPs)).IPv4Address)
             
             # Change useroutput ==> (/27 = 0..31 IPs -> AvailableIPs 32)
@@ -315,7 +310,6 @@ Begin {
             # Hosts = AvailableIPs - Network Address + Broadcast Address
             $Hosts = ($AvailableIPs - 2)
                 
-            # Build custom PSObject
             [pscustomobject] @{
                 NetworkID = $NetworkID
                 Broadcast = $Broadcast
@@ -331,31 +325,24 @@ Begin {
 }
 
 Process {
-    # Calculate Subnet (Start and End IPv4-Address)
     if ($PSCmdlet.ParameterSetName -eq 'CIDR' -or $PSCmdlet.ParameterSetName -eq 'Mask') {
-        # Convert Subnetmask
         if ($PSCmdlet.ParameterSetName -eq 'Mask') {
             $CIDR = (Convert-Subnetmask -Mask $Mask).CIDR     
         }
 
-        # Create new subnet
         $Subnet = Get-IPv4Subnet -IPv4Address $IPv4Address -CIDR $CIDR
 
-        # Assign Start and End IPv4-Address
         $StartIPv4Address = $Subnet.NetworkID
         $EndIPv4Address = $Subnet.Broadcast
     }
 
-    # Convert Start and End IPv4-Address to Int64
     $StartIPv4Address_Int64 = (Convert-IPv4Address -IPv4Address $StartIPv4Address.ToString()).Int64
     $EndIPv4Address_Int64 = (Convert-IPv4Address -IPv4Address $EndIPv4Address.ToString()).Int64
 
-    # Check if range is valid
     if ($StartIPv4Address_Int64 -gt $EndIPv4Address_Int64) {
         Write-Error -Message "Invalid IP-Range... Check your input!" -Category InvalidArgument -ErrorAction Stop
     }
 
-    # Calculate IPs to scan (range)
     $IPsToScan = ($EndIPv4Address_Int64 - $StartIPv4Address_Int64)
     
     Write-Verbose -Message "Scanning range from $StartIPv4Address to $EndIPv4Address ($($IPsToScan + 1) IPs)"
@@ -427,7 +414,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
     try {
         $Timeout = 1000
         if ($Port -eq 0) {
-            # No port check requirement use normal ICMP
                 $PingObj = New-Object System.Net.NetworkInformation.Ping
                 $Buffer = New-Object Byte[] 32
                 $Result = $PingObj.Send($IPv4Address, $Timeout, $Buffer)
@@ -441,7 +427,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
                 }
         }
         else {
-            # Need to do TCP Ping to specific port
             $Client = New-Object System.Net.Sockets.TcpClient
 
             $Connect = $Client.BeginConnect($IPv4Address, $Port, $null, $null)
@@ -478,13 +463,18 @@ for ($i = 0; $i -lt $Tries; $i++) {
         $MAC = [String]::Empty 
 
         if (($EnableMACResolving) -and (($Status -eq "Up") -or ($IncludeInactive))) {
-            $Arp_Result = (arp -a).ToUpper().Trim()
+            try {
+                $Arp_Result = (arp -a).ToUpper().Trim()
 
-            foreach ($Line in $Arp_Result) {                
-                if ($Line.Split(" ")[0] -eq $IPv4Address) {                    
-                    $MAC = [Regex]::Matches($Line, "([0-9A-F][0-9A-F]-){5}([0-9A-F][0-9A-F])").Value
+                foreach ($Line in $Arp_Result) {
+                    if ($Line.Split(" ")[0] -eq $IPv4Address) {
+                        $MAC = [Regex]::Matches($Line, "([0-9A-F][0-9A-F]-){5}([0-9A-F][0-9A-F])").Value
+                    }
                 }
             }
+            catch {
+                Write-Warning -Message "MAC resolution via 'arp -a' failed for $($IPv4Address): $($_.Exception.Message)"
+            } # arp.exe unavailable/failed - leave MAC empty
         }
 
         # +++ Get extended informations +++
@@ -520,19 +510,15 @@ for ($i = 0; $i -lt $Tries; $i++) {
 
     Write-Verbose -Message "Setting up RunspacePool..."
 
-    # Create RunspacePool and Jobs
     $RunspacePool = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, $Threads, $Host)
     $RunspacePool.Open()
     [System.Collections.ArrayList]$Jobs = @()
 
     Write-Verbose -Message "Setting up jobs..."
 
-    # Set up jobs for each IP...
     for ($i = $StartIPv4Address_Int64; $i -le $EndIPv4Address_Int64; $i++) { 
-        # Convert IP back from Int64
         $IPv4Address = (Convert-IPv4Address -Int64 $i).IPv4Address                
 
-        # Create hashtable to pass parameters
         $ScriptParams = @{
             IPv4Address          = $IPv4Address
             Port                 = $Port
@@ -553,7 +539,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
 
         Write-Progress -Activity "Setting up jobs..." -Id 1 -Status "Current IP-Address: $IPv4Address" -PercentComplete $Progress_Percent
 						 
-        # Create new job
         $Job = [System.Management.Automation.PowerShell]::Create().AddScript($ScriptBlock).AddParameters($ScriptParams)
         $Job.RunspacePool = $RunspacePool
         
@@ -563,7 +548,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
             Result = $Job.BeginInvoke()
         }
 
-        # Add job to collection
         [void]$Jobs.Add($JobObj)
     }
 
@@ -573,79 +557,82 @@ for ($i = 0; $i -lt $Tries; $i++) {
     $Jobs_Total = $Jobs.Count
 
     # Process results, while waiting for other jobs
-    Do {
-        # Get all jobs, which are completed
-        $Jobs_ToProcess = $Jobs | Where-Object -FilterScript { $_.Result.IsCompleted }
-  
-        # If no jobs finished yet, wait 500 ms and try again
-        if ($null -eq $Jobs_ToProcess) {
-            Write-Verbose -Message "No jobs completed, wait 250ms..."
+    try {
+        Do {
+            $Jobs_ToProcess = $Jobs | Where-Object -FilterScript { $_.Result.IsCompleted }
 
-            Start-Sleep -Milliseconds 250
-            continue
-        }
-        
-        # Get jobs, which are not complete yet
-        $Jobs_Remaining = ($Jobs | Where-Object -FilterScript { $_.Result.IsCompleted -eq $false }).Count
+            if ($null -eq $Jobs_ToProcess) {
+                Write-Verbose -Message "No jobs completed, wait 250ms..."
 
-        # Catch when trying to divide through zero
-        try {            
-            $Progress_Percent = 100 - (($Jobs_Remaining / $Jobs_Total) * 100) 
-        }
-        catch {
-            $Progress_Percent = 100
-        }
-
-        Write-Progress -Activity "Waiting for jobs to complete... ($($Threads - $($RunspacePool.GetAvailableRunspaces())) of $Threads threads running)" -Id 1 -PercentComplete $Progress_Percent -Status "$Jobs_Remaining remaining..."
-      
-        Write-Verbose -Message "Processing $(if($null -eq $Jobs_ToProcess.Count){"1"}else{$Jobs_ToProcess.Count}) job(s)..."
-
-        # Processing completed jobs
-        foreach ($Job in $Jobs_ToProcess) {       
-            # Get the result...     
-            $Job_Result = $Job.Pipe.EndInvoke($Job.Result)
-            $Job.Pipe.Dispose()
-
-            # Remove job from collection
-            $Jobs.Remove($Job)
-           
-            # Check if result contains status
-            if ($Job_Result.Status) {        
-                if ($AssignVendorToMAC) {           
-                    $Vendor = [String]::Empty
-
-                    # Check if MAC is null or empty
-                    if (-not([String]::IsNullOrEmpty($Job_Result.MAC))) {
-                        # Split it, so we can search the vendor (XX-XX-XX-XX-XX-XX to XXXXXX)
-                        $MAC_VendorSearch = $Job_Result.MAC.Replace("-", "").Substring(0, 6)
-                                
-                        $Vendor = $OUIHashTable.Get_Item($MAC_VendorSearch)
-                    }
-
-                    [pscustomobject] @{
-                        IPv4Address  = $Job_Result.IPv4Address
-                        Status       = $Job_Result.Status
-                        Hostname     = $Job_Result.Hostname
-                        MAC          = $Job_Result.MAC
-                        Vendor       = $Vendor  
-                        BufferSize   = $Job_Result.BufferSize
-                        ResponseTime = $Job_Result.ResponseTime
-                        TTL          = $Job_Result.TTL
-                    } | Select-Object -Property $PropertiesToDisplay
-                }
-                else {
-                    $Job_Result | Select-Object -Property $PropertiesToDisplay
-                }                            
+                Start-Sleep -Milliseconds 250
+                continue
             }
-        } 
 
-    } While ($Jobs.Count -gt 0)
+            $Jobs_Remaining = ($Jobs | Where-Object -FilterScript { $_.Result.IsCompleted -eq $false }).Count
 
-    Write-Verbose -Message "Closing RunspacePool and free resources..."
+            # Catch when trying to divide through zero
+            try {
+                $Progress_Percent = 100 - (($Jobs_Remaining / $Jobs_Total) * 100)
+            }
+            catch {
+                $Progress_Percent = 100
+            }
 
-    # Close the RunspacePool and free resources
-    $RunspacePool.Close()
-    $RunspacePool.Dispose()
+            Write-Progress -Activity "Waiting for jobs to complete... ($($Threads - $($RunspacePool.GetAvailableRunspaces())) of $Threads threads running)" -Id 1 -PercentComplete $Progress_Percent -Status "$Jobs_Remaining remaining..."
+
+            Write-Verbose -Message "Processing $(if($null -eq $Jobs_ToProcess.Count){"1"}else{$Jobs_ToProcess.Count}) job(s)..."
+
+            foreach ($Job in $Jobs_ToProcess) {
+                try {
+                    $Job_Result = $Job.Pipe.EndInvoke($Job.Result)
+                }
+                catch {
+                    Write-Warning -Message "Scan job for run #$($Job.RunNum) failed: $($_.Exception.Message)"
+                    $Job_Result = $null
+                }
+                finally {
+                    $Job.Pipe.Dispose()
+                    $Jobs.Remove($Job)
+                }
+
+                if ($null -eq $Job_Result) { continue }
+
+                if ($Job_Result.Status) {
+                    if ($AssignVendorToMAC) {
+                        $Vendor = [String]::Empty
+
+                        if (-not([String]::IsNullOrEmpty($Job_Result.MAC))) {
+                            # Split it, so we can search the vendor (XX-XX-XX-XX-XX-XX to XXXXXX)
+                            $MAC_VendorSearch = $Job_Result.MAC.Replace("-", "").Substring(0, 6)
+
+                            $Vendor = $OUIHashTable.Get_Item($MAC_VendorSearch)
+                        }
+
+                        [pscustomobject] @{
+                            IPv4Address  = $Job_Result.IPv4Address
+                            Status       = $Job_Result.Status
+                            Hostname     = $Job_Result.Hostname
+                            MAC          = $Job_Result.MAC
+                            Vendor       = $Vendor
+                            BufferSize   = $Job_Result.BufferSize
+                            ResponseTime = $Job_Result.ResponseTime
+                            TTL          = $Job_Result.TTL
+                        } | Select-Object -Property $PropertiesToDisplay
+                    }
+                    else {
+                        $Job_Result | Select-Object -Property $PropertiesToDisplay
+                    }
+                }
+            }
+
+        } While ($Jobs.Count -gt 0)
+    }
+    finally {
+        Write-Verbose -Message "Closing RunspacePool and free resources..."
+
+        $RunspacePool.Close()
+        $RunspacePool.Dispose()
+    }
 
     Write-Verbose -Message "Script finished at $(Get-Date)"
 }

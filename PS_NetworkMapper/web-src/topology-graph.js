@@ -1,13 +1,20 @@
-// Pure device-classification/edge extraction shared by graph.js (the diagram) and map.js
-// (the geo view) - both need "which devices exist, are they scanned/stacked, and which
-// pairs are LLDP neighbors" from the same raw topology array, and must never classify a
-// device differently between the two views. No DOM, no vis-network, no Leaflet.
+// Pure device-classification/edge extraction shared by graph.js (diagram) and map.js
+// (geo view), so both views classify devices identically. No DOM, no vis-network, no Leaflet.
+
+// Local copy of utils.js's window.asArray - this file also runs under plain Node (see the
+// dual-mode export below), where window.asArray doesn't exist. PowerShell's ConvertTo-Json
+// serializes a single-element array as a bare object, so device.Neighbors/TrueClients with
+// exactly one entry arrive as {..} instead of [{..}] and must be normalized before .forEach/.map.
+function asArray(val) {
+  if (Array.isArray(val)) return val;
+  if (val === null || val === undefined) return [];
+  return [val];
+}
 
 function computeDeviceClassification(topology) {
   var result = new Map();
 
-  // Pass 1: every actually-scanned device, even if something below already placeholdered
-  // its IP as a neighbor - scanned always wins (mirrors graph.js's existing two-pass order).
+  // Pass 1: scanned devices always win over a later placeholder for the same IP.
   topology.forEach(function (device) {
     if (!device || !device.DeviceIP) return;
     var isStack = !!(device.StackMembers && device.StackMembers.length > 1);
@@ -16,10 +23,10 @@ function computeDeviceClassification(topology) {
     });
   });
 
-  // Pass 2: LLDP neighbors that were never themselves scanned get a placeholder entry.
+  // Pass 2: unscanned LLDP neighbors get a placeholder entry.
   topology.forEach(function (device) {
     if (!device || !device.DeviceIP || !device.Neighbors) return;
-    device.Neighbors.forEach(function (neighbor) {
+    asArray(device.Neighbors).forEach(function (neighbor) {
       var neighborIp = String(neighbor.ManagementIP);
       if (!neighborIp || neighborIp === 'Unknown' || neighborIp === '0.0.0.0') return;
       if (!result.has(neighborIp)) {
@@ -31,16 +38,13 @@ function computeDeviceClassification(topology) {
   return result;
 }
 
-// Per-device VLAN tags seen on that device's own local clients (from its MAC table), keyed
-// by DeviceIP - shared by graph.js (the diagram's per-node vlanCache) and map.js (VLAN
-// highlighting on markers/edges) so the two views can never classify a device's VLANs
-// differently. A device with no TrueClients (unscanned neighbor placeholder, or a scanned
-// device with an empty MAC table) gets an empty array, not a missing entry.
+// Per-device VLAN tags from local clients (MAC table), keyed by DeviceIP; shared by
+// graph.js and map.js. A device with no TrueClients gets an empty array, not a missing entry.
 function computeVlanCache(topology) {
   var result = new Map();
   topology.forEach(function (device) {
     if (!device || !device.DeviceIP) return;
-    result.set(String(device.DeviceIP), device.TrueClients ? device.TrueClients.map(function (c) { return String(c.VLAN_Tag); }) : []);
+    result.set(String(device.DeviceIP), device.TrueClients ? asArray(device.TrueClients).map(function (c) { return String(c.VLAN_Tag); }) : []);
   });
   return result;
 }
@@ -52,7 +56,7 @@ function computeNeighborEdges(topology) {
   topology.forEach(function (device) {
     if (!device || !device.DeviceIP || !device.Neighbors) return;
     var switchIp = String(device.DeviceIP);
-    device.Neighbors.forEach(function (neighbor) {
+    asArray(device.Neighbors).forEach(function (neighbor) {
       var neighborIp = String(neighbor.ManagementIP);
       if (!neighborIp || neighborIp === 'Unknown' || neighborIp === '0.0.0.0') return;
       var edgeKey = [switchIp, neighborIp].sort().join('-');
@@ -65,10 +69,7 @@ function computeNeighborEdges(topology) {
   return edges;
 }
 
-// Dual-mode export: node:test imports this file via ESM `import {...}` syntax, which
-// Node resolves against `module.exports` here through its built-in CJS/ESM interop. The
-// browser loads this same file as a classic <script>, where `module` doesn't exist, so it
-// attaches to `window.TopologyGraph` instead (see graph-layout.js for the same pattern).
+// Dual-mode export: node:test (CJS/ESM interop) vs. browser <script> (no `module`).
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache };
 } else if (typeof window !== 'undefined') {

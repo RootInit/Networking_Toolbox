@@ -1,12 +1,9 @@
 # Standalone CLI to encrypt or decrypt a topology snapshot (Network_Maps\NetworkMap_*.json[.enc])
-# or Configuration.json[.enc] outside of a live crawl/webserver session - e.g. to inspect an
-# encrypted file's contents offline, re-encrypt a plaintext snapshot captured under
-# -NoEncryption, rotate a file onto a new password, or hand a decrypted copy to another tool.
-# Uses the exact same AES-256-CBC + PBKDF2-SHA256 + HMAC-SHA256 envelope as the rest of the
-# app (TopologyCrypto.ps1, dot-sourced below - not reimplemented here), so a file this script
-# encrypts opens normally in Start-NetworkMapper.ps1/the web UI, and vice versa.
+# or Configuration.json[.enc] outside of a live crawl/webserver session. Uses the same
+# envelope as the rest of the app (TopologyCrypto.ps1, dot-sourced below), so a file this
+# script encrypts opens normally in Start-NetworkMapper.ps1/the web UI, and vice versa.
 #
-# Not part of the app's own runtime - nothing here is called automatically. Run it directly:
+# Not part of the app's own runtime. Run it directly:
 #   .\Protect-MapperFile.ps1 -InputFile .\Network_Maps\NetworkMap_2026-08-28_120000.json          # encrypt
 #   .\Protect-MapperFile.ps1 -InputFile .\Network_Maps\NetworkMap_2026-08-28_120000.json.enc -Decrypt
 #   .\Protect-MapperFile.ps1 -InputFile .\Configuration.json.enc -Decrypt -OutputFile plain.json
@@ -17,47 +14,38 @@ param(
     [ValidateScript({ Test-Path $_ -PathType Leaf })]
     [string]$InputFile,
 
-    # Defaults to InputFile with ".enc" added (encrypting) or stripped (decrypting) - see
-    # the Default computation below for the exact rule when the name doesn't end in .enc.
+    # Defaults to InputFile with ".enc" added (encrypting) or stripped (decrypting).
     [string]$OutputFile,
 
-    # Default action is encrypt; pass this to reverse it. Mirrors -NoEncryption's existing
-    # "switch flips the default" idiom elsewhere in this app (Start-NetworkMapper.ps1).
+    # Default action is encrypt; pass this to reverse it.
     [switch]$Decrypt,
 
-    # Only meaningful when encrypting - which envelope `format` to stamp the file with.
-    # Start-NetworkMapper.ps1 refuses to load Configuration.json.enc under any format but
-    # "PSNetworkMapper-EncryptedConfig" (a deliberate safety check - see
-    # TopologyCrypto.ps1/web-src/topology-crypto.js's decryptEnvelope), so getting this
-    # wrong produces a file that LOOKS encrypted correctly but the app itself will reject.
-    # Auto-detected from the input filename by default; override only when the file doesn't
-    # follow the app's own Configuration*.json / NetworkMap_*.json naming.
+    # Which envelope `format` to stamp when encrypting. Start-NetworkMapper.ps1 refuses to
+    # load Configuration.json.enc under any format but "PSNetworkMapper-EncryptedConfig", so
+    # getting this wrong produces a file that looks encrypted but the app will reject.
+    # Auto-detected from the filename by default.
     [ValidateSet('Auto', 'Topology', 'Config')]
     [string]$Type = 'Auto',
 
-    # Non-interactive use (scripting/automation) - e.g.
-    # -Password (ConvertTo-SecureString 'x' -AsPlainText -Force). Prompted interactively
-    # when omitted, same Read-Host -AsSecureString idiom Start-NetworkMapper.ps1 uses.
+    # Non-interactive use, e.g. -Password (ConvertTo-SecureString 'x' -AsPlainText -Force).
+    # Prompted interactively when omitted.
     [securestring]$Password,
 
-    # Skips the overwrite confirmation if OutputFile already exists. Does not disable
-    # -WhatIf/-Confirm (SupportsShouldProcess above still governs those normally).
+    # Skips the overwrite confirmation if OutputFile already exists.
     [switch]$Force
 )
 
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 . (Join-Path $ScriptDir "TopologyCrypto.ps1")
 
-# Same cross-runtime idiom as Start-NetworkMapper.ps1's own copy of this (works identically
-# on Windows PowerShell 5.1 and pwsh 7+, unlike manually marshaling the BSTR).
+# Standard cross-runtime SecureString->plaintext idiom (avoids manual BSTR marshaling/cleanup).
 function ConvertFrom-SecurePassword {
     param([Parameter(Mandatory = $true)][securestring]$SecureString)
     return [System.Net.NetworkCredential]::new('', $SecureString).Password
 }
 
-# Auto-detects the envelope format from filename, matching the two files this app ever
-# encrypts - anything literally named Configuration.json(.enc) is the config file, every
-# other .json(.enc) is treated as a topology snapshot.
+# Auto-detects the envelope format from filename: Configuration.json(.enc) is the config
+# file, every other .json(.enc) is a topology snapshot.
 function Resolve-EnvelopeFormat {
     param([string]$Type, [string]$Path)
     if ($Type -eq 'Config') { return 'PSNetworkMapper-EncryptedConfig' }
@@ -80,31 +68,26 @@ function Confirm-Overwrite {
 }
 
 if ($Decrypt) {
-    # -Encoding UTF8 explicit, not the default - Get-Content -Raw with no -Encoding falls
-    # back to the system's ANSI codepage on a BOM-less file, which would corrupt this before
-    # it even reaches ConvertFrom-Json if the envelope (or, on encrypt below, a plaintext
-    # snapshot's device data - hostnames, LLDP banners) carries any non-ASCII byte. Same bug
-    # class as Get-JunosNodeData.ps1's ssh output reads and WebServer.ps1's
-    # Invoke-GetConfigAction - see either of those for the full explanation.
+    # -Encoding UTF8 explicit: Get-Content -Raw with no -Encoding falls back to the system
+    # ANSI codepage on a BOM-less file, corrupting any non-ASCII byte before ConvertFrom-Json.
     $Envelope = Get-Content -LiteralPath $ResolvedInput -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $Envelope.format) {
         throw "$ResolvedInput does not look like an encrypted PS_NetworkMapper file (no 'format' field) - nothing to decrypt."
     }
 
-    # Either known format decrypts fine here - unlike Start-NetworkMapper.ps1's own decrypt
-    # call, this script has no downstream logic that cares WHICH kind of file it was, so
-    # there's no reason to make the caller specify -Type just to decrypt.
-    $PlainJson = Unprotect-TopologyPayload -Envelope $Envelope -Password $PlainPassword -ExpectedFormats @('PSNetworkMapper-EncryptedTopology', 'PSNetworkMapper-EncryptedConfig')
+    # Either known format decrypts fine here - no downstream logic cares which kind it was.
+    try {
+        $PlainJson = Unprotect-TopologyPayload -Envelope $Envelope -Password $PlainPassword -ExpectedFormats @('PSNetworkMapper-EncryptedTopology', 'PSNetworkMapper-EncryptedConfig')
+    } catch {
+        throw "Failed to decrypt $ResolvedInput - $_"
+    }
     Write-Host "Decrypted (format: $($Envelope.format))" -ForegroundColor Green
 
     $DefaultOutput = if ($ResolvedInput -match '\.enc$') { $ResolvedInput -replace '\.enc$', '' } else { "$ResolvedInput.decrypted.json" }
     $TargetPath = if ($OutputFile) { $OutputFile } else { $DefaultOutput }
 
     if (-not (Confirm-Overwrite -Path $TargetPath)) { return }
-    # Re-serialize (not a raw string write) so the output is normalized, readable JSON
-    # regardless of exact whitespace the original plaintext happened to have - same "always
-    # re-serialize rather than write the raw body through" convention WebServer.ps1's
-    # Invoke-SaveConfigAction already uses for its own plaintext write path.
+    # Re-serialize rather than write the raw string, so output is normalized/readable JSON.
     ($PlainJson | ConvertFrom-Json) | ConvertTo-Json -Depth 100 | Out-File -FilePath $TargetPath -Encoding utf8 -Force
     Write-Host "Wrote plaintext to: $TargetPath" -ForegroundColor Green
 
@@ -113,9 +96,8 @@ if ($Decrypt) {
     $RawInput = Get-Content -LiteralPath $ResolvedInput -Raw -Encoding UTF8
     $ParsedInput = $null
     try { $ParsedInput = $RawInput | ConvertFrom-Json } catch { throw "$ResolvedInput is not valid JSON - nothing to encrypt." }
-    # Refuses to re-wrap an already-encrypted envelope as if it were plaintext - that would
-    # silently produce a file nothing can ever decrypt back to the real data (the "plaintext"
-    # being encrypted is itself ciphertext-plus-metadata, not the original content).
+    # Refuses to re-wrap an already-encrypted envelope as plaintext - would silently produce
+    # a file nothing can ever decrypt back to the real data.
     if ($ParsedInput.format -match '^PSNetworkMapper-Encrypted') {
         throw "$ResolvedInput is already an encrypted envelope (format: $($ParsedInput.format)) - use -Decrypt instead, or point -InputFile at the original plaintext source."
     }

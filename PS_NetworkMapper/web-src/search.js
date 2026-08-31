@@ -4,22 +4,18 @@
 // activeSnapshotIndex/searchIndex/searchHighlightQuery/currentSelectedNodeData (app.js)
 // and calls into graph.js (renderVisibleGraph)/drawer.js (openRightDrawer/switchTab).
 
-// 'client_ip' is kept distinct from the device's own 'ip' field - a client hanging off a
-// switch is not the switch, and collapsing the two made every client-IP match look like a
-// hit on the switch's own management IP with no indication a client was even involved.
+// 'client_ip' is kept distinct from the device's own 'ip' field so a client match doesn't
+// look like a hit on the switch's own management IP.
 var SEARCH_FIELD_LABELS = { ip: 'IP Address', client_ip: 'Client IP', hostname: 'Hostname', mac: 'MAC Address', user: 'Username', serial: 'Serial Number' };
-// Which tab to jump to for a match in each field - null means "leave whatever tab is
-// already active" (matches on the device's own identity don't point anywhere specific).
+// Which tab to jump to for a match in each field - null leaves the active tab as-is.
 var SEARCH_FIELD_TABS = { ip: null, client_ip: 'tab-clients', hostname: null, mac: 'tab-clients', user: 'tab-clients', serial: 'tab-stack' };
 // The UI only exposes one "IP Address" checkbox for both the device's own IP and a
 // client's IP - this maps a search-index field back to the checkbox id that gates it.
 var SEARCH_FIELD_CHECKBOX = { ip: 'ip', client_ip: 'ip', hostname: 'hostname', mac: 'mac', user: 'user', serial: 'serial' };
 
-// Rebuilds the index across ALL loaded snapshots (not just the active one) and, as a
-// side effect, builds/refreshes each snapshot's own flat deviceByIp map - one map per
-// snapshot rather than one shared map, so switching the active snapshot never has to
-// rebuild anything, just reassign which map is "current" (see window.setActiveSnapshot
-// in app.js).
+// Rebuilds the index across ALL loaded snapshots and, as a side effect, refreshes each
+// snapshot's own deviceByIp map - so switching the active snapshot is just a reassignment,
+// not a rebuild (see window.setActiveSnapshot in app.js).
 window.buildSearchIndex = function() {
     searchIndex = [];
 
@@ -36,18 +32,13 @@ window.buildSearchIndex = function() {
                 searchIndex.push({ deviceIp: ip, snapshotIndex: snapshotIndex, field: 'hostname', value: String(device.Hostname), valueLower: String(device.Hostname).toLowerCase() });
             }
 
-            // StackMembers/TrueClients aren't asArray-wrapped elsewhere in this file either
-            // (see drawer.js's renderStack/renderClients) - PowerShell's ConvertTo-Json only
-            // collapses a single-element array to a bare object for fields this app has
-            // needed to guard (Alarms), so this mirrors the existing, working assumption
-            // rather than introducing an inconsistent one just for search.
-            (device.StackMembers || []).forEach(sm => {
+            window.asArray(device.StackMembers).forEach(sm => {
                 if (sm && sm.Serial) {
                     searchIndex.push({ deviceIp: ip, snapshotIndex: snapshotIndex, field: 'serial', value: String(sm.Serial), valueLower: String(sm.Serial).toLowerCase() });
                 }
             });
 
-            (device.TrueClients || []).forEach(c => {
+            window.asArray(device.TrueClients).forEach(c => {
                 if (c.IP) searchIndex.push({ deviceIp: ip, snapshotIndex: snapshotIndex, field: 'client_ip', value: String(c.IP), valueLower: String(c.IP).toLowerCase() });
                 if (c.MAC) searchIndex.push({ deviceIp: ip, snapshotIndex: snapshotIndex, field: 'mac', value: String(c.MAC), valueLower: String(c.MAC).toLowerCase() });
                 if (c.Dot1x_User && c.Dot1x_User !== "Unknown") {
@@ -60,12 +51,8 @@ window.buildSearchIndex = function() {
     deviceByIp = (activeSnapshotIndex >= 0 && loadedSnapshots[activeSnapshotIndex]) ? loadedSnapshots[activeSnapshotIndex].deviceByIp : new Map();
 };
 
-// Runs only on Enter / the Search button (see network_vis.html) - it used to run on
-// every keystroke (onkeyup), which felt slow because each call didn't just search, it
-// immediately expanded ancestors, re-rendered the whole visible graph, and animated the
-// camera to the first match - all of that firing on every keystroke while typing is what
-// was actually slow, not the string matching itself. Now that expensive chain only runs
-// when a specific result is clicked (see window.goToSearchResult), not while searching.
+// Runs only on Enter / the Search button, not on keystroke - the expensive expand/render/
+// camera-animate chain only runs when a result is clicked (window.goToSearchResult).
 window.performGlobalSearch = function() {
     var query = document.getElementById('globalSearch').value.trim();
     var queryLower = query.toLowerCase();
@@ -85,15 +72,11 @@ window.performGlobalSearch = function() {
         serial: document.getElementById('searchFieldSerial').checked,
     };
 
-    // searchIndex is prebuilt (see window.buildSearchIndex) with every value already
-    // lowercased, so this is a single flat scan with a plain substring check - no nested
-    // array walking and no re-lowercasing on every search.
+    // searchIndex is prebuilt with values already lowercased, so this is a flat scan with
+    // a plain substring check.
     var matches = [];
-    // Dedup key includes snapshotIndex - without it, the same IP/field/value appearing in
-    // two different loaded snapshots would collapse into one row and silently hide that
-    // the device/client existed in more than one of them. Within a single snapshot this
-    // still collapses true duplicates the same way it always did (e.g. two clients
-    // happening to share a MAC record).
+    // Dedup key includes snapshotIndex so the same value in two different snapshots
+    // doesn't collapse into one row.
     var seen = new Set();
     for (var i = 0; i < searchIndex.length; i++) {
         var entry = searchIndex[i];
@@ -109,8 +92,7 @@ window.performGlobalSearch = function() {
         var snapshot = loadedSnapshots[m.snapshotIndex];
         var device = snapshot ? snapshot.deviceByIp.get(m.deviceIp) : null;
         var hostname = device && device.Hostname ? ` (${esc(device.Hostname)})` : '';
-        // Only show which snapshot a match came from when more than one is loaded - for
-        // the common single-file case this stays exactly as it looked before Phase 0.
+        // Only show which snapshot a match came from when more than one is loaded.
         var snapshotTag = (loadedSnapshots.length > 1 && snapshot)
             ? `<span class="sr-snapshot">${esc(snapshot.scanTimestamp ? new Date(snapshot.scanTimestamp).toLocaleString() : snapshot.sourceFile)}</span>`
             : '';
@@ -124,14 +106,10 @@ window.performGlobalSearch = function() {
     window.renderResultsList(rows, { emptyText: `No matches for "${query}".` });
 };
 
-// Shared renderer for a .search-result list - used by the global text search and a
-// dashboard stat drill-down (both target #searchResults, the default), and by the Config
-// tab's cross-device compare search (drawer.js, targets #configCompareSearchResults) so
-// that list looks and behaves exactly the same way without a second copy of this markup.
-// `opts` - `targetId`: element id to render into, defaults to 'searchResults'; `headerText`:
-// shown in a sticky bar with a "Clear" link (global-search drill-down only, since a text
-// search's own input box already shows what's being searched for - other callers omit
-// it); `emptyText`: shown when `rows` is empty.
+// Shared renderer for a .search-result list - used by global text search, a dashboard
+// stat drill-down, and drawer.js's cross-device compare search (#configCompareSearchResults).
+// `opts.targetId`: element id, defaults to 'searchResults'. `opts.headerText`: sticky bar
+// with "Clear" link (drill-down only). `opts.emptyText`: shown when `rows` is empty.
 window.renderResultsList = function(rows, opts) {
     opts = opts || {};
     var resultsEl = document.getElementById(opts.targetId || 'searchResults');
@@ -159,28 +137,19 @@ window.renderResultsList = function(rows, opts) {
     }
 };
 
-// Everything a search result click actually needs to do: switch to the snapshot the
-// match came from if it wasn't already active (a no-op for the common single-snapshot
-// case), then reveal the device (expanding any collapsed cluster ancestors), re-render,
-// select and focus it on the canvas, open its drawer, and land on whichever tab actually
-// shows the field that matched.
+// Switches to the match's snapshot if needed, reveals the device (expanding collapsed
+// ancestors), re-renders, selects/focuses it, opens its drawer, and jumps to the matched
+// field's tab.
 //
-// goToSearchResultGeneration guards against two clicks landing close together (two
-// different result rows, or a drill-down row clicked twice) - each call claims the next
-// generation number and checks it's still current after every await, since
-// globalTopologyData/deviceByIp/primaryTree/expandedNodes are plain globals a second,
-// newer call can overwrite mid-flight of the first. Without this, an older call's
-// still-pending expandAncestors/openRightDrawer could run AFTER a newer call already
-// switched snapshots, opening the wrong device's drawer against the wrong snapshot's tree
-// (deviceByIp.get(x) returning undefined for a device that's real in its own snapshot).
+// goToSearchResultGeneration guards against two clicks landing close together: each call
+// claims the next generation and checks it's still current after every await, since
+// globalTopologyData/deviceByIp/primaryTree/expandedNodes are plain globals a newer call
+// can overwrite mid-flight (otherwise an older call could open the wrong device's drawer
+// against the wrong snapshot's tree).
 var goToSearchResultGeneration = 0;
 
-// Reveals a device in whichever center view is currently active - diagram (select+focus
-// on the vis-network canvas, today's original behavior) or map (pan/zoom to its marker,
-// or a status note if it has no resolved location). Either branch is followed by
-// openRightDrawer in the caller - the details drawer is identical regardless of which
-// view revealed the device (see the geo-map-view design spec's "Search & details-drawer
-// parity").
+// Reveals a device in whichever center view is active - diagram (select+focus on the
+// vis-network canvas) or map (pan/zoom to marker, or a status note if unlocated).
 window.revealDeviceInActiveView = function(ip) {
     if (activeCenterView === 'map') {
         var revealed = window.revealDeviceOnMap(ip);
@@ -189,13 +158,9 @@ window.revealDeviceInActiveView = function(ip) {
         return;
     }
     try {
-        // A device with no LLDP neighbors at all (isolated, or the only device in its
-        // snapshot) has no path from the graph root, so it's never part of the
-        // "visible" tree renderVisibleGraph computes - vis-network throws selecting a
-        // node it was never given. That's a real, separate gap in the graph/tree logic,
-        // not something to paper over with a suppressed exception - but the drawer
-        // opening below is strictly more important than the camera animation up here,
-        // and one throwing must never block the other.
+        // An isolated device (no LLDP neighbors) has no path from the graph root, so it's
+        // never in the visible tree and vis-network throws selecting it. Swallow it here -
+        // the drawer opening below must not be blocked by a failed camera animation.
         network.selectNodes([ip]);
         network.focus(ip, { scale: 1.0, animation: { duration: 500 } });
     } catch (e) {

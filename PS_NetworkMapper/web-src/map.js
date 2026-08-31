@@ -1,10 +1,8 @@
-// Geographic map view: Leaflet-native rendering (NOT vis-network - confirmed unreliable
-// when synced onto a Leaflet map, see docs/superpowers/specs/2026-08-23-geo-map-view-design.md's
-// "Background: what the spike proved"). Owns Leaflet init, marker/edge rendering from the
-// same topology data + classification the diagram uses (via TopologyGraph/ConfigResolve),
-// the Unplaced Devices list, and the location editor. Reads globalTopologyData/deviceByIp
-// (app.js), calls into drawer.js's openRightDrawer for details-drawer parity with the
-// diagram.
+// Geographic map view: Leaflet-native rendering (not vis-network - unreliable when synced
+// onto a Leaflet map). Owns Leaflet init, marker/edge rendering from the same topology data
+// + classification the diagram uses (via TopologyGraph/ConfigResolve), the Unplaced Devices
+// list, and the location editor. Reads globalTopologyData/deviceByIp (app.js), calls into
+// drawer.js's openRightDrawer for details-drawer parity with the diagram.
 
 var leafletMap = null;
 var mapMarkersByIp = new Map();
@@ -12,66 +10,40 @@ var mapConfigEntries = [];      // decrypted Configuration.json's devices[], or 
 var loadedCredentials = null;   // decrypted Configuration.json's credentials ({username, password}), or null
 var loadedSettings = {};        // decrypted Configuration.json's settings (partial or empty) - merge over defaults at read time
 var mapConfigLoaded = false;    // true once a GET /api/config attempt (success OR "no file yet") has completed
-// In-flight loadMapConfiguration promise, so two near-simultaneous ensureConfigLoaded
-// callers (e.g. the Settings tab being opened while Map view is still loading) share one
-// fetch+password-prompt instead of each starting their own - two prompts stacked on top of
-// each other, and two racing writes to mapConfigEntries/loadedCredentials/loadedSettings.
-// Cleared as soon as the load settles, so a failed/cancelled attempt is still retryable.
+// In-flight loadMapConfiguration promise, so near-simultaneous ensureConfigLoaded callers
+// share one fetch+password-prompt instead of racing two. Cleared once the load settles.
 var configLoadPromise = null;
-// True once fitBounds has ever run against real markers. renderMapMarkers is now called
-// from every place topology data can change (new snapshot, single-device rescan), not just
-// from the original three call sites - re-fitting the camera on every one of those would
-// reset the user's pan/zoom every time a rescan completes or a snapshot switches, which is
-// worse than the stale-map bug this is fixing. Only the very first time markers appear
-// does the camera auto-frame; every re-render after that only touches markers/edges.
+// True once fitBounds has run against real markers. renderMapMarkers fires on every topology
+// change, so only the first marker appearance auto-frames the camera - otherwise every
+// rescan/snapshot switch would reset the user's pan/zoom.
 var hasFitBoundsOnce = false;
 
 window.switchCenterView = function(view) {
     activeCenterView = view;
-    // A status note shown while in one view (e.g. Task 9's "No location set for this
-    // device." from a map-view search) is a plain #mapStatusNote sibling, not a child of
-    // #mapview - it isn't covered by the display-toggling below, so it stays visibly
-    // floating over whichever view comes next unless explicitly cleared here.
+    // #mapStatusNote is a sibling of #mapview, not a child, so it isn't covered by the
+    // display-toggling below - clear it explicitly or it floats over the next view.
     window.showMapStatus('');
     document.getElementById('mynetwork').style.display = (view === 'diagram') ? 'block' : 'none';
     document.getElementById('mapview').style.display = (view === 'map') ? 'block' : 'none';
     document.getElementById('mapUnplacedPanel').style.display = (view === 'map') ? 'block' : 'none';
     document.getElementById('btn-center-view-diagram').classList.toggle('active', view === 'diagram');
     document.getElementById('btn-center-view-map').classList.toggle('active', view === 'map');
-    // Same leak class as #mapStatusNote above (see the comment there, fixed in d5e884c) -
-    // a second instance the final review caught: the floating Save button is a sibling of
-    // #mapview too, so it isn't covered by the display-toggling above and would otherwise
-    // float over the diagram canvas whenever pending edits exist and the user switches away.
-    // Hidden (not removed) here so it reappears correctly on the next switch back to Map
-    // without losing the pending-edit count it's tracking.
+    // Same leak class as #mapStatusNote above: the floating Save button is also a sibling
+    // of #mapview, so hide (not remove) it here to preserve its pending-edit count.
     var saveBtn = document.getElementById('mapSaveConfigBtn');
     if (saveBtn) saveBtn.style.display = (view === 'map') ? '' : 'none';
 
     if (view !== 'map') {
-        // Mirror image of the leafletMap.invalidateSize() call below, for the diagram side:
         // buildSwitchMap may have (re)created the vis.Network instance while #mynetwork was
-        // display:none (a snapshot load/switch that happened while Map view was showing),
-        // sizing its canvas against the hidden container's bogus 0x0 clientWidth/
-        // clientHeight - graph.js's window.resizeDiagram forces a re-measure/redraw/refit
-        // now that the container is actually visible again. Guarded for existence per the
-        // brief, though graph.js loads before map.js in network_vis.html's script order so
-        // it should always be defined here.
+        // hidden, sizing its canvas against a bogus 0x0 - force a re-measure now it's visible.
         if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
         return;
     }
 
     if (leafletMap !== null) {
-        // renderMapMarkers (and any camera move) may have run while #mapview was
-        // display:none (e.g. a snapshot load or single-device rescan that happened while
-        // Diagram view was showing) - Leaflet sizes itself from the container's
-        // clientWidth/clientHeight, which read 0 while hidden, so tiles for the real
-        // viewport were never fetched. invalidateSize() re-measures the now-visible
-        // container and repaints; it does not change the center/zoom itself, so this does
-        // not fight the hasFitBoundsOnce/pan-preservation logic in renderMapMarkers - it
-        // only fixes the rendering, not the framing. Hoisted above the branches below (not
-        // just in the "already loaded" branch) so BOTH re-entry paths - the common "config
-        // already loaded, just returning to Map" case and the rarer "retrying a
-        // previously-failed config load" case - get it, not just one of them.
+        // Markers/camera moves may have happened while #mapview was hidden - Leaflet reads
+        // 0x0 from a display:none container, so tiles for the real viewport never loaded.
+        // invalidateSize() re-measures and repaints without touching center/zoom.
         leafletMap.invalidateSize();
     }
 
@@ -80,69 +52,43 @@ window.switchCenterView = function(view) {
             window.showMapStatus('Failed to load map: ' + err.message);
         });
     } else if (!mapConfigLoaded) {
-        // A previous config load attempt was cancelled or failed (see loadMapConfiguration
-        // below) - retry it on every return to Map view instead of leaving the view wedged.
-        // The Leaflet instance itself is never torn down/recreated for this - only the
-        // config fetch+decrypt is re-attempted.
-        //
-        // Goes through ensureConfigLoaded, NOT loadMapConfiguration directly: the Settings
-        // tab may have loaded (or be mid-load of) the config already, and calling
-        // loadMapConfiguration here bypassed both of ensureConfigLoaded's guards - the
-        // "already loaded, don't re-prompt" one and the shared-configLoadPromise one that
-        // stops two near-simultaneous callers racing two promptForPassword calls against
-        // the same single #password-modal. The trailing renderMapMarkers is kept even though
-        // ensureConfigLoaded already renders on a successful load: it is idempotent, and
-        // keeping it means this branch behaves exactly as before for the retry-succeeds case
-        // while also covering the "another surface had already loaded it" early return.
+        // A previous config load was cancelled or failed - retry via ensureConfigLoaded
+        // (not loadMapConfiguration directly) so it shares the "already loaded" and
+        // in-flight-promise guards with the Settings tab instead of double-prompting.
         window.ensureConfigLoaded().then(function () {
             window.renderMapMarkers();
         }).catch(function (err) {
             window.showMapStatus('Failed to load map: ' + err.message);
         });
     } else {
-        // If markers appeared for the very first time while this view was hidden,
-        // renderMapMarkers's own maybeFitBoundsToMarkers() call deferred the first fit
-        // rather than fitting against the bogus 0x0 size the container had while hidden -
-        // retry it now that invalidateSize() above has it visible and correctly sized. A
-        // no-op if the first fit already happened, or if there are still no markers.
+        // If markers first appeared while this view was hidden, the fit was deferred against
+        // the bogus 0x0 size - retry now that invalidateSize() above sized it correctly.
         maybeFitBoundsToMarkers();
     }
 };
 
 window.initMapView = async function() {
     leafletMap = L.map('mapview', { zoomControl: true }).setView([0, 0], 2);
-    // CARTO's basemaps.cartocdn.com free/anonymous tiles now require a registered API key -
-    // requests without one still load but are watermarked "api key required". Standard OSM
-    // tile servers remain free and keyless (subject to OSM's usage policy, fine for this
-    // app's internal/low-volume use) and need no {r} retina placeholder - the standard tile
-    // server doesn't serve @2x tiles the way CARTO's did.
+    // Keyless standard OSM tiles - CARTO's free tier now requires registration and watermarks
+    // otherwise. No {r} retina placeholder: the OSM tile server doesn't serve @2x tiles.
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19,
         attribution: '&copy; OpenStreetMap contributors'
     }).addTo(leafletMap);
 
-    // ensureConfigLoaded, not loadMapConfiguration: opening the Settings tab first already
-    // loads (and password-prompts for) the config, and calling loadMapConfiguration here
-    // unconditionally re-prompted for the SAME password the moment the user then clicked
-    // Map - with cancelling that second prompt resetting mapConfigEntries/loadedCredentials/
-    // loadedSettings back to empty even though the session had already loaded them fine.
-    // ensureConfigLoaded is a no-op when the config is already loaded and dedups a still
-    // in-flight load via configLoadPromise. It does not render on that already-loaded early
-    // return, so the renderMapMarkers below is still required for the Settings-first case.
+    // ensureConfigLoaded, not loadMapConfiguration: the Settings tab may have already loaded
+    // (and password-prompted for) the config, and calling loadMapConfiguration unconditionally
+    // would re-prompt for the same password. It doesn't render on an already-loaded early
+    // return, so renderMapMarkers below is still needed for that case.
     await window.ensureConfigLoaded();
     window.renderMapMarkers();
 };
 
 // Fetches and decrypts Configuration.json.enc (if any). Sets mapConfigEntries/mapConfigLoaded.
-// A missing file (404, fresh checkout) is a normal empty state, not an error - same "nothing
-// configured yet" posture the server takes toward missing Juniper credentials elsewhere in
-// this app, and mapConfigLoaded=true there since there's nothing to retry. A cancelled
-// password prompt or a network/parse failure is a real
-// failure: it's reported via showMapStatus (same "Cancelled" handling app.js's own
-// processSelectedFiles already does for the identical rejection from the topology-file
-// password prompt) and leaves mapConfigLoaded=false so switchCenterView's retry path above
-// can re-attempt it - this function must never throw/reject, since initMapView awaits it
-// with nothing downstream to catch a rejection.
+// A missing file (404, fresh checkout) is a normal empty state (mapConfigLoaded=true, nothing
+// to retry). A cancelled password prompt or a network/parse failure is reported via
+// showMapStatus and leaves mapConfigLoaded=false so switchCenterView's retry path can
+// re-attempt it. Must never throw/reject - initMapView awaits it with nothing to catch a rejection.
 window.loadMapConfiguration = async function() {
     var resp;
     try {
@@ -183,16 +129,13 @@ window.loadMapConfiguration = async function() {
     }
 
     var parsedConfig;
-    // A -NoEncryption server run writes/serves Configuration.json as plain
-    // {devices, credentials, settings} JSON directly - no envelope, no password. Same
-    // format check app.js's readSnapshotFile uses for plain vs. encrypted topology files.
+    // A -NoEncryption server run serves Configuration.json as plain JSON directly - no
+    // envelope, no password. Same format check app.js's readSnapshotFile uses.
     if (envelope && envelope.format === 'PSNetworkMapper-EncryptedConfig') {
         var decryptedText = null;
         var errorMsg = null;
-        // Try the session password (app.js's window.getSessionEncryptionPassword) once, silently,
-        // before ever showing the modal - Start-NetworkMapper.ps1 already prompted for this exact
-        // password at the console to decrypt this same file server-side. Only falls through to
-        // promptForPassword if that's unavailable/empty, or (rare) it fails to decrypt.
+        // Try the session password silently first (Start-NetworkMapper.ps1 already prompted
+        // for it server-side); fall through to promptForPassword if unavailable or wrong.
         var sessionPassword = await window.getSessionEncryptionPassword();
         var triedSessionPassword = false;
         while (decryptedText === null) {
@@ -245,17 +188,13 @@ window.setLoadedSettings = function(settings) {
     loadedSettings = settings;
 };
 
-// Idempotent, session-wide "make sure the config has been fetched" gate - both Map view
-// (initMapView, above) and the Settings tab (app.js's switchSidebarTab) call this instead
-// of loadMapConfiguration directly, so the password prompt and fetch only ever happen once
-// per session regardless of which one the user opens first. A no-op once mapConfigLoaded is
-// true; retries a previously failed/cancelled attempt otherwise.
-// Returns whether the config is actually loaded now (true) or the attempt failed/was
-// cancelled (false). Callers that are about to WRITE the config (saveConfiguration,
-// saveSettingsPanel) must check this and bail: loadMapConfiguration resets
-// mapConfigEntries/loadedCredentials/loadedSettings to empty on failure, so proceeding
-// would POST that empty state over every previously-saved device location, the stored
-// Juniper credentials and every setting.
+// Idempotent, session-wide "make sure the config has been fetched" gate - Map view and the
+// Settings tab both call this instead of loadMapConfiguration directly, so the password
+// prompt and fetch happen at most once per session. Returns whether the config is actually
+// loaded (false if the attempt failed/was cancelled). Callers about to WRITE the config
+// (saveConfiguration, saveSettingsPanel) must check this and bail: on failure
+// mapConfigEntries/loadedCredentials/loadedSettings are reset to empty, and proceeding would
+// POST that empty state over everything previously saved.
 window.ensureConfigLoaded = async function() {
     if (mapConfigLoaded) return true;
     if (!configLoadPromise) {
@@ -276,38 +215,20 @@ var MARKER_COLORS = {
     scannedStack: { background: '#D2E5FF', border: '#2B7CE9' },
     scanned: { background: '#97C2FC', border: '#2B7CE9' },
     unscanned: { background: '#E8E8E8', border: '#B0B0B0' },
-    // Matches graph.js's applyVlanFilter's own "doesn't match the selected VLAN" node
-    // color exactly - same visual language (a faded near-white circle) on both views.
+    // Matches graph.js's applyVlanFilter "non-matching VLAN" node color for visual parity.
     vlanDimmed: { background: '#f2f2f2', border: '#e6e6e6' },
 };
 
-// dimmedByVlan: true when a VLAN filter is active AND this device's own local clients
-// don't carry the selected VLAN tag. Only applies to scanned devices - an unscanned
-// neighbor placeholder has no client data to test and always stays plain gray, exactly
-// like graph.js's applyVlanFilter leaves an unscanned node's background alone (it only
-// dims that node's font color there, which has no equivalent here since the marker's
-// circle never carries text - see below).
+// dimmedByVlan: true when a VLAN filter is active and this device's clients don't carry the
+// selected tag. Unscanned placeholders have no client data and always stay plain gray.
 function iconForClassification(meta, dimmedByVlan) {
     var colors = !meta.scanned ? MARKER_COLORS.unscanned
         : dimmedByVlan ? MARKER_COLORS.vlanDimmed
         : (meta.isStack ? MARKER_COLORS.scannedStack : MARKER_COLORS.scanned);
-    // The hostname is NOT drawn inside this circle. Two earlier attempts were: 26px with a
-    // single clipped line, then 40px with wrapped text - a realistic 19-character hostname
-    // ("ACCESS-SW-001.local") still needs four wrapped lines at that font size and overflows
-    // a 40px circle top and bottom. Growing the circle far enough to hold arbitrary text was
-    // the wrong lever anyway: it grows the CLICK target with it, and Leaflet markers default
-    // to bubblingMouseEvents:false (verified in the vendored leaflet.js), so a click landing
-    // on a marker never reaches the map's own click handler - which is exactly how the
-    // location editor places its pin (leafletMap.once('click', onEditorMapClick)). A 40px
-    // marker is 2.4x the area of the original 26px one, so click-to-place-pin silently
-    // failed far more often in the clustered case the bug report screenshotted, leaving the
-    // once-listener armed to misplace the pin on some later unrelated click.
-    //
-    // So: the circle is back to a small, low-collision 22px and carries no text, and the
-    // hostname is a separate permanent Leaflet tooltip anchored below it (see
-    // renderMapMarkers). Tooltips are interactive:false by default (also verified in the
-    // vendored leaflet.js - .leaflet-tooltip is pointer-events:none in leaflet.css), so the
-    // label adds no clickable area at all: only the small circle stays clickable.
+    // Hostname is not drawn inside the circle - a larger circle to fit text also grows the
+    // click target, and Leaflet markers default to bubblingMouseEvents:false, so an oversized
+    // marker made the location editor's click-to-place-pin miss more often in clustered areas.
+    // Kept small (22px, no text); the hostname is a separate tooltip below it (renderMapMarkers).
     var size = 22;
     var html = '<div style="width:' + size + 'px;height:' + size + 'px;border-radius:' + (meta.isStack ? '30%' : '50%') +
         ';background:' + colors.background + ';border:2px solid ' + colors.border +
@@ -315,13 +236,9 @@ function iconForClassification(meta, dimmedByVlan) {
     return L.divIcon({ className: '', html: html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
 
-// Only fits the camera to the placed markers the first time markers ever appear - see
-// hasFitBoundsOnce's own comment above. If the map container is currently hidden (the user
-// is on Diagram view while a snapshot load/rescan triggers a re-render), Leaflet's own size
-// (clientWidth/clientHeight) reads 0x0 and both invalidateSize/fitBounds would compute
-// against that bogus size - so this defers instead of fitting against garbage; the pending
-// first-fit is retried by switchCenterView the next time the user actually returns to Map
-// view (see the `else` branch there).
+// Fits the camera only the first time markers ever appear (see hasFitBoundsOnce). If the
+// map container is hidden, Leaflet reads 0x0 size, so this defers rather than fitting
+// against garbage - retried by switchCenterView's `else` branch on the next return to Map.
 function maybeFitBoundsToMarkers() {
     if (hasFitBoundsOnce || mapMarkersByIp.size === 0) return;
     var container = document.getElementById('mapview');
@@ -331,14 +248,10 @@ function maybeFitBoundsToMarkers() {
     hasFitBoundsOnce = true;
 }
 
-// Bottom-up "which VLANs are reachable behind this edge" for the map's OWN edge set,
-// mirroring graph.js's computeSubtreeVlanSets/edgeTrunksVlan (see graph.js for the full
-// reasoning on why a subtree union is the right trunk-membership signal here). Duplicated
-// rather than shared: graph.js's version walks its private primaryTree/graphRoot, which are
-// vis-network-diagram state that may not even be built yet (Diagram view need never be
-// opened this session for Map view to be used) - this instead builds its own root/tree from
-// the map's own node/edge set via the same window.GraphLayout helpers scan-network.js
-// already uses for its start-IP heuristic (see bestStartIpFromActiveSnapshot).
+// Bottom-up "which VLANs are reachable behind this edge", mirroring graph.js's
+// computeSubtreeVlanSets/edgeTrunksVlan. Duplicated rather than shared: graph.js's version
+// walks vis-network-diagram state that may not exist if Diagram view was never opened -
+// this builds its own root/tree from the map's own node/edge set instead.
 function computeMapVlanTrunkSets(nodeIds, edges, vlanCacheByIp) {
     var root = window.GraphLayout.computeGraphRoot(nodeIds, edges);
     var tree = window.GraphLayout.buildPrimaryTree(nodeIds, edges, root);
@@ -353,8 +266,7 @@ function computeMapVlanTrunkSets(nodeIds, edges, vlanCacheByIp) {
         return set;
     }
     if (root) visit(root);
-    // Anything buildPrimaryTree didn't reach from root (a genuinely disconnected device)
-    // still gets its own local VLANs rather than an undefined lookup later.
+    // Disconnected devices buildPrimaryTree didn't reach still get their own local VLANs.
     nodeIds.forEach(function (id) { if (!result.has(id)) result.set(id, new Set(vlanCacheByIp.get(id) || [])); });
     return result;
 }
@@ -366,11 +278,8 @@ function mapEdgeTrunksVlan(subtreeVlanSets, fromId, toId, vlanTag) {
 }
 
 window.renderMapMarkers = function() {
-    // Safe to call unconditionally from anywhere in the app (a new snapshot loading, a
-    // single-device rescan merging) even if Map view has never been opened this session -
-    // Leaflet itself (leafletMap) only exists once initMapView has run at least once, so
-    // there is nothing to update yet; the next actual switch to Map view runs initMapView
-    // and renders from current data normally.
+    // Safe to call unconditionally even if Map view was never opened this session - Leaflet
+    // (leafletMap) only exists once initMapView has run, so there's nothing to update yet.
     if (leafletMap === null) return;
 
     mapMarkersByIp.forEach(function (marker) { leafletMap.removeLayer(marker); });
@@ -381,11 +290,8 @@ window.renderMapMarkers = function() {
     var deviceByIpLocal = new Map(globalTopologyData.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
     var placedByIp = new Map(); // ip -> {lat, lng} for devices that resolved a location, used below for edges
 
-    // Same #vlanFilter <select> the diagram's own applyVlanFilter (graph.js) reads -
-    // there's only one filter control on the page, shared by both views (see
-    // network_vis.html). Read live off the DOM, same as every other render-time setting
-    // this file/graph.js already reads this way (getClusterThreshold, etc.), so a filter
-    // change is picked up on the very next render without map.js needing its own cached copy.
+    // Same #vlanFilter <select> the diagram's applyVlanFilter (graph.js) reads - one shared
+    // control, read live off the DOM so a filter change is picked up on the next render.
     var vlanFilterEl = document.getElementById('vlanFilter');
     var selectedVlan = vlanFilterEl ? vlanFilterEl.value : 'ALL';
     var vlanCacheByIp = window.TopologyGraph.computeVlanCache(globalTopologyData);
@@ -395,13 +301,9 @@ window.renderMapMarkers = function() {
         if (!device) return; // unscanned neighbors have no chassis/serial data to resolve a location from
         var entry = window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries);
         if (!entry) return;
-        // /api/save-config only validates that a `devices` key exists on the request body,
-        // not the shape of each entry - a hand-crafted POST (e.g. via curl) could write a
-        // malformed entry with a missing/non-numeric lat or lng. L.marker/L.polyline throw
-        // Leaflet's own "Invalid LatLng object" on a non-finite coordinate, which - since
-        // this runs inside a forEach with no per-entry try/catch - would abort the rest of
-        // this render pass (later markers, the edge layer, the Unplaced list all never
-        // render) with no visible error, wedging the map. Skip the bad entry instead.
+        // /api/save-config doesn't validate entry shape, so a hand-crafted POST could write a
+        // non-numeric lat/lng. L.marker throws on that, which would abort this whole forEach
+        // (no per-entry try/catch) and wedge the map - skip the bad entry instead.
         if (!Number.isFinite(entry.lat) || !Number.isFinite(entry.lng)) {
             console.warn('Skipping map location entry with invalid lat/lng for device ' + ip, entry);
             return;
@@ -410,40 +312,21 @@ window.renderMapMarkers = function() {
         placedByIp.set(ip, { lat: entry.lat, lng: entry.lng });
         var dimmedByVlan = selectedVlan !== 'ALL' && !(vlanCacheByIp.get(ip) || []).includes(selectedVlan.toString());
         var marker = L.marker([entry.lat, entry.lng], { icon: iconForClassification(meta, dimmedByVlan) }).addTo(leafletMap);
-        // The hostname label lives here, not inside the marker's circle - see
-        // iconForClassification's comment for why (text inside the circle either clips or
-        // forces the circle - and with it the click target - to grow). permanent:true shows
-        // it without a hover; direction 'bottom' + the offset below clear the 22px circle so
-        // the two never overlap, and the tooltip is free to be as wide as the hostname needs
-        // since nothing clips it. Non-interactive by Leaflet's default, so it adds no
-        // clickable area (see .leaflet-tooltip's pointer-events:none in leaflet.css).
-        //
-        // window.esc is REQUIRED here despite the option being called plain content:
-        // Leaflet's DivOverlay._updateContent does `contentNode.innerHTML = content` for a
-        // STRING content (verified in the vendored leaflet.js) - it is not a textContent
-        // assignment - so an unescaped device-supplied hostname would be an XSS sink exactly
-        // like the divIcon html was.
+        // Hostname label lives in a permanent tooltip below the marker, not inside the circle
+        // (see iconForClassification). window.esc is required: Leaflet's DivOverlay sets
+        // tooltip content via innerHTML, so an unescaped hostname would be an XSS sink.
         if (meta.hostname !== 'Unknown') {
-            // dimmedByVlan fades the label too (see the .vlan-dimmed rule in
-            // network_vis.html) - the marker circle alone dimming wasn't enough signal: the
-            // permanent label is what a user actually reads on a map with many markers, and
-            // it used to stay exactly as loud as a matching device's regardless of the
-            // filter. Matches applyVlanFilter's (graph.js) own font-dimming for a
-            // non-matching diagram node.
+            // dimmedByVlan fades the label too (.vlan-dimmed in network_vis.html), matching
+            // applyVlanFilter's (graph.js) font-dimming for a non-matching diagram node.
             marker.bindTooltip(window.esc(meta.hostname), {
                 permanent: true, direction: 'bottom', offset: [0, 8],
                 className: dimmedByVlan ? 'map-marker-label vlan-dimmed' : 'map-marker-label',
             });
         }
         marker.on('click', function () { window.openRightDrawer(ip); });
-        // Spec ("In-app editor", Architecture item 8): the editor is reachable from an
-        // Unplaced-Devices row OR from an existing marker's popup ("Edit location") - only
-        // the first half existed before this fix. Built via DOM methods (not innerHTML),
-        // same reasoning as renderUnplacedDevicesList's escaping below: nothing here embeds
-        // device-supplied data into markup via string concatenation. This is a second,
-        // independent way to open the same window.openLocationEditor(ip) the Unplaced list
-        // already calls - openLocationEditor itself doesn't change for a device that
-        // already has a location.
+        // Second entry point into the same window.openLocationEditor(ip) the Unplaced list
+        // uses, so an already-placed marker can also edit its location. Built via DOM methods
+        // (not innerHTML) since nothing here needs escaping.
         var popupEl = document.createElement('div');
         var editLink = document.createElement('a');
         editLink.href = '#';
@@ -451,7 +334,7 @@ window.renderMapMarkers = function() {
         editLink.style.cssText = 'color:var(--accent); cursor:pointer;';
         editLink.addEventListener('click', function (evt) {
             evt.preventDefault();
-            marker.closePopup(); // the popup would otherwise sit over the map, blocking the click-to-place-pin the editor is about to ask for - same failure class as Task 12's modal-backdrop bug
+            marker.closePopup(); // otherwise sits over the map, blocking the editor's click-to-place-pin
             window.openLocationEditor(ip);
         });
         popupEl.appendChild(editLink);
@@ -460,10 +343,8 @@ window.renderMapMarkers = function() {
     });
 
     var edges = window.TopologyGraph.computeNeighborEdges(globalTopologyData);
-    // Links that trunk the selected VLAN get emphasized, every other link fades - same
-    // visual language as applyVlanFilter's edge pass (graph.js). "ALL" leaves every line at
-    // its plain default styling. Only computed when a VLAN is actually selected - the
-    // trunk-set walk is wasted work otherwise.
+    // Links trunking the selected VLAN are emphasized, others fade - matches applyVlanFilter's
+    // edge pass (graph.js). Only computed when a VLAN is selected.
     var subtreeVlanSets = selectedVlan !== 'ALL'
         ? computeMapVlanTrunkSets(Array.from(classification.keys()), edges, vlanCacheByIp)
         : null;
@@ -497,24 +378,17 @@ window.revealDeviceOnMap = function(ip) {
 
 var editorTargetIp = null;
 // keyType+':'+key (from bestKeyForSave) -> { entry, deviceIp, deviceKeysAtCommit },
-// accumulated across edits until Save. deviceKeysAtCommit is the device's full
-// extractDeviceKeys() set as of the moment the edit was committed, snapshotted here rather
-// than re-derived at save time: saveConfiguration uses it to collapse that device's OTHER
-// stale-keyed entries (see its own comment below for why that collapse exists at all), and
-// it used to do that by re-resolving deviceByIp.get(deviceIp) when Save was clicked. A
-// network scan or snapshot load between commit and Save replaces deviceByIp wholesale, so
-// if that IP had since been reassigned to a DIFFERENT device (fleet renumbering, DHCP
-// churn) the save-time lookup resolved the wrong device and deleted ITS saved location.
-// deviceIp is still carried for diagnostics/traceability only - nothing resolves it now.
+// accumulated across edits until Save. deviceKeysAtCommit snapshots the device's full
+// extractDeviceKeys() at commit time (not re-derived at save time): saveConfiguration uses
+// it to collapse that device's other stale-keyed entries. Re-resolving via deviceByIp.get()
+// at save time was wrong if that IP got reassigned to a different device meanwhile (DHCP
+// churn) - it would delete the wrong device's saved location. deviceIp is now kept only for
+// diagnostics.
 var pendingConfigEdits = new Map();
 
-// Named (not inline) so closeLocationEditor can `off` it below - `leafletMap.once` still
-// only ever fires it a single time per registration, but without a name, re-opening the
-// editor (or opening/cancelling repeatedly without ever clicking the map) stacks up
-// once-listeners that Leaflet never got the chance to auto-remove, and each stale one would
-// still overwrite #editorLat/#editorLng's values if the map were ever clicked afterward for
-// an unrelated reason. Cheap to avoid, so it's handled explicitly rather than left as
-// benign-but-untidy.
+// Named (not inline) so closeLocationEditor can `off` it - without a name, repeated
+// open/cancel of the editor stacks up stale once-listeners that could still overwrite
+// #editorLat/#editorLng on an unrelated later map click.
 function onEditorMapClick(e) {
     document.getElementById('editorLat').value = e.latlng.lat.toFixed(6);
     document.getElementById('editorLng').value = e.latlng.lng.toFixed(6);
@@ -525,23 +399,15 @@ window.openLocationEditor = function(ip) {
     editorTargetIp = ip;
     var device = deviceByIp.get(String(ip));
     document.getElementById('editorDeviceLabel').textContent = 'Set Location: ' + (device && device.Hostname !== 'Unknown' ? device.Hostname : ip);
-    // This editor is reachable two ways (see renderMapMarkers's "Edit location" popup link
-    // comment above): from the Unplaced Devices list, where the device by definition has no
-    // resolved location yet, and from an already-placed marker's own popup, where it does.
-    // Blanking the form unconditionally was correct for the first case but silently
-    // discarded the existing building/room/notes (and now lat/lng) for the second the moment
-    // the user hit Save (commitLocationEdit always writes whatever the form currently holds)
-    // - prefill from the existing resolved entry when there is one, so re-saving without
-    // touching these fields preserves them instead of wiping them to empty strings, and so
-    // editing an already-placed device shows its real current coordinates instead of
-    // requiring a re-click just to have something valid to save.
+    // Editor is reachable both from the Unplaced list (no existing location) and from an
+    // already-placed marker's popup - prefill from the existing entry when there is one, so
+    // re-saving without touching a field doesn't wipe it to empty.
     var existing = device ? window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries) : null;
     document.getElementById('editorBuilding').value = existing ? (existing.building || '') : '';
     document.getElementById('editorRoom').value = existing ? (existing.room || '') : '';
     document.getElementById('editorNotes').value = existing ? (existing.notes || '') : '';
-    // Number.isFinite guard (not `existing.lat || ''`) because `|| ''` would blank a
-    // legitimate 0 latitude/longitude (e.g. a device placed exactly on the equator/prime
-    // meridian) - unlikely for this app's real data, but the guard costs nothing.
+    // Number.isFinite guard, not `existing.lat || ''` - that would blank a legitimate 0
+    // (equator/prime meridian).
     document.getElementById('editorLat').value = (existing && Number.isFinite(existing.lat)) ? existing.lat : '';
     document.getElementById('editorLng').value = (existing && Number.isFinite(existing.lng)) ? existing.lng : '';
     document.getElementById('location-editor-modal').style.display = 'flex';
@@ -551,11 +417,8 @@ window.openLocationEditor = function(ip) {
 
 window.closeLocationEditor = function() {
     document.getElementById('location-editor-modal').style.display = 'none';
-    // leafletMap is null until initMapView has run, i.e. until Map view has been opened at
-    // least once this session. This is now called defensively from app.js's
-    // processSelectedFiles on EVERY file load (see there), including for users who never
-    // touch Map view - without this guard that call would throw on `.off` of null and pop
-    // the fatal-error modal, which is the exact failure class those callers exist to avoid.
+    // leafletMap is null until Map view has been opened - guarded since this is also called
+    // defensively from app.js's processSelectedFiles on every file load.
     if (leafletMap) leafletMap.off('click', onEditorMapClick);
     editorTargetIp = null;
 };
@@ -568,22 +431,16 @@ window.commitLocationEdit = function() {
         return;
     }
     var device = deviceByIp.get(String(editorTargetIp));
-    // The editor's backdrop is pointer-events:none, so the sidebar stays live while it's
-    // open - a Scan Network or a snapshot/folder load can therefore replace loadedSnapshots/
-    // deviceByIp out from under an open editor, leaving editorTargetIp pointing at a device
-    // that no longer exists. bestKeyForSave(undefined) throws (extractDeviceKeys dereferences
-    // .StackMembers), which the global error handler turns into the fatal-error modal over
-    // the whole page. Guard it the same way openLocationEditor already guards its own lookup.
-    // (app.js's processSelectedFiles also closes this editor pre-emptively on any new load -
-    // this is the belt to that braces, covering any other path that swaps the data.)
+    // The editor's backdrop is pointer-events:none, so a Scan/snapshot load can replace
+    // deviceByIp while it's open, leaving editorTargetIp stale. bestKeyForSave(undefined)
+    // would throw and trigger the fatal-error modal - guard against that.
     if (!device) {
         window.closeLocationEditor();
         window.showMapStatus('That device is no longer in the currently loaded data (the topology was reloaded or rescanned while this editor was open) - the location was not saved. Reopen the editor from the device on the current map.');
         return;
     }
     var keyInfo = window.ConfigResolve.bestKeyForSave(device);
-    // Snapshotted at COMMIT time, not re-resolved at save time - see pendingConfigEdits's
-    // declaration comment above and saveConfiguration's use of it below.
+    // Snapshotted at commit time, not re-resolved at save time - see pendingConfigEdits above.
     var deviceKeysAtCommit = window.ConfigResolve.extractDeviceKeys(device);
     var entry = {
         key: keyInfo.key, keyType: keyInfo.keyType,
@@ -617,14 +474,10 @@ window.renderSaveConfigButton = function() {
 };
 
 window.saveConfiguration = async function() {
-    // Config may not have loaded yet if this is triggered from the Settings tab before Map
-    // view was ever opened (or before an earlier load attempt finished) - saving now would
-    // otherwise overwrite devices/credentials/settings this session never actually fetched
-    // with empty defaults, silently wiping out everything previously saved (e.g. every
-    // placed device location). ensureConfigLoaded is a no-op once a real load has completed,
-    // and returns false when the load itself failed or its password prompt was cancelled -
-    // in that case the in-memory state is EMPTY, not "the saved config", so saving must be
-    // refused outright rather than merged over and written.
+    // Config may not have loaded yet if this is triggered before Map view was ever opened.
+    // ensureConfigLoaded returns false if the load failed/was cancelled, in which case
+    // in-memory state is EMPTY, not "the saved config" - refuse to save rather than
+    // overwrite everything previously saved with empty defaults.
     var loaded = await window.ensureConfigLoaded();
     if (!loaded) {
         window.showMapStatus('Cannot save - the existing configuration has not loaded (password prompt was cancelled or the server could not be reached). Click Save Configuration again once it loads.');
@@ -632,34 +485,14 @@ window.saveConfiguration = async function() {
     }
 
     // Merge pending edits over the currently-loaded config entries. An untouched entry
-    // (its key+keyType never appears in pendingConfigEdits) survives unchanged.
+    // survives unchanged.
     //
-    // Before inserting each pending edit's entry, collapse any STALE entry left behind by a
-    // key change: if a device was saved once under one key (e.g. hostname-keyed, because it
-    // had no serial yet) and is now being edited again after its keys changed (e.g. a
-    // rescan gave it a serial, so bestKeyForSave now returns the serial key), the old
-    // hostname-keyed entry would otherwise never be removed - saveConfiguration only ever
-    // added/updated by the NEW key, leaving the stale old-keyed entry sitting in
-    // Configuration.json.enc forever. That's not just clutter: resolveDeviceLocation
-    // (config-resolve.js) matches purely on `entry.key === value` within a keyType tier
-    // with no binding to which device created the entry, so if that old key is ever reused
-    // by a DIFFERENT device before that device's own serial is captured, resolution could
-    // silently attach the new device to the old device's stale saved location.
-    //
-    // pending.deviceKeysAtCommit is the device's full set of candidate keys (serial/
-    // hostname/ip, whichever were non-null) as extractDeviceKeys saw them at the moment this
-    // edit was committed - not just the one key this particular edit happens to be saved
-    // under - so this removes every one of them from `merged`, regardless of which tier the
-    // device used to be keyed by, before inserting the new entry under its (possibly
-    // different) key.
-    //
-    // This used to re-resolve the device here via deviceByIp.get(pending.deviceIp), i.e. at
-    // SAVE time. A scan or snapshot load between commit and Save replaces deviceByIp
-    // wholesale, so if that IP had been reassigned to a different device in the meantime,
-    // the lookup returned the WRONG device and this loop deleted that innocent third
-    // device's saved location while still writing the pending edit under its own correct
-    // key. Snapshotting the keys at commit time removes the re-resolution entirely: the
-    // collapse now always operates on the device the user was actually editing.
+    // Before inserting each pending edit, collapse any STALE entry left by a key change: if
+    // a device was saved under one key (e.g. hostname, no serial yet) and its keys later
+    // changed (rescan added a serial), the old entry would otherwise linger forever - and
+    // could be silently reused by a different device if that old key is later reassigned.
+    // pending.deviceKeysAtCommit holds every candidate key (serial/hostname/ip) the device
+    // had at commit time, so all of them get removed here before the new entry is inserted.
     var merged = new Map(mapConfigEntries.map(function (e) { return [e.keyType + ':' + e.key, e]; }));
     pendingConfigEdits.forEach(function (pending) {
         var keys = pending.deviceKeysAtCommit;
@@ -679,9 +512,6 @@ window.saveConfiguration = async function() {
             body: JSON.stringify({ devices: devices, credentials: loadedCredentials, settings: loadedSettings }),
         });
     } catch (fetchErr) {
-        // Same "must never leave the user without feedback" concern as loadMapConfiguration's
-        // fetch above - an unreachable server here would otherwise be an unhandled rejection
-        // from the Save button's onclick with no visible sign the click did anything.
         window.showMapStatus('Could not reach the server to save (' + fetchErr.message + '). Click Save Configuration to retry.');
         return false;
     }
@@ -705,9 +535,8 @@ window.toggleUnplacedPanel = function() {
     icon.innerHTML = collapsed ? '&#9660;' : '&#9650;';
 };
 
-// Snapshotted by the render below so window.exportUnplacedDevicesCsv doesn't need its own
-// copy of the classification/placedByIp filtering logic - always exports exactly what the
-// panel is currently showing.
+// Snapshotted by the render below so exportUnplacedDevicesCsv exports exactly what the
+// panel is currently showing, without duplicating the filtering logic.
 var unplacedDevicesForExport = [];
 
 window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, placedByIp) {
@@ -718,7 +547,7 @@ window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, pla
 
     var unplaced = [];
     classification.forEach(function (meta, ip) {
-        if (!meta.scanned) return;          // only scanned devices are ever geo-taggable (see Task 4's key resolution - an unscanned neighbor has no chassis data to key by)
+        if (!meta.scanned) return;          // only scanned devices are geo-taggable - an unscanned neighbor has no chassis data to key by
         if (placedByIp.has(ip)) return;      // already has a resolved location
         unplaced.push({ ip: ip, meta: meta, device: deviceByIpLocal.get(ip) });
     });
@@ -730,10 +559,8 @@ window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, pla
     unplaced.forEach(function (row) {
         var rowEl = document.createElement('div');
         rowEl.style.cssText = 'padding:6px 12px; font-size:0.8rem; border-bottom:1px solid #f0f0f0; display:flex; justify-content:space-between; align-items:center; gap:8px;';
-        // row.meta.hostname/row.ip are device-supplied (LLDP/DNS data this app doesn't
-        // control) and this string is assigned to .innerHTML, same as iconForClassification's
-        // marker label above - escape with window.esc (utils.js) before concatenating,
-        // matching the fix applied there (see Task 8's post-review XSS fix).
+        // row.meta.hostname/row.ip are device-supplied (LLDP/DNS) and assigned via innerHTML
+        // below - escape with window.esc first to avoid an XSS sink.
         var label = row.meta.hostname !== 'Unknown' ? window.esc(row.meta.hostname) : window.esc(row.ip);
         rowEl.innerHTML =
             '<span style="cursor:pointer; color:var(--accent);">' + label + '</span>' +
@@ -744,13 +571,9 @@ window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, pla
     });
 };
 
-// CSV of exactly what the Unplaced Devices list is currently showing - handed to whoever is
-// walking the building placing pins, so they have a paper/spreadsheet worklist (hostname +
-// serial to find the right unit on-site) instead of having to keep this panel open and
-// scrolled to the right spot the whole time. Serial comes from the same StackMembers
-// extraction config-resolve.js already uses for location-key resolution (extractDeviceKeys) -
-// not reimplemented here - so "the serial this row would be saved under" and "the serial in
-// this export" can never drift apart.
+// CSV of exactly what the Unplaced Devices list is currently showing, as a worklist for
+// whoever is walking the building placing pins. Serial comes from the same
+// extractDeviceKeys() config-resolve.js uses for location-key resolution, so it can't drift.
 window.exportUnplacedDevicesCsv = function() {
     if (unplacedDevicesForExport.length === 0) return;
     var rows = [['Hostname', 'IP', 'Serial', 'Model', 'Junos Version', 'Uptime']];

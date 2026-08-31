@@ -1,13 +1,9 @@
-// The Analysis Dashboard (#sidebar-tab-analysis): Fleet Health, New Devices, Trends,
-// Local Accounts, Topology Diff, IP Space, Reliability - plus the stat-card drill-down
-// that jumps into a search.js results list. Reads loadedSnapshots/activeSnapshotIndex/
-// globalTopologyData (app.js), window.loadSettings/updateDeviceHistory/updateAlarmHistory
-// (persistence.js), window.asArray/lookupVendor/detectDaisyChains (utils.js), and
-// window.renderResultsList/goToSearchResult/switchSidebarTab (search.js/app.js).
+// Analysis Dashboard (#sidebar-tab-analysis): Fleet Health, New Devices, Trends, Local
+// Accounts, Topology Diff, IP Space, Reliability - plus stat-card drill-down into a
+// search.js results list. Depends on globals from app.js/persistence.js/utils.js/search.js.
 
-// Re-renders every Analysis Dashboard view - called on tab activation (see
-// window.switchSidebarTab) and again after a file load if that tab is already showing,
-// so it doesn't sit stale until the user clicks away and back.
+// Re-renders every Analysis Dashboard view - called on tab activation and after a file
+// load if that tab is already showing.
 window.refreshAnalysisDashboard = function() {
     window.renderFleetDashboard();
     window.renderNewDevicesTable();
@@ -34,16 +30,11 @@ window.switchAnalysisTab = function(tabId) {
     if (tabId === 'analysis-tab-reliability') window.renderReliabilityHeatmap();
 };
 
-// Aggregates the ACTIVE snapshot only (not every loaded snapshot merged together -
-// merging different points in time into one "fleet" view would double-count devices and
-// mix states that were never simultaneously true). Works with just one snapshot loaded,
-// unlike New Devices/Trends which genuinely need history.
-// Config diff (see the Config tab / window.renderConfigDiff in drawer.js). "show
-// configuration | display set" output is a flat list of complete, order-independent
-// statements - Junos doesn't guarantee stable line ordering between commits either - so
-// this is a plain set difference, not a positional line diff (Myers/LCS). Blank lines are
-// dropped and each line is trimmed so incidental whitespace never shows up as a phantom
-// change.
+// Aggregates the ACTIVE snapshot only - merging snapshots from different times would
+// double-count devices and mix states never simultaneously true.
+
+// Plain set difference of "display set" config lines (order isn't stable between Junos
+// commits, so this isn't a positional diff). Blank/whitespace-only differences are ignored.
 function configSetDiff(oldText, newText) {
     var oldLines = new Set(String(oldText || '').split('\n').map(l => l.trim()).filter(Boolean));
     var newLines = new Set(String(newText || '').split('\n').map(l => l.trim()).filter(Boolean));
@@ -53,16 +44,10 @@ function configSetDiff(oldText, newText) {
     };
 }
 
-// Real (Myers/LCS) positional line diff for the Config tab's git-style side-by-side view -
-// unlike configSetDiff above, this cares about WHICH lines are common, not just whether a
-// line exists on both sides, so the side-by-side view can align unchanged lines next to each
-// other and only shade the actual +/- rows, the way `git diff --color` reads. Standard
-// dynamic-programming LCS: dp[i][j] = length of the longest common subsequence of
-// oldLines[i:] and newLines[j:], then a single backtrack from (0,0) reconstructs the
-// alignment. O(n*m) time and space - fine for real switch configs (typically a few hundred
-// to a couple thousand "display set" lines), but the ROW_LIMIT guard below caps it before an
-// unusually huge pair of configs (or two wildly different devices being compared) turns into
-// a multi-hundred-MB table and locks up the tab.
+// Real (Myers/LCS) positional line diff for the Config tab's git-style side-by-side view,
+// so unchanged lines align and only +/- rows are shaded (unlike configSetDiff above).
+// Standard O(n*m) DP LCS with a backtrack; CONFIG_DIFF_CELL_LIMIT below caps it so an
+// unusually large config pair falls back to the flat set diff instead of locking up the tab.
 var CONFIG_DIFF_CELL_LIMIT = 4000000; // ~16MB of Int32Array at 4 bytes/cell
 function computeLineDiff(oldText, newText) {
     var oldLines = String(oldText || '').split('\n');
@@ -98,16 +83,13 @@ function computeLineDiff(oldText, newText) {
     return rows;
 }
 
-// For every device with a real config backup in 2+ loaded snapshots, compares its two
-// MOST RECENT captures (by scanTimestamp) and flags whether they differ at all - cheap
-// string equality, not a full diff (the actual line-level diff is computed lazily, only
-// when a user opens that device's Config tab). Spans every loaded snapshot regardless of
-// which is active, same as window.updateDeviceHistory - "did this change since last time"
-// is a cross-snapshot question, not a single-snapshot one.
+// For every device with a config backup in 2+ loaded snapshots, compares its two most
+// recent captures (by scanTimestamp) via cheap string equality - the real line-level diff
+// is computed lazily when the user opens that device's Config tab. Spans all loaded
+// snapshots regardless of which is active, same as window.updateDeviceHistory.
 function computeConfigChanges() {
-    // Keyed by window.resolveDeviceIdentity, not DeviceIP - otherwise a device renumbered
-    // between two captures never accumulates 2+ entries under the same key at all, so a real
-    // config change on that device goes completely undetected (not just mis-attributed).
+    // Keyed by window.resolveDeviceIdentity, not DeviceIP, so a device renumbered between
+    // captures still accumulates entries under one key.
     var byDevice = new Map(); // identity -> [{idx, ts, config, hostname, ip}]
     loadedSnapshots.forEach((snap, idx) => {
         if (!snap.scanTimestamp) return;
@@ -124,9 +106,7 @@ function computeConfigChanges() {
         if (entries.length < 2) return;
         entries.sort((a, b) => b.ts - a.ts);
         if (entries[0].config !== entries[1].config) {
-            // deviceIp is the NEWEST capture's IP - the current, drill-down-clickable
-            // identity for opening this device's drawer right now, even though the older
-            // capture being diffed against may have shown a different IP.
+            // deviceIp is the newest capture's IP, for drill-down opening the drawer now.
             changed.push({ deviceIp: entries[0].ip, hostname: entries[0].hostname, newIdx: entries[0].idx, oldIdx: entries[1].idx });
         }
     });
@@ -164,9 +144,8 @@ window.renderFleetDashboard = function() {
         return value >= critical ? 'red' : (value >= warn ? 'warn-badge' : 'green');
     }
 
-    // --- Recently rebooted (elapsed since boot, measured from THIS snapshot's capture
-    // time - not the browser's wall-clock "now", which would be wrong when viewing old
-    // data long after it was captured) ---
+    // --- Recently rebooted (elapsed since boot, measured from this snapshot's capture
+    // time, not wall-clock "now") ---
     var recentlyRebooted = [];
     if (activeSnapshot && activeSnapshot.scanTimestamp) {
         var snapTime = new Date(activeSnapshot.scanTimestamp).getTime();
@@ -181,9 +160,8 @@ window.renderFleetDashboard = function() {
         });
     }
 
-    // --- Dot1x compliance: a live client whose port IS running dot1x but isn't
-    // Authenticated. "Unknown" means dot1x isn't observed for that MAC at all (not
-    // necessarily a violation - many uplinks/infra ports never run dot1x), so it's
+    // --- Dot1x compliance: a client whose port runs dot1x but isn't Authenticated.
+    // "Unknown" means dot1x isn't observed at all (not necessarily a violation), so it's
     // excluded rather than counted. ---
     var dot1xViolations = [];
     devices.forEach(d => (d.TrueClients || []).forEach(c => {
@@ -211,10 +189,8 @@ window.renderFleetDashboard = function() {
     var configChanges = computeConfigChanges();
 
     // --- Render ---
-    // Cards below are click-to-drill-down (see window.drillDownStat) into a full,
-    // search-style list of the underlying devices/clients - "New This Snapshot" is left
-    // as a plain count since it has no single natural list target of its own (it's a
-    // count of distinct client MACs first seen in this snapshot, spread across devices).
+    // Cards below drill down (window.drillDownStat) into a search-style device/client list;
+    // "New This Snapshot" stays a plain count - it has no single natural list target.
     var html = `<div class="fleet-stats-grid">
         <div class="fleet-stat-card drillable" onclick="window.drillDownStat('devices')"><div class="stat-value">${devices.length}</div><div class="stat-label">Devices</div></div>
         <div class="fleet-stat-card drillable" onclick="window.drillDownStat('clients')"><div class="stat-value">${totalClients}</div><div class="stat-label">Clients</div></div>
@@ -250,8 +226,7 @@ window.renderFleetDashboard = function() {
     container.innerHTML = html;
 };
 
-// Reverse-chronological by First Seen, per the explicit request - newest detections at
-// the top, so it doubles as a "what's new" alert list.
+// Reverse-chronological by First Seen - newest detections at top, doubling as a "what's new" list.
 window.renderNewDevicesTable = function() {
     var tbody = document.getElementById('new-devices-tbody');
     var history = window.updateDeviceHistory();
@@ -282,9 +257,8 @@ window.renderNewDevicesTable = function() {
 
 window.populateTrendDeviceSelect = function() {
     var select = document.getElementById('trendDeviceSelect');
-    // Keyed by window.resolveDeviceIdentity, same reasoning as populateReliabilityDeviceSelect
-    // above - a device's CPU/memory/alarm/client trend line should stay one continuous
-    // series across a renumbering, not fork into two partial series under two different IPs.
+    // Keyed by window.resolveDeviceIdentity so a trend line stays continuous across a
+    // device renumbering instead of forking into two series.
     var deviceMap = new Map(); // identity -> {hostname, ip}, from whichever loaded snapshot last saw it
     loadedSnapshots.slice()
         .sort((a, b) => new Date(a.scanTimestamp || 0) - new Date(b.scanTimestamp || 0))
@@ -309,16 +283,12 @@ function trendMetricValue(device, metric) {
     return NaN;
 }
 
-// Plain <canvas> line chart - no vendored charting library, matching the rest of this
-// codebase's "vendor only what's necessary, hand-roll everything else" pattern (see the
-// topology graph's own radial layout).
+// Plain <canvas> line chart - no vendored charting library.
 window.renderTrendChart = function() {
     var canvas = document.getElementById('trendCanvas');
     var ctx = canvas.getContext('2d');
     var metric = document.getElementById('trendMetricSelect').value;
-    // Despite the name, this is now an identity key (window.resolveDeviceIdentity), not a
-    // literal IP - see populateTrendDeviceSelect's own comment. Kept as `deviceIp` below only
-    // where it's genuinely still comparing against a real DeviceIP (the reboot-marker pass).
+    // Despite the name, this is a resolveDeviceIdentity key, not a literal IP.
     var deviceIdentity = document.getElementById('trendDeviceSelect').value;
 
     ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -387,12 +357,10 @@ window.renderTrendChart = function() {
         ctx.fillText(p.t.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }), x(p.t.getTime()), pad.top + h + 20);
     });
 
-    // Reboot markers: a device's reported boot timestamp (Uptime) jumping to a new value
-    // between two consecutive snapshots means it rebooted in between - "did this reboot
-    // around when CPU spiked" is the useful question, so these draw on every metric's
-    // chart, not a separate one. Independent pass over all snapshots (not the
-    // metric-filtered `points` above), since a reboot is a fact about the device
-    // regardless of whether this particular metric had a value at that snapshot.
+    // Reboot markers: Uptime jumping to a new value between consecutive snapshots means a
+    // reboot happened in between. Drawn on every metric's chart from an independent pass
+    // over all snapshots (not the metric-filtered `points`), since a reboot is a fact about
+    // the device regardless of whether this metric had a value then.
     var deviceSnapshotsSorted = loadedSnapshots
         .filter(s => s.scanTimestamp)
         .slice()
@@ -435,9 +403,7 @@ window.renderTrendChart = function() {
         ctx.fill();
     });
 
-    // Title - the selected <option>'s own text ("10.0.0.1 (hostname)", from
-    // populateTrendDeviceSelect), not deviceIdentity itself: that's an opaque
-    // "serial:SYN..." /"hostname:..." string, meaningless to read on a chart title.
+    // Title uses the selected <option>'s text, not deviceIdentity (an opaque "serial:..." key).
     var selectedOption = document.getElementById('trendDeviceSelect').selectedOptions[0];
     ctx.fillStyle = '#2c3e50';
     ctx.font = 'bold 13px sans-serif';
@@ -446,12 +412,9 @@ window.renderTrendChart = function() {
 };
 
 // --- Local Account Audit (see #analysis-tab-accounts) ---
-// Both regexes read the already-captured Configuration text - zero new SSH commands.
-// Deliberately does NOT flag specific usernames as "suspicious" (e.g. treating "admin" as
-// inherently bad) - that's a judgment call this tool can't make correctly across every
-// org's naming convention, same reasoning as skipping a hand-maintained Junos EOL table
-// elsewhere in this codebase. The one thing checked objectively is whether centralized
-// RADIUS/TACACS+ auth is referenced at all - a binary fact, not a guess.
+// Reads already-captured Configuration text only. Deliberately doesn't flag specific
+// usernames as "suspicious" - that's not a judgment call this tool can make reliably.
+// Only checked objectively: whether centralized RADIUS/TACACS+ auth is referenced at all.
 function extractLocalAccounts(configText) {
     var accounts = [];
     var re = /set system login user (\S+) class (\S+)/g;
@@ -464,12 +427,9 @@ function hasCentralizedAuth(configText) {
     return /set system authentication-order[^\r\n]*\b(radius|tacplus)\b/i.test(configText);
 }
 
-// Groups the flat (device, username, class) audit rows by username+class - the same local
-// account defined identically on every switch in the fleet is the common case, and a table
-// with one row per device drowns that pattern under hundreds of duplicate-looking rows. The
-// group key intentionally does NOT fold in `centralized` (that's a per-device fact, not part
-// of the account's identity) - see the mixed-badge handling below for how a group whose
-// member devices disagree on it is surfaced instead of silently picking one.
+// Groups the flat (device, username, class) rows by username+class, since the same local
+// account is usually defined identically fleet-wide. `centralized` is per-device, not part
+// of the group key - see the mixed-badge handling below for devices that disagree on it.
 function groupLocalAccounts(rows) {
     var groups = new Map(); // "username class" -> {username, cls, entries: [{device, centralized}]}
     rows.forEach(r => {
@@ -507,10 +467,8 @@ window.renderLocalAccountsAudit = function() {
     });
 
     if (noAuthEl) noAuthEl.textContent = noAuthCount;
-    // Kept as the (account, device) instance count, not distinct-account count - this is an
-    // audit total ("how many local-login exposures exist across the fleet"), and collapsing
-    // it to the grouped-row count would understate that by exactly the amount grouping saves
-    // on screen.
+    // (account, device) instance count, not distinct-account count - the grouped-row count
+    // would understate total fleet-wide exposure.
     if (totalEl) totalEl.textContent = rows.length;
 
     var groups = groupLocalAccounts(rows).sort((a, b) => a.username.localeCompare(b.username) || a.cls.localeCompare(b.cls));
@@ -538,11 +496,9 @@ window.renderLocalAccountsAudit = function() {
 };
 
 // --- Topology Diff (see #analysis-tab-topodiff) - a pure per-snapshot set difference,
-// not a rendered graph. The layout engine only ever positions one connected tree from one
-// root, so a device/link present in only the "From" snapshot has nowhere to be drawn -
-// a list view answers "what changed" completely without that structural mismatch, and
-// this never touches the live allNodeMeta/allEdges/graphRoot/primaryTree singletons the
-// interactive graph uses, so it can't destabilize clustering/expand-collapse. ---
+// rendered as a list rather than a graph (the layout engine only positions one connected
+// tree, so a device/link present in only one snapshot has nowhere to be drawn). Doesn't
+// touch the live graph's allNodeMeta/allEdges/graphRoot/primaryTree singletons. ---
 window.populateTopologyDiffSelects = function() {
     var fromSel = document.getElementById('topoDiffFromSelect');
     var toSel = document.getElementById('topoDiffToSelect');
@@ -564,15 +520,10 @@ window.populateTopologyDiffSelects = function() {
     toSel.value = opts.some(o => String(o.idx) === prevTo) ? prevTo : String(opts[opts.length - 1].idx);
 };
 
-// Edge identity matches window.buildSwitchMap's own convention (sorted [deviceIp,
-// neighborIp] pair) for DISPLAY (e.from/e.to still show real, current IPs, same as the
-// interactive graph), but the map KEY is built from window.resolveDeviceIdentity where
-// possible - a link between two devices that are each still there, just renumbered since the
-// other snapshot, must not read as "link removed" + "link added" on top of the (correctly
-// suppressed) device churn. A neighbor that was never itself crawled has no device object to
-// resolve an identity from in this snapshot - IP is genuinely the only identifier available
-// for it, so it's kept as a plain IP key in that case, same tiered "best identity available"
-// approach as window.ConfigResolve.
+// Edge display (e.from/e.to) uses real IPs, but the map KEY uses window.resolveDeviceIdentity
+// where possible, so a link between two devices that just got renumbered doesn't falsely
+// read as "removed" + "added". A neighbor that was never crawled has no device object to
+// resolve, so it falls back to a plain IP key.
 function snapshotEdgeSet(snapshot) {
     var ipToIdentity = new Map();
     (snapshot.topology || []).forEach(d => { if (d && d.DeviceIP) ipToIdentity.set(String(d.DeviceIP), window.resolveDeviceIdentity(d)); });
@@ -611,10 +562,8 @@ window.renderTopologyDiff = function() {
         return;
     }
 
-    // Keyed by window.resolveDeviceIdentity, not DeviceIP - a device that kept its serial/
-    // hostname but changed IP between these two snapshots is neither "removed" nor "added",
-    // it's the same device (see the IP Changed section below, which is exactly the
-    // information a raw add+remove pair would have destroyed).
+    // Keyed by window.resolveDeviceIdentity, not DeviceIP - a device that changed IP but
+    // kept its serial/hostname is neither removed nor added; see the IP Changed section below.
     var fromByKey = new Map((fromSnap.topology || []).filter(d => d && d.DeviceIP).map(d => [window.resolveDeviceIdentity(d), d]));
     var toByKey = new Map((toSnap.topology || []).filter(d => d && d.DeviceIP).map(d => [window.resolveDeviceIdentity(d), d]));
 
@@ -660,18 +609,12 @@ window.renderTopologyDiff = function() {
 };
 
 // --- IP-Space / Subnet Utilization (see #analysis-tab-ipspace) ---
-// Subnet boundaries are read opportunistically from captured config text (IRB/L3-gateway
-// lines) - this only works if a device with that VLAN's L3 gateway was actually crawled.
-// That's a property of which devices are in the crawl target list, not something a new SSH
-// command can fix (the gap is "device not crawled", not "command not run") - see the
-// caveat rendered directly in the tab. VLANs with no discovered boundary still show a raw
-// live-IP count instead of a fabricated or omitted percentage.
+// Subnet boundaries are read opportunistically from captured config (IRB/L3-gateway lines);
+// this only works if a device with that VLAN's L3 gateway was actually crawled. VLANs with
+// no discovered boundary still show a raw live-IP count rather than a fabricated percentage.
 function extractSubnetsFromConfigs(devices) {
-    // Both regexes are joined PER DEVICE (irb unit numbers are only unique within one
-    // device's own config, not fleet-wide) before merging into the final vlanName->subnet
-    // map - joining through two flat, fleet-wide maps used to let an unrelated device that
-    // happens to reuse the same irb unit NUMBER for a different purpose silently overwrite
-    // an earlier device's real mapping, with no way to tell it happened.
+    // irb unit numbers are only unique within one device's config, not fleet-wide - resolve
+    // each device's own irb->subnet map before merging into vlanName->subnet.
     var vlanToSubnet = new Map();
     var conflicts = [];
 
@@ -680,13 +623,9 @@ function extractSubnetsFromConfigs(devices) {
         var text = d.Configuration;
         var m;
 
-        // "display set" always spells the logical unit out as "... unit N family inet
-        // address ..." - never as the dotted "irb.N" shorthand that only appears when an
-        // interface name is used as a REFERENCE (e.g. the l3-interface line below). Also
-        // matches "vlan unit N ..." for the older EX2200/3200/4200-style RVI, which uses
-        // "vlan" instead of "irb" as the routed-VLAN interface name. Keyed by "irb.N"/
-        // "vlan.N" (matching l3-interface's own reference form) so both interface types
-        // can coexist in one fleet without colliding on unit number alone.
+        // Also matches "vlan unit N ..." for the older EX2200/3200/4200-style RVI (uses
+        // "vlan" instead of "irb"). Keyed by "irb.N"/"vlan.N" to avoid unit-number collisions
+        // between the two interface types.
         var irbToSubnet = new Map(); // "irb.N" or "vlan.N" -> {ip, prefix}, scoped to this device only
         var irbRe = /set interfaces (irb|vlan) unit (\d+)[^\r\n]*family inet address (\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})/g;
         while ((m = irbRe.exec(text)) !== null) irbToSubnet.set(m[1] + '.' + m[2], { ip: m[3], prefix: parseInt(m[4], 10) });
@@ -699,11 +638,8 @@ function extractSubnetsFromConfigs(devices) {
 
             var existing = vlanToSubnet.get(vlanName);
             if (existing && (existing.ip !== subnet.ip || existing.prefix !== subnet.prefix)) {
-                // A genuine conflict: two different devices report different subnets for
-                // the same VLAN name (could be a real stretched-VLAN-different-subnet
-                // multi-site design, or a config error) - keep whichever was found first
-                // (deterministic, not "whichever device happened to be processed last")
-                // and surface it instead of silently picking one.
+                // Two devices report different subnets for the same VLAN name - keep
+                // whichever was found first (deterministic) and surface the conflict.
                 conflicts.push({ vlanName: vlanName, device: d.Hostname || d.DeviceIP, kept: existing, sawInstead: subnet });
                 continue;
             }
@@ -771,8 +707,7 @@ window.renderIpSpaceUtilization = function() {
 
         var base = networkBase(ipToInt(subnet.ip), subnet.prefix);
         var usable = Math.pow(2, 32 - subnet.prefix) - 2;
-        // Only count client IPs that actually fall within the discovered subnet - a VLAN
-        // name match alone doesn't guarantee every seen IP genuinely belongs to that CIDR.
+        // Require actual CIDR membership, not just a VLAN name match.
         var inSubnet = Array.from(ips).filter(ip => { var n = ipToInt(ip); return n !== null && networkBase(n, subnet.prefix) === base; });
         var pct = usable > 0 ? Math.round((inSubnet.length / usable) * 100) : 0;
         var pctClass = pct >= 90 ? 'red' : (pct >= 75 ? 'warn-badge' : 'green');
@@ -788,11 +723,8 @@ window.renderIpSpaceUtilization = function() {
 window.populateReliabilityDeviceSelect = function() {
     var select = document.getElementById('reliabilityDeviceSelect');
     if (!select) return;
-    // Keyed by window.resolveDeviceIdentity (serial > hostname > IP, matching
-    // window.updateAlarmHistory) rather than DeviceIP - a renumbered device stays one entry
-    // in this dropdown instead of splitting into an old-IP ghost and a new-IP "device" with
-    // no history. Label shows the latest-known hostname/IP for readability; sorted by that
-    // latest IP too, since that's what an operator actually recognizes a device by on sight.
+    // Keyed by window.resolveDeviceIdentity (matching window.updateAlarmHistory), so a
+    // renumbered device stays one dropdown entry instead of splitting its history.
     var deviceMap = new Map(); // identity -> {hostname, ip}
     loadedSnapshots.slice()
         .sort((a, b) => new Date(a.scanTimestamp || 0) - new Date(b.scanTimestamp || 0))
@@ -822,16 +754,10 @@ window.renderReliabilityHeatmap = function() {
         return;
     }
 
-    // `dates` are plain YYYY-MM-DD keys sliced from a UTC ISO ScanTimestamp (see
-    // persistence.js's updateAlarmHistory) - every construction/comparison/arithmetic
-    // below has to stay in UTC terms (the 'Z' suffix, and the getUTC*/setUTC* variants,
-    // not their local-time counterparts) to keep `iso` matching those keys. Parsing as
-    // local time and reading back via toISOString() (both UTC-based) used to roll the
-    // date back by one for any positive UTC-offset timezone - e.g. browser at UTC+2,
-    // "2026-08-20T00:00:00" parses as local midnight = 2026-08-19T22:00:00Z, so
-    // toISOString() always produced the day BEFORE what was actually stored, and every
-    // `days[iso]` lookup below missed - the heatmap rendered as empty for most timezones
-    // east of UTC, every time, not just as an edge case.
+    // `dates` are plain YYYY-MM-DD keys sliced from a UTC ISO ScanTimestamp. Everything below
+    // must stay in UTC terms (the 'Z' suffix, getUTC*/setUTC*) to keep `iso` matching those
+    // keys - parsing as local time shifts the date for any positive UTC-offset timezone and
+    // silently breaks every `days[iso]` lookup.
     var minDate = new Date(dates[0] + 'T00:00:00Z');
     var maxDate = new Date(dates[dates.length - 1] + 'T00:00:00Z');
     // Start the grid on the Sunday on/before minDate so day-of-week rows line up.
@@ -862,10 +788,8 @@ window.renderReliabilityHeatmap = function() {
         </div>`;
 };
 
-// Entry point for a dashboard stat card click (see the .fleet-stat-card.drillable onclick
-// handlers above) - jumps to the Search tab and renders the full underlying list for that
-// stat via search.js's results-list UI, instead of the small always-truncated inline lists
-// the dashboard itself used to show.
+// Entry point for a dashboard stat card click - jumps to the Search tab and renders the
+// full underlying list for that stat via search.js's results-list UI.
 window.drillDownStat = function(kind) {
     window.switchSidebarTab('sidebar-tab-search');
     document.getElementById('globalSearch').value = '';
@@ -928,10 +852,8 @@ window.drillDownStat = function(kind) {
                 line2Html: `Configuration changed since its previous capture`,
                 onClick: () => {
                     window.goToSearchResult(c.deviceIp, 'tab-config', c.newIdx);
-                    // Best-effort: pre-select the exact "previous capture" in the Config
-                    // tab's compare picker once the drawer has finished opening. Falls
-                    // back gracefully to the raw view if the picker isn't ready in time -
-                    // nothing here is required for the drill-down itself to work.
+                    // Best-effort: pre-select the "previous capture" in the compare picker
+                    // once the drawer opens; falls back to raw view if not ready in time.
                     setTimeout(() => {
                         var sel = document.getElementById('configCompareSelect');
                         if (sel && Array.from(sel.options).some(o => o.value === String(c.oldIdx))) {

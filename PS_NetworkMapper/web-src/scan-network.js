@@ -1,15 +1,9 @@
-// "Scan Network" button (#sidebar-tab-load): kicks off a full fleet crawl from the browser
-// via WebServer.ps1's async POST /api/scan-network + GET /api/scan-network/status
-// (see that file's Invoke-ScanNetworkAction/Invoke-ScanNetworkStatusAction). Reads
-// loadedSnapshots/globalTopologyData (app.js), calls into window.processSelectedFiles
-// (app.js) to load the finished scan through the exact same pipeline a manually-uploaded
-// file goes through - no separate "apply a scan result" code path to keep in sync.
+// "Scan Network" button: kicks off an async fleet crawl (WebServer.ps1's /api/scan-network),
+// then feeds the result through processSelectedFiles - same pipeline as a manual file upload.
 
 var scanNetworkPollTimer = null;
 
-// Promise-based starting-IP prompt, same resolve-on-confirm/reject-on-cancel shape as
-// window.promptForPassword (app.js) - only used when no previous scan is loaded this
-// session (see window.startNetworkScan below).
+// Promise-based starting-IP prompt, same resolve/reject shape as window.promptForPassword.
 function promptForStartIp() {
     return new Promise((resolve, reject) => {
         var modal = document.getElementById('scan-start-ip-modal');
@@ -51,10 +45,8 @@ function promptForStartIp() {
     });
 }
 
-// "Best" starting IP from the currently active snapshot: the graph-center node (largest
-// connected component, minimum eccentricity) - the same "core/backbone" selection
-// graph.js's own diagram root uses (see graph.js line ~121's computeGraphRoot call), reused
-// here via the same pure, DOM-free function rather than inventing a second heuristic.
+// "Best" starting IP from the active snapshot: the graph-center node, same heuristic as
+// graph.js's own diagram root (computeGraphRoot).
 function bestStartIpFromActiveSnapshot() {
     if (!globalTopologyData || globalTopologyData.length === 0) return null;
     var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
@@ -76,9 +68,8 @@ window.startNetworkScan = async function() {
     } else {
         startIp = bestStartIpFromActiveSnapshot();
         if (!startIp) {
-            // Defensive - loadedSnapshots.length > 0 but somehow no classifiable node (e.g.
-            // every device record is malformed). Fall back to asking, same as the
-            // no-snapshot case, rather than silently failing to start.
+            // Defensive: no classifiable node even though snapshots are loaded. Fall back
+            // to asking, same as the no-snapshot case.
             try {
                 startIp = await promptForStartIp();
             } catch (cancelErr) {
@@ -87,11 +78,8 @@ window.startNetworkScan = async function() {
         }
     }
 
-    // A fleet crawl runs for minutes and switching tabs mid-scan is entirely reasonable
-    // (e.g. to double-check saved credentials in Settings) - window.setStatus (utils.js)
-    // itself now mirrors to #mapStatusNote whenever #status-text isn't the currently
-    // visible tab, so every one of this scan's messages is seen wherever the user happens
-    // to be without a separate mirror call here.
+    // window.setStatus mirrors to #mapStatusNote when #status-text isn't visible, so scan
+    // messages are seen even if the user switched tabs mid-scan.
     function finish(msg, color) {
         if (scanNetworkPollTimer) { clearTimeout(scanNetworkPollTimer); scanNetworkPollTimer = null; }
         if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
@@ -153,14 +141,10 @@ window.startNetworkScan = async function() {
             return;
         }
 
-        // Feed the finished scan through the exact same load pipeline a manually-uploaded
-        // file goes through, by synthesizing a File object from the already-decrypted JSON
-        // this endpoint returned - readSnapshotFile (app.js) already knows how to parse
-        // this shape (it's the same {Topology, ScanTimestamp} envelope Start-NetworkMapper.ps1
-        // writes to disk), so there is no second parsing path to keep in sync. This
-        // intentionally REPLACES whatever was previously loaded (loadedSnapshots is
-        // reassigned wholesale) - the same behavior any other new load already has via
-        // processSelectedFiles, not special-cased here.
+        // Synthesize a File from the returned JSON so it goes through the same
+        // processSelectedFiles/readSnapshotFile pipeline as a manual upload - same
+        // {Topology, ScanTimestamp} envelope Start-NetworkMapper.ps1 writes to disk.
+        // This replaces whatever was previously loaded, same as any other new load.
         var syntheticContent = JSON.stringify({ Topology: status.topology, ScanTimestamp: status.scanTimestamp });
         var syntheticFile = new File([syntheticContent], status.outputFile || 'scan-result.json', { type: 'application/json' });
         finish("Scan complete - " + status.visitedCount + " device(s) found. Loading...", "green");

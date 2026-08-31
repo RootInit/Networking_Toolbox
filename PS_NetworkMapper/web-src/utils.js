@@ -1,11 +1,9 @@
-// Generic helpers with no feature-specific state of their own - string escaping, status
-// text, the progress bar, MAC vendor lookup, daisy-chain detection. Used by every other
-// file in this app. Classic script (not a module) like everything else here - see
-// graph-layout.js's footer comment for why - so everything below is a plain global,
-// reachable by bare name (or window.<name>) from any other <script> tag on the page.
+// Generic helpers (string escaping, status text, progress bar, MAC vendor lookup,
+// daisy-chain detection) used by every other file. Classic script, not a module - see
+// graph-layout.js's footer comment - so everything below is a plain global.
 
-// Escape device-supplied strings (hostnames, LLDP descriptions, etc. come from other
-// network devices, not from this app, before they're interpolated into innerHTML.
+// Escape device-supplied strings (hostnames, LLDP descriptions, etc. from other network
+// devices, not this app) before they're interpolated into innerHTML.
 var HTML_ESCAPES = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
 window.esc = function(val) {
     if (val === null || val === undefined) return "";
@@ -21,32 +19,65 @@ window.asArray = function(val) {
     return [val];
 };
 
+// Mirrors a client-side error into the server's log (Mapper_Debug.log - see WebServer.ps1's
+// Write-MapperDebugLog/Invoke-ClientErrorAction) since the browser console alone is easy
+// to lose after the fact. Fire-and-forget: failed POSTs are swallowed so error reporting
+// can't itself raise a second error.
+var reportedClientErrors = new Set();
+window.reportClientError = function(message, opts) {
+    opts = opts || {};
+    // Log each (source, message) pair only once per page load, so a repeatedly-firing
+    // error (e.g. a poll loop) doesn't flood the log.
+    var key = (opts.source || '') + '|' + message;
+    if (reportedClientErrors.has(key)) return;
+    reportedClientErrors.add(key);
+
+    try {
+        fetch('/api/client-error', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                message: String(message),
+                source: opts.source || 'status',
+                url: window.location.href,
+                stack: opts.stack || (opts.error && opts.error.stack) || '',
+            }),
+        }).catch(() => {});
+    } catch (e) { /* fetch itself unavailable/throwing - nothing else to do */ }
+};
+
+// Catches errors that never reach a try/catch calling setStatus(..., "red") - otherwise
+// visible only in the devtools console.
+window.addEventListener('error', function(e) {
+    window.reportClientError(e.message || 'Uncaught error', {
+        source: 'window.onerror', stack: e.error && e.error.stack,
+    });
+});
+window.addEventListener('unhandledrejection', function(e) {
+    var reason = e.reason;
+    window.reportClientError((reason && reason.message) || String(reason), {
+        source: 'unhandledrejection', stack: reason && reason.stack,
+    });
+});
+
 // UI Helpers
 //
-// #status-text lives inside #sidebar-tab-load (network_vis.html) and is display:none
-// whenever any other sidebar tab is active (.sidebar-tab-content only shows the one with
-// .active - see app.js's switchSidebarTab). Plenty of setStatus callers are NOT gated by
-// that tab: every drawer action (rescan, SSH launch, config export/print - drawer.js) is
-// reachable from the drawer regardless of which sidebar tab is open, and the Settings
-// tab's own Save/Reset (persistence.js) is *guaranteed* to fire while sidebar-tab-load is
-// hidden, since Settings has to be the active tab for the user to click Save at all - so
-// every one of those messages was silently invisible. Mirror through #mapStatusNote
-// (map.js's window.showMapStatus) whenever #status-text itself isn't currently visible -
-// that element is a sibling of both center-view panes, not gated by sidebar tab or
-// diagram/map view (see map.js's switchCenterView comment). Skipped when #status-text IS
-// visible so the common case (Load File tab already showing it) doesn't also flash a
-// duplicate toast over the map/diagram.
+// #status-text is hidden (display:none) unless the Load sidebar tab is active, but many
+// callers (drawer actions, Settings Save) fire while it's hidden. Mirror to #mapStatusNote
+// (map.js's showMapStatus) whenever #status-text isn't visible, so those messages aren't
+// silently dropped; skipped when #status-text IS visible to avoid a duplicate toast.
 //
-// noMirror: true opts out for a caller that already wrote a MORE detailed message straight
-// to showMapStatus itself and is now only writing a generic local pointer to #status-text
-// (see persistence.js's saveSettingsPanel) - without it, this generic echo would win the
-// race and overwrite the detailed reason the earlier call already put in #mapStatusNote.
+// noMirror: true lets a caller that already wrote a more detailed message straight to
+// showMapStatus (persistence.js's saveSettingsPanel) avoid this generic echo overwriting it.
 window.setStatus = function(msg, color="blue", opts) {
     var el = document.getElementById('status-text');
     if(el) { el.innerText = msg; el.style.color = color; }
     if (!(opts && opts.noMirror) && (!el || el.offsetParent === null) && typeof window.showMapStatus === 'function') {
         window.showMapStatus(msg);
     }
+    // "red" is this app's convention for an error message - piggyback on it to log every
+    // user-visible error without instrumenting each individual catch block.
+    if (color === "red") { window.reportClientError(msg, { source: 'status' }); }
 };
 
 window.formatAge = function(ms) {
@@ -62,12 +93,10 @@ window.formatAge = function(ms) {
 
 var crawlAgeInterval = null;
 
-// Surfaces how old the loaded scan is (ScanTimestamp, written once per crawl by
-// Start-NetworkMapper.ps1) so a NOC tech can tell at a glance whether to trust what's
-// on screen. Keeps updating live via setInterval so "3 minutes ago" doesn't go stale
-// while the tab stays open. Files predating this field just show "unknown" - it isn't
-// a parse error, ScanTimestamp is a new optional field, not a schema change. Reads
-// window.loadSettings (persistence.js) for the fresh/stale cutoffs.
+// Shows how old the loaded scan is (ScanTimestamp, written once per crawl by
+// Start-NetworkMapper.ps1), updating live so it doesn't go stale while the tab stays
+// open. Files predating this optional field show "unknown", not an error. Reads
+// window.loadSettings for the fresh/stale cutoffs.
 window.renderCrawlAge = function(scanTimestampIso) {
     var badge = document.getElementById('crawl-age-badge');
     if (crawlAgeInterval) { clearInterval(crawlAgeInterval); crawlAgeInterval = null; }
@@ -95,34 +124,24 @@ window.renderCrawlAge = function(scanTimestampIso) {
 };
 
 // MAC vendor/category fingerprinting (see vendor/oui-data.js, generated by
-// ../Update-OuiDatabase.ps1 from the full IEEE OUI registry - ~40k entries as of
-// writing). Best-effort string-matching against registered vendor names, not a
-// certified device inventory - there is no separate "DoD device" OUI registry;
-// government/GFE fleets buy the same COTS hardware under the same public OUIs as
-// everyone else, so this is brand recognition, not a compliance data source.
+// ../Update-OuiDatabase.ps1 from the IEEE OUI registry). Best-effort string-matching
+// against vendor names, not a certified inventory.
 var VENDOR_CATEGORY_RULES = [
-    // Checked first: vendors that make both switches/APs AND phones/endpoints. In a MAC
-    // table full of "clients" behind an access switch, a Cisco/Aruba/Juniper device is
-    // far more likely to be an AP or another switch than a desk phone - this ordering
-    // resolves that ambiguity toward the more common case rather than whichever rule
-    // happens to be checked first.
+    // Checked first: vendors making both switches/APs and phones - in client MAC tables,
+    // a Cisco/Aruba/Juniper device is more likely an AP/switch than a desk phone.
     { category: 'Network-Infra', keywords: ['cisco', 'juniper', 'aruba', 'hewlett packard enterprise', 'hpe ', 'arista', 'ubiquiti', 'extreme networks', 'netgear', 'fortinet', 'palo alto'] },
     { category: 'Phone', keywords: ['poly', 'yealink', 'avaya', 'grandstream', 'mitel', 'snom', 'shoretel', 'aastra'] },
     { category: 'Laptop-OEM', keywords: ['dell', 'hewlett packard', 'hewlett-packard', 'lenovo', 'panasonic', 'getac', 'apple', 'microsoft'] },
-    // Identifies the Ethernet chipset vendor, not the dock's outer brand - a Dell- or
-    // Lenovo-branded dock very commonly contains a third-party Realtek/ASIX chip inside,
-    // so this tag most likely means "laptop dock or USB adapter", not a literal
-    // Realtek/ASIX-branded product.
+    // Identifies the Ethernet chipset, not the outer brand - a Dell/Lenovo dock commonly
+    // contains a third-party Realtek/ASIX chip, so this means "dock or USB adapter".
     { category: 'Dock/Adapter-Chipset', keywords: ['realtek', 'asix electronics'] },
 ];
 
-// Returns {vendor, category}. `vendor` is the raw IEEE-registered name or null if the
-// prefix isn't in the database at all (not registered, or a locally-administered/
-// randomized MAC - itself sometimes worth noticing). `category` is 'Unknown' only for
-// that no-match case; a registered vendor that doesn't hit any keyword rule above comes
-// back as 'Other' - deliberately a different bucket, since "real vendor we just haven't
-// categorized" and "no vendor match at all" mean different things to someone scanning
-// for anomalies.
+// Returns {vendor, category}. vendor is null if the OUI prefix isn't registered (or is
+// locally-administered/randomized). category is 'Unknown' only for that no-match case;
+// a registered vendor matching no keyword rule is 'Other' (a different bucket, since
+// "uncategorized real vendor" and "no vendor match" mean different things when scanning
+// for anomalies).
 window.lookupVendor = function(mac) {
     if (!mac || typeof mac !== 'string') return { vendor: null, category: 'Unknown' };
     var prefix = mac.replace(/[:\-.]/g, '').toUpperCase().slice(0, 6);
@@ -141,39 +160,26 @@ window.lookupVendor = function(mac) {
     return { vendor: vendor, category: 'Other' };
 };
 
-// Client.Port and MedNeighbor.LocalPort can carry a logical-unit suffix ("ge-0/0/5.0"),
-// while the Interfaces table's Port values are already bare physical ports (renderInterfaces
-// filters out anything containing "." before it ever gets here) - normalize the same way
-// Get-JunosNodeData.ps1 already does for its own PortDesc lookup so all three line up on
-// one grouping key.
+// Client.Port and MedNeighbor.LocalPort can carry a logical-unit suffix ("ge-0/0/5.0");
+// Interfaces table Ports are already bare. Strip it, matching Get-JunosNodeData.ps1's own
+// PortDesc normalization, so all three line up on one grouping key.
 window.normalizePort = function(port) {
     return String(port || '').replace(/\.\d+$/, '');
 };
 
 // Daisy-chain detection: groups a device's clients by physical port to find a phone with
-// a PC plugged into its own built-in switch port. The MAC table already shows two
-// distinct MACs on one physical port with different VLANs (voice vs. data) in exactly
-// this scenario - no new data collection, see Get-JunosNodeData.ps1's MAC-table parsing,
-// which never dedups by port. LLDP-MED (MedNeighbors, captured instead of discarded as of
-// this feature) upgrades confidence from a generic "multiple devices" guess to a
-// confirmed phone ID when a MED phone/AP block exists on the same port.
+// a PC plugged into its own built-in switch port. LLDP-MED (MedNeighbors) upgrades
+// confidence to a confirmed phone ID when a MED block exists on the same port.
 //
 // Returns Map<normalizedPort, {confidence: 'confirmed'|'likely'|'possible', medDescription, clients}>.
 //
 // Confidence tiers, most to least certain:
 //   confirmed - LLDP-MED identified an actual phone/AP on this port.
-//   likely    - 2+ MACs on this port span 2+ VLANs. Not normal for a plain access port
-//               (a phone tagging voice VLAN while passing an untagged PC through on the
-//               data VLAN is exactly this shape) even with no MED confirmation.
-//   possible  - 2+ MACs on this port, all on the SAME VLAN - the far more common real-world
-//               case (an unmanaged hub/switch feeding two PCs, a PC + printer, etc., none of
-//               which retag anything). Originally excluded here on the theory that VLAN
-//               diversity was the daisy-chain signal, but that theory only covers the
-//               phone-with-passthrough-PC case - it made this tier fire on effectively
-//               nothing in fleets where daisy-chains are mostly same-VLAN hubs, which is the
-//               common case. Kept as its own weaker tier (not folded into 'likely') since a
-//               same-VLAN multi-MAC port is somewhat more likely to also be a stale mac-table
-//               entry from a device that recently moved ports, which VLAN diversity rules out.
+//   likely    - 2+ MACs on this port span 2+ VLANs (phone tagging voice VLAN while
+//               passing an untagged PC through on data VLAN), no MED confirmation.
+//   possible  - 2+ MACs, all same VLAN - more likely an unmanaged hub/PC+printer, but
+//               also more likely a stale mac-table entry from a device that moved ports
+//               (which VLAN diversity would rule out), hence the weaker tier.
 window.detectDaisyChains = function(device) {
     var medByPort = new Map();
     window.asArray(device.MedNeighbors).forEach(m => {
@@ -181,7 +187,7 @@ window.detectDaisyChains = function(device) {
     });
 
     var byPort = new Map();
-    (device.TrueClients || []).forEach(c => {
+    window.asArray(device.TrueClients).forEach(c => {
         var port = window.normalizePort(c.Port);
         if (!byPort.has(port)) byPort.set(port, []);
         byPort.get(port).push(c);
@@ -204,18 +210,12 @@ window.detectDaisyChains = function(device) {
     return result;
 };
 
-// Stable cross-snapshot device identity, for every feature that has to recognize "the same
-// physical switch" across TIME (Topology Diff, the Trends chart, the Reliability heatmap,
-// the Config-Changed dashboard card, and the Config tab's "this device, other capture"
-// picker) rather than within one snapshot. DeviceIP is a fine unique key WITHIN a single
-// snapshot (it can't collide there) but is exactly the wrong choice across snapshots - a
-// DHCP renewal or a deliberate renumbering makes a continuously-managed switch look like one
-// device disappearing and a different one appearing, which corrupts all five of those
-// features' history. Reuses window.ConfigResolve.bestKeyForSave (config-resolve.js) - the
-// SAME serial > hostname > IP priority the geo-map location feature already uses to survive
-// exactly this - instead of a second, independently-maintained notion of "identity" that
-// could quietly drift from that one. Returns a single string ("keyType:key") suitable as a
-// Map/object key or a <select> option value.
+// Stable cross-snapshot device identity (Topology Diff, Trends, Reliability heatmap,
+// Config-Changed card, Config tab's device picker). DeviceIP alone breaks across
+// snapshots on DHCP renewal/renumbering. Reuses window.ConfigResolve.bestKeyForSave's
+// serial > hostname > IP priority (same one the geo-map location feature uses) instead of
+// a second notion of identity that could drift. Returns "keyType:key", usable as a
+// Map/object key or <select> option value.
 window.resolveDeviceIdentity = function(device) {
     var k = window.ConfigResolve.bestKeyForSave(device);
     return k.keyType + ':' + k.key;
@@ -233,14 +233,11 @@ window.renderDaisyChainBadge = function(chain) {
     return `<span class="daisy-badge possible" title="${chain.clients.length} devices share this port, all on the same VLAN - likely an unmanaged hub/switch. Weaker signal than different-VLAN sharing: could also be a stale mac-table entry from a device that recently moved ports.">Multiple devices (possible daisy-chain)</span>`;
 };
 
-// `indeterminate` marks a phase that can't report real fractional progress (an index
-// rebuild, the layout algorithm) - those run as one uninterrupted synchronous block with
-// no opportunity to update `percent` partway through, so without this the bar would just
-// sit static for however long that block takes and look identical to a frozen page. The
-// stripe animation it turns on (see .progress-fill.indeterminate in network_vis.html)
-// only animates `transform`, which Chromium keeps compositing on its own thread even
-// while the main thread is blocked - so it keeps visibly moving through exactly the
-// stretch a plain width/text update can't cover.
+// `indeterminate` marks a phase with no fractional progress to report (index rebuild,
+// layout algorithm - one uninterrupted sync block). Its stripe animation (see
+// .progress-fill.indeterminate in network_vis.html) only animates `transform`, which
+// Chromium composites on its own thread even while the main thread is blocked, so it
+// keeps moving when a plain width/text update can't.
 window.showProgress = function(text, percent, indeterminate) {
     document.getElementById('loadingBar').style.display = 'flex';
     document.getElementById('progress-text').innerText = text;
@@ -249,10 +246,9 @@ window.showProgress = function(text, percent, indeterminate) {
     fill.classList.toggle('indeterminate', !!indeterminate);
 };
 
-// Yields one tick back to the browser so a just-set showProgress() text/width actually
-// paints before the caller starts a long synchronous block - without this the DOM
-// mutation is queued but never rendered until that block finishes, so the bar would
-// appear to jump straight from the previous message to "done".
+// Yields one tick so a just-set showProgress() text/width actually paints before the
+// caller starts a long synchronous block, instead of the DOM mutation staying queued
+// until that block finishes.
 function nextPaint() {
     return new Promise(r => setTimeout(r, 0));
 }

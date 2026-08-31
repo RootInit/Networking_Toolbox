@@ -1,28 +1,15 @@
-# HttpListener-based local webserver for Network_Visualizer. Zero-install by design -
-# HttpListener ships in every .NET runtime this repo already targets (Framework 4.x via
-# PS 5.1, and Core/5+ via pwsh), same reasoning as the AES/PBKDF2 primitives in
-# Start-NetworkMapper.ps1. Localhost-only by design too: it binds "localhost" specifically
-# (not "+" or a NIC address), so no netsh urlacl reservation and no admin rights are
-# needed, and no auth is needed either, because the only thing this server can do beyond
-# serve static files is spawn a process with the live switch credentials it holds in memory
-# (decrypted from Configuration.json.enc at startup by Start-NetworkMapper.ps1) - that's
-# only safe when "reaches this server" and "already runs as the person who started this
-# process" are the same fact, which is true for localhost and false the moment this is
-# ever rebound to a LAN address.
+# HttpListener-based local webserver for Network_Visualizer. Localhost-only by design:
+# binds "localhost" specifically (no netsh urlacl/admin needed), and no auth is needed
+# either - the only sensitive action it can trigger is spawning an SSH session with
+# in-memory switch credentials, which is only safe when caller and process owner are
+# the same person, true for localhost and false the moment this is rebound to a LAN address.
 #
 # Not meant to be run directly - dot-source it, then call Start-MapperWebServer.
 
-# Invoke-SaveConfigAction (below) needs Get-TopologyKeyMaterial/Protect-TopologyPayload.
-# Dot-sourced here directly rather than relying on the caller (Start-NetworkMapper.ps1)
-# having already loaded it first, so this file's correctness doesn't depend on caller load
-# order. $PSScriptRoot inside a dot-sourced file resolves to that file's own directory, not
-# the caller's - both files live in lib/, so this resolves correctly
-# regardless of how WebServer.ps1 itself gets loaded.
+# Dot-sourced directly (not relying on caller load order) so this file's correctness
+# doesn't depend on Start-NetworkMapper.ps1 having loaded these first.
 . (Join-Path $PSScriptRoot "TopologyCrypto.ps1")
-# Invoke-ConnectAction (below) needs New-JunosCredentialFile. Same "dot-source directly,
-# don't rely on caller load order" reasoning as the TopologyCrypto.ps1 dot-source above.
 . (Join-Path $PSScriptRoot "SshHelpers.ps1")
-# Invoke-ScanNetworkAction (below) needs Invoke-FleetCrawl.
 . (Join-Path $PSScriptRoot "FleetCrawl.ps1")
 
 $script:ContentTypes = @{
@@ -47,15 +34,65 @@ function Send-WebResponse {
 
 function Send-WebJson {
     param($Response, [int]$StatusCode, [hashtable]$Object, [int]$Depth = 10)
-    $Json = $Object | ConvertTo-Json -Depth $Depth -Compress
+    try {
+        $Json = $Object | ConvertTo-Json -Depth $Depth -Compress
+    } catch {
+        # Must not fall through to Start-MapperWebServer's catch-all, which sends a
+        # plain-text 500 body - every client caller does .json() on every response
+        # regardless of status, so a non-JSON body here is a guaranteed parse failure
+        # that discards the real error. Emit a small, always-serializable JSON error instead.
+        $ErrJson = @{ error = "Server failed to serialize response: $_" } | ConvertTo-Json -Compress
+        Send-WebResponse -Response $Response -StatusCode 500 -Bytes ([System.Text.Encoding]::UTF8.GetBytes($ErrJson)) -ContentType "application/json; charset=utf-8"
+        return
+    }
     Send-WebResponse -Response $Response -StatusCode $StatusCode -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Json)) -ContentType "application/json; charset=utf-8"
 }
 
-# Minimal, dependency-free query-string reader. [System.Web.HttpUtility] would do this in
-# one call, but System.Web isn't reliably present across both runtimes this repo targets
-# (.NET Framework via PS 5.1, .NET Core/5+ via pwsh) - same reasoning as this repo's other
-# runtime-portability choices (see Start-NetworkMapper.ps1's AesGcm comment).
-# [System.Net.WebUtility] IS available on both, so it's the only cross-runtime dependency.
+# Mapper_Debug.log - the same file Invoke-FleetCrawl's Write-DebugLogLocal writes crawl
+# activity to (set once via $script:DebugLogPath in Start-MapperWebServer).
+function Write-MapperDebugLog {
+    param([string]$Message)
+    if (-not $script:DebugLogPath) { return }
+    # Best-effort: a full disk or locked log file must not take down the request logging to it.
+    # -Encoding utf8 explicit, or a mixed-encoding file causes CJK mojibake in text editors.
+    try { "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" | Out-File -FilePath $script:DebugLogPath -Append -Encoding utf8 } catch {}
+}
+
+# Lets the browser (window.reportClientError, utils.js) forward client-side errors into
+# Mapper_Debug.log, so server- and client-side failures of a scan end up in one place.
+# Tolerant of a malformed/missing body - a logging endpoint must not itself throw.
+function Invoke-ClientErrorAction {
+    param($Response, [string]$Body)
+
+    $Parsed = $null
+    try { $Parsed = $Body | ConvertFrom-Json } catch {}
+
+    $MessageText = if ($Parsed -and $Parsed.message) { [string]$Parsed.message } else { "(no message)" }
+    $SourceText = if ($Parsed -and $Parsed.source) { [string]$Parsed.source } else { "unknown" }
+    $UrlText = if ($Parsed -and $Parsed.url) { [string]$Parsed.url } else { "" }
+    $StackText = if ($Parsed -and $Parsed.stack) { [string]$Parsed.stack } else { "" }
+
+    $HeaderLine = "CLIENT ERROR [$SourceText] $MessageText"
+    if ($UrlText) { $HeaderLine += " (at $UrlText)" }
+    Write-MapperDebugLog $HeaderLine
+    if ($StackText) {
+        foreach ($StackLine in ($StackText -split "`n")) { Write-MapperDebugLog "    $($StackLine.TrimEnd())" }
+    }
+
+    Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "logged" }
+}
+
+# $Request.ContentEncoding falls back to the system ANSI codepage on Windows PowerShell
+# 5.1 when no charset is declared (our fetch() calls never declare one) - decode as UTF-8
+# explicitly instead, since the browser body is always UTF-8 regardless of the header.
+function Read-WebRequestBody {
+    param($Request)
+    $Reader = [System.IO.StreamReader]::new($Request.InputStream, [System.Text.Encoding]::UTF8)
+    try { return $Reader.ReadToEnd() } finally { $Reader.Close() }
+}
+
+# Minimal query-string reader. [System.Web.HttpUtility] isn't reliably present on both
+# runtimes this repo targets; [System.Net.WebUtility] is, so that's the only dependency.
 function Get-QueryParam {
     param([string]$Query, [string]$Name)
     if ([string]::IsNullOrEmpty($Query)) { return $null }
@@ -68,28 +105,14 @@ function Get-QueryParam {
     return $null
 }
 
-# CSRF/DNS-rebinding guard, applied to every endpoint that either changes state
-# (/api/connect, /api/rescan, /api/scan-network, /api/save-config) or hands back something
-# sensitive on a bare GET (/api/session-password - see that endpoint's own comment; the
-# criterion is "sensitive or state-changing", not "state-changing" alone, which is the gap
-# that endpoint originally shipped with). Binding to "localhost" (see the header comment)
-# only proves the CALLER runs as this user - it does nothing to prove the caller is OUR page
-# rather than a hidden form (or a fetch after a DNS-rebinding attack rebinds some other
-# hostname to 127.0.0.1) on some other site the analyst has open in another tab, and several
-# of these endpoints can trigger an outbound SSH session or hand back the encryption password
-# itself. Origin (and Referer as fallback, since not every browser sends Origin on a
-# same-origin fetch) is the standard defense: both are set by the browser itself from the
-# requesting page's actual origin, so page JS cannot forge them, and a bare cross-origin
-# <form> POST (or a rebound fetch) still carries a truthful Origin header even though it
-# needs no CORS preflight to fire. Fail closed - neither header present means this wasn't a
-# browser navigating from our own page, so it's refused too.
+# CSRF/DNS-rebinding guard for every endpoint that changes state or hands back something
+# sensitive (e.g. /api/session-password). Localhost binding only proves the caller runs as
+# this user, not that it's our page - a rebound-DNS fetch or hidden cross-origin form still
+# looks same-machine. Origin (Referer as fallback) is browser-set and unforgeable by page JS,
+# so check it; fail closed if neither header is present.
 #
-# What this does NOT cover: a hostile process already running as a DIFFERENT, unprivileged
-# OS user on the same machine (Fast User Switching, RDP, a shared lab box). Origin/Referer
-# are meaningful only when a real browser is enforcing them - a raw script talking straight
-# to this HttpListener can set any Origin header it likes. That gap is pre-existing and
-# app-wide (this whole server has no authentication - see the header comment on why localhost
-# binding was judged sufficient), not something this check claims to close.
+# Does NOT cover a hostile process running as a different OS user on the same machine - it
+# can set any Origin it likes talking directly to this HttpListener. Pre-existing, app-wide gap.
 function Test-SameOriginRequest {
     param($Request, [int]$Port)
     $Expected = "http://localhost:$Port"
@@ -100,18 +123,13 @@ function Test-SameOriginRequest {
     return $false
 }
 
-# The one action a browser click can trigger server-side: launch Connect-Switch.ps1 (a
-# real interactive SSH session, askpass-injected via a short-lived credential file) against
-# a target IP. Deliberately narrow - a fixed script, one validated parameter, no free-form
-# command or Invoke-Expression surface. $TargetIP is regex-locked to IPv4 shape before it
-# ever reaches Start-Process, so it carries no shell metacharacters even though the
-# arguments below are also passed as a single pre-quoted string rather than relying on
-# Start-Process's own (version-dependent) array-quoting behavior.
+# Launches Connect-Switch.ps1 (interactive SSH, askpass-injected via a short-lived
+# credential file) against a target IP. Deliberately narrow: fixed script, one validated
+# parameter, no free-form command surface. $TargetIP is regex-locked to IPv4 shape before
+# reaching Start-Process, so it carries no shell metacharacters.
 #
-# $PowerShellExePath is resolved once by Start-MapperWebServer (below) from the CURRENT
-# process, not hardcoded - a machine with only PowerShell 7+ installed (no Windows
-# PowerShell 5.1) has no "powershell.exe" to find, and Start-Process would fail outright.
-# The default here is only a last-resort fallback if that detection itself couldn't run.
+# $PowerShellExePath is resolved by Start-MapperWebServer from the CURRENT process rather
+# than hardcoded, since a pwsh-only machine has no "powershell.exe" to find.
 function Invoke-ConnectAction {
     param($Response, [string]$Body, [string]$ConnectScriptPath, [string]$JunosUsername, [string]$JunosPassword, [string]$PowerShellExePath = "powershell.exe")
 
@@ -129,9 +147,8 @@ function Invoke-ConnectAction {
         return
     }
 
-    # Declared outside the try so the catch can still see it: the credential file (switch
-    # username + password, plaintext, in %TEMP%) is written BEFORE Start-Process runs, and is
-    # normally removed by Connect-Switch.ps1's own finally block once it has read it.
+    # Declared outside the try so the catch can see it: the plaintext credential file in
+    # %TEMP% is normally removed by Connect-Switch.ps1's own finally block once it reads it.
     $CredFile = $null
     try {
         $CredFile = New-JunosCredentialFile -Username $JunosUsername -Password $JunosPassword
@@ -139,26 +156,19 @@ function Invoke-ConnectAction {
         Start-Process -FilePath $PowerShellExePath -ArgumentList $ArgString | Out-Null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "launched"; ip = $TargetIP }
     } catch {
-        # Start-Process (or the credential-file write itself) failed - Connect-Switch.ps1 never
-        # launched to clean up the credential file itself, so remove it here instead of leaking
-        # the switch password in plaintext at %TEMP% (and accumulating one more file per retry).
+        # Launch failed before Connect-Switch.ps1 could clean up its own credential file -
+        # remove it here so the plaintext password doesn't leak/accumulate in %TEMP%.
         if ($CredFile) { Remove-JunosCredentialFile -CredentialFile $CredFile }
+        Write-MapperDebugLog "CONNECT ERROR [$TargetIP] Failed to launch SSH session: $_"
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to launch SSH session: $_" }
     }
 }
 
-# Re-scan a single device (see Get-JunosNodeData.ps1) without waiting for a full fleet
-# crawl. Async by necessity, not preference: the accept loop below handles one request at
-# a time, and a scan can legitimately take up to the worker's own ~50s SSH-batch budget -
-# running it inline would freeze the whole server (every static file, /api/connect, a
-# page reload) for the duration. Instead this starts the scan in a single-slot runspace
-# pool (the same BeginInvoke/RunspacePool mechanism Start-NetworkMapper.ps1 already uses
-# and trusts for the whole-fleet crawl, just sized to one) and returns immediately; the
-# browser polls Invoke-RescanStatusAction for the result. Exactly one rescan may be
-# in-flight at a time - not a security boundary (the analyst already has full SSH access
-# via /api/connect), just hygiene: no dictionary of per-IP jobs to leak-sweep, no question
-# of how many concurrent authenticated SSH sessions a stuck button should be allowed to
-# fire against the fleet.
+# Re-scans a single device without waiting for a full fleet crawl. Async: a scan can take
+# up to ~50s and the accept loop handles one request at a time, so this starts it in a
+# single-slot runspace pool and returns immediately; the browser polls
+# Invoke-RescanStatusAction for the result. Only one rescan may be in-flight at a time
+# (hygiene, not a security boundary - the analyst already has SSH access via /api/connect).
 function Invoke-RescanAction {
     param($Response, [string]$Body, [string]$WorkerPath, [string]$JunosUsername, [string]$JunosPassword)
 
@@ -176,10 +186,8 @@ function Invoke-RescanAction {
         return
     }
 
-    # Opportunistically reap any previously-timed-out job that has since actually
-    # finished, so its runspace slot and askpass cleanup are accounted for before this
-    # decides whether a new scan can start (see the timeout handling in
-    # Invoke-RescanStatusAction for why a timed-out job isn't force-stopped).
+    # Reap any previously-timed-out job that has since finished (see the timeout handling
+    # in Invoke-RescanStatusAction for why a timed-out job isn't force-stopped).
     for ($i = $script:OrphanedScans.Count - 1; $i -ge 0; $i--) {
         $Orphan = $script:OrphanedScans[$i]
         if ($Orphan.Handle.IsCompleted) {
@@ -196,9 +204,8 @@ function Invoke-RescanAction {
         return
     }
 
-    # -TargetIP/-Username/-Password only, matching Get-JunosNodeData.ps1's fixed read-only
-    # "show ..." batch. Never -HumanReadable (that branch ends in `exit`, which would kill
-    # this runspace) and never -Log (no reason for an ad-hoc rescan to write RawDumps/).
+    # Never -HumanReadable (ends in `exit`, killing this runspace) and never -Log (no
+    # reason for an ad-hoc rescan to write RawDumps/).
     $JobId = [guid]::NewGuid().ToString()
     $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $TargetIP).AddParameter("Username", $JunosUsername).AddParameter("Password", $JunosPassword)
     $PS.RunspacePool = $script:RescanPool
@@ -208,11 +215,8 @@ function Invoke-RescanAction {
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; jobId = $JobId; ip = $TargetIP }
 }
 
-# Quick reachability check - a handful of ICMP echoes against one device's management IP.
-# Synchronous: Test-Connection with a small -Count returns in a couple seconds worst case
-# (unlike Invoke-RescanAction's SSH batch), so this doesn't need the job-queue/poll dance -
-# the accept loop is only blocked for the ping's own short timeout, same as any other
-# single-request action here.
+# Quick reachability check (a few ICMP echoes). Synchronous - Test-Connection returns in a
+# couple seconds worst case, so no job-queue/poll dance is needed here unlike a rescan.
 function Invoke-PingAction {
     param($Response, [string]$Body)
 
@@ -220,40 +224,21 @@ function Invoke-PingAction {
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
     $TargetIP = if ($Parsed) { [string]$Parsed.ip } else { $null }
 
-    # Same strict dotted-quad check Invoke-ConnectAction/Invoke-RescanAction use - this
-    # value is never passed through a shell, only as a bound -TargetName parameter to
-    # Test-Connection below, but the validation still matters: it's what stops a malformed
-    # body from reaching Test-Connection with something other than a real IP at all (a
-    # hostname, a flag-looking string, etc.) and turning this into a generic "resolve
-    # and probe anything" endpoint.
+    # Strict dotted-quad check - stops this from becoming a generic "resolve and probe
+    # anything" endpoint (a hostname, a flag-looking string, etc.).
     if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing IP address" }
         return
     }
 
     try {
-        # -Quiet is avoided: it collapses the whole result to one bool with no latency/loss
-        # detail. Parameter set genuinely differs between the two PowerShell generations
-        # (PS 7+ renamed -ComputerName to -TargetName and added -TimeoutSeconds; PS 5.1 has
-        # neither and would throw "parameter cannot be found" if passed them - same
-        # pwsh-vs-powershell.exe split this file already branches on elsewhere), and so does
-        # what a FAILED probe looks like in the output - confirmed directly against a real
-        # unreachable target on PS 7, not assumed from docs:
-        #   - PS 7+'s redesigned cmdlet returns ONE OBJECT PER PING regardless of outcome -
-        #     a timed-out probe is a normal pipeline object with Status='TimedOut' and
-        #     Latency=0, not an error and not a missing object. Counting every non-null
-        #     object here (the original version of this code) therefore reported a fully
-        #     dead device as 4/4 replies received - the opposite of what this endpoint
-        #     exists to show. Must filter on Status -eq 'Success' explicitly.
-        #   - PS 5.1's classic Win32_PingStatus-backed cmdlet does the reverse: a successful
-        #     ping is a normal pipeline object, but a FAILED one is written to the error
-        #     stream instead of returned as an object at all - so plain assignment already
-        #     collects successes only, with no Status field to filter on. -ErrorAction Stop
-        #     here would be actively wrong: it turns the first failed probe into a
-        #     script-terminating exception, discarding any EARLIER successes already
-        #     collected (a 2-of-4 partial loss would misreport as 0/4) - SilentlyContinue
-        #     lets every probe run and just suppresses the per-failure error records this
-        #     endpoint doesn't need to surface.
+        # -Quiet avoided (no latency/loss detail). Parameter set and failure shape differ
+        # by generation: PS 7+'s Test-Connection returns one object per ping including
+        # timeouts (Status='TimedOut', Latency=0) - must filter on Status -eq 'Success' or
+        # a dead device reports as 4/4 replies. PS 5.1's classic cmdlet only ever returns
+        # successes as objects (failures go to the error stream), so plain assignment
+        # already collects successes only - -ErrorAction Stop there would wrongly turn the
+        # first failure into a terminating exception and discard earlier successes.
         if ($PSVersionTable.PSVersion.Major -ge 6) {
             $AllResults = Test-Connection -TargetName $TargetIP -Count 4 -TimeoutSeconds 2 -ErrorAction SilentlyContinue
             $Results = @($AllResults | Where-Object { $_.Status -eq 'Success' })
@@ -261,9 +246,7 @@ function Invoke-PingAction {
             $Results = @(Test-Connection -ComputerName $TargetIP -Count 4 -ErrorAction SilentlyContinue)
         }
     } catch {
-        # Belt-and-braces only at this point (e.g. Test-Connection itself missing/broken) -
-        # reported as zero replies, not a 500, since a fully unreachable device is the
-        # expected, common result this endpoint exists to report, not a server error.
+        # Report as zero replies, not a 500 - an unreachable device is an expected result here.
         $Results = @()
     }
 
@@ -302,12 +285,9 @@ function Invoke-RescanStatusAction {
         }
         $Job.PS.Dispose()
 
-        # Success/failure is decided here, server-side, from the same CRITICAL log-line
-        # signal Get-JunosNodeData.ps1 already emits for exactly this purpose (the
-        # empty-payload path and its own catch-all both log a line matching this) - not
-        # inferred by the browser from log text. ok:false intentionally omits `node`
-        # entirely: a failed scan's Interfaces/etc. are placeholder-shaped, and the only
-        # safe thing to do with a failed scan is leave the existing good data untouched.
+        # Success/failure decided here from the CRITICAL log-line signal Get-JunosNodeData.ps1
+        # emits, not inferred by the browser. ok:false omits `node` entirely, since a failed
+        # scan's fields are placeholder-shaped and should not overwrite existing good data.
         $Logs = if ($Result -and $Result.Logs) { @($Result.Logs) } else { @() }
         $HasCritical = $false
         foreach ($LogLine in $Logs) { if ($LogLine -match 'CRITICAL') { $HasCritical = $true; break } }
@@ -326,15 +306,11 @@ function Invoke-RescanStatusAction {
 
     $Elapsed = ((Get-Date) - $Job.StartTime).TotalSeconds
     if ($Elapsed -gt 90) {
-        # Deliberately not force-stopped. New-JunosAskPass (SshHelpers.ps1) writes
-        # the real switch password to a plaintext %TEMP% file, cleaned up only by the
-        # worker's own `finally { Remove-JunosAskPass ... }`. A pipeline .Stop()'d while
-        # blocked inside Process.WaitForExit (a synchronous native call) isn't guaranteed
-        # to run that finally block promptly - and a browser button invites hitting this
-        # far more often than the orchestrator's own rare-hung-switch case. Instead: move
-        # it out of the single active slot (freeing it for a new rescan) and into a small
-        # list that Invoke-RescanAction opportunistically reaps once it actually finishes
-        # on its own schedule.
+        # Not force-stopped: New-JunosAskPass writes the switch password to a plaintext
+        # %TEMP% file cleaned up only by the worker's own finally block, and .Stop()'ing a
+        # pipeline blocked in Process.WaitForExit isn't guaranteed to run that promptly.
+        # Instead free the single active slot and let Invoke-RescanAction reap it once it
+        # actually finishes on its own.
         $script:OrphanedScans.Add($Job)
         $script:PendingScan = $null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "timeout"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
@@ -344,12 +320,9 @@ function Invoke-RescanStatusAction {
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "running"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
 }
 
-# Kicks off a full fleet crawl from the browser, via Invoke-FleetCrawl (see that file) run
-# asynchronously in its own runspace pool - same "must not block the accept loop" reasoning
-# as Invoke-RescanAction, but sized to $MaxConcurrent (a real crawl needs real concurrency,
-# unlike a single-device rescan's 1-slot pool). Only one scan may be in flight at a time,
-# tracked in $script:PendingScanNetwork exactly like $script:PendingScan does for rescans -
-# a second click while one is running is refused with a 409, not queued or stacked.
+# Kicks off a full fleet crawl asynchronously (same "don't block the accept loop" reasoning
+# as Invoke-RescanAction, but the runspace pool is sized to $MaxConcurrent). Only one scan
+# may be in flight, tracked in $script:PendingScanNetwork; a second click gets a 409.
 function Invoke-ScanNetworkAction {
     param($Response, [string]$Body, [string]$WorkerPath, [string]$JunosUsername, [string]$JunosPassword,
           [string]$MaxConcurrent, [string[]]$AllowedScopes, [string]$SnapshotDir,
@@ -360,14 +333,10 @@ function Invoke-ScanNetworkAction {
         return
     }
 
-    # Opportunistically reap a finished scan job before deciding whether a new one can
-    # start - same shape as Invoke-RescanAction's orphan reaping above. Without this, a
-    # scan that finished but whose result the browser never polled again (tab closed,
-    # page reloaded after the last poll) would sit in $script:PendingScanNetwork forever,
-    # 409-ing every future "Scan Network" click even though nothing is actually running.
-    # If Invoke-ScanNetworkStatusAction already cached the outcome (.Collected), the
-    # PS/Runspace are already disposed and this just clears the slot; if a poll never
-    # arrived at all, collect it here so the runspace/pool resources aren't leaked.
+    # Reap a finished scan job before deciding whether a new one can start - without this,
+    # a scan whose result the browser never polled (tab closed) would sit here forever,
+    # 409-ing every future click. If .Collected is already set, PS/Runspace are already
+    # disposed and this just clears the slot; otherwise collect here so nothing leaks.
     if ($script:PendingScanNetwork -and $script:PendingScanNetwork.Handle.IsCompleted) {
         $Finished = $script:PendingScanNetwork
         if (-not $Finished.Collected) {
@@ -392,12 +361,8 @@ function Invoke-ScanNetworkAction {
         return
     }
 
-    # A fixed path next to the snapshot output, mirroring the CLI crawl path's own
-    # -DebugLogPath (Start-NetworkMapper.ps1's $DebugLog) - without this,
-    # Invoke-FleetCrawl's internal Write-DebugLogLocal is a total no-op for every
-    # web-triggered scan (see Invoke-ScanNetworkStatusAction's failure message, which
-    # otherwise points at a debug log that was never written) and a failed web scan is
-    # undiagnosable. Overwritten (not appended) per crawl, same as the CLI path.
+    # Without this, Invoke-FleetCrawl's Write-DebugLogLocal is a no-op for web-triggered
+    # scans, making a failed scan undiagnosable. Overwritten per crawl, same as the CLI path.
     $DebugLogPath = Join-Path $SnapshotDir "ScanNetwork_Debug.log"
 
     $ProgressTable = [hashtable]::Synchronized(@{ Visited = 0; QueueDepth = 1; ActiveJobs = 0; Done = $false })
@@ -413,9 +378,8 @@ function Invoke-ScanNetworkAction {
         AddParameter("DebugLogPath", $DebugLogPath)
     if ($EncKey) { $PS.AddParameter("EncKey", $EncKey).AddParameter("MacKey", $MacKey).AddParameter("Salt", $Salt).AddParameter("Iterations", $Iterations) | Out-Null }
 
-    # Invoke-FleetCrawl itself is defined in the caller's session state (dot-sourced at the
-    # top of this file) - a fresh [powershell]::Create() runspace does NOT inherit that by
-    # default, so the function definition has to travel into the new runspace explicitly.
+    # A fresh [powershell]::Create() runspace doesn't inherit Invoke-FleetCrawl's
+    # definition from this session by default, so load it explicitly.
     $InitialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     $FleetCrawlPath = Join-Path $PSScriptRoot "FleetCrawl.ps1"
     $InitialState.StartupScripts.Add($FleetCrawlPath) | Out-Null
@@ -424,21 +388,16 @@ function Invoke-ScanNetworkAction {
     $PS.Runspace = $Runspace
 
     $Handle = $PS.BeginInvoke()
-    # Collected/Outcome: filled in once by Invoke-ScanNetworkStatusAction the first time it
-    # observes completion (see that function) so a completed result can be re-served
-    # idempotently to every later poll instead of being destructively consumed by the
-    # first one.
+    # Collected/Outcome: filled in once by Invoke-ScanNetworkStatusAction on first
+    # completion so the result can be re-served idempotently to later polls.
     $script:PendingScanNetwork = [PSCustomObject]@{ PS = $PS; Runspace = $Runspace; Handle = $Handle; StartIP = $StartIP; StartTime = (Get-Date); ProgressTable = $ProgressTable; Collected = $false; Outcome = $null }
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; startIp = $StartIP }
 }
 
-# Polled by the browser every ~2s while a scan is outstanding. Unlike Invoke-RescanStatusAction
-# (one device, small/bounded runtime), a full fleet crawl can run for many minutes - no
-# client-side timeout ceiling is imposed here; the browser just keeps polling until it sees
-# "complete". Returns the FULL decrypted topology inline on completion (not a second file
-# fetch) - Invoke-FleetCrawl already holds it all in memory at that point, so there is
-# nothing to gain by writing it to disk and reading it straight back over a new endpoint,
-# and doing so would mean adding new file-serving surface rooted outside $VisualizerRoot.
+# Polled by the browser every ~2s. Unlike a rescan, a fleet crawl can run for many minutes,
+# so no timeout ceiling is imposed - the browser just keeps polling until "complete".
+# Returns the full decrypted topology inline (already in memory) rather than writing it to
+# disk and adding new file-serving surface outside $VisualizerRoot.
 function Invoke-ScanNetworkStatusAction {
     param($Response)
 
@@ -450,32 +409,16 @@ function Invoke-ScanNetworkStatusAction {
     $Job = $script:PendingScanNetwork
 
     if ($Job.Handle.IsCompleted) {
-        # Collect (EndInvoke + Dispose) exactly once, the first poll that observes
-        # completion, and cache the outcome on the job object itself. Every later poll
-        # (including one after $Job has been left in $script:PendingScanNetwork for a
-        # while - see Invoke-ScanNetworkAction's reap-before-409, which is what eventually
-        # clears this slot) re-serves the SAME cached outcome instead of calling EndInvoke
-        # a second time (which throws - a PSDataCollection handle can only be ended once)
-        # or losing the result entirely. This is what makes a completed scan's result
-        # readable more than once.
+        # Collect (EndInvoke + Dispose) exactly once and cache the outcome - EndInvoke
+        # throws if called twice, and later polls just re-serve the cached outcome.
         if (-not $Job.Collected) {
             try {
                 $Result = $Job.PS.EndInvoke($Job.Handle)
-                # $Result is the PSDataCollection[PSObject] EndInvoke wraps the pipeline
-                # output in. Invoke-FleetCrawl returns exactly one hashtable via `return
-                # @{ Topology = ...; ... }`, so $Result normally holds exactly one item -
-                # index into it explicitly rather than dotting straight into $Result.
-                # Dotting (e.g. $Result.Topology) is PowerShell member enumeration: for a
-                # 1-item collection it unwraps straight through to that single item's own
-                # .Topology property, so when the crawl finds exactly 1 device,
-                # $Result.Topology would be the bare device PSCustomObject rather than the
-                # actual List[object] the function returned - and ConvertTo-Json would then
-                # emit "topology":{...} instead of "topology":[{...}], breaking the
-                # browser's data.Topology.forEach(...) in readSnapshotFile. Indexing
-                # ($Result[0]) always returns the real return value regardless of item
-                # count, so .Topology off of THAT is always the actual List[object] -
-                # ConvertTo-Json then always renders it as an array ([], [{...}], or
-                # [{...},{...}]) no matter how many devices were visited.
+                # Index explicitly ($Result[0]) rather than dotting into $Result: PowerShell
+                # member enumeration on a 1-item collection unwraps straight to that item's
+                # own .Topology, which for a single-device crawl is a bare PSCustomObject
+                # instead of the List[object] Invoke-FleetCrawl actually returns - breaking
+                # ConvertTo-Json's array shape and the browser's .forEach(...) on it.
                 $Payload = if ($Result -and $Result.Count -gt 0) { $Result[0] } else { $null }
 
                 if (-not $Payload -or -not $Payload.Topology) {
@@ -495,10 +438,8 @@ function Invoke-ScanNetworkStatusAction {
             $Job.Collected = $true
         }
 
-        # -Depth 100 matches FleetCrawl.ps1's Write-TopologyOutputLocal (the
-        # file-write path) - this endpoint serializes the exact same device-object shape
-        # inline, and the old -Depth 30 here risked ConvertTo-Json silently truncating a
-        # deeply-nested topology into type-name strings past the depth limit.
+        # -Depth 100 matches FleetCrawl.ps1's Write-TopologyOutputLocal - a shallower depth
+        # risks ConvertTo-Json silently truncating a deeply-nested topology.
         Send-WebJson -Response $Response -StatusCode 200 -Depth 100 -Object $Job.Outcome
         return
     }
@@ -511,18 +452,12 @@ function Invoke-ScanNetworkStatusAction {
 }
 
 # Serves the current Configuration.json.enc envelope as-is (still encrypted - the browser
-# decrypts client-side with a human-typed password, exactly like NetworkMap files). 404
-# with a JSON body (not the generic Invoke-StaticFile 404) so the browser can tell "no
-# config yet" (a normal, expected state on a fresh checkout) apart from a real error.
+# decrypts it client-side). 404 with a JSON body so the browser can tell "no config yet"
+# apart from a real error.
 #
-# Deliberately does NOT round-trip through ConvertFrom-Json/Send-WebJson: the brief's
-# original draft used `ConvertFrom-Json -AsHashtable` to satisfy Send-WebJson's
-# [hashtable] parameter, but -AsHashtable is PowerShell 6.0+ only, and this file (like
-# Start-NetworkMapper.ps1's AesGcm avoidance and Get-QueryParam's System.Web avoidance)
-# has to run under Windows PowerShell 5.1 too - there it throws a binding error on every
-# call, caught below, so /api/config would 500 unconditionally. The envelope is already
-# JSON on disk and is served unchanged either way, so skip the parse entirely and write
-# the raw bytes straight through (same Send-WebResponse helper Invoke-StaticFile uses).
+# Skips ConvertFrom-Json/Send-WebJson entirely: `-AsHashtable` (needed for Send-WebJson's
+# [hashtable] param) is PowerShell 6.0+ only and throws under Windows PowerShell 5.1. The
+# envelope is already JSON on disk, so just write the raw bytes straight through.
 function Invoke-GetConfigAction {
     param($Response, [string]$ConfigPath)
 
@@ -532,73 +467,44 @@ function Invoke-GetConfigAction {
     }
 
     try {
-        # -Encoding UTF8 explicit, not the default: same class of bug as
-        # Get-JunosNodeData.ps1's ssh stdout/stderr reads (see that file's own comment) -
-        # Get-Content -Raw with no -Encoding falls back to the system's ANSI codepage on any
-        # BOM-less UTF-8 file (e.g. one written under pwsh 7+, where -Encoding utf8 means
-        # NO BOM, then later read back here under Windows PowerShell 5.1 - a very real split
-        # given this server can run under either runtime). A Building/Room/Notes field with
-        # a non-ASCII character (map location editor) would get silently mis-decoded here,
-        # then re-encoded as UTF8 bytes for the browser - corrupting exactly the kind of
-        # text this endpoint exists to serve, not just failing loudly.
+        # -Encoding UTF8 explicit: Get-Content -Raw with no -Encoding falls back to the
+        # system ANSI codepage on a BOM-less UTF-8 file (e.g. written under pwsh 7+, read
+        # back under Windows PowerShell 5.1), silently mis-decoding non-ASCII fields.
         $Raw = Get-Content $ConfigPath -Raw -Encoding UTF8
         Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Raw)) -ContentType "application/json; charset=utf-8"
     } catch {
+        Write-MapperDebugLog "GET-CONFIG ERROR [$ConfigPath] Failed to read configuration file: $_"
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to read configuration file: $_" }
     }
 }
 
-# Hands the browser the SAME encryption password Start-NetworkMapper.ps1 already prompted
-# for interactively at startup, so it can decrypt Configuration.json.enc/an encrypted
-# NetworkMap_*.json.enc without asking the operator to re-type a password they just typed
-# into this very console (see network_vis.js's window.getSessionEncryptionPassword, the only
-# caller). A deliberate exception to Invoke-SaveConfigAction's "the password never crosses
-# the wire" posture just below.
+# Hands the browser the encryption password Start-NetworkMapper.ps1 already prompted for at
+# startup, so it can decrypt Configuration.json.enc / NetworkMap_*.json.enc client-side
+# without re-prompting the operator. A deliberate exception to Invoke-SaveConfigAction's
+# "the password never crosses the wire" posture below.
 #
-# GATED by Test-SameOriginRequest (see the accept loop below and that function's own
-# comment) even though this is a read-only GET - it originally shipped without that gate on
-# the reasoning that "no side effects + no CORS headers means a hostile page can't read the
-# response." That reasoning was wrong: a DNS-rebinding attack rebinds some OTHER hostname to
-# 127.0.0.1, and a `fetch('/api/session-password')` made relative to that page's OWN
-# (rebound) origin is same-origin from the browser's point of view, so the ordinary CORS
-# same-origin-read restriction never engages at all - the request goes straight to this
-# server as an entirely unremarkable same-origin fetch. Unlike /api/connect (whose worst case
-# is one visible, ephemeral SSH window popping open while the server is running),
-# a leaked password here is silent and durable: decrypts Configuration.json.enc and every
-# archived encrypted snapshot offline, indefinitely, long after this server has stopped.
-# Origin-checking closes the DNS-rebinding/browser-CSRF vector; it does NOT close a hostile
-# process already running as a different OS user on the same machine, which can set any
-# Origin header it wants - see Test-SameOriginRequest's own comment on that residual gap.
+# Gated by Test-SameOriginRequest even though this is a read-only GET: a DNS-rebinding
+# attack makes a same-origin-looking fetch from the browser's point of view, so "no side
+# effects" alone doesn't protect it - and a leaked password here is silent and durable
+# (decrypts every archived snapshot offline, indefinitely), unlike /api/connect's worst case.
 #
-# Returns "" (not null/absent) when there's nothing to offer - a server-only launch with no
-# Configuration.json.enc, or the "continue without credentials" path where the typed
-# password was proven wrong - the browser falls straight back to prompting exactly as it did
-# before this endpoint existed.
+# Returns "" (not null) when there's nothing to offer - the browser falls back to prompting.
 function Invoke-GetSessionPasswordAction {
     param($Response, [string]$EncryptionPassword)
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ password = [string]$EncryptionPassword }
 }
 
 # Encrypts and writes Configuration.json.enc. The browser sends PLAINTEXT edited config
-# JSON - the encryption password itself is never part of THIS request in either direction
-# (see Invoke-GetSessionPasswordAction above for the one deliberate exception elsewhere),
-# same as topology writes. $EncryptionPassword is the same password Start-NetworkMapper.ps1
-# already prompted for interactively at startup (see that script's header sequence) and
-# passed straight through to Start-MapperWebServer - it is never read from a file. A fresh
-# salt/IV is generated per save (unlike a crawl's session-cached key - saves are rare/
-# interactive, not periodic, so there's no repeated-PBKDF2-cost reason to cache keys across
-# calls here).
+# JSON - the encryption password itself never crosses in this request (see
+# Invoke-GetSessionPasswordAction for the one deliberate exception). A fresh salt/IV is
+# generated per save (saves are rare/interactive, no reason to cache the key across calls).
 function Invoke-SaveConfigAction {
     param($Response, [string]$Body, [string]$ConfigPath, [string]$EncryptionPassword, [switch]$NoEncryption)
 
-    # Fail closed. Start-NetworkMapper.ps1 blanks the password when Configuration.json.enc
-    # could not be decrypted at startup and the operator chose to continue anyway - the
-    # password typed there is proven wrong, and re-encrypting the whole file under it would
-    # permanently and silently change the file's real password to a string nobody has a
-    # record of, locking every future session out of its own config. Doesn't apply in
-    # -NoEncryption mode: there is no password to have failed to decrypt, since
-    # Start-NetworkMapper.ps1 never prompted for one and $ConfigPath points at a plaintext
-    # Configuration.json instead.
+    # Fail closed: if Configuration.json.enc failed to decrypt at startup and the operator
+    # chose to continue anyway, $EncryptionPassword is blanked - re-encrypting under it would
+    # silently lock every future session out under an unrecorded password. Doesn't apply in
+    # -NoEncryption mode, where there's no password to have failed to decrypt.
     if (-not $NoEncryption -and [string]::IsNullOrWhiteSpace($EncryptionPassword)) {
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "No working encryption password for this session - Configuration.json.enc could not be decrypted at startup, so saving is disabled to avoid rewriting the file under an unverified password. Restart Start-NetworkMapper.ps1 with the correct password." }
         return
@@ -606,10 +512,8 @@ function Invoke-SaveConfigAction {
 
     $Parsed = $null
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
-    # Presence check, not truthiness: `-not $Parsed.devices` would also reject a
-    # legitimate `devices: []` save (PowerShell treats an empty array as falsy), which is
-    # exactly what the in-app editor sends the first time someone deletes their last
-    # location entry. $null -eq checks for "key absent (or explicitly null)" instead.
+    # Presence check, not truthiness: `-not $Parsed.devices` would also reject a legitimate
+    # `devices: []` save, since PowerShell treats an empty array as falsy.
     if (-not $Parsed -or $null -eq $Parsed.devices) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Request body must be JSON with a 'devices' array" }
         return
@@ -617,8 +521,7 @@ function Invoke-SaveConfigAction {
 
     try {
         if ($NoEncryption) {
-            # Plain pass-through - re-serialize (not a raw $Body | Out-File) so the file on
-            # disk is consistently formatted regardless of what the browser sent.
+            # Re-serialize rather than raw $Body | Out-File, so the file is consistently formatted.
             $Parsed | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
         } else {
             $SaltBytes = [byte[]]::new(16)
@@ -626,11 +529,8 @@ function Invoke-SaveConfigAction {
             $Rng.GetBytes($SaltBytes)
             $Rng.Dispose()
 
-            # Shared with Start-NetworkMapper.ps1's crawl-output encryption via
-            # TopologyCrypto.ps1's Get-TopologyPbkdf2Iterations (dot-sourced at the top of this
-            # file) - was a duplicated `600000` literal here, defeating the point of extracting
-            # TopologyCrypto.ps1 in the first place (stop crypto parameters drifting between the
-            # crawler and the webserver).
+            # Shared with the crawl's own encryption via TopologyCrypto.ps1, so iteration
+            # count can't drift between the crawler and the webserver.
             $Iterations = Get-TopologyPbkdf2Iterations
             $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $Iterations
             $Envelope = Protect-TopologyPayload -PlainJson $Body -EncKey $KeyMaterial.EncKey -MacKey $KeyMaterial.MacKey -Salt $SaltBytes -Iterations $Iterations -Format "PSNetworkMapper-EncryptedConfig"
@@ -638,22 +538,12 @@ function Invoke-SaveConfigAction {
             $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
         }
 
-        # Push the just-saved Juniper credentials into the running server's live copies (see
-        # Start-MapperWebServer's $script:JunosUsername/$script:JunosPassword) so /api/connect,
-        # /api/rescan and /api/scan-network start using them immediately - without this, the
-        # server kept serving requests with whatever was decrypted from disk at process start,
-        # so saving credentials in the Settings tab appeared to work but changed nothing until
-        # the operator restarted Start-NetworkMapper.ps1.
-        #
-        # Deliberately after the file write, inside this try: a save that failed to reach disk
-        # must not leave the process running credentials that were never actually persisted.
-        # Also deliberately a presence check on `credentials` - a body that only carries
-        # `devices` (or sends credentials:null, which map.js's saveConfiguration does whenever
-        # nothing has been loaded into loadedCredentials) leaves the in-memory copies alone
-        # rather than nulling out working credentials. An explicitly-blank {username:"",
-        # password:""} DOES clear them, which is the honest reading of "the operator saved
-        # empty credentials" - the actions then report "No Juniper login configured" as they
-        # would on a fresh install.
+        # Push just-saved credentials into the running server's live copies so
+        # /api/connect, /api/rescan, /api/scan-network use them immediately, instead of
+        # requiring a restart. After the file write (a failed save must not update live
+        # credentials) and a presence check, not truthiness: `credentials:null` (sent when
+        # nothing was loaded) leaves in-memory copies alone, but an explicit {username:"",
+        # password:""} does clear them.
         if ($Parsed.credentials) {
             $script:JunosUsername = [string]$Parsed.credentials.username
             $script:JunosPassword = [string]$Parsed.credentials.password
@@ -661,6 +551,7 @@ function Invoke-SaveConfigAction {
 
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "saved" }
     } catch {
+        Write-MapperDebugLog "SAVE-CONFIG ERROR [$ConfigPath] Failed to save configuration: $_"
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to save configuration: $_" }
     }
 }
@@ -678,9 +569,9 @@ function Invoke-StaticFile {
     if (-not $RootFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) { $RootFull += [System.IO.Path]::DirectorySeparatorChar }
     $FullPath = [System.IO.Path]::GetFullPath((Join-Path $RootFull $RelPath))
 
-    # StartsWith needs $RootFull's trailing separator (added above) or this containment
-    # check is only a string-prefix match, not a path-prefix match - "Network_Visualizer"
-    # would then also accept a sibling directory named e.g. "Network_Visualizer_old".
+    # $RootFull's trailing separator (added above) makes this a path-prefix match, not a
+    # string-prefix match - otherwise "Network_Visualizer" would also accept
+    # "Network_Visualizer_old".
     if (-not $FullPath.StartsWith($RootFull, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $FullPath -PathType Leaf)) {
         Send-WebResponse -Response $Response -StatusCode 404 -Bytes ([System.Text.Encoding]::UTF8.GetBytes("Not found"))
         return
@@ -691,15 +582,10 @@ function Invoke-StaticFile {
     Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.IO.File]::ReadAllBytes($FullPath)) -ContentType $CType
 }
 
-# Serves the ONE portable single-file visualizer (web-src/tools/build-inline.mjs's
-# output - see Start-NetworkMapper.ps1's SingleFileVisualizerPath detection) instead of
-# Invoke-StaticFile's whole-directory serving, when that file is what this server was told to
-# use. Deliberately narrow: only "/" and "/Network_Visualizer.html" resolve to anything - the
-# bundle has no external .js/.css/image files left to request (see that build script's own
-# header comment), so there is nothing else a real browser loading it would ever ask for.
-# Never falls through to $VisualizerRoot for an unmatched path - doing so would silently widen
-# exposure back to the whole Network_Visualizer/ directory tree the single-file mode exists to
-# avoid needing at all.
+# Serves the ONE portable single-file visualizer bundle instead of Invoke-StaticFile's
+# whole-directory serving. Only "/" and "/Network_Visualizer.html" resolve - the bundle has
+# no external .js/.css/image files, so nothing else is ever requested. Never falls through
+# to $VisualizerRoot, or single-file mode would silently widen back to serving the whole tree.
 function Invoke-SingleFileVisualizer {
     param($Response, [string]$AbsolutePath, [string]$SingleFileVisualizerPath)
 
@@ -710,33 +596,25 @@ function Invoke-SingleFileVisualizer {
     Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.IO.File]::ReadAllBytes($SingleFileVisualizerPath)) -ContentType "text/html; charset=utf-8"
 }
 
-# Starts the listener, opens the default browser to it, then blocks serving requests
-# (one at a time - this is a single local analyst's viewer, not a shared service, so the
-# synchronous accept loop used everywhere else needing concurrency in this repo isn't
-# needed here) until Ctrl+C.
+# Starts the listener, opens the default browser to it, then blocks serving requests one
+# at a time (single local analyst, not a shared service) until Ctrl+C.
 function Start-MapperWebServer {
     param(
-        # Mirrors Start-NetworkMapper.ps1's own -NoEncryption switch - passed through so
-        # Invoke-SaveConfigAction knows to write a plaintext Configuration.json instead of
-        # requiring/using $EncryptionPassword.
+        # Passed through so Invoke-SaveConfigAction writes plaintext Configuration.json
+        # instead of requiring/using $EncryptionPassword.
         [switch]$NoEncryption,
         [Parameter(Mandatory=$true)][string]$VisualizerRoot,
-        # $null/empty (the common case - a normal checkout) means "serve $VisualizerRoot the
-        # usual way"; set only when Start-NetworkMapper.ps1 found Network_Visualizer.html
-        # sitting next to itself (see that script's own detection comment) - see
-        # Invoke-SingleFileVisualizer above for why this takes over serving ENTIRELY rather
-        # than being layered on top of $VisualizerRoot.
+        # Set only when Start-NetworkMapper.ps1 found a single-file bundle next to itself -
+        # see Invoke-SingleFileVisualizer for why this takes over serving entirely.
         [AllowNull()][AllowEmptyString()][string]$SingleFileVisualizerPath,
         [Parameter(Mandatory=$true)][string]$ConnectScriptPath,
         [Parameter(Mandatory=$true)][string]$WorkerPath,
         [Parameter(Mandatory=$true)][string]$ConfigPath,
-        # Still mandatory (a caller must make a deliberate decision about it), but empty/null
-        # is a legal VALUE: Start-NetworkMapper.ps1 passes $null on the "continue without
-        # server-side credentials" path, where the only password typed was proven wrong
-        # against Configuration.json.enc. That means "no verified password this session" and
-        # Invoke-SaveConfigAction refuses to write the config file at all - do not re-tighten
-        # this to reject empty, or that path dies with a raw parameter-binding error on
-        # launch instead of serving the viewer read-only.
+        # Empty/null is a legal VALUE (not "omit"): Start-NetworkMapper.ps1 passes $null on
+        # the "continue without server-side credentials" path, meaning "no verified password
+        # this session" - Invoke-SaveConfigAction then refuses to write the config file.
+        # Keep AllowNull/AllowEmptyString, or that path dies at launch instead of serving
+        # the viewer read-only.
         [Parameter(Mandatory=$true)][AllowNull()][AllowEmptyString()][string]$EncryptionPassword,
         [string]$JunosUsername = "",
         [string]$JunosPassword = "",
@@ -747,7 +625,10 @@ function Start-MapperWebServer {
         [byte[]]$MacKey,
         [byte[]]$Salt,
         [int]$Iterations,
-        [int]$Port = 8787
+        [int]$Port = 8787,
+        # Mapper_Debug.log. Optional - Write-MapperDebugLog is a no-op without it, so an
+        # unwired caller just loses client-error logging rather than failing to start.
+        [AllowNull()][AllowEmptyString()][string]$DebugLogPath
     )
 
     $Listener = [System.Net.HttpListener]::new()
@@ -760,59 +641,37 @@ function Start-MapperWebServer {
         throw "Could not bind $Prefix - is another instance already running? ($_)"
     }
 
-    # Backs /api/rescan - a single-slot pool, not sized for concurrency (see
-    # Invoke-RescanAction's header comment for why one in-flight scan is a deliberate
-    # choice, not a resource limit).
+    # Backs /api/rescan - single-slot, matching Invoke-RescanAction's "one in-flight scan" choice.
     $script:RescanPool = [runspacefactory]::CreateRunspacePool(1, 1)
     $script:RescanPool.Open()
     $script:PendingScan = $null
     $script:OrphanedScans = [System.Collections.Generic.List[object]]::new()
     $script:PendingScanNetwork = $null
-    # The Juniper credentials the accept loop below hands to /api/connect, /api/rescan and
-    # /api/scan-network. The -JunosUsername/-JunosPassword parameters are only the SEED:
-    # Start-NetworkMapper.ps1 decrypts them out of Configuration.json.enc once, before this
-    # server ever starts, so passing those frozen locals straight into every request meant
-    # credentials saved from the browser's Settings tab (Invoke-SaveConfigAction, below)
-    # never reached the running server. A fresh install stayed stuck on "No Juniper login
-    # configured" until the whole PowerShell process was restarted, and a rotated password
-    # was worse - IsNullOrWhiteSpace still passed, so scans/rescans really started and then
-    # failed confusingly against the stale credentials. Script-scoped so
-    # Invoke-SaveConfigAction can update them live, same cross-function pattern as
-    # $script:PendingScan above.
+    # -JunosUsername/-JunosPassword are only the seed (decrypted once at startup).
+    # Script-scoped so Invoke-SaveConfigAction can update them live when credentials are
+    # saved from the Settings tab, without requiring a process restart.
     $script:JunosUsername = $JunosUsername
     $script:JunosPassword = $JunosPassword
+    $script:DebugLogPath = $DebugLogPath
 
-    # Which host actually launched THIS process - pwsh.exe under PowerShell 7+, or
-    # powershell.exe under Windows PowerShell 5.1 - so Invoke-ConnectAction's "Launch SSH
-    # Session" opens in the same runtime rather than a hardcoded "powershell.exe" literal
-    # that doesn't exist on a machine where only pwsh is installed. Inspecting the CURRENT
-    # process needs no elevated access, so this should never fail in practice - the
-    # try/catch and Invoke-ConnectAction's own default param are only a last-resort
-    # fallback to the historical literal, never a reason to block every SSH launch on a
-    # detection quirk.
+    # Detect the host that launched this process (pwsh.exe vs powershell.exe) so
+    # Invoke-ConnectAction's SSH launch uses the same runtime rather than a hardcoded
+    # literal that may not exist. try/catch + the default param are a last-resort fallback.
     $PowerShellExePath = try { [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { $null }
     if ([string]::IsNullOrWhiteSpace($PowerShellExePath)) { $PowerShellExePath = "powershell.exe" }
 
     Write-Host "`nWeb UI listening on $Prefix (localhost only - Ctrl+C to stop)" -ForegroundColor Cyan
     Start-Process $Prefix
 
-    # Console progress for browser-triggered scans - Invoke-ScanNetworkAction runs the fleet
-    # crawl in a background runspace, so FleetCrawl.ps1's own Write-Host calls never
-    # reach this console (unlike the CLI path in Start-NetworkMapper.ps1, which calls it
-    # directly on the main thread). Piggybacks on the 250ms accept-loop tick below since
-    # that is the only point the main thread is free to touch the console between requests.
+    # Console progress for browser-triggered scans: Invoke-ScanNetworkAction runs the crawl
+    # in a background runspace, so FleetCrawl.ps1's Write-Host never reaches this console
+    # otherwise. Piggybacks on the 250ms accept-loop tick below.
     $script:ScanProgressSnapshot = $null
     try {
         while ($Listener.IsListening) {
-            # BeginGetContext/WaitOne(250) replaces a blocking GetContext() call. The
-            # blocking call never returned control to the PowerShell engine, so it gave
-            # Ctrl+C no statement boundary to act on - the process just ignored it. Polling
-            # on a timeout hands control back every 250ms, which is what makes Ctrl+C work;
-            # no custom Ctrl+C handler is needed (or used) here. A raw
-            # [Console]::add_CancelKeyPress handler throws, because that event fires on a
-            # thread with no PowerShell runspace attached; a Register-ObjectEvent handler
-            # doesn't throw, but its action never runs while the thread is stuck inside a
-            # single blocking call, so it silently never fires either.
+            # BeginGetContext/WaitOne(250) instead of a blocking GetContext(): a blocking
+            # call gives the engine no statement boundary to act on, so Ctrl+C is ignored.
+            # Polling on a timeout hands control back every 250ms, making Ctrl+C work.
             $AsyncResult = $Listener.BeginGetContext($null, $null)
             while (-not $AsyncResult.AsyncWaitHandle.WaitOne(250)) {
                 if ($script:PendingScanNetwork) {
@@ -842,18 +701,14 @@ function Start-MapperWebServer {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
                     } else {
-                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
-                        $Body = $Reader.ReadToEnd()
-                        $Reader.Close()
+                        $Body = Read-WebRequestBody -Request $Request
                         Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -PowerShellExePath $PowerShellExePath
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/rescan") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
                     } else {
-                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
-                        $Body = $Reader.ReadToEnd()
-                        $Reader.Close()
+                        $Body = Read-WebRequestBody -Request $Request
                         Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
@@ -863,18 +718,21 @@ function Start-MapperWebServer {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
                     } else {
-                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
-                        $Body = $Reader.ReadToEnd()
-                        $Reader.Close()
+                        $Body = Read-WebRequestBody -Request $Request
                         Invoke-PingAction -Response $Response -Body $Body
+                    }
+                } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/client-error") {
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        $Body = Read-WebRequestBody -Request $Request
+                        Invoke-ClientErrorAction -Response $Response -Body $Body
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/scan-network") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
                     } else {
-                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
-                        $Body = $Reader.ReadToEnd()
-                        $Reader.Close()
+                        $Body = Read-WebRequestBody -Request $Request
                         Invoke-ScanNetworkAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations $Iterations
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/scan-network/status") {
@@ -891,9 +749,7 @@ function Start-MapperWebServer {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
                     } else {
-                        $Reader = [System.IO.StreamReader]::new($Request.InputStream, $Request.ContentEncoding)
-                        $Body = $Reader.ReadToEnd()
-                        $Reader.Close()
+                        $Body = Read-WebRequestBody -Request $Request
                         Invoke-SaveConfigAction -Response $Response -Body $Body -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -NoEncryption:$NoEncryption
                     }
                 } elseif ($SingleFileVisualizerPath) {
@@ -902,7 +758,8 @@ function Start-MapperWebServer {
                     Invoke-StaticFile -Response $Response -AbsolutePath $Request.Url.AbsolutePath -VisualizerRoot $VisualizerRoot
                 }
             } catch {
-                try { Send-WebResponse -Response $Response -StatusCode 500 -Bytes ([System.Text.Encoding]::UTF8.GetBytes("Server error: $_")) } catch {}
+                Write-MapperDebugLog "UNHANDLED REQUEST ERROR [$($Request.HttpMethod) $($Request.Url.AbsolutePath)] $_"
+                try { Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Server error: $_" } } catch {}
             }
         }
     } finally {
@@ -910,9 +767,8 @@ function Start-MapperWebServer {
         $Listener.Close()
         if ($script:PendingScan) { try { $script:PendingScan.PS.Stop() } catch {}; $script:PendingScan.PS.Dispose() }
         foreach ($Orphan in $script:OrphanedScans) { try { $Orphan.PS.Stop() } catch {}; $Orphan.PS.Dispose() }
-        # .Collected means Invoke-ScanNetworkStatusAction already ran EndInvoke/Dispose on
-        # this job and cached its outcome - Stop()/Dispose() again here would double-dispose
-        # the PS/Runspace, so only tear down a job that never got collected.
+        # .Collected means Invoke-ScanNetworkStatusAction already disposed this job -
+        # avoid double-disposing PS/Runspace.
         if ($script:PendingScanNetwork -and -not $script:PendingScanNetwork.Collected) {
             try { $script:PendingScanNetwork.PS.Stop() } catch {}
             try { $script:PendingScanNetwork.PS.Dispose() } catch {}

@@ -1,28 +1,15 @@
 #
 # Shared AES-256-CBC + PBKDF2-SHA256 + HMAC-SHA256 (encrypt-then-MAC) envelope logic,
-# used by both Start-NetworkMapper.ps1 (topology snapshot writes) and WebServer.ps1
-# (Configuration.json.enc writes via /api/save-config) - extracted so this crypto exists
-# in exactly one place instead of drifting between the crawler and the webserver.
-# Mirrors web-src/topology-crypto.js's decryptEnvelope on the browser side.
+# used by Start-NetworkMapper.ps1 (topology snapshots) and WebServer.ps1
+# (Configuration.json.enc). Mirrors web-src/topology-crypto.js's decryptEnvelope.
 #
 # Not meant to be run directly - dot-source it.
 
-# Single source of truth for the PBKDF2 iteration count used by every encrypted write in
-# this app - topology/client/config-backup snapshots via Start-NetworkMapper.ps1, and
-# Configuration.json.enc via WebServer.ps1's /api/save-config. Both call sites used to
-# each hardcode their own literal `600000`; harmless while they happened to agree, but it
-# defeated the whole point of extracting this file in the first place (stop crypto
-# parameters drifting between the crawler and the webserver). A function, not a bare
-# variable, so it resolves correctly no matter how many layers of dot-sourcing sit between
-# the caller and this file (WebServer.ps1 dot-sources this file directly;
-# Start-NetworkMapper.ps1 dot-sources both WebServer.ps1 and this file) - the same
-# nested dot-source chain Get-TopologyKeyMaterial/Protect-TopologyPayload below already rely
-# on successfully.
-#
-# OWASP's current PBKDF2-HMAC-SHA256 guidance (600k, up from 310k a few years ago). Safe to
-# raise without breaking old files: iterations is stored per-file in the envelope and read
-# back from it on decrypt, not assumed - see MIN/MAX_ITERATIONS in topology-crypto.js's
-# decryptEnvelope, which accepts anything from 200k-era files up through this.
+# Single source of truth for the PBKDF2 iteration count, so it can't drift between the
+# crawler and the webserver. A function (not a variable) so it resolves through however
+# many layers of dot-sourcing sit between caller and file.
+# OWASP's current PBKDF2-HMAC-SHA256 guidance (600k). Safe to raise later - iterations is
+# stored per-file in the envelope and read back on decrypt, not assumed.
 function Get-TopologyPbkdf2Iterations {
     return 600000
 }
@@ -39,9 +26,8 @@ function Get-TopologyKeyMaterial {
     return @{ EncKey = $KeyMaterial[0..31]; MacKey = $KeyMaterial[32..63] }
 }
 
-# Builds an encrypted envelope from a plaintext JSON string. IV is fresh per call; the
-# caller derives (and may cache/reuse across multiple calls) EncKey/MacKey/Salt via
-# Get-TopologyKeyMaterial above.
+# Builds an encrypted envelope from a plaintext JSON string. IV is fresh per call; caller
+# derives EncKey/MacKey/Salt via Get-TopologyKeyMaterial above.
 function Protect-TopologyPayload {
     param(
         [Parameter(Mandatory=$true)][string]$PlainJson,
@@ -84,11 +70,8 @@ function Protect-TopologyPayload {
     }
 }
 
-# Mirror of web-src/topology-crypto.js's decryptEnvelope, for the PowerShell
-# side - Start-NetworkMapper.ps1 needs to decrypt Configuration.json.enc at startup to read
-# stored Juniper credentials, and until now only the browser ever decrypted anything (this
-# file's other function, Protect-TopologyPayload, only ever encrypts). Verifies the HMAC
-# before decrypting (encrypt-then-MAC) so a wrong password or a tampered file fails with one
+# PowerShell mirror of web-src/topology-crypto.js's decryptEnvelope. Verifies the HMAC
+# before decrypting (encrypt-then-MAC) so a wrong password or tampered file fails with one
 # clear error instead of an AES-CBC padding exception.
 function Unprotect-TopologyPayload {
     param(
@@ -107,17 +90,20 @@ function Unprotect-TopologyPayload {
         throw "Unsupported encryption parameters: $($Envelope.kdf)/$($Envelope.cipher)/$($Envelope.macAlgorithm)"
     }
     # Same bounds as topology-crypto.js's MIN_ITERATIONS/MAX_ITERATIONS - a CPU-burn guard
-    # against a tampered file forcing an absurd PBKDF2 cost, not a security boundary (a real
-    # file, current or historical, never needs to go anywhere near either edge).
+    # against a tampered file forcing an absurd PBKDF2 cost, not a security boundary.
     $IterCheck = 0L
     if (-not [long]::TryParse([string]$Envelope.iterations, [ref]$IterCheck) -or $IterCheck -lt 1000 -or $IterCheck -gt 5000000) {
         throw "Iteration count out of range: $($Envelope.iterations)"
     }
 
-    $SaltBytes = [Convert]::FromBase64String($Envelope.salt)
-    $IvBytes = [Convert]::FromBase64String($Envelope.iv)
-    $CipherBytes = [Convert]::FromBase64String($Envelope.ciphertext)
-    $MacBytes = [Convert]::FromBase64String($Envelope.mac)
+    try {
+        $SaltBytes = [Convert]::FromBase64String($Envelope.salt)
+        $IvBytes = [Convert]::FromBase64String($Envelope.iv)
+        $CipherBytes = [Convert]::FromBase64String($Envelope.ciphertext)
+        $MacBytes = [Convert]::FromBase64String($Envelope.mac)
+    } catch {
+        throw "Incorrect password, or the file is corrupted."
+    }
 
     $KeyMaterial = Get-TopologyKeyMaterial -Password $Password -Salt $SaltBytes -Iterations $IterCheck
 
@@ -125,11 +111,8 @@ function Unprotect-TopologyPayload {
     $ComputedMac = $Hmac.ComputeHash($IvBytes + $CipherBytes)
     $Hmac.Dispose()
 
-    # Byte-by-byte, not a Base64-string comparison - avoids allocating strings for the sole
-    # purpose of comparing them. Not constant-time, but this app's threat model (localhost-
-    # only server, single local operator - see WebServer.ps1's header comment) already
-    # accepts non-constant-time comparisons elsewhere; anyone able to measure this timing
-    # already has local code execution, which is full compromise regardless.
+    # Byte-by-byte, not constant-time - acceptable given this app's threat model (localhost-
+    # only server, single local operator).
     $MacOk = $ComputedMac.Length -eq $MacBytes.Length
     if ($MacOk) {
         for ($i = 0; $i -lt $ComputedMac.Length; $i++) {

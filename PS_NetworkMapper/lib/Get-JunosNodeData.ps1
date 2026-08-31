@@ -11,7 +11,7 @@ param (
 
     [switch]$HumanReadable,
 
-    # NEW: Only write raw payload text files if this flag is present
+    # Only write raw payload text files if this flag is present.
     [switch]$Log
 )
 
@@ -41,15 +41,9 @@ function Invoke-InteractiveBatch {
     if ($HumanReadable) { Write-Host "  -> Establishing Interactive Shell & Injecting Commands..." -ForegroundColor DarkGray }
 
     $Process = $null
-    # The 19 StandardInput.WriteLine calls below assume the pipe stays open for all of
-    # them - if ssh.exe exits immediately (bad host, refused connection, askpass
-    # rejected), the pipe breaks and the first write after that throws. The temp-file
-    # reads and their Remove-Item cleanup are inside this same try (not after it): a
-    # throw from a broken pipe must still reach the finally below, or $TempOut/$TempErr
-    # are never deleted - a steady %TEMP% leak across a crawl that keeps hitting
-    # unreachable devices - and stderr (the one thing that would explain the failure)
-    # never gets read at all. The outer try/catch (see below) still catches the throw
-    # itself; this block only guarantees cleanup runs regardless.
+    # If ssh.exe exits immediately (bad host, refused connection, askpass rejected) the pipe
+    # breaks and a WriteLine throws. Temp-file reads/cleanup stay inside this try so a throw
+    # still reaches the finally below - otherwise $TempOut/$TempErr leak across the crawl.
     $Output = ""; $ErrText = ""
     try {
         $Process = [System.Diagnostics.Process]::Start($ProcInfo)
@@ -68,12 +62,9 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.WriteLine("show vlans")
         $Process.StandardInput.WriteLine("show ethernet-switching table")
         $Process.StandardInput.WriteLine("show arp no-resolve")
-        # These four are appended last, after the ARP table the client-IP correlation
-        # depends on: if a slow switch trips the hard timeout below, it truncates only
-        # this optional data instead of corrupting client IPs. Config backup is last of the
-        # four specifically because it's the largest output of anything in this batch (a
-        # full device config, potentially thousands of lines on a big stack) - a timeout
-        # should cost the config backup before it costs uptime/alarms/RE-health.
+        # These four come last, after the ARP table client-IP correlation depends on, so a
+        # timeout truncates only this optional data. Config backup is last of the four since
+        # it's the largest output, so a timeout costs it before uptime/alarms/RE-health.
         $Process.StandardInput.WriteLine("show system uptime")
         $Process.StandardInput.WriteLine("show chassis alarms")
         $Process.StandardInput.WriteLine("show chassis routing-engine")
@@ -84,19 +75,10 @@ function Invoke-InteractiveBatch {
         $Process.WaitForExit(50000) | Out-Null
         if (-not $Process.HasExited) { $Process.Kill(); Write-LogMsg "TIMEOUT on interactive batch." }
 
-        # -Encoding UTF8 explicit, not the default: ssh.exe's redirected stdout/stderr is the
-        # remote device's raw byte stream verbatim (cmd.exe's `>`/`2>` redirection does no
-        # codepage translation), and Junos emits UTF-8 for anything outside ASCII (hostnames,
-        # login-message banners, etc). Get-Content's no-BOM default is the system's ANSI
-        # codepage, not UTF-8 - on a non-Western-European locale that mismatch turns every
-        # multi-byte UTF-8 sequence into a run of wrong-but-valid characters (commonly
-        # rendering as CJK ideographs once written back out and viewed), corrupting every
-        # log line and Configuration dump that ever passes through a non-ASCII byte.
+        # -Encoding UTF8 explicit: Junos emits UTF-8 for non-ASCII text, but Get-Content's
+        # no-BOM default is the system ANSI codepage, which mangles multi-byte sequences.
         $Output = if (Test-Path $TempOut) { Get-Content $TempOut -Raw -Encoding UTF8 } else { "" }
-        # Named $ErrText, not $Error - $Error is PowerShell's automatic variable holding
-        # the session's error record history; shadowing it here previously made every
-        # subsequent $Error.Count / $Error[0] check in this scope look at ssh's stderr
-        # text instead.
+        # Named $ErrText, not $Error - $Error is PowerShell's automatic error-history variable.
         $ErrText = if (Test-Path $TempErr) { Get-Content $TempErr -Raw -Encoding UTF8 } else { "" }
     } finally {
         if ($Process) { $Process.Dispose() }
@@ -111,16 +93,13 @@ $NodeData = @{
     DeviceIP = $TargetIP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
     StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
     Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
-    # These reflect only the RE that answered the CLI session (the master on a VC),
-    # not an aggregate across all members - named accordingly, not "Cpu"/"Memory".
+    # Reflects only the RE that answered the CLI session (the master on a VC), not an
+    # aggregate across all members.
     MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
-    # LLDP-MED endpoints (phones, APs) - kept separate from Neighbors, which is the
-    # switch-to-switch topology graph and was never meant to include them. See the LLDP
-    # parsing loop below for why these are captured instead of discarded outright.
+    # LLDP-MED endpoints (phones, APs), kept separate from Neighbors (switch-to-switch topology).
     MedNeighbors = @()
-    # Full "show configuration | display set" text - folded into the same interactive
-    # batch as everything else above (one SSH connection, not two) but deliberately
-    # redacted out of the -Log RawDumps file below - see that block for why.
+    # Full "show configuration | display set" text; redacted from the -Log RawDumps file
+    # (see that block below) since it contains secrets.
     Configuration = "Unknown"
 }
 
@@ -136,41 +115,26 @@ try {
         if (-not (Test-Path $DumpDir)) { New-Item -ItemType Directory -Path $DumpDir -Force | Out-Null }
         $RawLogPath = Join-Path $DumpDir "Raw_$TargetIP.txt"
 
-        # Config backup content - SNMP communities, RADIUS/TACACS+ shared secrets, local
-        # user secrets - is far more sensitive than anything else this tool captures, and
-        # isn't parsed at all (just stored verbatim), so RawDumps gets none of the
-        # debugging benefit it exists for and all of the risk. Redact it before writing:
-        # keep the command echo line (so it's visible the command ran) and replace
-        # everything after it, to the end of the captured output, with a placeholder.
-        # "show configuration | display set" is written last in Invoke-InteractiveBatch
-        # specifically so this "to the end" replacement is safe - nothing else follows it.
+        # Config backup contains secrets (SNMP communities, RADIUS/TACACS+ shared secrets, etc)
+        # and is stored verbatim/unparsed, so redact it here: keep the command echo line,
+        # replace everything after it (safe since this command is written last, see above).
         $RedactedOutput = $RawOutput -replace '(?ms)(^.*>\s*show\s+configuration\s*\|\s*display\s+set[^\r\n]*[\r\n]+).*\z', '$1[CONFIGURATION REDACTED - not written to RawDumps by design; see the Configuration field in NetworkMap output]'
         $RedactedOutput | Out-File $RawLogPath -Force -Encoding utf8
         Write-LogMsg "Raw payload saved to $RawLogPath (configuration output redacted)"
     }
 
     if ([string]::IsNullOrWhiteSpace($RawOutput)) {
-        # ssh's stderr is the only thing that actually says WHY - "Connection timed out",
-        # "Permission denied", "Host key verification failed", etc. Without logging it, an
-        # unreachable/misauthenticating switch and every other empty-payload cause are
-        # indistinguishable in the debug log. Truncated so one pathological/looping stderr
-        # dump can't blow up the log for a single device.
+        # ssh's stderr says WHY (timed out, permission denied, host key failure, etc).
+        # Truncated so a pathological stderr dump can't blow up the log.
         $ErrSummary = if (-not [string]::IsNullOrWhiteSpace($Result.Error)) {
             $Trimmed = $Result.Error.Trim()
             if ($Trimmed.Length -gt 500) { $Trimmed.Substring(0, 500) + "...(truncated)" } else { $Trimmed }
         } else { "(no stderr output captured)" }
         if ($HumanReadable) { Write-Host "  [!] CRITICAL ERROR: Switch returned empty payload. ssh said: $ErrSummary" -ForegroundColor Red }
         Write-LogMsg "CRITICAL: Switch returned empty payload. ssh stderr: $ErrSummary"
-        # Every other field here was already initialized array-shaped above; Interfaces is
-        # the one exception - it starts as a hashtable (built up keyed by port name while
-        # parsing) and only gets converted to an array at the very end, a step this early
-        # return skips. Left as @{}, it serializes to JSON "{}" instead of "[]", and any
-        # consumer that does `(node.Interfaces || []).forEach(...)` (Network_Visualizer's
-        # CSV export does exactly this) throws on it, since "{}" is truthy. Converting it
-        # here keeps this early-return path shape-consistent with the normal one - and
-        # matters more here than in V1, since a rescanned device that fails now has a
-        # guard (ok:false, never merged) but the underlying shape bug is worth not leaving
-        # in place regardless.
+        # Interfaces starts as a hashtable (converted to an array later in the normal path,
+        # a step this early return skips) - force it to @() so it still serializes as JSON
+        # "[]" instead of "{}", which some consumers (e.g. CSV export) choke on.
         $NodeData.Interfaces = @()
         return @{ Node = $NodeData; Logs = $Logs }
     }
@@ -195,29 +159,12 @@ try {
         elseif ($Sec -match '^(?i)system uptime\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["UPTIME"] = $Matches.content }
         elseif ($Sec -match '^(?i)chassis alarms\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ALARMS"] = $Matches.content }
         elseif ($Sec -match '^(?i)chassis routing-engine\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ROUTING_ENGINE"] = $Matches.content }
-        # Unlike every section above, nothing with "show " follows this one - "quit" does -
-        # so the -split boundary above can't bound it and a greedy (?s).* would swallow the
-        # trailing "user@switch> quit" echo (and any "Connection closed" text after it) into
-        # the config itself. Stop non-greedily at the next CLI prompt line instead, anchored
-        # on it being the LAST thing in the captured stream (`\z` at the very end of the
-        # optional trailing group), not on the literal word "quit" following it - large
-        # configs routinely hit Invoke-InteractiveBatch's 50s WaitForExit timeout with the
-        # prompt already flushed to the temp file but the "quit" echo (sent immediately
-        # after, see above) not yet written before Kill() fires, which used to fall through
-        # to the `\z` fallback below on effectively every real device and leave the trailing
-        # "{master:N}\nuser@host>" prompt lines stuck in the saved Configuration text. A
-        # generic `\S+@\S+[>#]` pattern alone would still be unsafe as a MID-content anchor
-        # (Junos places no restriction on `set system login message` banner text, so a
-        # banner containing something like "contact admin@example.com > for support" could
-        # match a bare prompt-shape pattern and truncate the capture early) - requiring it be
-        # immediately followed by nothing but the rest of the string (`(?s).*` then `\z`)
-        # instead of requiring literal "quit" keeps that same safety without depending on an
-        # echo that often never arrives: real config content is never itself the last thing
-        # before end-of-stream. The optional `{master:0}`-shaped group absorbs a Virtual
-        # Chassis prompt prefix line that can appear immediately before the trailing prompt
-        # on a VC member, so it isn't left dangling inside the captured config text. The
-        # bare `\z` alternative remains as the fallback for the genuinely rare case no
-        # trailing prompt line ever arrives at all (e.g. the connection dropped mid-command).
+        # No "show " follows this section ("quit" does), so stop non-greedily at a trailing
+        # CLI prompt line anchored to end-of-stream (`\z`) rather than on literal "quit" -
+        # large configs often hit the 50s timeout with the prompt flushed but "quit" not yet
+        # written. Anchoring to end-of-stream (not mid-content) avoids false-triggering on a
+        # login banner containing prompt-shaped text like "admin@example.com >". The optional
+        # `{master:N}` group absorbs a VC member's prompt prefix; bare `\z` is the fallback.
         elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+(?:{[^}]+}[\r\n]+)?\S+@\S+[>#](?s).*)?\z') { $DataDict["CONFIG"] = $Matches.content }
     }
 
@@ -225,8 +172,7 @@ try {
     if ($DataDict["VERSION"] -match "(?i)Hostname:\s*(?<host>\S+)") { $NodeData.Hostname = $Matches.host }
     if ($DataDict["VERSION"] -match "(?i)Junos:\s*(?<ver>\S+)") { $NodeData.JunosVersion = $Matches.ver }
 
-    # --- Parse Config Backup (stored verbatim, no further parsing - see the redaction
-    # comment above for why this never reaches RawDumps) ---
+    # --- Parse Config Backup (stored verbatim, redacted from RawDumps - see above) ---
     if (-not [string]::IsNullOrWhiteSpace($DataDict["CONFIG"])) { $NodeData.Configuration = $DataDict["CONFIG"].Trim() }
     
     # --- Parse Stack/Hardware ---
@@ -279,19 +225,11 @@ try {
     }
 
     # --- Parse Routing Engine Health ---
-    # On a dual-RE system / Virtual Chassis, "show chassis routing-engine" reports one
-    # block per member headed "Slot N:" with its own "Current state" (Master/Backup/...).
-    # Slot order in the raw text is NOT guaranteed to put the master first (confirmed
-    # against Juniper's own command reference and mastership-check docs - both document
-    # "Slot 0: Current state Master" / "Slot 1: Current state Backup" as literal example
-    # output, with no ordering guarantee), so grabbing the first "Idle NN percent" /
-    # "Memory utilization NN percent" match anywhere in the combined text could silently
-    # report the BACKUP's health as if it were the master's whenever slot 1 happens to be
-    # master. Scope the search to the text starting at "Current state ... Master" and
-    # ending at the next "Slot N:" header (or end of output) instead. A standalone
-    # single-RE system has no "Current state"/"Slot N:" fields at all in this command's
-    # output, so that pattern simply won't match there - the fallback below then searches
-    # the whole (unambiguous, single-RE) blob, same as before.
+    # On dual-RE/VC systems, slot order in "show chassis routing-engine" doesn't guarantee
+    # the master comes first, so scope the CPU/memory search to the "Current state ...
+    # Master" block specifically (not just the first match anywhere) to avoid reporting the
+    # backup's health as the master's. A standalone single-RE system has no "Current state"/
+    # "Slot N:" fields, so this pattern just won't match and the fallback searches the whole blob.
     $MasterReBlock = $DataDict["ROUTING_ENGINE"]
     if ($DataDict["ROUTING_ENGINE"] -match "(?is)Current state\s+Master(?<masterblock>.*?)(?=Slot \d+:|\z)") {
         $MasterReBlock = $Matches.masterblock
@@ -347,9 +285,18 @@ try {
     }
 
     # --- Parse LLDP Neighbors (switch-to-switch topology) + LLDP-MED Endpoints (phones/APs) ---
+    # Tracks every LLDP neighbor confirmed to be a switch/router by its advertised LLDP
+    # capabilities (see the $UplinkPorts comment below), even one without a usable management
+    # address - a switch neighbor that doesn't advertise one must still count as an uplink, or
+    # its downstream MAC-table entries leak into Clients. Deliberately requires a positive
+    # "Bridge"/"Router" capability signal rather than just "not recognized as a MED endpoint" -
+    # an unrecognized phone/AP/camera falling into the wrong bucket here would silently drop
+    # its real clients from the scan output, which is worse than the leak this guards against.
+    $LldpSwitchPorts = New-Object System.Collections.Generic.HashSet[string]
     $Blocks = $DataDict["LLDP"] -split "(?i)(?=Local Interface\s*:)"
     foreach ($Block in $Blocks) {
         $IsMedEndpoint = ($Block -match "Class III Device") -or ($Block -match "Bridge Telephone") -or ($Block -match "WLAN Access Point") -or ($Block -match "ArubaOS")
+        $IsSwitchOrRouter = ($Block -match "(?i)(?:Enabled|System)\s+Capabilities\s*:\s*[^\r\n]*(?:Bridge|Router)")
 
         $Neigh = @{ LocalPort = "Unknown"; RemotePort = "Unknown"; Hostname = "Unknown"; MacAddress = "Unknown"; ManagementIP = "Unknown"; Description = "Unknown" }
         if ($Block -match "(?i)Local Interface\s*:\s*(?<port>[^\r\n]+)") { $Neigh.LocalPort = $Matches.port.Trim() }
@@ -360,24 +307,26 @@ try {
         if ($Block -match "(?i)System Description\s*:\s*(?<desc>[^\r\n]+)") { $Neigh.Description = $Matches.desc.Trim() }
 
         if ($IsMedEndpoint) {
-            # Phones/APs identifying via LLDP-MED rarely advertise a management address the
-            # way a switch does, so - unlike $NodeData.Neighbors below - capture is gated
-            # only on having parsed a local port: that's the field the visualizer's
-            # daisy-chain detection correlates against the MAC-table client list on.
+            # Phones/APs rarely advertise a management address, so gate only on LocalPort
+            # (unlike Neighbors below) - it's what the visualizer's daisy-chain detection uses.
             if ($Neigh.LocalPort -ne "Unknown") {
                 $NodeData.MedNeighbors += [PSCustomObject]$Neigh
             }
-        } elseif ($Neigh.ManagementIP -ne "Unknown" -and $Neigh.ManagementIP -ne $TargetIP -and $Neigh.ManagementIP -ne "0.0.0.0") {
-            $NodeData.Neighbors += [PSCustomObject]$Neigh
+        } else {
+            $HasManagementIp = $Neigh.ManagementIP -ne "Unknown" -and $Neigh.ManagementIP -ne $TargetIP -and $Neigh.ManagementIP -ne "0.0.0.0"
+            if ($Neigh.LocalPort -ne "Unknown" -and ($IsSwitchOrRouter -or $HasManagementIp)) {
+                [void]$LldpSwitchPorts.Add(($Neigh.LocalPort -replace "\.\d+$",""))
+            }
+            if ($HasManagementIp) {
+                $NodeData.Neighbors += [PSCustomObject]$Neigh
+            }
         }
     }
 
     # --- Parse VLANs ---
     $VlanDict = @{}
     foreach ($Line in ($DataDict["VLANS"] -split "`n")) {
-        # "Name  Tag  Interfaces" - the trailing interface (if any) is never purely numeric,
-        # so anchoring the match on name+tag only (not a 3rd numeric field) is what actually
-        # matches real "show vlans" output.
+        # "Name  Tag  Interfaces" - match name+tag only, since the interface field isn't numeric.
         if ($Line -match "^(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = $Matches.tag }
     }
 
@@ -394,10 +343,9 @@ try {
         }
     }
 
-    # --- Parse local ARP Table (used to enrich this node's own clients; also exported
-    # raw so the orchestrator can build a network-wide MAC->IP map. On L2-only access
-    # switches, ARP for downstream hosts usually lives on the L3 gateway instead, not
-    # here - that's what the orchestrator-side global enrichment pass is for.) ---
+    # --- Parse local ARP Table (enriches this node's own clients; also exported raw so
+    # the orchestrator can build a network-wide MAC->IP map for downstream hosts whose ARP
+    # entry lives on the L3 gateway instead) ---
     $ArpDict = @{}
     foreach ($Line in ($DataDict["ARP_TABLE"] -split "`n")) {
         if ($Line -match "(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)") {
@@ -407,23 +355,19 @@ try {
         }
     }
 
-    # Physical ports where an LLDP neighbor with a management IP was seen - i.e. another
-    # switch/router, not a phone/AP (those land in MedNeighbors, handled separately below).
-    # A trunk/uplink to a downstream switch shows up in THIS switch's own MAC table exactly
-    # like a directly attached host: one row per MAC the downstream switch has ever learned,
-    # which for an access-layer uplink can be hundreds of unrelated clients. Excluded here so
-    # Clients reflects devices this switch is actually the access point for, not everything
-    # reachable through it. MedNeighbor ports are deliberately NOT excluded - a phone with a
-    # PC daisy-chained into its own switch port legitimately puts two real client MACs on one
-    # port, which detectDaisyChains (utils.js) depends on still seeing both of.
-    $UplinkPorts = New-Object System.Collections.Generic.HashSet[string]
-    foreach ($Neigh in $NodeData.Neighbors) {
-        if ($Neigh.LocalPort -ne "Unknown") { [void]$UplinkPorts.Add(($Neigh.LocalPort -replace "\.\d+$","")) }
-    }
+    # Ports with a switch/router LLDP neighbor (not a phone/AP - those are MedNeighbors and
+    # deliberately not excluded here). A downstream switch's uplink shows up in this switch's
+    # MAC table as hundreds of unrelated client MACs; excluded so Clients only reflects
+    # devices this switch is the actual access point for. Built from $LldpSwitchPorts, which
+    # is wider than $NodeData.Neighbors (management IP required there for the topology-edge
+    # display) - it also includes a neighbor confirmed as a switch/router by its LLDP
+    # capabilities even without a management address - but never wider than "confirmed
+    # switch/router or has a management IP", so an unrecognized endpoint device can't be
+    # mistaken for an uplink and silently swallow its own clients.
+    $UplinkPorts = $LldpSwitchPorts
 
-    # --- Build Clients from the MAC table (primary source - this is what a switch
-    # actually knows about its own connected devices). IP comes from local ARP when
-    # available; otherwise "Unknown" until the orchestrator's global enrichment pass. ---
+    # --- Build Clients from the MAC table. IP comes from local ARP when available;
+    # otherwise "Unknown" until the orchestrator's global enrichment pass. ---
     foreach ($MacKey in $RawMacs.Keys) {
         $Entry = $RawMacs[$MacKey]
         $physPort = $Entry.Port -replace "\.\d+$",""
@@ -450,7 +394,9 @@ try {
 
 $InterfaceArray = @()
 foreach ($Key in $NodeData.Interfaces.Keys) { $InterfaceArray += [PSCustomObject]$NodeData.Interfaces[$Key] }
-$NodeData.Interfaces = $InterfaceArray | Sort-Object Port
+# Wrapped in @(...): `X | Sort-Object` alone collapses to a bare object for 1 item, or
+# $null for 0, so ConvertTo-Json would emit "{...}"/null instead of always an array.
+$NodeData.Interfaces = @($InterfaceArray | Sort-Object Port)
 
 # ==============================================================================
 # HUMAN READABLE CLI OUTPUT
