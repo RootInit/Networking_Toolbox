@@ -254,9 +254,24 @@ try {
 
     foreach ($Line in ($DataDict["INTERFACES_DESC"] -split "`n")) {
         $Line = $Line.Trim()
-        if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?:up|down)\s+(?:up|down)\s+(?<desc>.+)$") { 
+        if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?:up|down)\s+(?:up|down)\s+(?<desc>.+)$") {
             $p = $Matches.port
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].Desc = $Matches.desc.Trim() }
+        }
+    }
+
+    # LACP bundle membership (physical port -> "aeN"), from "show interfaces terse"'s
+    # "<phys>.<unit>  up  up  aenet  --> aeN.<unit>" lines. LLDP runs on the physical member
+    # links of an AE bundle, never on the "aeN" logical interface itself, so a neighbor
+    # discovered there reports LocalPort as e.g. "xe-0/1/0" - the uplink-exclusion check below
+    # needs this map to also recognize "aeN" as an uplink, or every MAC learned across that
+    # trunk (every VLAN it carries, from devices this switch never directly saw) leaks into
+    # Clients as if directly attached, on port "aeN.0", almost entirely with "Unknown" IP.
+    $AeMemberOf = @{}
+    foreach ($Line in ($DataDict["INTERFACES_TERSE"] -split "`n")) {
+        $Line = $Line.Trim()
+        if ($Line -match "^(?<phys>(?:ge|xe|et|mge)\S+)\.\d+\s+(?:up|down)\s+(?:up|down)\s+aenet\s+-->\s+(?<ae>ae\d+)\.") {
+            $AeMemberOf[$Matches.phys] = $Matches.ae
         }
     }
 
@@ -315,7 +330,9 @@ try {
         } else {
             $HasManagementIp = $Neigh.ManagementIP -ne "Unknown" -and $Neigh.ManagementIP -ne $TargetIP -and $Neigh.ManagementIP -ne "0.0.0.0"
             if ($Neigh.LocalPort -ne "Unknown" -and ($IsSwitchOrRouter -or $HasManagementIp)) {
-                [void]$LldpSwitchPorts.Add(($Neigh.LocalPort -replace "\.\d+$",""))
+                $LocalPhysPort = $Neigh.LocalPort -replace "\.\d+$",""
+                [void]$LldpSwitchPorts.Add($LocalPhysPort)
+                if ($AeMemberOf.ContainsKey($LocalPhysPort)) { [void]$LldpSwitchPorts.Add($AeMemberOf[$LocalPhysPort]) }
             }
             if ($HasManagementIp) {
                 $NodeData.Neighbors += [PSCustomObject]$Neigh
