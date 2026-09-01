@@ -1244,7 +1244,18 @@ svg.leaflet-image-layer.leaflet-interactive path {
 
     <style>
         :root { --primary: #2c3e50; --accent: #2B7CE9; --bg: #f4f6f9; --panel-bg: #ffffff; --border: #e0e0e0; }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; width: 100vw; overflow: hidden; background-color: var(--bg); color: #333; }
+        /* overflow:hidden only hides the scrollbar and blocks user-driven scroll gestures -
+           it does NOT stop an element from being scrolled programmatically, including the
+           browser's own default scroll-into-view on focus. vis-network calls
+           canvas.frame.focus() on every click (needed for its keyboard shortcuts to work
+           scoped to the graph instead of window), and even though the graph is already
+           fully visible, that focus call was enough to scroll body/html a few dozen px and
+           shear the top of the page off screen (confirmed via document.body.scrollTop, not
+           a user scroll). overflow:clip genuinely disallows scrolling, program or user, on
+           both axes - use it instead on both html and body so no future focus()/
+           scrollIntoView() call anywhere can do this again.  */
+        html { height: 100%; overflow: clip; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; width: 100vw; overflow: clip; background-color: var(--bg); color: #333; }
         
         /* Layout Panels */
         #left-panel { width: 400px; min-width: 400px; padding: 0; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: row; box-sizing: border-box; position: relative; transition: width 0.15s ease, min-width 0.15s ease; }
