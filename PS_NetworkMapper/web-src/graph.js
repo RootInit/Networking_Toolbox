@@ -123,7 +123,11 @@ window.buildSwitchMap = async function() {
         layout: { hierarchical: false },
         physics: { enabled: false },
         edges: { smooth: false },
-        interaction: { navigationButtons: true, keyboard: true, hover: true, dragNodes: true },
+        // bindToWindow: false - vis-network's keyboard shortcuts (+/- zoom, arrow-key pan)
+        // default to binding on window, not the graph container, so typing "-" in any text
+        // field elsewhere on the page (an IP, a note, a search box) got eaten as a zoom-out
+        // instead of typing a dash. Scoped to the container, they only fire while it has focus.
+        interaction: { navigationButtons: true, keyboard: { bindToWindow: false }, hover: true, dragNodes: true },
     });
     // vis-network still fires "click" for a blank click (unlike "selectNode"), so close
     // the drawer instead of leaving it pointing at a stale selection.
