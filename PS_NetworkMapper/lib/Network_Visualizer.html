@@ -1969,7 +1969,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
             <div class="tabs wrap">
                 <div class="analysis-tab active" onclick="window.switchAnalysisTab('analysis-tab-fleethealth')" id="btn-analysis-tab-fleethealth">Fleet Health</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-newdevices')" id="btn-analysis-tab-newdevices">New Devices</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-inactiveports')" id="btn-analysis-tab-inactiveports">Inactive Ports</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-trends')" id="btn-analysis-tab-trends">Trends</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-accounts')" id="btn-analysis-tab-accounts">Local Accounts</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" id="btn-analysis-tab-topodiff">Topology Diff</div>
@@ -1983,13 +1982,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
                 <table id="new-devices-table">
                     <thead><tr><th>First Seen</th><th>MAC</th><th>Vendor</th><th>Last IP</th><th>Last Switch / Port</th><th>Last Seen</th></tr></thead>
                     <tbody id="new-devices-tbody"></tbody>
-                </table>
-            </div>
-            <div id="analysis-tab-inactiveports" class="analysis-tab-content">
-                <p style="font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px;">Physical ports whose link is currently down, sorted by how long ago they last flapped (longest-inactive first) - based on each device's own "Last flapped" clock, captured at scan time. A port with no usable flap data (never flapped since boot, or on a device scanned before this field existed) is listed but not sortable by duration.</p>
-                <table id="inactive-ports-table">
-                    <thead><tr><th>Device</th><th>Port</th><th>Description</th><th>Admin</th><th>Inactive For</th></tr></thead>
-                    <tbody id="inactive-ports-tbody"></tbody>
                 </table>
             </div>
             <div id="analysis-tab-trends" class="analysis-tab-content">
@@ -2181,7 +2173,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
                 <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportInterfacesCsv()">Export CSV</button>
             </div>
             <table id="interfaces-table">
-                <thead><tr><th>Port</th><th>State</th><th>STP</th><th>PoE</th><th>Description</th></tr></thead>
+                <thead><tr><th>Port</th><th>State</th><th>STP</th><th>PoE</th><th>Description</th><th>Inactive For</th></tr></thead>
                 <tbody id="interfaces-tbody"></tbody>
             </table>
         </div>
@@ -3470,7 +3462,6 @@ window.resizeDiagram = function() {
 window.refreshAnalysisDashboard = function() {
     window.renderFleetDashboard();
     window.renderNewDevicesTable();
-    window.renderInactivePortsTable();
     window.populateTrendDeviceSelect();
     window.renderTrendChart();
     window.renderLocalAccountsAudit();
@@ -3767,50 +3758,6 @@ window.renderNewDevicesTable = function() {
             <td>${esc(r.lastIp)}</td>
             <td>${esc(r.lastDeviceIp)} / ${esc(r.lastPort)}</td>
             <td>${esc(lastSeenMs !== null ? new Date(lastSeenMs).toLocaleString() : 'unknown')}</td>
-        </tr>`;
-    }).join('');
-};
-
-// Longest-inactive physical ports (Link === "down"), fleet-wide, sorted with the longest
-// downtime first - LastFlappedSeconds is captured once per scan (see Get-JunosNodeData.ps1),
-// so this reflects "as of the active snapshot's capture," not a live clock like
-// renderCrawlAge. A port with no LastFlappedSeconds (never flapped since boot, or a
-// snapshot predating this field) is listed after every port with known duration, not
-// dropped - the operator still needs to see it's down, just without a fabricated duration.
-window.renderInactivePortsTable = function() {
-    var tbody = document.getElementById('inactive-ports-tbody');
-    if (!tbody) return;
-    var devices = globalTopologyData || [];
-
-    var rows = [];
-    devices.forEach(d => {
-        window.asArray(d.Interfaces).forEach(intf => {
-            if (intf.Link !== 'down') return;
-            rows.push({ device: d, intf: intf });
-        });
-    });
-
-    rows.sort((a, b) => {
-        var av = a.intf.LastFlappedSeconds, bv = b.intf.LastFlappedSeconds;
-        if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
-        if (bv === null || bv === undefined) return -1;
-        return bv - av;
-    });
-
-    if (rows.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;">No inactive ports.</td></tr>`;
-        return;
-    }
-
-    tbody.innerHTML = rows.map(r => {
-        var secs = r.intf.LastFlappedSeconds;
-        var duration = (secs === null || secs === undefined) ? 'Unknown' : window.formatAge(secs * 1000);
-        return `<tr>
-            <td>${esc(r.device.Hostname || r.device.DeviceIP)}</td>
-            <td style="font-family:monospace;">${esc(r.intf.Port)}</td>
-            <td>${esc(r.intf.Desc && r.intf.Desc !== 'Unknown' ? r.intf.Desc : '-')}</td>
-            <td>${esc(r.intf.Admin)}</td>
-            <td>${esc(duration)}</td>
         </tr>`;
     }).join('');
 };
@@ -5266,11 +5213,27 @@ window.renderInterfaces = function() {
     var html = "";
 
     if (currentSelectedNodeData.Interfaces) {
-        window.asArray(currentSelectedNodeData.Interfaces).forEach(intf => {
-            if (!intf.Port || String(intf.Port).includes('.')) return;
+        var rows = window.asArray(currentSelectedNodeData.Interfaces).filter(intf => {
+            if (!intf.Port || String(intf.Port).includes('.')) return false;
+            if (hideDown && String(intf.Link).toLowerCase() !== "up") return false;
+            return true;
+        });
 
-            if (hideDown && String(intf.Link).toLowerCase() !== "up") return;
+        // Down ports sort first, longest-inactive first (unknown duration last among downs) -
+        // same tiebreak the old fleet-wide Inactive Ports dashboard tab used - so the ports
+        // most worth an operator's attention on THIS switch surface at the top. Up ports keep
+        // their original relative order (stable sort, comparator returns 0 for any up/up pair).
+        rows.sort((a, b) => {
+            var aDown = String(a.Link).toLowerCase() !== "up", bDown = String(b.Link).toLowerCase() !== "up";
+            if (aDown !== bDown) return aDown ? -1 : 1;
+            if (!aDown) return 0;
+            var av = a.LastFlappedSeconds, bv = b.LastFlappedSeconds;
+            if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
+            if (bv === null || bv === undefined) return -1;
+            return bv - av;
+        });
 
+        rows.forEach(intf => {
             var linkBadge = String(intf.Link).toLowerCase() === "up" ? "green" : "red";
             var stpBadge = String(intf.STP) === "FWD" ? "green" : (String(intf.STP) === "BLK" ? "red" : "gray");
             var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
@@ -5280,16 +5243,21 @@ window.renderInterfaces = function() {
                 ? `<br>${window.renderDaisyChainBadge(chain)}`
                 : "";
 
+            var secs = intf.LastFlappedSeconds;
+            var inactiveFor = String(intf.Link).toLowerCase() === "up" ? "-"
+                : ((secs === null || secs === undefined) ? "Unknown" : window.formatAge(secs * 1000));
+
             html += `<tr>
                 <td><b>${esc(intf.Port)}</b>${daisyStr}</td>
                 <td><span class="badge ${linkBadge}">${esc(intf.Admin)}/${esc(intf.Link)}</span></td>
                 <td><span class="badge ${stpBadge}">${esc(intf.STP) || "?"}</span></td>
                 <td>${esc(poeTxt)}</td>
                 <td style="font-style:italic; color:var(--text-muted);">${esc(intf.Desc)}</td>
+                <td>${esc(inactiveFor)}</td>
             </tr>`;
         });
     }
-    tbody.innerHTML = html || `<tr><td colspan="5" style="text-align:center;">No interface data</td></tr>`;
+    tbody.innerHTML = html || `<tr><td colspan="6" style="text-align:center;">No interface data</td></tr>`;
 };
 
 window.renderClients = function() {
@@ -5717,13 +5685,18 @@ ${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(
 window.exportInterfacesCsv = function() {
     if (!currentSelectedNodeData) { window.setStatus("Select a switch first.", "red"); return; }
     var hideDown = document.getElementById('hideDownPorts').checked;
-    var rows = [['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description']];
+    var rows = [['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description', 'Inactive For']];
 
     window.asArray(currentSelectedNodeData.Interfaces).forEach(intf => {
         if (!intf.Port || String(intf.Port).includes('.')) return;
         if (hideDown && String(intf.Link).toLowerCase() !== "up") return;
         var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
-        rows.push([intf.Port, intf.Admin, intf.Link, intf.STP, poeTxt, intf.Desc]);
+        // LastFlappedSeconds is captured once per scan (see Get-JunosNodeData.ps1), so this
+        // reflects "as of the active snapshot's capture," not a live clock like renderCrawlAge.
+        var secs = intf.LastFlappedSeconds;
+        var inactiveFor = String(intf.Link).toLowerCase() === "up" ? "-"
+            : ((secs === null || secs === undefined) ? "Unknown" : window.formatAge(secs * 1000));
+        rows.push([intf.Port, intf.Admin, intf.Link, intf.STP, poeTxt, intf.Desc, inactiveFor]);
     });
 
     downloadCsv(`${currentSelectedNodeData.DeviceIP}_interfaces.csv`, rows);

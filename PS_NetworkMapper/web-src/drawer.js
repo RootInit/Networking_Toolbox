@@ -606,11 +606,27 @@ window.renderInterfaces = function() {
     var html = "";
 
     if (currentSelectedNodeData.Interfaces) {
-        window.asArray(currentSelectedNodeData.Interfaces).forEach(intf => {
-            if (!intf.Port || String(intf.Port).includes('.')) return;
+        var rows = window.asArray(currentSelectedNodeData.Interfaces).filter(intf => {
+            if (!intf.Port || String(intf.Port).includes('.')) return false;
+            if (hideDown && String(intf.Link).toLowerCase() !== "up") return false;
+            return true;
+        });
 
-            if (hideDown && String(intf.Link).toLowerCase() !== "up") return;
+        // Down ports sort first, longest-inactive first (unknown duration last among downs) -
+        // same tiebreak the old fleet-wide Inactive Ports dashboard tab used - so the ports
+        // most worth an operator's attention on THIS switch surface at the top. Up ports keep
+        // their original relative order (stable sort, comparator returns 0 for any up/up pair).
+        rows.sort((a, b) => {
+            var aDown = String(a.Link).toLowerCase() !== "up", bDown = String(b.Link).toLowerCase() !== "up";
+            if (aDown !== bDown) return aDown ? -1 : 1;
+            if (!aDown) return 0;
+            var av = a.LastFlappedSeconds, bv = b.LastFlappedSeconds;
+            if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
+            if (bv === null || bv === undefined) return -1;
+            return bv - av;
+        });
 
+        rows.forEach(intf => {
             var linkBadge = String(intf.Link).toLowerCase() === "up" ? "green" : "red";
             var stpBadge = String(intf.STP) === "FWD" ? "green" : (String(intf.STP) === "BLK" ? "red" : "gray");
             var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
@@ -620,16 +636,21 @@ window.renderInterfaces = function() {
                 ? `<br>${window.renderDaisyChainBadge(chain)}`
                 : "";
 
+            var secs = intf.LastFlappedSeconds;
+            var inactiveFor = String(intf.Link).toLowerCase() === "up" ? "-"
+                : ((secs === null || secs === undefined) ? "Unknown" : window.formatAge(secs * 1000));
+
             html += `<tr>
                 <td><b>${esc(intf.Port)}</b>${daisyStr}</td>
                 <td><span class="badge ${linkBadge}">${esc(intf.Admin)}/${esc(intf.Link)}</span></td>
                 <td><span class="badge ${stpBadge}">${esc(intf.STP) || "?"}</span></td>
                 <td>${esc(poeTxt)}</td>
                 <td style="font-style:italic; color:var(--text-muted);">${esc(intf.Desc)}</td>
+                <td>${esc(inactiveFor)}</td>
             </tr>`;
         });
     }
-    tbody.innerHTML = html || `<tr><td colspan="5" style="text-align:center;">No interface data</td></tr>`;
+    tbody.innerHTML = html || `<tr><td colspan="6" style="text-align:center;">No interface data</td></tr>`;
 };
 
 window.renderClients = function() {
@@ -1057,13 +1078,18 @@ ${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(
 window.exportInterfacesCsv = function() {
     if (!currentSelectedNodeData) { window.setStatus("Select a switch first.", "red"); return; }
     var hideDown = document.getElementById('hideDownPorts').checked;
-    var rows = [['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description']];
+    var rows = [['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description', 'Inactive For']];
 
     window.asArray(currentSelectedNodeData.Interfaces).forEach(intf => {
         if (!intf.Port || String(intf.Port).includes('.')) return;
         if (hideDown && String(intf.Link).toLowerCase() !== "up") return;
         var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
-        rows.push([intf.Port, intf.Admin, intf.Link, intf.STP, poeTxt, intf.Desc]);
+        // LastFlappedSeconds is captured once per scan (see Get-JunosNodeData.ps1), so this
+        // reflects "as of the active snapshot's capture," not a live clock like renderCrawlAge.
+        var secs = intf.LastFlappedSeconds;
+        var inactiveFor = String(intf.Link).toLowerCase() === "up" ? "-"
+            : ((secs === null || secs === undefined) ? "Unknown" : window.formatAge(secs * 1000));
+        rows.push([intf.Port, intf.Admin, intf.Link, intf.STP, poeTxt, intf.Desc, inactiveFor]);
     });
 
     downloadCsv(`${currentSelectedNodeData.DeviceIP}_interfaces.csv`, rows);

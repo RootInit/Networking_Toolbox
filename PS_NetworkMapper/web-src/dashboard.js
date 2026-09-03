@@ -7,7 +7,6 @@
 window.refreshAnalysisDashboard = function() {
     window.renderFleetDashboard();
     window.renderNewDevicesTable();
-    window.renderInactivePortsTable();
     window.populateTrendDeviceSelect();
     window.renderTrendChart();
     window.renderLocalAccountsAudit();
@@ -304,50 +303,6 @@ window.renderNewDevicesTable = function() {
             <td>${esc(r.lastIp)}</td>
             <td>${esc(r.lastDeviceIp)} / ${esc(r.lastPort)}</td>
             <td>${esc(lastSeenMs !== null ? new Date(lastSeenMs).toLocaleString() : 'unknown')}</td>
-        </tr>`;
-    }).join('');
-};
-
-// Longest-inactive physical ports (Link === "down"), fleet-wide, sorted with the longest
-// downtime first - LastFlappedSeconds is captured once per scan (see Get-JunosNodeData.ps1),
-// so this reflects "as of the active snapshot's capture," not a live clock like
-// renderCrawlAge. A port with no LastFlappedSeconds (never flapped since boot, or a
-// snapshot predating this field) is listed after every port with known duration, not
-// dropped - the operator still needs to see it's down, just without a fabricated duration.
-window.renderInactivePortsTable = function() {
-    var tbody = document.getElementById('inactive-ports-tbody');
-    if (!tbody) return;
-    var devices = globalTopologyData || [];
-
-    var rows = [];
-    devices.forEach(d => {
-        window.asArray(d.Interfaces).forEach(intf => {
-            if (intf.Link !== 'down') return;
-            rows.push({ device: d, intf: intf });
-        });
-    });
-
-    rows.sort((a, b) => {
-        var av = a.intf.LastFlappedSeconds, bv = b.intf.LastFlappedSeconds;
-        if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
-        if (bv === null || bv === undefined) return -1;
-        return bv - av;
-    });
-
-    if (rows.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;">No inactive ports.</td></tr>`;
-        return;
-    }
-
-    tbody.innerHTML = rows.map(r => {
-        var secs = r.intf.LastFlappedSeconds;
-        var duration = (secs === null || secs === undefined) ? 'Unknown' : window.formatAge(secs * 1000);
-        return `<tr>
-            <td>${esc(r.device.Hostname || r.device.DeviceIP)}</td>
-            <td style="font-family:monospace;">${esc(r.intf.Port)}</td>
-            <td>${esc(r.intf.Desc && r.intf.Desc !== 'Unknown' ? r.intf.Desc : '-')}</td>
-            <td>${esc(r.intf.Admin)}</td>
-            <td>${esc(duration)}</td>
         </tr>`;
     }).join('');
 };

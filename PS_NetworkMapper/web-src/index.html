@@ -608,7 +608,6 @@
             <div class="tabs wrap">
                 <div class="analysis-tab active" onclick="window.switchAnalysisTab('analysis-tab-fleethealth')" id="btn-analysis-tab-fleethealth">Fleet Health</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-newdevices')" id="btn-analysis-tab-newdevices">New Devices</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-inactiveports')" id="btn-analysis-tab-inactiveports">Inactive Ports</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-trends')" id="btn-analysis-tab-trends">Trends</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-accounts')" id="btn-analysis-tab-accounts">Local Accounts</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" id="btn-analysis-tab-topodiff">Topology Diff</div>
@@ -622,13 +621,6 @@
                 <table id="new-devices-table">
                     <thead><tr><th>First Seen</th><th>MAC</th><th>Vendor</th><th>Last IP</th><th>Last Switch / Port</th><th>Last Seen</th></tr></thead>
                     <tbody id="new-devices-tbody"></tbody>
-                </table>
-            </div>
-            <div id="analysis-tab-inactiveports" class="analysis-tab-content">
-                <p style="font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px;">Physical ports whose link is currently down, sorted by how long ago they last flapped (longest-inactive first) - based on each device's own "Last flapped" clock, captured at scan time. A port with no usable flap data (never flapped since boot, or on a device scanned before this field existed) is listed but not sortable by duration.</p>
-                <table id="inactive-ports-table">
-                    <thead><tr><th>Device</th><th>Port</th><th>Description</th><th>Admin</th><th>Inactive For</th></tr></thead>
-                    <tbody id="inactive-ports-tbody"></tbody>
                 </table>
             </div>
             <div id="analysis-tab-trends" class="analysis-tab-content">
@@ -820,7 +812,7 @@
                 <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportInterfacesCsv()">Export CSV</button>
             </div>
             <table id="interfaces-table">
-                <thead><tr><th>Port</th><th>State</th><th>STP</th><th>PoE</th><th>Description</th></tr></thead>
+                <thead><tr><th>Port</th><th>State</th><th>STP</th><th>PoE</th><th>Description</th><th>Inactive For</th></tr></thead>
                 <tbody id="interfaces-tbody"></tbody>
             </table>
         </div>
