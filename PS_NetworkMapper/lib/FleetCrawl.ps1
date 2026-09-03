@@ -182,12 +182,12 @@ function Invoke-FleetCrawl {
     try {
         Write-Host "`nStarting Crawl with $MaxConcurrent Threads. Press Ctrl+C to abort gracefully.`n" -ForegroundColor Yellow
 
-        # Temp-file + Move-Item, same pattern as every later write in this function (periodic,
-        # final, and the emergency-salvage write in the catch block below) - a partway failure
-        # here (e.g. disk full) then leaves no half-written $OutputFile behind instead of a
-        # truncated one a poller could read mid-write. Inside the try (not above it) so a
-        # Move-Item failure here still hits the catch below (an empty-topology salvage write is
-        # a harmless no-op at this point) and the finally still reaps the leftover .tmp file.
+        # Temp-file + Move-FileAtomic, same pattern as every later write in this function
+        # (periodic, final, and the emergency-salvage write in the catch block below) - a
+        # partway failure here (e.g. disk full) then leaves no half-written $OutputFile behind
+        # instead of a truncated one a poller could read mid-write. Inside the try (not above it)
+        # so a Move-FileAtomic failure here still hits the catch below (an empty-topology salvage
+        # write is a harmless no-op at this point) and the finally still reaps the leftover .tmp file.
         Write-TopologyOutputLocal -Topology @() -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
         Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
 
@@ -522,7 +522,7 @@ function Invoke-FleetCrawl {
         try {
             if ($TopologyList.Count -gt 0) {
                 Update-ClientIpCorrelationLocal -Topology $TopologyList
-                # Temp file + Move-Item (not a direct write) so a partway failure here
+                # Temp file + Move-FileAtomic (not a direct write) so a partway failure here
                 # doesn't replace a good prior snapshot with a truncated one.
                 Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
                 Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
@@ -540,6 +540,6 @@ function Invoke-FleetCrawl {
         # would otherwise leak whatever's still pending here.
         Complete-PendingDisposalsLocal -OnlyCompleted:$false
         $RunspacePool.Close(); $RunspacePool.Dispose()
-        if (Test-Path $TempOutputFile) { Remove-Item -Path $TempOutputFile -Force }
+        if (Test-Path $TempOutputFile) { Remove-Item -LiteralPath $TempOutputFile -Force }
     }
 }
