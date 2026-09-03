@@ -117,3 +117,12 @@ console.log(`Inlined ${inlinedCount} file(s) into ${outPath}`);
 if (skipped.length > 0) {
     console.log(`Skipped ${skipped.length} missing file(s) (tag dropped, same as a 404'd src/href today): ${skipped.join(', ')}`);
 }
+
+// vendor/oui-data.js is the one file this build tolerates being absent (see the comment in
+// inlineLocalFile above); any other missing referenced file means the build produced a
+// broken artifact and must not be reported as a success.
+const requiredSkipped = skipped.filter((src) => !src.endsWith('vendor/oui-data.js'));
+if (requiredSkipped.length > 0) {
+    console.error(`ERROR: ${requiredSkipped.length} required file(s) could not be inlined and are missing from ${outPath}: ${requiredSkipped.join(', ')}`);
+    process.exit(1);
+}
