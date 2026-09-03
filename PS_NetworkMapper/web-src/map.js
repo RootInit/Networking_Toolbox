@@ -308,6 +308,20 @@ window.renderMapMarkers = function() {
         var device = deviceByIpLocal.get(ip); // undefined for an unscanned placeholder - resolveDeviceLocation needs a real device object
         if (!device) return; // unscanned neighbors have no chassis/serial data to resolve a location from
         var entry = window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries);
+        // A drag (or the location editor) may have staged an edit for this device that hasn't
+        // been saved yet - pendingConfigEdits, not mapConfigEntries, is the most current state.
+        // Overlay it here so a re-render triggered by a VLAN filter change, snapshot switch, or
+        // rescan (all of which call renderMapMarkers) doesn't visually snap the marker back to
+        // its last-SAVED position while the "N unsaved changes" indicator still (correctly)
+        // shows the newer edit as pending. Same key resolution saveConfiguration/the drag
+        // handler/commitLocationEdit use to look up a pending edit for this device - reused
+        // here rather than re-derived, so it can't drift from how edits are staged/saved.
+        // Also covers a device with no prior saved location (resolveDeviceLocation above
+        // returned null) that just got placed via the location editor - that edit exists only
+        // in pendingConfigEdits until Save, so without this the marker wouldn't render at all.
+        var pendingKeyInfo = window.ConfigResolve.bestKeyForSave(device);
+        var pendingEdit = pendingConfigEdits.get(pendingKeyInfo.keyType + ':' + pendingKeyInfo.key);
+        if (pendingEdit) entry = pendingEdit.entry;
         if (!entry) return;
         // /api/save-config doesn't validate entry shape, so a hand-crafted POST could write a
         // non-numeric lat/lng. L.marker throws on that, which would abort this whole forEach
