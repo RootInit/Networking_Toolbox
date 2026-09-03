@@ -17,6 +17,10 @@ param(
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 . (Join-Path $ScriptDir "SshHelpers.ps1")
 
+# Sweep up plaintext credential/askpass files a prior crashed run (this script or the crawler)
+# left behind in %TEMP% before this session writes its own.
+Clear-StaleJunosTempFiles
+
 # Everything that touches the credential file lives inside the try, so the finally always
 # runs cleanup even if e.g. New-JunosAskPass fails partway (%TEMP% full/locked), which would
 # otherwise leave the plaintext credential on disk with nothing to remove it.

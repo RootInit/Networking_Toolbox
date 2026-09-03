@@ -190,7 +190,7 @@ async function doRenderVisibleGraph() {
     // Wrapped so a thrown error can't leave the loading overlay stuck at "Computing
     // layout..." forever - the caller only logs a rejection, it doesn't hide progress.
     try {
-        var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, getClusterThreshold());
+        var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, getClusterThreshold(), primaryTree.extraRoots);
         var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges, getLayoutSettings());
         // buildSwitchMap ran while the above awaited - graphRoot/primaryTree/allNodeMeta/
         // `network` are now for a different topology than `visible` was computed from.
@@ -262,8 +262,14 @@ function computeSubtreeVlanSets() {
         return set;
     }
     if (graphRoot) visit(graphRoot);
-    // Anything buildPrimaryTree didn't reach from graphRoot still gets its own local
-    // VLANs rather than an undefined lookup later.
+    // Disconnected fabric islands (buildPrimaryTree.extraRoots) are separate trees, not
+    // reachable via graphRoot's own recursion - walk each one too so their subtree VLAN
+    // unions are computed the same way, instead of only getting each node's own local
+    // VLANs via the fallback below.
+    (primaryTree.extraRoots || []).forEach(r => visit(r));
+    // Anything buildPrimaryTree still didn't reach (shouldn't happen now that
+    // extraRoots covers every component, but kept as a safety net) still gets its own
+    // local VLANs rather than an undefined lookup later.
     allNodeMeta.forEach((meta, id) => { if (!result.has(id)) result.set(id, new Set(meta.vlanCache || [])); });
     return result;
 }

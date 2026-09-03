@@ -222,8 +222,12 @@ function Invoke-RescanAction {
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; jobId = $JobId; ip = $TargetIP }
 }
 
-# Quick reachability check (a few ICMP echoes). Synchronous - Test-Connection returns in a
-# couple seconds worst case, so no job-queue/poll dance is needed here unlike a rescan.
+# Quick reachability check (a few ICMP echoes). Async, same "don't block the accept loop"
+# reasoning as Invoke-RescanAction: Test-Connection -Count 4 -TimeoutSeconds 2 can take up
+# to ~8s against an unreachable device, and the accept loop dispatches every request inline
+# on a single thread - a synchronous call here used to stall scan/rescan status polling and
+# every other request for that long. Offloaded to a single-slot runspace pool, mirroring the
+# rescan pattern; the browser polls Invoke-PingStatusAction for the result.
 function Invoke-PingAction {
     param($Response, [string]$Body)
 
@@ -238,36 +242,132 @@ function Invoke-PingAction {
         return
     }
 
-    try {
-        # -Quiet avoided (no latency/loss detail). Parameter set and failure shape differ
-        # by generation: PS 7+'s Test-Connection returns one object per ping including
-        # timeouts (Status='TimedOut', Latency=0) - must filter on Status -eq 'Success' or
-        # a dead device reports as 4/4 replies. PS 5.1's classic cmdlet only ever returns
-        # successes as objects (failures go to the error stream), so plain assignment
-        # already collects successes only - -ErrorAction Stop there would wrongly turn the
-        # first failure into a terminating exception and discard earlier successes.
-        if ($PSVersionTable.PSVersion.Major -ge 6) {
-            $AllResults = Test-Connection -TargetName $TargetIP -Count 4 -TimeoutSeconds 2 -ErrorAction SilentlyContinue
-            $Results = @($AllResults | Where-Object { $_.Status -eq 'Success' })
-        } else {
-            $Results = @(Test-Connection -ComputerName $TargetIP -Count 4 -ErrorAction SilentlyContinue)
+    # Reap any previously-timed-out job that has since finished (see the timeout handling
+    # in Invoke-PingStatusAction for why a timed-out job isn't force-stopped).
+    for ($i = $script:OrphanedPings.Count - 1; $i -ge 0; $i--) {
+        $Orphan = $script:OrphanedPings[$i]
+        if ($Orphan.Handle.IsCompleted) {
+            try { $Orphan.PS.EndInvoke($Orphan.Handle) | Out-Null } catch {}
+            $Orphan.PS.Dispose()
+            $script:OrphanedPings.RemoveAt($i)
         }
+    }
+
+    # A ping whose result the browser never polled (drawer closed, page reload) would
+    # otherwise hold the single slot forever, 409-ing every future ping - same reasoning as
+    # Invoke-ScanNetworkAction's reap of an unpolled scan job.
+    if ($script:PendingPing -and $script:PendingPing.Handle.IsCompleted) {
+        try { $script:PendingPing.PS.EndInvoke($script:PendingPing.Handle) | Out-Null } catch {}
+        try { $script:PendingPing.PS.Dispose() } catch {}
+        $script:PendingPing = $null
+    }
+
+    if ($script:PendingPing) {
+        Send-WebJson -Response $Response -StatusCode 409 -Object @{
+            error = "A ping is already in progress"; jobId = $script:PendingPing.JobId; ip = $script:PendingPing.IP
+        }
+        return
+    }
+
+    $JobId = [guid]::NewGuid().ToString()
+    $PS = [powershell]::Create().AddScript({
+        param($TargetIP)
+        try {
+            # -Quiet avoided (no latency/loss detail). Parameter set and failure shape differ
+            # by generation: PS 7+'s Test-Connection returns one object per ping including
+            # timeouts (Status='TimedOut', Latency=0) - must filter on Status -eq 'Success' or
+            # a dead device reports as 4/4 replies. PS 5.1's classic cmdlet only ever returns
+            # successes as objects (failures go to the error stream), so plain assignment
+            # already collects successes only - -ErrorAction Stop there would wrongly turn the
+            # first failure into a terminating exception and discard earlier successes.
+            if ($PSVersionTable.PSVersion.Major -ge 6) {
+                $AllResults = Test-Connection -TargetName $TargetIP -Count 4 -TimeoutSeconds 2 -ErrorAction SilentlyContinue
+                $Results = @($AllResults | Where-Object { $_.Status -eq 'Success' })
+            } else {
+                $Results = @(Test-Connection -ComputerName $TargetIP -Count 4 -ErrorAction SilentlyContinue)
+            }
+        } catch {
+            # Report as zero replies, not a failure - an unreachable device is an expected result here.
+            $Results = @()
+        }
+
+        $ReplyCount = $Results.Count
+        $Latencies = @($Results | ForEach-Object {
+            if ($null -ne $_.PSObject.Properties['Latency']) { $_.Latency }
+            elseif ($null -ne $_.PSObject.Properties['ResponseTime']) { $_.ResponseTime }
+        } | Where-Object { $null -ne $_ })
+
+        $AvgLatency = if ($Latencies.Count -gt 0) { [math]::Round(($Latencies | Measure-Object -Average).Average, 1) } else { $null }
+
+        [PSCustomObject]@{ ReplyCount = $ReplyCount; AvgLatency = $AvgLatency }
+    }).AddArgument($TargetIP)
+    $PS.RunspacePool = $script:PingPool
+    # $PS isn't reachable from $script:PendingPing until BeginInvoke succeeds below - if it
+    # throws, dispose it here or it leaks (nothing else references it to clean up later).
+    try {
+        $Handle = $PS.BeginInvoke()
     } catch {
-        # Report as zero replies, not a 500 - an unreachable device is an expected result here.
-        $Results = @()
+        $PS.Dispose()
+        throw
     }
 
-    $ReplyCount = $Results.Count
-    $Latencies = @($Results | ForEach-Object {
-        if ($null -ne $_.PSObject.Properties['Latency']) { $_.Latency }
-        elseif ($null -ne $_.PSObject.Properties['ResponseTime']) { $_.ResponseTime }
-    } | Where-Object { $null -ne $_ })
+    $script:PendingPing = [PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $TargetIP; JobId = $JobId; StartTime = (Get-Date) }
+    Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; jobId = $JobId; ip = $TargetIP }
+}
 
-    $AvgLatency = if ($Latencies.Count -gt 0) { [math]::Round(($Latencies | Measure-Object -Average).Average, 1) } else { $null }
+# Polled by the browser every ~1-2s while a ping is outstanding. Response shape mirrors
+# Invoke-RescanStatusAction: {status:"running"|"timeout"|"complete", ...}. On "complete" the
+# result carries the same fields the old synchronous /api/ping used to return in one shot
+# (ip/alive/sent/received/avgLatencyMs), plus ok:true so the browser can tell a successful
+# probe apart from a job that errored out (ok:false, reason).
+function Invoke-PingStatusAction {
+    param($Response, [string]$JobId)
 
-    Send-WebJson -Response $Response -StatusCode 200 -Object @{
-        ip = $TargetIP; alive = ($ReplyCount -gt 0); sent = 4; received = $ReplyCount; avgLatencyMs = $AvgLatency
+    if (-not $JobId -or -not $script:PendingPing -or $script:PendingPing.JobId -ne $JobId) {
+        Send-WebJson -Response $Response -StatusCode 404 -Object @{ error = "Unknown or expired job id" }
+        return
     }
+
+    $Job = $script:PendingPing
+
+    if ($Job.Handle.IsCompleted) {
+        $script:PendingPing = $null
+        try {
+            $Result = $Job.PS.EndInvoke($Job.Handle)
+        } catch {
+            $Job.PS.Dispose()
+            Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "complete"; ok = $false; ip = $Job.IP; reason = "Ping failed: $_" }
+            return
+        }
+        $Job.PS.Dispose()
+
+        # Index explicitly ($Result[0]), not by dotting into $Result, matching
+        # Invoke-ScanNetworkStatusAction's convention - member enumeration on a 1-item
+        # collection would still work for these two scalar properties, but indexing keeps
+        # this consistent with how EndInvoke results are unwrapped elsewhere in this file.
+        $Payload = if ($Result -and $Result.Count -gt 0) { $Result[0] } else { $null }
+        $ReplyCount = if ($Payload) { $Payload.ReplyCount } else { 0 }
+        $AvgLatency = if ($Payload) { $Payload.AvgLatency } else { $null }
+
+        Send-WebJson -Response $Response -StatusCode 200 -Object @{
+            status = "complete"; ok = $true; ip = $Job.IP
+            alive = ($ReplyCount -gt 0); sent = 4; received = $ReplyCount; avgLatencyMs = $AvgLatency
+        }
+        return
+    }
+
+    $Elapsed = ((Get-Date) - $Job.StartTime).TotalSeconds
+    if ($Elapsed -gt 20) {
+        # Not force-stopped, same reasoning as Invoke-RescanStatusAction's timeout handling:
+        # free the single active slot and let Invoke-PingAction reap it once it actually
+        # finishes on its own, instead of risking a .Stop() that doesn't return promptly.
+        $script:OrphanedPings.Add($Job)
+        $script:PendingPing = $null
+        Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "timeout"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
+        return
+    }
+
+    Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "running"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
 }
 
 # Polled by the browser every ~2s while a rescan is outstanding.
@@ -526,8 +626,17 @@ function Invoke-GetSnapshotsAction {
     }
 
     try {
+        # Max snapshots served per request - without a cap, a large snapshot history makes
+        # every page load read and serve the entire archive (each file fully into memory),
+        # which is arbitrarily slow and, combined with the single-threaded accept loop,
+        # freezes the server for the whole read. Most-recent-first covers the actual use
+        # case (autoload picks the latest anyway); older history is still on disk, just not
+        # served by this endpoint.
+        $MaxSnapshots = 20
         $Files = Get-ChildItem -LiteralPath $SnapshotDir -File |
-            Where-Object { $_.Name -match '^NetworkMap_.*\.json(\.enc)?$' -and $_.Name -notmatch '\.tmp\.json(\.enc)?$' }
+            Where-Object { $_.Name -match '^NetworkMap_.*\.json(\.enc)?$' -and $_.Name -notmatch '\.tmp\.json(\.enc)?$' } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First $MaxSnapshots
 
         # Per-file try/catch: a single locked/unreadable file (e.g. a concurrent crawl mid-
         # write, a permissions issue) must not 500 the whole autoload - skip it and serve
@@ -535,12 +644,17 @@ function Invoke-GetSnapshotsAction {
         # doesn't discard the rest" convention (app.js). -LiteralPath on both calls - a
         # filename containing [ or ] would otherwise be wildcard-interpreted by -Path.
         $Snapshots = @($Files | ForEach-Object {
+            # Captured into a named variable because inside the catch block below, $_ is
+            # rebound to the ErrorRecord (shadowing this ForEach-Object iteration variable) -
+            # referencing $_.FullName there would silently evaluate against the ErrorRecord
+            # instead of the file, losing the filename from the log line.
+            $File = $_
             try {
-                $Content = Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8
+                $Content = Get-Content -LiteralPath $File.FullName -Raw -Encoding UTF8
                 if ([string]::IsNullOrEmpty($Content)) { return }
-                @{ name = $_.Name; content = $Content }
+                @{ name = $File.Name; content = $Content }
             } catch {
-                Write-MapperDebugLog "GET-SNAPSHOTS WARNING [$($_.FullName)] Skipped unreadable snapshot: $_"
+                Write-MapperDebugLog "GET-SNAPSHOTS WARNING [$($File.FullName)] Skipped unreadable snapshot: $_"
             }
         })
 
@@ -704,6 +818,11 @@ function Start-MapperWebServer {
     $script:PendingScan = $null
     $script:OrphanedScans = [System.Collections.Generic.List[object]]::new()
     $script:PendingScanNetwork = $null
+    # Backs /api/ping - single-slot, matching Invoke-RescanAction's "one in-flight job" choice.
+    $script:PingPool = [runspacefactory]::CreateRunspacePool(1, 1)
+    $script:PingPool.Open()
+    $script:PendingPing = $null
+    $script:OrphanedPings = [System.Collections.Generic.List[object]]::new()
     # -JunosUsername/-JunosPassword are only the seed (decrypted once at startup).
     # Script-scoped so Invoke-SaveConfigAction can update them live when credentials are
     # saved from the Settings tab, without requiring a process restart.
@@ -799,6 +918,13 @@ function Start-MapperWebServer {
                         $Body = Read-WebRequestBody -Request $Request
                         Invoke-PingAction -Response $Response -Body $Body
                     }
+                } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/ping/status") {
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
+                        Invoke-PingStatusAction -Response $Response -JobId $JobId
+                    }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/client-error") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
@@ -864,5 +990,9 @@ function Start-MapperWebServer {
         }
         $script:RescanPool.Close()
         $script:RescanPool.Dispose()
+        if ($script:PendingPing) { try { $script:PendingPing.PS.Stop() } catch {}; $script:PendingPing.PS.Dispose() }
+        foreach ($Orphan in $script:OrphanedPings) { try { $Orphan.PS.Stop() } catch {}; $Orphan.PS.Dispose() }
+        $script:PingPool.Close()
+        $script:PingPool.Dispose()
     }
 }

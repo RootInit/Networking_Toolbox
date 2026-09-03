@@ -51,22 +51,36 @@ var TopologyCrypto = (function() {
             throw new Error(`Iteration count out of range: ${envelope.iterations}`);
         }
 
-        var saltBytes = b64ToBytes(envelope.salt);
-        var ivBytes = b64ToBytes(envelope.iv);
-        var cipherBytes = b64ToBytes(envelope.ciphertext);
-        var macBytes = b64ToBytes(envelope.mac);
+        // Everything below can throw a raw browser exception on a malformed/corrupted
+        // envelope: atob() throws DOMException on non-base64 input, and
+        // crypto.subtle.decrypt() throws DOMException (OperationError) when ciphertext
+        // isn't a multiple of the AES block size. Normalize all of that - same as the
+        // wrong-password/bad-MAC case - so the caller can't tell "bad password" apart
+        // from "corrupt file" any worse than it already can't, and never sees a raw
+        // exception escape this function.
+        try {
+            var saltBytes = b64ToBytes(envelope.salt);
+            var ivBytes = b64ToBytes(envelope.iv);
+            var cipherBytes = b64ToBytes(envelope.ciphertext);
+            var macBytes = b64ToBytes(envelope.mac);
 
-        var keys = await deriveKeyMaterial(password, saltBytes, envelope.iterations);
+            var keys = await deriveKeyMaterial(password, saltBytes, envelope.iterations);
 
-        // Verify MAC before decrypting: a wrong password fails clearly here instead of
-        // producing a confusing AES-CBC padding exception.
-        var macKey = await crypto.subtle.importKey('raw', keys.macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
-        var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, concatBytes(ivBytes, cipherBytes));
-        if (!macOk) throw new Error('Incorrect password, or the file is corrupted.');
+            // Verify MAC before decrypting: a wrong password fails clearly here instead of
+            // producing a confusing AES-CBC padding exception.
+            var macKey = await crypto.subtle.importKey('raw', keys.macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+            var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, concatBytes(ivBytes, cipherBytes));
+            if (!macOk) throw new Error('Incorrect password, or the file is corrupted.');
 
-        var encKey = await crypto.subtle.importKey('raw', keys.encKeyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
-        var plainBuf = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, encKey, cipherBytes);
-        return new TextDecoder().decode(plainBuf);
+            var encKey = await crypto.subtle.importKey('raw', keys.encKeyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
+            var plainBuf = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, encKey, cipherBytes);
+            return new TextDecoder().decode(plainBuf);
+        } catch (err) {
+            if (err instanceof Error && err.message === 'Incorrect password, or the file is corrupted.') {
+                throw err;
+            }
+            throw new Error('Incorrect password, or the file is corrupted.');
+        }
     }
 
     var TopologyCryptoExports = { decryptEnvelope: decryptEnvelope };

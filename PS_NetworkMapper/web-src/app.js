@@ -354,7 +354,16 @@ window.autoloadLastScan = async function() {
 
     if (loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0) return;
     var files = entries.map(e => new File([e.content], e.name, { type: 'application/json' }));
-    await window.processSelectedFiles(files);
+    // This is a silent background autoload, not a user-initiated action - a single corrupt/
+    // malformed archived snapshot must not surface the fatal red error state (processSelectedFiles
+    // re-throws once files.length === 1, since tolerateFailures only kicks in for multi-file
+    // batches). Swallow and log instead, matching every other documented failure mode above
+    // (nothing to load, fetch fails, encrypted-with-no-cached-password) which already fail silently.
+    try {
+        await window.processSelectedFiles(files);
+    } catch (err) {
+        console.warn('Autoload of the last scan failed - leaving manual load available.', err);
+    }
 };
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -406,6 +415,14 @@ window.processSelectedFiles = async function(files) {
     // Reset the map's location editor too, before loadedSnapshots/deviceByIp are reassigned
     // wholesale - left open, its editorTargetIp would point into data that no longer exists.
     window.closeLocationEditor();
+    // A rescan poll in flight would otherwise eventually splice its result into whichever
+    // snapshot occupies its captured array slot once loadedSnapshots is replaced below -
+    // mergeRescannedDevice's own targetSnapshot check catches that too, but there's no
+    // reason to let a now-pointless poll keep running.
+    if (window.cancelPendingRescan) window.cancelPendingRescan();
+    // Same reasoning for an in-flight ping poll - its result would otherwise paint under
+    // whichever device now occupies the drawer once loadedSnapshots is replaced below.
+    if (window.cancelPendingPing) window.cancelPendingPing();
 
     var newSnapshots = [];
     var skipped = []; // {name, reason}[] - only used/reported for multi-file batches
@@ -447,6 +464,16 @@ window.processSelectedFiles = async function(files) {
 
         if (myGeneration !== loadFilesGeneration) return; // superseded while reading files
         loadedSnapshots = newSnapshots;
+        // A previously-rendered search result row carries an onclick closure over the OLD
+        // loadedSnapshots/deviceByIp - once those are replaced, that row can reopen a drawer
+        // for a device that no longer exists, or (worse) one that now resolves to a
+        // different, unrelated device at the same IP. Clear the search UI state alongside
+        // the data it was built from.
+        var searchResultsEl = document.getElementById('searchResults');
+        if (searchResultsEl) searchResultsEl.innerHTML = '';
+        var globalSearchEl = document.getElementById('globalSearch');
+        if (globalSearchEl) globalSearchEl.value = '';
+        searchHighlightQuery = ""; // matches its declared default above
         window.showProgress("Indexing search data...", 100, true);
         await nextPaint();
         if (myGeneration !== loadFilesGeneration) return;

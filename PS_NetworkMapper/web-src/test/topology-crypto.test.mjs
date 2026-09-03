@@ -63,3 +63,32 @@ test('decryptEnvelope rejects the wrong password with a clear error, not a crypt
     /Incorrect password, or the file is corrupted/
   );
 });
+
+test('decryptEnvelope normalizes a non-base64 field (corrupted file) instead of throwing a raw DOMException', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  envelope.ciphertext = 'not-valid-base64!!!not-valid-base64!!!'; // '!' is not in the base64 alphabet
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    (err) => err instanceof Error && err.message === 'Incorrect password, or the file is corrupted.'
+  );
+});
+
+test('decryptEnvelope normalizes a missing envelope field instead of throwing a raw exception', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  delete envelope.salt;
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    (err) => err instanceof Error && err.message === 'Incorrect password, or the file is corrupted.'
+  );
+});
+
+test('decryptEnvelope normalizes a ciphertext length that is not a multiple of the AES block size', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  // Valid base64, but decodes to a byte length that isn't a multiple of 16 - AES-CBC decrypt
+  // itself throws a raw DOMException (OperationError) on this, distinct from a bad-base64 field.
+  envelope.ciphertext = b64(new Uint8Array([1, 2, 3, 4, 5]));
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    (err) => err instanceof Error && err.message === 'Incorrect password, or the file is corrupted.'
+  );
+});

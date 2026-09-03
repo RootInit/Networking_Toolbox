@@ -105,6 +105,15 @@ function Unprotect-TopologyPayload {
         throw "Incorrect password, or the file is corrupted."
     }
 
+    # [Convert]::FromBase64String("") succeeds and returns a 0-length array, so it doesn't
+    # hit the catch above. An empty array would then hit Get-TopologyKeyMaterial's Mandatory
+    # -Salt parameter binding and throw a raw ParameterBindingValidationException instead of
+    # this function's clean error - check explicitly instead of letting parameter binding be
+    # the thing that throws.
+    if ($SaltBytes.Length -eq 0 -or $IvBytes.Length -eq 0 -or $CipherBytes.Length -eq 0 -or $MacBytes.Length -eq 0) {
+        throw "Incorrect password, or the file is corrupted."
+    }
+
     $KeyMaterial = Get-TopologyKeyMaterial -Password $Password -Salt $SaltBytes -Iterations $IterCheck
 
     $Hmac = [System.Security.Cryptography.HMACSHA256]::new($KeyMaterial.MacKey)

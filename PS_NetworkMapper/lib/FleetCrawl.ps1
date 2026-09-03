@@ -4,6 +4,7 @@
 # Not meant to be run directly - dot-source it, then call Invoke-FleetCrawl.
 
 . (Join-Path $PSScriptRoot "TopologyCrypto.ps1")
+. (Join-Path $PSScriptRoot "SshHelpers.ps1")
 
 function Invoke-FleetCrawl {
     param(
@@ -28,6 +29,11 @@ function Invoke-FleetCrawl {
         [switch]$Log
     )
 
+    # A new crawl session starts here - sweep up any plaintext credential/askpass files a prior
+    # crashed run (this crawl or Connect-Switch.ps1) left behind in %TEMP% before workers start
+    # writing their own.
+    Clear-StaleJunosTempFiles
+
     $Encrypted = $null -ne $EncKey
     # Swallow logging failures (e.g. read-only log dir) - losing a debug line shouldn't kill the crawl.
     function Write-DebugLogLocal {
@@ -50,6 +56,38 @@ function Invoke-FleetCrawl {
             $Envelope | ConvertTo-Json -Depth 5 | Out-File -FilePath $Path -Encoding utf8
         } else {
             $PlainJson | Out-File -FilePath $Path -Encoding utf8
+        }
+    }
+
+    # Every worker's ssh.exe is launched (inside Get-JunosNodeData.ps1) as `cmd.exe /c ssh.exe
+    # ...` from THIS process's runspace pool, so both cmd.exe and its ssh.exe grandchild are
+    # OS-level descendants of the current PID - not of any handle FleetCrawl.ps1 holds.
+    # $PS.Stop()/.Dispose() only tear down the managed PowerShell pipeline; they have no idea a
+    # native grandchild process exists, so abandoning a hung job leaks a live ssh.exe with its
+    # TCP session to the switch still open. Since many jobs share this one parent PID
+    # concurrently, match candidates on command line (the target IP is always the last ssh.exe
+    # argument, "$Username@$TargetIP") plus creation time (>= this job's start), not just name.
+    function Stop-JunosOrphanProcessesLocal {
+        param([Parameter(Mandatory=$true)][string]$TargetIP, [Parameter(Mandatory=$true)][datetime]$SinceTime)
+        try {
+            # Anchored on the literal "$Username@$TargetIP" token Get-JunosSshArgs always
+            # appends last (see SshHelpers.ps1). A bare "*$TargetIP*" wildcard would also match
+            # e.g. 10.1.1.5 against a concurrently-running job for 10.1.1.50-59, killing a
+            # healthy in-flight scan instead of only the abandoned one.
+            $Candidates = Get-CimInstance Win32_Process -Filter "Name='ssh.exe' OR Name='cmd.exe'" -ErrorAction Stop |
+                Where-Object { $_.CommandLine -and $_.CommandLine -match "@$([regex]::Escape($TargetIP))(\s|$)" -and $_.CreationDate -ge $SinceTime }
+            # Kill ssh.exe before cmd.exe: once the cmd.exe parent is gone there's no longer a
+            # process-tree link to fall back on if a later scan's command-line match ever misses.
+            foreach ($Proc in ($Candidates | Sort-Object { if ($_.Name -eq 'ssh.exe') { 0 } else { 1 } })) {
+                try {
+                    Stop-Process -Id $Proc.ProcessId -Force -ErrorAction Stop
+                    Write-DebugLogLocal "ORCHESTRATOR CLEANUP: killed orphaned $($Proc.Name) (PID $($Proc.ProcessId)) for $TargetIP"
+                } catch {
+                    Write-DebugLogLocal "ORCHESTRATOR CLEANUP: failed to kill orphan PID $($Proc.ProcessId) ($($Proc.Name)) for $($TargetIP): $_"
+                }
+            }
+        } catch {
+            Write-DebugLogLocal "ORCHESTRATOR CLEANUP: Stop-JunosOrphanProcessesLocal failed for $($TargetIP): $_"
         }
     }
 
@@ -94,12 +132,53 @@ function Invoke-FleetCrawl {
     $LastWriteTime = Get-Date
     $PendingWrites = 0
 
+    # Circuit breaker: the same Username/Password is retried against every device in the queue.
+    # On a TACACS+/RADIUS estate with lockout-after-N-failed-attempts, one mistyped password
+    # could otherwise lock the account out fleet-wide. Track consecutive AuthFailed results and
+    # abort early (rather than hammering every remaining device with the same bad credential)
+    # once the streak crosses a small threshold. Any non-AuthFailed result resets the streak,
+    # so this only fires on a genuine run of failures, not a few scattered ones.
+    $ConsecutiveAuthFailures = 0
+    $TotalAuthFailures = 0
+    $AuthFailureThreshold = 3
+
+    # PowerShell instances whose async Stop() (BeginStop) is in flight, awaiting EndStop()+
+    # Dispose() once it actually completes - see the "async stop" comment at the cleanup site
+    # below for why this can't just be done inline.
+    $PendingDisposal = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    function Complete-PendingDisposalsLocal {
+        param([bool]$OnlyCompleted = $true)
+        for ($i = $PendingDisposal.Count - 1; $i -ge 0; $i--) {
+            $Entry = $PendingDisposal[$i]
+            if ($Entry.Async.IsCompleted) {
+                try { $Entry.PS.EndStop($Entry.Async) } catch {}
+                try { $Entry.PS.Dispose() } catch {}
+                $PendingDisposal.RemoveAt($i)
+            } elseif (-not $OnlyCompleted) {
+                # Final drain, entry not actually done yet: EndStop() blocks until completion
+                # just like the original Stop() call did, so don't call it here - that would
+                # reintroduce the exact hang this fix removes. Dispose() alone is the
+                # documented Stop()-then-dispose behavior too, but this only runs once, at
+                # crawl shutdown, on whatever (rare) entry hasn't finished in the 250ms-polled
+                # window since it was abandoned - an acceptable, bounded, one-time cost instead
+                # of a risk in the hot per-iteration path.
+                try { $Entry.PS.Dispose() } catch {}
+                $PendingDisposal.RemoveAt($i)
+            }
+        }
+    }
+
     Write-TopologyOutputLocal -Topology @() -Path $OutputFile -ScanTimestampIso $ScanTimestampIso
 
     try {
         Write-Host "`nStarting Crawl with $MaxConcurrent Threads. Press Ctrl+C to abort gracefully.`n" -ForegroundColor Yellow
 
         while ($Queue.Count -gt 0 -or $Jobs.Count -gt 0) {
+
+            # 0. Finish off any async Stop()s that completed since the last iteration (loop
+            # ticks every 250ms below, so this is cheap and never blocks).
+            Complete-PendingDisposalsLocal
 
             # 1. Fill available thread slots (Safely dequeueing)
             while ($Jobs.Count -lt $MaxConcurrent -and $Queue.Count -gt 0) {
@@ -137,6 +216,31 @@ function Invoke-FleetCrawl {
                 if (-not $Job.Handle.IsCompleted -and ((Get-Date) - $Job.StartTime).TotalSeconds -gt 65) {
                     Write-DebugLogLocal "ORCHESTRATOR TIMEOUT: Abandoning hung thread for $($Job.IP)"
                     Write-Host "`n[!] Timed out waiting on $($Job.IP) - abandoning and continuing." -ForegroundColor Red
+
+                    # Previously this device was just dropped from $TopologyList - silently
+                    # different from a worker-level failure (bad password, connection refused),
+                    # which DOES get added with its own ScanStatus. Add a synthetic minimal node
+                    # so both failure classes are represented consistently for the UI/consumers.
+                    # Mirrors Get-JunosNodeData.ps1's $NodeData initializer field-for-field
+                    # (Devices consuming this - the web UI - are owned by other agents; a node
+                    # missing keys a real one always has would fail there, not here) plus the
+                    # ScanStatus/ScanError contract.
+                    $TimeoutNode = @{
+                        DeviceIP = $Job.IP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
+                        StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+                        Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
+                        MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
+                        MedNeighbors = @(); Configuration = "Unknown";
+                        ScanStatus = "Timeout"
+                        ScanError  = "Orchestrator gave up waiting on $($Job.IP) after 65s (job abandoned)."
+                    }
+                    $TopologyList.Add($TimeoutNode)
+                    $PendingWrites++
+                    # A timeout isn't an auth failure - only reset the consecutive streak
+                    # (not $TotalAuthFailures, which is a whole-crawl tally per the circuit
+                    # breaker's "3 in a row, OR across the whole crawl" requirement).
+                    $ConsecutiveAuthFailures = 0
+
                     $JobsToRemove += $Job
                     continue
                 }
@@ -165,6 +269,14 @@ function Invoke-FleetCrawl {
                             $TopologyList.Add($Node)
                             $PendingWrites++
 
+                            if ($Node.ScanStatus -eq "AuthFailed") {
+                                $ConsecutiveAuthFailures++
+                                $TotalAuthFailures++
+                                Write-DebugLogLocal "ORCHESTRATOR: auth failures - consecutive=$ConsecutiveAuthFailures total=$TotalAuthFailures (threshold $AuthFailureThreshold)"
+                            } else {
+                                $ConsecutiveAuthFailures = 0
+                            }
+
                             foreach ($Neigh in $Node.Neighbors) {
                                 $NIP = $Neigh.ManagementIP
                                 if ([string]::IsNullOrEmpty($NIP)) { continue }
@@ -192,11 +304,59 @@ function Invoke-FleetCrawl {
                 }
             }
 
-            # 3. Clean up processed or hung jobs
+            # 3. Clean up processed or hung jobs.
+            #
+            # PowerShell.Stop() is a documented SYNCHRONOUS API: it blocks the calling thread
+            # until the pipeline has actually stopped, and can't preempt an uninterruptible
+            # native call inside the worker (e.g. Process.WaitForExit, or a blocked
+            # StandardInput.WriteLine on a dead pipe). This crawl loop is single-threaded, so a
+            # stuck pipeline could freeze the *entire* crawl right here despite already having
+            # logged "abandoning and continuing" above. Use the async BeginStop() instead - it
+            # returns immediately - and defer EndStop()+Dispose() to $PendingDisposal, drained
+            # once each async Stop() actually completes (step 0 above, polled every 250ms). A
+            # scriptblock passed as BeginStop's AsyncCallback would run on an arbitrary
+            # threadpool thread with no PowerShell runspace attached, which is unreliable for
+            # invoking PS methods - polling from the main loop avoids that entirely and never
+            # blocks it.
             foreach ($DeadJob in $JobsToRemove) {
-                try { $DeadJob.PS.Stop() } catch { Write-DebugLogLocal "Stop() failed for $($DeadJob.IP): $_" }
-                try { $DeadJob.PS.Dispose() } catch { Write-DebugLogLocal "Dispose() failed for $($DeadJob.IP): $_" }
+                try {
+                    $StopHandle = $DeadJob.PS.BeginStop($null, $null)
+                    $PendingDisposal.Add([PSCustomObject]@{ PS = $DeadJob.PS; Async = $StopHandle })
+                } catch {
+                    Write-DebugLogLocal "BeginStop() failed for $($DeadJob.IP): $_"
+                    try { $DeadJob.PS.Dispose() } catch {}
+                }
+
+                # Also reap any orphaned ssh.exe/cmd.exe OS child process this job may have left
+                # running - see Stop-JunosOrphanProcessesLocal above for why PS.Stop()/Dispose()
+                # alone can't do this.
+                Stop-JunosOrphanProcessesLocal -TargetIP $DeadJob.IP -SinceTime $DeadJob.StartTime
+
                 $Jobs.Remove($DeadJob) | Out-Null
+            }
+
+            # Circuit breaker: bail out of the crawl before hammering more devices with a
+            # credential that's clearly failing repeatedly. Either 3-in-a-row or 3 total across
+            # the whole crawl trips it, so an estate that interleaves scattered auth failures
+            # with unrelated timeouts (which reset the consecutive streak but not the total)
+            # still gets caught.
+            if ($ConsecutiveAuthFailures -ge $AuthFailureThreshold -or $TotalAuthFailures -ge $AuthFailureThreshold) {
+                Write-DebugLogLocal "ORCHESTRATOR ABORT: consecutive=$ConsecutiveAuthFailures total=$TotalAuthFailures auth failures (threshold $AuthFailureThreshold) - aborting crawl to avoid a fleet-wide lockout."
+                Write-Host "`n[!] Aborting crawl: repeated authentication failures ($TotalAuthFailures total) - check the credential before retrying (avoiding a possible account lockout)." -ForegroundColor Red
+
+                # Jobs still in flight at this point weren't touched by step 3 above (that only
+                # handled completed/timed-out ones this cycle) - stop/dispose and reap them here
+                # too so breaking out of the loop below doesn't leak their pipelines or ssh.exe
+                # children the same way an abandoned timeout would.
+                foreach ($LiveJob in $Jobs) {
+                    try {
+                        $StopHandle = $LiveJob.PS.BeginStop($null, $null)
+                        $PendingDisposal.Add([PSCustomObject]@{ PS = $LiveJob.PS; Async = $StopHandle })
+                    } catch { try { $LiveJob.PS.Dispose() } catch {} }
+                    Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime
+                }
+                $Jobs.Clear()
+                break
             }
 
             # 4. Batch JSON Write (Only write if pending data exists AND 5 seconds have passed)
@@ -215,6 +375,13 @@ function Invoke-FleetCrawl {
 
             Start-Sleep -Milliseconds 250
         }
+
+        # Drain any still-pending async Stop()s (from the last iteration's cleanup, or the
+        # circuit breaker's abort path) before returning. $OnlyCompleted:$false forces a final
+        # best-effort EndStop()+Dispose() on whatever hasn't finished yet rather than waiting
+        # indefinitely - the crawl is ending either way, so a wedged pipeline here just gets
+        # abandoned the same as PS.Stop() would previously have blocked on.
+        Complete-PendingDisposalsLocal -OnlyCompleted:$false
 
         # Last write this run gets (no "next cycle" retry like step 4). A failure here must
         # not stop the crawl from reporting completion - the caller still gets $TopologyList
@@ -263,6 +430,10 @@ function Invoke-FleetCrawl {
         throw
     }
     finally {
+        # Belt-and-suspenders: the normal-exit path already drains this before returning, but
+        # an unhandled throw from the `catch` block above (re-thrown, so it skips that drain)
+        # would otherwise leak whatever's still pending here.
+        Complete-PendingDisposalsLocal -OnlyCompleted:$false
         $RunspacePool.Close(); $RunspacePool.Dispose()
         if (Test-Path $TempOutputFile) { Remove-Item -Path $TempOutputFile -Force }
     }

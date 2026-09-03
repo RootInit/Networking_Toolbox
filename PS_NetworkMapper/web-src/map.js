@@ -285,6 +285,9 @@ window.renderMapMarkers = function() {
     mapMarkersByIp.forEach(function (marker) { leafletMap.removeLayer(marker); });
     mapMarkersByIp.clear();
     if (window.mapEdgeLayer) { leafletMap.removeLayer(window.mapEdgeLayer); window.mapEdgeLayer = null; }
+    // Every marker is about to be torn down and rebuilt - any prior "Edit position" arming
+    // pointed at an object that no longer exists on the map.
+    currentlyArmedMarker = null;
 
     var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
     var deviceByIpLocal = new Map(globalTopologyData.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
@@ -329,6 +332,7 @@ window.renderMapMarkers = function() {
             // indefinitely (dragging.enable() has no other timeout/blur to turn it back off).
             // No-op if a real drag already disabled it via dragend below.
             if (marker.dragging.enabled()) marker.dragging.disable();
+            if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
             window.openRightDrawer(ip);
         });
         // Second entry point into the same window.openLocationEditor(ip) the Unplaced list
@@ -355,12 +359,23 @@ window.renderMapMarkers = function() {
         repositionLink.addEventListener('click', function (evt) {
             evt.preventDefault();
             marker.closePopup();
+            // Only one marker is ever draggable at a time - disarm whichever marker was
+            // previously armed (bubblingMouseEvents:false means clicking THIS marker to open
+            // its popup never reached leafletMap's 'click' handler, so the previous marker's
+            // one-shot disarm listener below would otherwise never fire).
+            if (currentlyArmedMarker && currentlyArmedMarker !== marker && currentlyArmedMarker.dragging.enabled()) {
+                currentlyArmedMarker.dragging.disable();
+            }
             marker.dragging.enable();
+            currentlyArmedMarker = marker;
             window.showMapStatus('Drag "' + (meta.hostname !== 'Unknown' ? meta.hostname : ip) + '" to reposition it - release to stage the change.');
             // Covers "changed their mind and clicked elsewhere on the map" - the marker's own
             // click handler above covers "clicked the marker itself instead of dragging it".
             // Harmless no-op if a real drag already disabled dragging by the time this fires.
-            leafletMap.once('click', function () { marker.dragging.disable(); });
+            leafletMap.once('click', function () {
+                marker.dragging.disable();
+                if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
+            });
         });
         popupEl.appendChild(repositionLink);
         marker.bindPopup(popupEl);
@@ -369,6 +384,7 @@ window.renderMapMarkers = function() {
         // (never fires) until "Edit position" arms it.
         marker.on('dragend', function () {
             marker.dragging.disable();
+            if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
             var newLatLng = marker.getLatLng();
             var currentDevice = deviceByIp.get(String(ip));
             // Guarded the same way commitLocationEdit is - a snapshot reload/rescan while
@@ -434,6 +450,13 @@ window.revealDeviceOnMap = function(ip) {
     leafletMap.setView(marker.getLatLng(), Math.max(leafletMap.getZoom(), 17), { animate: true });
     return true;
 };
+
+// The marker (if any) currently armed for drag-to-reposition via "Edit position" below.
+// Leaflet markers default to bubblingMouseEvents:false, so clicking marker B to open its own
+// popup never bubbles to leafletMap's 'click' handler and can't disarm marker A's one-shot
+// listener that way - only tracking the armed marker explicitly and disarming it here (when
+// a DIFFERENT marker gets armed) guarantees at most one marker is ever draggable at a time.
+var currentlyArmedMarker = null;
 
 var editorTargetIp = null;
 // keyType+':'+key (from bestKeyForSave) -> { entry, deviceIp, deviceKeysAtCommit },
@@ -537,6 +560,18 @@ window.renderSaveConfigButton = function() {
     document.getElementById('mapview').parentElement.appendChild(btn);
 };
 
+// Pure helper (exported below for node:test): which pendingConfigEdits keys are safe to
+// remove after a successful save. A key is only cleared if the entry currently sitting
+// under it in pendingConfigEditsNow is IDENTICALLY (by reference) the one that was actually
+// sent - if a newer edit landed on the same key while the save's fetch was in flight (a
+// second drag, or the location editor committed again), pendingConfigEditsNow.get(key) is a
+// different object and that key must survive uncleared.
+function computeSaveKeysToClear(includedKeys, includedEditsSnapshot, pendingConfigEditsNow) {
+    return includedKeys.filter(function (key) {
+        return pendingConfigEditsNow.get(key) === includedEditsSnapshot.get(key);
+    });
+}
+
 window.saveConfiguration = async function() {
     // Config may not have loaded yet if this is triggered before Map view was ever opened.
     // ensureConfigLoaded returns false if the load failed/was cancelled, in which case
@@ -548,7 +583,17 @@ window.saveConfiguration = async function() {
         return false;
     }
 
-    // Merge pending edits over the currently-loaded config entries. An untouched entry
+    // Snapshot exactly which edits are going into THIS save, and the edit objects
+    // themselves, before the request goes out. The POST payload below is built synchronously
+    // from this snapshot, not from pendingConfigEdits read live later - a marker drag or the
+    // location-editor modal (reachable mid-save; its backdrop is pointer-events:none) can add
+    // a new entry to pendingConfigEdits while this request is in flight, and that entry must
+    // survive the eventual pendingConfigEdits.clear() a naive "clear everything on success"
+    // would otherwise do.
+    var includedKeys = Array.from(pendingConfigEdits.keys());
+    var includedEditsSnapshot = new Map(includedKeys.map(function (k) { return [k, pendingConfigEdits.get(k)]; }));
+
+    // Merge the included edits over the currently-loaded config entries. An untouched entry
     // survives unchanged.
     //
     // Before inserting each pending edit, collapse any STALE entry left by a key change: if
@@ -558,7 +603,7 @@ window.saveConfiguration = async function() {
     // pending.deviceKeysAtCommit holds every candidate key (serial/hostname/ip) the device
     // had at commit time, so all of them get removed here before the new entry is inserted.
     var merged = new Map(mapConfigEntries.map(function (e) { return [e.keyType + ':' + e.key, e]; }));
-    pendingConfigEdits.forEach(function (pending) {
+    includedEditsSnapshot.forEach(function (pending) {
         var keys = pending.deviceKeysAtCommit;
         ['serial', 'hostname', 'ip'].forEach(function (keyType) {
             var value = keys[keyType];
@@ -584,9 +629,16 @@ window.saveConfiguration = async function() {
         return false;
     }
     mapConfigEntries = devices;
-    pendingConfigEdits.clear();
+    // Only remove the entries actually included in this successful save - not the whole map -
+    // so an edit added to pendingConfigEdits during the request (or a newer edit that landed
+    // on the same key) survives and is still treated as unsaved / included in the next save.
+    computeSaveKeysToClear(includedKeys, includedEditsSnapshot, pendingConfigEdits).forEach(function (key) {
+        pendingConfigEdits.delete(key);
+    });
     window.renderSaveConfigButton();
-    window.showMapStatus('Configuration saved.');
+    window.showMapStatus(pendingConfigEdits.size > 0
+        ? 'Configuration saved. ' + pendingConfigEdits.size + ' more unsaved change(s) made during the save - click Save Configuration to write them.'
+        : 'Configuration saved.');
     window.renderMapMarkers();
     return true;
 };

@@ -101,6 +101,10 @@ $NodeData = @{
     # Full "show configuration | display set" text; redacted from the -Log RawDumps file
     # (see that block below) since it contains secrets.
     Configuration = "Unknown"
+    # Distinguishes a real, successfully-scanned isolated leaf switch from a device that
+    # was never actually reached, so callers (e.g. FleetCrawl.ps1) can tell "empty because
+    # unreachable" apart from "empty because it genuinely has no neighbors/clients."
+    ScanStatus = "Ok"; ScanError = $null
 }
 
 try {
@@ -136,6 +140,16 @@ try {
         # a step this early return skips) - force it to @() so it still serializes as JSON
         # "[]" instead of "{}", which some consumers (e.g. CSV export) choke on.
         $NodeData.Interfaces = @()
+        # Classify the failure from ssh's stderr so a ghost node (never reached) is
+        # distinguishable from a real, successfully-scanned isolated leaf switch.
+        $NodeData.ScanStatus = if ($ErrSummary -match "(?i)permission denied|authentication failed|too many authentication failures") {
+            "AuthFailed"
+        } elseif ($ErrSummary -match "(?i)connection refused|no route to host|network is unreachable|operation timed out|connection timed out|could not resolve hostname|host is down|no address associated") {
+            "Unreachable"
+        } else {
+            "Error"
+        }
+        $NodeData.ScanError = $ErrSummary
         return @{ Node = $NodeData; Logs = $Logs }
     }
 
@@ -181,17 +195,23 @@ try {
         foreach ($Line in ($DataDict["VIRTUAL_CHASSIS"] -split "`n")) {
             $Line = $Line.Trim()
             if ($Line -match "^(?<id>\d+)\s+") {
+                # Captured immediately, before any further -match calls below overwrite
+                # $Matches - otherwise reading $Matches.id later picks up whichever regex
+                # (role/serial/model) happened to match last, not the id match, leaving
+                # FPC blank.
+                $fpcId = $Matches.id
+
                 $role = "Unknown"
                 if ($Line -match "(Master|Backup|Linecard)") { $role = $Matches[1] }
-                
+
                 $serial = "Unknown"
                 if ($Line -match "\b([A-Z0-9]{10,})\b") { $serial = $Matches[1] }
-                
+
                 $model = "Unknown"
-                if ($Line -match "\b(ex\d{4}[^\s]*|qfx\d{4}[^\s]*|srx\d{4}[^\s]*)\b") { $model = $Matches[1] }
-                
+                if ($Line -match "(?i)\b(ex\d{4}[^\s]*|qfx\d{4}[^\s]*|srx\d{4}[^\s]*)\b") { $model = $Matches[1] }
+
                 if ($serial -ne "Unknown") {
-                    $NodeData.StackMembers += [PSCustomObject]@{ FPC = $Matches.id; Model = $model; Serial = $serial; Role = $role }
+                    $NodeData.StackMembers += [PSCustomObject]@{ FPC = $fpcId; Model = $model; Serial = $serial; Role = $role }
                     $ParsedStack = $true
                 }
             }
@@ -245,7 +265,10 @@ try {
     foreach ($Line in ($DataDict["INTERFACES_TERSE"] -split "`n")) {
         $Line = $Line.Trim()
         if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?<admin>up|down)\s+(?<link>up|down)") {
-            $p = $Matches.port
+            # Strip any trailing ".N" logical-unit suffix so a port's physical line and its
+            # logical-unit line(s) (e.g. "ge-0/0/1" and "ge-0/0/1.100") collapse onto the
+            # same dict entry instead of creating duplicate interface rows.
+            $p = $Matches.port -replace "\.\d+$",""
             if (-not $NodeData.Interfaces.ContainsKey($p)) {
                 $NodeData.Interfaces[$p] = @{ Port = $p; Admin = $Matches.admin; Link = $Matches.link; Desc = "Unknown"; STP = "Unknown"; PoE = "Unknown" }
             }
@@ -255,7 +278,7 @@ try {
     foreach ($Line in ($DataDict["INTERFACES_DESC"] -split "`n")) {
         $Line = $Line.Trim()
         if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?:up|down)\s+(?:up|down)\s+(?<desc>.+)$") {
-            $p = $Matches.port
+            $p = $Matches.port -replace "\.\d+$",""
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].Desc = $Matches.desc.Trim() }
         }
     }
@@ -278,7 +301,9 @@ try {
     foreach ($Line in ($DataDict["STP"] -split "`n")) {
         $Line = $Line.Trim()
         if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+.*?(?<state>FWD|BLK|DIS|LRN|LST)") {
-            $p = $Matches.port -replace "\.0$","" 
+            # Strip any trailing ".N" (not just ".0") so this lands on the same collapsed
+            # physical-port entry the terse/desc loops above key by.
+            $p = $Matches.port -replace "\.\d+$",""
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].STP = $Matches.state }
         }
     }
@@ -286,7 +311,7 @@ try {
     foreach ($Line in ($DataDict["POE"] -split "`n")) {
         $Line = $Line.Trim()
         if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?<status>Enabled|Disabled)\s+(?<oper>\S+)\s+\S+\s+(?<class>\S+)\s+(?<power>\d+\.\d+W)") {
-            $p = $Matches.port
+            $p = $Matches.port -replace "\.\d+$",""
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].PoE = "$($Matches.oper) ($($Matches.power))" }
         }
     }
@@ -360,9 +385,13 @@ try {
     }
 
     # --- Parse MAC Table ---
-    $RawMacs = @{} 
+    $RawMacs = @{}
     foreach ($Line in ($DataDict["MAC_TABLE"] -split "`n")) {
-        if ($Line -match "(?<vlan>\S+)\s+(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<flag>[SDLPCNO])\s+.+?(?<interface>(?:ge|xe|et|ae|vcp|bme|reth|me|vme)[a-zA-Z0-9\-\/\.]+)") {
+        # Junos's documented flag legend for "show ethernet-switching table" includes the
+        # two-letter flags SE (statistics enabled) and NM (non-configured MAC) alongside the
+        # single-letter ones; matching only a single char here failed the whole line's regex
+        # and silently dropped that client. Try the two-letter tokens first.
+        if ($Line -match "(?<vlan>\S+)\s+(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<flag>SE|NM|[SDLPCNO])\s+.+?(?<interface>(?:ge|xe|et|ae|vcp|bme|reth|me|vme)[a-zA-Z0-9\-\/\.]+)") {
             $VlanName = $Matches.vlan
             $RawMacs[$Matches.mac.ToLower()] = @{ 
                 Port = $Matches.interface; VLAN_Name = $VlanName; 
@@ -395,12 +424,20 @@ try {
     # mistaken for an uplink and silently swallow its own clients.
     $UplinkPorts = $LldpSwitchPorts
 
+    # Virtual-chassis interconnect (vcp) and management (bme/reth/me/vme) interfaces are
+    # never LLDP neighbors, so they'd never land in $UplinkPorts above - yet the MAC-table
+    # regex above deliberately still matches them (it needs to, for other VC bookkeeping),
+    # so a MAC learned on one of these must be excluded here explicitly or it leaks into
+    # Clients as a fake directly-attached device, the same failure shape as the
+    # already-fixed LACP/AE trunk-VLAN leak.
+    $InterconnectPortPattern = "^(?:vcp|bme|reth|me|vme)"
+
     # --- Build Clients from the MAC table. IP comes from local ARP when available;
     # otherwise "Unknown" until the orchestrator's global enrichment pass. ---
     foreach ($MacKey in $RawMacs.Keys) {
         $Entry = $RawMacs[$MacKey]
         $physPort = $Entry.Port -replace "\.\d+$",""
-        if ($UplinkPorts.Contains($physPort)) { continue }
+        if ($UplinkPorts.Contains($physPort) -or $physPort -match $InterconnectPortPattern) { continue }
 
         $Client = @{
             IP = if ($ArpDict.ContainsKey($MacKey)) { $ArpDict[$MacKey] } else { "Unknown" }
@@ -416,9 +453,15 @@ try {
         $NodeData.Clients += [PSCustomObject]$Client
     }
 
-} catch { 
+} catch {
     Write-LogMsg "CRITICAL EXCEPTION: $_"
     if ($HumanReadable) { Write-Host "`n[!] SCRIPT EXCEPTION: $_" -ForegroundColor Red }
+    # Reached only after a successful SSH session (ssh's own connect/auth failures are
+    # handled above, before parsing starts) - so any exception here is a parsing/script
+    # error, not a connectivity problem. Still worth flagging so this node isn't mistaken
+    # for a clean scan.
+    $NodeData.ScanStatus = "Error"
+    $NodeData.ScanError = $_.ToString()
 }
 
 $InterfaceArray = @()

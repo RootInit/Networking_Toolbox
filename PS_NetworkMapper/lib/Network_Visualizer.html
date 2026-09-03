@@ -90,12 +90,23 @@ function buildAdjacency(nodeIds, edges) {
 }
 
 // BFS distances from `startId` to every reachable node.
+//
+// Perf: `queue.shift()` is O(n) per call (array-backed queues shift every remaining
+// element down), so a naive BFS here is worse than its nominal O(V+E) - replaced with
+// an index pointer (O(1) dequeue). Also dropped the neighbor sort that used to run on
+// every visit: only dist.size (component size) and the max depth reached matter to
+// computeGraphRoot's caller, and BFS reaches the same set of nodes at the same depths
+// regardless of the order neighbors are visited in, so sorting them bought nothing here
+// (unlike buildPrimaryTree's BFS, where visit order determines which parent a node
+// gets - that sort stays).
 function bfsDistances(adj, startId) {
   const dist = new Map([[startId, 0]]);
   const queue = [startId];
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const neighbors = Array.from(adj.get(current) || []).sort(compareIpIds);
+  let head = 0;
+  while (head < queue.length) {
+    const current = queue[head++];
+    const neighbors = adj.get(current);
+    if (!neighbors) continue;
     for (const next of neighbors) {
       if (!dist.has(next)) {
         dist.set(next, dist.get(current) + 1);
@@ -134,30 +145,74 @@ function computeGraphRoot(nodeIds, edges) {
 
 function buildPrimaryTree(nodeIds, edges, rootId) {
   const adj = buildAdjacency(nodeIds, edges);
-  const parentOf = new Map([[rootId, null]]);
-  const childrenOf = new Map([[rootId, []]]);
+  const parentOf = new Map();
+  const childrenOf = new Map();
   const treeEdgeKeys = new Set();
+  const extraRoots = [];
 
   const edgeKey = (a, b) => [a, b].sort(compareIpIds).join('|');
 
-  const queue = [rootId];
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const neighbors = Array.from(adj.get(current) || []).sort(compareIpIds);
-    for (const next of neighbors) {
-      if (!parentOf.has(next)) {
-        parentOf.set(next, current);
-        childrenOf.set(next, []);
-        childrenOf.get(current).push(next);
-        treeEdgeKeys.add(edgeKey(current, next));
-        queue.push(next);
+  // BFS-grows the tree from `start`, adding every node reachable from it (via `adj`)
+  // that isn't already in parentOf/childrenOf. Used both for the primary root and,
+  // below, for each disconnected component's own local root.
+  function growTreeFrom(start) {
+    parentOf.set(start, null);
+    childrenOf.set(start, []);
+    const queue = [start];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const neighbors = Array.from(adj.get(current) || []).sort(compareIpIds);
+      for (const next of neighbors) {
+        if (!parentOf.has(next)) {
+          parentOf.set(next, current);
+          childrenOf.set(next, []);
+          childrenOf.get(current).push(next);
+          treeEdgeKeys.add(edgeKey(current, next));
+          queue.push(next);
+        }
       }
     }
   }
 
+  growTreeFrom(rootId);
+
+  // Anything the BFS from rootId never reached is a separate fabric island (2+ devices
+  // that only connect to each other, not to the main graph) or a single unreachable
+  // node. It used to just vanish from the diagram here - parentOf/childrenOf never got
+  // an entry for it, so computeVisibleTree (which only walks from rootId) never saw it,
+  // and expandAncestors' parentOf.get() would silently return undefined for it too.
+  // Instead, give each such component its own local root - picked with the same
+  // heuristic as the main root (computeGraphRoot), scoped to just that component's own
+  // nodes/edges - and attach it as an additional top-level entry (parentOf.get(root)
+  // === null, exactly like rootId) so it renders as its own separate tree alongside the
+  // main one instead of disappearing, and stays reachable via expandAncestors/search.
+  const remaining = nodeIds.filter(id => !parentOf.has(id)).sort(compareIpIds);
+  for (const id of remaining) {
+    if (parentOf.has(id)) continue; // already swept into an earlier component this loop
+
+    // Discover this component's full node set via a plain adjacency walk (its root
+    // isn't known yet, so growTreeFrom can't be used for this part).
+    const componentIds = [];
+    const seen = new Set([id]);
+    const stack = [id];
+    while (stack.length > 0) {
+      const cur = stack.pop();
+      componentIds.push(cur);
+      for (const next of (adj.get(cur) || [])) {
+        if (!seen.has(next)) { seen.add(next); stack.push(next); }
+      }
+    }
+
+    const componentIdSet = new Set(componentIds);
+    const componentEdges = edges.filter(e => componentIdSet.has(e.from) && componentIdSet.has(e.to));
+    const localRoot = computeGraphRoot(componentIds, componentEdges);
+    extraRoots.push(localRoot);
+    growTreeFrom(localRoot);
+  }
+
   const secondaryEdges = edges.filter(e => !treeEdgeKeys.has(edgeKey(e.from, e.to)));
 
-  return { parentOf, childrenOf, secondaryEdges };
+  return { parentOf, childrenOf, secondaryEdges, extraRoots };
 }
 
 function collectDescendants(childrenOf, nodeId) {
@@ -176,15 +231,19 @@ function isExpanded(childrenOf, nodeId, expandedNodes, threshold) {
   return childCount <= threshold || expandedNodes.has(nodeId);
 }
 
-function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold) {
+function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold, extraRoots) {
   const visibleNodeIds = [];
   const visibleEdges = [];
   const clusters = new Map();
 
   if (rootId == null) return { visibleNodeIds, visibleEdges, clusters };
 
-  const queue = [rootId];
-  visibleNodeIds.push(rootId);
+  // extraRoots (from buildPrimaryTree) are disconnected fabric islands' own local
+  // roots - rendered as additional top-level entries alongside rootId rather than
+  // silently dropped, so each still needs walking here just like rootId does.
+  const roots = [rootId, ...(extraRoots || [])];
+  const queue = [...roots];
+  visibleNodeIds.push(...roots);
   while (queue.length > 0) {
     const current = queue.shift();
     const children = childrenOf.get(current) || [];
@@ -568,11 +627,44 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
     // synchronous layout crunch blocks the main thread.
     await new Promise(r => setTimeout(r, 0));
     const childrenOf = new Map();
+    const hasIncomingEdge = new Set();
     visibleEdges.forEach(e => {
       if (!childrenOf.has(e.from)) childrenOf.set(e.from, []);
       childrenOf.get(e.from).push(e.to);
+      hasIncomingEdge.add(e.to);
     });
-    return window.GraphLayout.computeRecursiveRadialLayout(visibleNodeIds[0], childrenOf, { ...layoutSettings, deadline });
+
+    // Normally there's exactly one such node - the primary graph root. But a
+    // disconnected fabric island (graph-layout.js's buildPrimaryTree attaches those as
+    // extra top-level entries in visible.visibleNodeIds/visibleEdges rather than
+    // dropping them) surfaces here too: it has no incoming visible edge either, since
+    // nothing connects it to the main tree. Laying out only visibleNodeIds[0]'s subtree
+    // would leave every other component with no computed position at all (graph.js
+    // would then default them all to the same (0, 0), stacking them on top of each
+    // other) - so each root gets its own independent layout pass, offset along x so the
+    // components render as separate, non-overlapping trees.
+    const roots = visibleNodeIds.filter(id => !hasIncomingEdge.has(id));
+    const positions = new Map();
+    // cursorX tracks where the NEXT component's own center should land, computed from
+    // the true extent of the component just placed (not a fixed/one-sided guess) - a
+    // fixed offset derived only from the previous component's extent broke down whenever
+    // a later component (e.g. an unbalanced island, laid out with a much larger radius
+    // than a big-but-round main tree) was wider than the one before it: the two could
+    // still overlap. Each component is centered at cursorX and pushes cursorX out by its
+    // own extent afterward, so the gap between any two components' bounding circles is
+    // always at least NODE_WIDTH*3, regardless of ordering or relative size.
+    let cursorX = null;
+    for (const root of roots) {
+      const sub = window.GraphLayout.computeRecursiveRadialLayout(root, childrenOf, { ...layoutSettings, deadline });
+      let extent = 0;
+      sub.forEach(pos => {
+        extent = Math.max(extent, Math.abs(pos.x), Math.abs(pos.y));
+      });
+      const centerX = (cursorX === null) ? 0 : cursorX + extent;
+      sub.forEach((pos, id) => positions.set(id, { x: pos.x + centerX, y: pos.y }));
+      cursorX = centerX + extent + NODE_WIDTH * 3;
+    }
+    return positions;
   };
 
   // This race is kept as a backstop (e.g. an infinite loop/bug outside computeRecursiveRadialLayout's
@@ -581,8 +673,12 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   // control returns to the event loop for this timer to even run, doLayout() has already
   // settled, whether that took 1 second or 100. computeRecursiveRadialLayout's own `deadline`
   // check above is what actually bounds a slow layout now; see its comment for why.
+  // Tracked so it can be cleared once doLayout() wins the race (the normal case) -
+  // otherwise this timer keeps a Node process (e.g. `node --test`) alive for another
+  // ~9s after every call, waiting to fire a rejection nothing will ever see.
+  let timeoutId;
   const timeout = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('Layout timed out')), LAYOUT_TIMEOUT_MS + 1000);
+    timeoutId = setTimeout(() => reject(new Error('Layout timed out')), LAYOUT_TIMEOUT_MS + 1000);
   });
 
   try {
@@ -602,6 +698,8 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
       }
     }
     return computeGridFallback(visibleNodeIds);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
@@ -2420,22 +2518,36 @@ var TopologyCrypto = (function() {
             throw new Error(`Iteration count out of range: ${envelope.iterations}`);
         }
 
-        var saltBytes = b64ToBytes(envelope.salt);
-        var ivBytes = b64ToBytes(envelope.iv);
-        var cipherBytes = b64ToBytes(envelope.ciphertext);
-        var macBytes = b64ToBytes(envelope.mac);
+        // Everything below can throw a raw browser exception on a malformed/corrupted
+        // envelope: atob() throws DOMException on non-base64 input, and
+        // crypto.subtle.decrypt() throws DOMException (OperationError) when ciphertext
+        // isn't a multiple of the AES block size. Normalize all of that - same as the
+        // wrong-password/bad-MAC case - so the caller can't tell "bad password" apart
+        // from "corrupt file" any worse than it already can't, and never sees a raw
+        // exception escape this function.
+        try {
+            var saltBytes = b64ToBytes(envelope.salt);
+            var ivBytes = b64ToBytes(envelope.iv);
+            var cipherBytes = b64ToBytes(envelope.ciphertext);
+            var macBytes = b64ToBytes(envelope.mac);
 
-        var keys = await deriveKeyMaterial(password, saltBytes, envelope.iterations);
+            var keys = await deriveKeyMaterial(password, saltBytes, envelope.iterations);
 
-        // Verify MAC before decrypting: a wrong password fails clearly here instead of
-        // producing a confusing AES-CBC padding exception.
-        var macKey = await crypto.subtle.importKey('raw', keys.macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
-        var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, concatBytes(ivBytes, cipherBytes));
-        if (!macOk) throw new Error('Incorrect password, or the file is corrupted.');
+            // Verify MAC before decrypting: a wrong password fails clearly here instead of
+            // producing a confusing AES-CBC padding exception.
+            var macKey = await crypto.subtle.importKey('raw', keys.macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
+            var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, concatBytes(ivBytes, cipherBytes));
+            if (!macOk) throw new Error('Incorrect password, or the file is corrupted.');
 
-        var encKey = await crypto.subtle.importKey('raw', keys.encKeyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
-        var plainBuf = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, encKey, cipherBytes);
-        return new TextDecoder().decode(plainBuf);
+            var encKey = await crypto.subtle.importKey('raw', keys.encKeyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
+            var plainBuf = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, encKey, cipherBytes);
+            return new TextDecoder().decode(plainBuf);
+        } catch (err) {
+            if (err instanceof Error && err.message === 'Incorrect password, or the file is corrupted.') {
+                throw err;
+            }
+            throw new Error('Incorrect password, or the file is corrupted.');
+        }
     }
 
     var TopologyCryptoExports = { decryptEnvelope: decryptEnvelope };
@@ -3047,7 +3159,7 @@ async function doRenderVisibleGraph() {
     // Wrapped so a thrown error can't leave the loading overlay stuck at "Computing
     // layout..." forever - the caller only logs a rejection, it doesn't hide progress.
     try {
-        var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, getClusterThreshold());
+        var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, getClusterThreshold(), primaryTree.extraRoots);
         var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges, getLayoutSettings());
         // buildSwitchMap ran while the above awaited - graphRoot/primaryTree/allNodeMeta/
         // `network` are now for a different topology than `visible` was computed from.
@@ -3119,8 +3231,14 @@ function computeSubtreeVlanSets() {
         return set;
     }
     if (graphRoot) visit(graphRoot);
-    // Anything buildPrimaryTree didn't reach from graphRoot still gets its own local
-    // VLANs rather than an undefined lookup later.
+    // Disconnected fabric islands (buildPrimaryTree.extraRoots) are separate trees, not
+    // reachable via graphRoot's own recursion - walk each one too so their subtree VLAN
+    // unions are computed the same way, instead of only getting each node's own local
+    // VLANs via the fallback below.
+    (primaryTree.extraRoots || []).forEach(r => visit(r));
+    // Anything buildPrimaryTree still didn't reach (shouldn't happen now that
+    // extraRoots covers every component, but kept as a safety net) still gets its own
+    // local VLANs rather than an undefined lookup later.
     allNodeMeta.forEach((meta, id) => { if (!result.has(id)) result.set(id, new Set(meta.vlanCache || [])); });
     return result;
 }
@@ -3434,6 +3552,11 @@ window.renderFleetDashboard = function() {
     var daisyChainCount = 0;
     devices.forEach(d => { daisyChainCount += window.detectDaisyChains(d).size; });
 
+    // --- Devices that didn't scan cleanly (ScanStatus/ScanError, set server-side; absent or
+    // "Ok" means a normal successful scan) - tallied separately so they don't inflate/hide
+    // inside the plain "Devices" count above. ---
+    var unreachableDevices = devices.filter(d => d.ScanStatus && d.ScanStatus !== "Ok");
+
     // --- New devices detected in exactly this snapshot ---
     var history = window.updateDeviceHistory();
     var newInThisSnapshot = activeSnapshot ? Object.values(history).filter(h => h.firstSeen === activeSnapshot.scanTimestamp).length : 0;
@@ -3446,6 +3569,7 @@ window.renderFleetDashboard = function() {
     // "New This Snapshot" stays a plain count - it has no single natural list target.
     var html = `<div class="fleet-stats-grid">
         <div class="fleet-stat-card drillable" onclick="window.drillDownStat('devices')"><div class="stat-value">${devices.length}</div><div class="stat-label">Devices</div></div>
+        <div class="fleet-stat-card drillable ${unreachableDevices.length > 0 ? 'critical' : ''}" onclick="window.drillDownStat('unreachable')"><div class="stat-value">${unreachableDevices.length}</div><div class="stat-label">Unreachable / Failed</div></div>
         <div class="fleet-stat-card drillable" onclick="window.drillDownStat('clients')"><div class="stat-value">${totalClients}</div><div class="stat-label">Clients</div></div>
         <div class="fleet-stat-card drillable ${totalAlarms > 0 ? 'critical' : ''}" onclick="window.drillDownStat('alarms')"><div class="stat-value">${totalAlarms}</div><div class="stat-label">Active Alarms</div></div>
         <div class="fleet-stat-card drillable ${dot1xViolations.length > 0 ? 'warn' : ''}" onclick="window.drillDownStat('dot1x')"><div class="stat-value">${dot1xViolations.length}</div><div class="stat-label">Dot1x Violations</div></div>
@@ -4066,6 +4190,15 @@ window.drillDownStat = function(kind) {
             onClick: () => window.goToSearchResult(String(d.DeviceIP), null, activeSnapshotIndex),
         }));
         headerText = `All ${rows.length} Devices`;
+    } else if (kind === 'unreachable') {
+        devices.filter(d => d.ScanStatus && d.ScanStatus !== "Ok").forEach(d => {
+            rows.push({
+                line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">(${esc(d.DeviceIP)})</span>`,
+                line2Html: `<b style="color:#c0392b;">${esc(d.ScanStatus)}</b>${d.ScanError ? ` — ${esc(d.ScanError)}` : ''}`,
+                onClick: () => window.goToSearchResult(String(d.DeviceIP), null, activeSnapshotIndex),
+            });
+        });
+        headerText = `All ${rows.length} Unreachable / Failed Devices`;
     } else if (kind === 'clients') {
         devices.forEach(d => (d.TrueClients || []).forEach(c => {
             rows.push({
@@ -4390,11 +4523,25 @@ window.copyConnectCommand = async function() {
 // "Unscanned Node" placeholder case (a device only ever seen as an LLDP neighbor).
 var rescanPollTimer = null;
 
+// Called from app.js's processSelectedFiles when a new file set is loaded mid-poll - a
+// pending rescan's eventual result must not land in whatever snapshot happens to be active
+// once loadedSnapshots gets replaced wholesale.
+window.cancelPendingRescan = function() {
+    if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
+};
+
 window.rescanDevice = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
     var btn = document.getElementById('rescanBtn');
     var original = btn ? btn.textContent : null;
+
+    // Captured now, not re-read live when the poll resolves - if the user switches
+    // snapshots (or loads a new file set) while this rescan is in flight, the result must
+    // still land in the snapshot that was active when the rescan STARTED, not whatever
+    // happens to be active/loaded by the time it completes. A stable object reference
+    // (not just the array index) also survives snapshots being reordered/reloaded.
+    var targetSnapshot = (activeSnapshotIndex >= 0) ? loadedSnapshots[activeSnapshotIndex] : null;
 
     function finish(msg, color) {
         if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
@@ -4473,14 +4620,39 @@ window.rescanDevice = async function() {
             finish("Rescan failed: " + (status.reason || "unknown error") + " - existing data left unchanged.", "red");
             return;
         }
-        window.mergeRescannedDevice(status.node);
-        finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString() + ".", "green");
+        var merged = window.mergeRescannedDevice(status.node, targetSnapshot);
+        if (!merged) {
+            finish("Rescan of " + ip + " completed, but the snapshot it was scanned against is no longer loaded (a new file set was loaded while it was running) - the result was discarded.", "orange");
+        } else {
+            finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString() + ".", "green");
+        }
     };
     poll();
 };
 
-// Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes,
-// synchronous since it's only a couple seconds (unlike /api/rescan's poll dance).
+// Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes.
+// Offloaded server-side to a background job (the server enforces a 20s timeout on it), so
+// this polls /api/ping/status just like rescanDevice above polls /api/rescan/status.
+var pingPollTimer = null;
+
+// Mirrors cancelPendingRescan (exposed for the same reason: a caller resetting drawer/app
+// state - e.g. a new file set loading - should stop a pending poll from touching it). Not
+// currently wired to a call site; the completion path below is self-defending anyway (see
+// isDrawerShowing) since, unlike a rescan, a ping poll isn't cancelled just by switching
+// which device's drawer is open.
+window.cancelPendingPing = function() {
+    if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+};
+
+// #pingResult (unlike the rest of the drawer body) is a persistent element in index.html,
+// only cleared when openRightDrawer opens a NEW device - so a ping's own poll must re-check
+// this itself before painting a result, or a poll for IP A resolving after the user has
+// switched to viewing IP B's drawer would show A's "Reachable"/"No response" under B's data.
+function isDrawerShowing(ip) {
+    var titleEl = document.getElementById('drawer-title');
+    return !!titleEl && titleEl.innerText === ip;
+}
+
 window.pingDevice = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
@@ -4495,6 +4667,16 @@ window.pingDevice = async function() {
         resultEl.className = cls || '';
     }
 
+    function finish(msg, cls) {
+        if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+        // Only paint the drawer's inline result if it's still showing the device this ping
+        // was for - see isDrawerShowing. window.setStatus is global and safe either way.
+        if (isDrawerShowing(ip)) showResult(msg, cls);
+        window.setStatus(msg, cls);
+    }
+
+    var jobId;
     try {
         if (btn) { btn.disabled = true; btn.textContent = 'Pinging...'; }
         showResult('Pinging...', '');
@@ -4504,28 +4686,81 @@ window.pingDevice = async function() {
             body: JSON.stringify({ ip: ip })
         });
         var result = await resp.json();
-        if (!resp.ok) {
-            var errMsg = "Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status));
-            showResult(errMsg, 'red');
-            window.setStatus(errMsg, "red");
+        if (resp.status === 409 && result.jobId) {
+            // Only one ping slot exists server-side; only attach if it's our own device
+            // already in flight, not someone else's running job.
+            if (result.ip !== ip) {
+                finish("A ping of " + result.ip + " is already running - try again once it finishes.", "red");
+                return;
+            }
+            jobId = result.jobId;
+        } else if (!resp.ok) {
+            finish("Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status)), "red");
             return;
-        }
-        if (result.alive) {
-            var okMsg = "Reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + ")";
-            showResult(okMsg, 'green');
-            window.setStatus(ip + " is reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + " replies).", "green");
         } else {
-            var failMsg = "No response (" + result.received + "/" + result.sent + ")";
-            showResult(failMsg, 'red');
-            window.setStatus(ip + " did not respond to ping (" + result.received + "/" + result.sent + " replies).", "red");
+            jobId = result.jobId;
         }
     } catch (e) {
-        var exMsg = "Could not ping " + ip + ": " + e.message;
-        showResult(exMsg, 'red');
-        window.setStatus(exMsg, "red");
-    } finally {
-        if (btn) { btn.disabled = false; btn.textContent = original; }
+        finish("Could not ping " + ip + ": " + e.message, "red");
+        return;
     }
+
+    var pollStart = Date.now();
+    var poll = async function() {
+        // Stays above the server's own 20s hard timeout.
+        if (Date.now() - pollStart > 25000) { finish("Ping timed out waiting for a response.", "red"); return; }
+
+        var statusResp;
+        try {
+            statusResp = await fetch('/api/ping/status?jobId=' + encodeURIComponent(jobId));
+        } catch (e) {
+            finish("Lost connection to the local server - retry once it's running again.", "red");
+            return;
+        }
+
+        if (statusResp.status === 404) {
+            finish("Ping job expired or the server restarted - try again.", "red");
+            return;
+        }
+
+        var status;
+        try {
+            status = await statusResp.json();
+        } catch (e) {
+            finish("Lost connection to the local server - retry once it's running again.", "red");
+            return;
+        }
+
+        if (!statusResp.ok) {
+            finish("Could not ping " + ip + ": " + (status.reason || ('HTTP ' + statusResp.status)), "red");
+            return;
+        }
+        if (status.status === 'timeout') {
+            finish("Ping of " + ip + " timed out.", "red");
+            return;
+        }
+        if (status.status === 'running') {
+            pingPollTimer = setTimeout(poll, 2000);
+            return;
+        }
+        // status.status === 'complete'
+        if (!status.ok) {
+            finish("Could not ping " + ip + ": " + (status.reason || "unknown error"), "red");
+            return;
+        }
+        if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+        if (status.alive) {
+            var okMsg = "Reachable (" + status.avgLatencyMs + "ms avg, " + status.received + "/" + status.sent + ")";
+            if (isDrawerShowing(ip)) showResult(okMsg, 'green');
+            window.setStatus(ip + " is reachable (" + status.avgLatencyMs + "ms avg, " + status.received + "/" + status.sent + " replies).", "green");
+        } else {
+            var failMsg = "No response (" + status.received + "/" + status.sent + ")";
+            if (isDrawerShowing(ip)) showResult(failMsg, 'red');
+            window.setStatus(ip + " did not respond to ping (" + status.received + "/" + status.sent + " replies).", "red");
+        }
+    };
+    poll();
 };
 
 // Client-side port of Start-NetworkMapper.ps1's Update-ClientIpCorrelation. A single-device
@@ -4548,14 +4783,27 @@ function correlateClientIps(topology) {
     });
 }
 
-// Merges a rescan result into the active snapshot's in-memory state only, never written
-// back to disk: the loaded file's password isn't retained, and snapshot immutability is
-// load-bearing for Topology Diff and cross-snapshot config compare. RescannedAt (shown in
-// Summary) surfaces that ephemerality.
-window.mergeRescannedDevice = function(freshDevice) {
-    if (!freshDevice || !freshDevice.DeviceIP || activeSnapshotIndex < 0) return;
+// True when the snapshot a rescan was targeting is no longer among the loaded snapshots -
+// a new file set was loaded (or the same array index now holds a different, reloaded
+// snapshot) while the poll was in flight, and the result must be discarded rather than
+// spliced into whatever now occupies that spot. Pure/DOM-free by design.
+function isRescanTargetSnapshotGone(snapshots, targetSnapshot) {
+    return !targetSnapshot || snapshots.indexOf(targetSnapshot) === -1;
+}
+
+// Merges a rescan result into the SNAPSHOT THAT WAS ACTIVE WHEN THE RESCAN STARTED
+// (targetSnapshot, captured by rescanDevice - not activeSnapshotIndex read live here, which
+// could have moved on to a different snapshot or a whole new file set while the rescan
+// polled). Never written back to disk: the loaded file's password isn't retained, and
+// snapshot immutability is load-bearing for Topology Diff and cross-snapshot config compare.
+// RescannedAt (shown in Summary) surfaces that ephemerality. Returns false (nothing merged)
+// if targetSnapshot no longer exists among loadedSnapshots.
+window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
+    if (!freshDevice || !freshDevice.DeviceIP) return false;
+    if (isRescanTargetSnapshotGone(loadedSnapshots, targetSnapshot)) return false;
+
     var ip = String(freshDevice.DeviceIP);
-    var topology = loadedSnapshots[activeSnapshotIndex].topology; // same array globalTopologyData references
+    var topology = targetSnapshot.topology;
 
     freshDevice.TrueClients = window.asArray(freshDevice.Clients);
     freshDevice.RescannedAt = new Date().toISOString();
@@ -4569,10 +4817,22 @@ window.mergeRescannedDevice = function(freshDevice) {
 
     correlateClientIps(topology);
 
-    // buildSearchIndex() replaces snapshot.deviceByIp with a new Map rather than mutating
-    // it, so the module-level deviceByIp must be re-pointed here or search would serve stale data.
+    // buildSearchIndex() spans every loaded snapshot and replaces each snapshot.deviceByIp
+    // with a new Map rather than mutating it, so the merged device is searchable regardless
+    // of whether targetSnapshot is still the active one - and the module-level deviceByIp
+    // must be re-pointed at the (possibly still-active) snapshot's fresh map.
     window.buildSearchIndex();
-    deviceByIp = loadedSnapshots[activeSnapshotIndex].deviceByIp;
+    if (activeSnapshotIndex >= 0 && loadedSnapshots[activeSnapshotIndex]) {
+        deviceByIp = loadedSnapshots[activeSnapshotIndex].deviceByIp;
+    }
+
+    // Everything below touches the on-screen graph/drawer/map, which only reflect the
+    // ACTIVE snapshot - if the user switched away from targetSnapshot while this rescan was
+    // running, the merge above still updated that (now background) snapshot's data, but
+    // nothing currently on screen should change (and must not be re-rendered from the wrong
+    // snapshot's now-stale globalTopologyData/deviceByIp).
+    var isActiveSnapshot = (activeSnapshotIndex >= 0 && loadedSnapshots[activeSnapshotIndex] === targetSnapshot);
+    if (!isActiveSnapshot) return true;
 
     window.extractVlans();
 
@@ -4593,6 +4853,8 @@ window.mergeRescannedDevice = function(freshDevice) {
     // Keeps the Map view in sync too; no-op if Map was never opened this session, and
     // doesn't reset pan/zoom if it has been.
     if (window.renderMapMarkers) window.renderMapMarkers();
+
+    return true;
 };
 
 window.openRightDrawer = function(ip) {
@@ -4636,7 +4898,17 @@ window.renderSummary = function() {
            </div>`
         : '';
 
+    // Scan didn't fully succeed (see ScanStatus/ScanError, set server-side) - surface that
+    // prominently instead of letting the mostly-empty Neighbors/Clients/Hostname="Unknown"
+    // fields below pass as a normal, fully scanned device.
+    var scanStatusHtml = (d.ScanStatus && d.ScanStatus !== "Ok")
+        ? `<div style="grid-column:1/-1; background:var(--danger-bg); color:var(--danger-text); border:1px solid var(--danger-border); padding:8px 12px; border-radius:4px; font-size:0.85rem; margin-bottom:4px;">
+             <b>Scan ${esc(d.ScanStatus)}</b>${d.ScanError ? ` &mdash; ${esc(d.ScanError)}` : ''} - the data below may be incomplete or stale.
+           </div>`
+        : '';
+
     var html = `
+        ${scanStatusHtml}
         ${rescannedHtml}
         <div class="summary-item"><label>Hostname</label><div>${esc(d.Hostname) || 'N/A'}</div></div>
         <div class="summary-item"><label>IP Address</label><div>${esc(d.DeviceIP) || 'N/A'}</div></div>
@@ -5624,6 +5896,9 @@ window.renderMapMarkers = function() {
     mapMarkersByIp.forEach(function (marker) { leafletMap.removeLayer(marker); });
     mapMarkersByIp.clear();
     if (window.mapEdgeLayer) { leafletMap.removeLayer(window.mapEdgeLayer); window.mapEdgeLayer = null; }
+    // Every marker is about to be torn down and rebuilt - any prior "Edit position" arming
+    // pointed at an object that no longer exists on the map.
+    currentlyArmedMarker = null;
 
     var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
     var deviceByIpLocal = new Map(globalTopologyData.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
@@ -5668,6 +5943,7 @@ window.renderMapMarkers = function() {
             // indefinitely (dragging.enable() has no other timeout/blur to turn it back off).
             // No-op if a real drag already disabled it via dragend below.
             if (marker.dragging.enabled()) marker.dragging.disable();
+            if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
             window.openRightDrawer(ip);
         });
         // Second entry point into the same window.openLocationEditor(ip) the Unplaced list
@@ -5694,12 +5970,23 @@ window.renderMapMarkers = function() {
         repositionLink.addEventListener('click', function (evt) {
             evt.preventDefault();
             marker.closePopup();
+            // Only one marker is ever draggable at a time - disarm whichever marker was
+            // previously armed (bubblingMouseEvents:false means clicking THIS marker to open
+            // its popup never reached leafletMap's 'click' handler, so the previous marker's
+            // one-shot disarm listener below would otherwise never fire).
+            if (currentlyArmedMarker && currentlyArmedMarker !== marker && currentlyArmedMarker.dragging.enabled()) {
+                currentlyArmedMarker.dragging.disable();
+            }
             marker.dragging.enable();
+            currentlyArmedMarker = marker;
             window.showMapStatus('Drag "' + (meta.hostname !== 'Unknown' ? meta.hostname : ip) + '" to reposition it - release to stage the change.');
             // Covers "changed their mind and clicked elsewhere on the map" - the marker's own
             // click handler above covers "clicked the marker itself instead of dragging it".
             // Harmless no-op if a real drag already disabled dragging by the time this fires.
-            leafletMap.once('click', function () { marker.dragging.disable(); });
+            leafletMap.once('click', function () {
+                marker.dragging.disable();
+                if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
+            });
         });
         popupEl.appendChild(repositionLink);
         marker.bindPopup(popupEl);
@@ -5708,6 +5995,7 @@ window.renderMapMarkers = function() {
         // (never fires) until "Edit position" arms it.
         marker.on('dragend', function () {
             marker.dragging.disable();
+            if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
             var newLatLng = marker.getLatLng();
             var currentDevice = deviceByIp.get(String(ip));
             // Guarded the same way commitLocationEdit is - a snapshot reload/rescan while
@@ -5773,6 +6061,13 @@ window.revealDeviceOnMap = function(ip) {
     leafletMap.setView(marker.getLatLng(), Math.max(leafletMap.getZoom(), 17), { animate: true });
     return true;
 };
+
+// The marker (if any) currently armed for drag-to-reposition via "Edit position" below.
+// Leaflet markers default to bubblingMouseEvents:false, so clicking marker B to open its own
+// popup never bubbles to leafletMap's 'click' handler and can't disarm marker A's one-shot
+// listener that way - only tracking the armed marker explicitly and disarming it here (when
+// a DIFFERENT marker gets armed) guarantees at most one marker is ever draggable at a time.
+var currentlyArmedMarker = null;
 
 var editorTargetIp = null;
 // keyType+':'+key (from bestKeyForSave) -> { entry, deviceIp, deviceKeysAtCommit },
@@ -5876,6 +6171,18 @@ window.renderSaveConfigButton = function() {
     document.getElementById('mapview').parentElement.appendChild(btn);
 };
 
+// Pure helper (exported below for node:test): which pendingConfigEdits keys are safe to
+// remove after a successful save. A key is only cleared if the entry currently sitting
+// under it in pendingConfigEditsNow is IDENTICALLY (by reference) the one that was actually
+// sent - if a newer edit landed on the same key while the save's fetch was in flight (a
+// second drag, or the location editor committed again), pendingConfigEditsNow.get(key) is a
+// different object and that key must survive uncleared.
+function computeSaveKeysToClear(includedKeys, includedEditsSnapshot, pendingConfigEditsNow) {
+    return includedKeys.filter(function (key) {
+        return pendingConfigEditsNow.get(key) === includedEditsSnapshot.get(key);
+    });
+}
+
 window.saveConfiguration = async function() {
     // Config may not have loaded yet if this is triggered before Map view was ever opened.
     // ensureConfigLoaded returns false if the load failed/was cancelled, in which case
@@ -5887,7 +6194,17 @@ window.saveConfiguration = async function() {
         return false;
     }
 
-    // Merge pending edits over the currently-loaded config entries. An untouched entry
+    // Snapshot exactly which edits are going into THIS save, and the edit objects
+    // themselves, before the request goes out. The POST payload below is built synchronously
+    // from this snapshot, not from pendingConfigEdits read live later - a marker drag or the
+    // location-editor modal (reachable mid-save; its backdrop is pointer-events:none) can add
+    // a new entry to pendingConfigEdits while this request is in flight, and that entry must
+    // survive the eventual pendingConfigEdits.clear() a naive "clear everything on success"
+    // would otherwise do.
+    var includedKeys = Array.from(pendingConfigEdits.keys());
+    var includedEditsSnapshot = new Map(includedKeys.map(function (k) { return [k, pendingConfigEdits.get(k)]; }));
+
+    // Merge the included edits over the currently-loaded config entries. An untouched entry
     // survives unchanged.
     //
     // Before inserting each pending edit, collapse any STALE entry left by a key change: if
@@ -5897,7 +6214,7 @@ window.saveConfiguration = async function() {
     // pending.deviceKeysAtCommit holds every candidate key (serial/hostname/ip) the device
     // had at commit time, so all of them get removed here before the new entry is inserted.
     var merged = new Map(mapConfigEntries.map(function (e) { return [e.keyType + ':' + e.key, e]; }));
-    pendingConfigEdits.forEach(function (pending) {
+    includedEditsSnapshot.forEach(function (pending) {
         var keys = pending.deviceKeysAtCommit;
         ['serial', 'hostname', 'ip'].forEach(function (keyType) {
             var value = keys[keyType];
@@ -5923,9 +6240,16 @@ window.saveConfiguration = async function() {
         return false;
     }
     mapConfigEntries = devices;
-    pendingConfigEdits.clear();
+    // Only remove the entries actually included in this successful save - not the whole map -
+    // so an edit added to pendingConfigEdits during the request (or a newer edit that landed
+    // on the same key) survives and is still treated as unsaved / included in the next save.
+    computeSaveKeysToClear(includedKeys, includedEditsSnapshot, pendingConfigEdits).forEach(function (key) {
+        pendingConfigEdits.delete(key);
+    });
     window.renderSaveConfigButton();
-    window.showMapStatus('Configuration saved.');
+    window.showMapStatus(pendingConfigEdits.size > 0
+        ? 'Configuration saved. ' + pendingConfigEdits.size + ' more unsaved change(s) made during the save - click Save Configuration to write them.'
+        : 'Configuration saved.');
     window.renderMapMarkers();
     return true;
 };
@@ -6354,7 +6678,16 @@ window.autoloadLastScan = async function() {
 
     if (loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0) return;
     var files = entries.map(e => new File([e.content], e.name, { type: 'application/json' }));
-    await window.processSelectedFiles(files);
+    // This is a silent background autoload, not a user-initiated action - a single corrupt/
+    // malformed archived snapshot must not surface the fatal red error state (processSelectedFiles
+    // re-throws once files.length === 1, since tolerateFailures only kicks in for multi-file
+    // batches). Swallow and log instead, matching every other documented failure mode above
+    // (nothing to load, fetch fails, encrypted-with-no-cached-password) which already fail silently.
+    try {
+        await window.processSelectedFiles(files);
+    } catch (err) {
+        console.warn('Autoload of the last scan failed - leaving manual load available.', err);
+    }
 };
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -6406,6 +6739,14 @@ window.processSelectedFiles = async function(files) {
     // Reset the map's location editor too, before loadedSnapshots/deviceByIp are reassigned
     // wholesale - left open, its editorTargetIp would point into data that no longer exists.
     window.closeLocationEditor();
+    // A rescan poll in flight would otherwise eventually splice its result into whichever
+    // snapshot occupies its captured array slot once loadedSnapshots is replaced below -
+    // mergeRescannedDevice's own targetSnapshot check catches that too, but there's no
+    // reason to let a now-pointless poll keep running.
+    if (window.cancelPendingRescan) window.cancelPendingRescan();
+    // Same reasoning for an in-flight ping poll - its result would otherwise paint under
+    // whichever device now occupies the drawer once loadedSnapshots is replaced below.
+    if (window.cancelPendingPing) window.cancelPendingPing();
 
     var newSnapshots = [];
     var skipped = []; // {name, reason}[] - only used/reported for multi-file batches
@@ -6447,6 +6788,16 @@ window.processSelectedFiles = async function(files) {
 
         if (myGeneration !== loadFilesGeneration) return; // superseded while reading files
         loadedSnapshots = newSnapshots;
+        // A previously-rendered search result row carries an onclick closure over the OLD
+        // loadedSnapshots/deviceByIp - once those are replaced, that row can reopen a drawer
+        // for a device that no longer exists, or (worse) one that now resolves to a
+        // different, unrelated device at the same IP. Clear the search UI state alongside
+        // the data it was built from.
+        var searchResultsEl = document.getElementById('searchResults');
+        if (searchResultsEl) searchResultsEl.innerHTML = '';
+        var globalSearchEl = document.getElementById('globalSearch');
+        if (globalSearchEl) globalSearchEl.value = '';
+        searchHighlightQuery = ""; // matches its declared default above
         window.showProgress("Indexing search data...", 100, true);
         await nextPaint();
         if (myGeneration !== loadFilesGeneration) return;

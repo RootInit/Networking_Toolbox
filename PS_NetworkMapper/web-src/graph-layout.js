@@ -28,12 +28,23 @@ function buildAdjacency(nodeIds, edges) {
 }
 
 // BFS distances from `startId` to every reachable node.
+//
+// Perf: `queue.shift()` is O(n) per call (array-backed queues shift every remaining
+// element down), so a naive BFS here is worse than its nominal O(V+E) - replaced with
+// an index pointer (O(1) dequeue). Also dropped the neighbor sort that used to run on
+// every visit: only dist.size (component size) and the max depth reached matter to
+// computeGraphRoot's caller, and BFS reaches the same set of nodes at the same depths
+// regardless of the order neighbors are visited in, so sorting them bought nothing here
+// (unlike buildPrimaryTree's BFS, where visit order determines which parent a node
+// gets - that sort stays).
 function bfsDistances(adj, startId) {
   const dist = new Map([[startId, 0]]);
   const queue = [startId];
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const neighbors = Array.from(adj.get(current) || []).sort(compareIpIds);
+  let head = 0;
+  while (head < queue.length) {
+    const current = queue[head++];
+    const neighbors = adj.get(current);
+    if (!neighbors) continue;
     for (const next of neighbors) {
       if (!dist.has(next)) {
         dist.set(next, dist.get(current) + 1);
@@ -72,30 +83,74 @@ function computeGraphRoot(nodeIds, edges) {
 
 function buildPrimaryTree(nodeIds, edges, rootId) {
   const adj = buildAdjacency(nodeIds, edges);
-  const parentOf = new Map([[rootId, null]]);
-  const childrenOf = new Map([[rootId, []]]);
+  const parentOf = new Map();
+  const childrenOf = new Map();
   const treeEdgeKeys = new Set();
+  const extraRoots = [];
 
   const edgeKey = (a, b) => [a, b].sort(compareIpIds).join('|');
 
-  const queue = [rootId];
-  while (queue.length > 0) {
-    const current = queue.shift();
-    const neighbors = Array.from(adj.get(current) || []).sort(compareIpIds);
-    for (const next of neighbors) {
-      if (!parentOf.has(next)) {
-        parentOf.set(next, current);
-        childrenOf.set(next, []);
-        childrenOf.get(current).push(next);
-        treeEdgeKeys.add(edgeKey(current, next));
-        queue.push(next);
+  // BFS-grows the tree from `start`, adding every node reachable from it (via `adj`)
+  // that isn't already in parentOf/childrenOf. Used both for the primary root and,
+  // below, for each disconnected component's own local root.
+  function growTreeFrom(start) {
+    parentOf.set(start, null);
+    childrenOf.set(start, []);
+    const queue = [start];
+    while (queue.length > 0) {
+      const current = queue.shift();
+      const neighbors = Array.from(adj.get(current) || []).sort(compareIpIds);
+      for (const next of neighbors) {
+        if (!parentOf.has(next)) {
+          parentOf.set(next, current);
+          childrenOf.set(next, []);
+          childrenOf.get(current).push(next);
+          treeEdgeKeys.add(edgeKey(current, next));
+          queue.push(next);
+        }
       }
     }
   }
 
+  growTreeFrom(rootId);
+
+  // Anything the BFS from rootId never reached is a separate fabric island (2+ devices
+  // that only connect to each other, not to the main graph) or a single unreachable
+  // node. It used to just vanish from the diagram here - parentOf/childrenOf never got
+  // an entry for it, so computeVisibleTree (which only walks from rootId) never saw it,
+  // and expandAncestors' parentOf.get() would silently return undefined for it too.
+  // Instead, give each such component its own local root - picked with the same
+  // heuristic as the main root (computeGraphRoot), scoped to just that component's own
+  // nodes/edges - and attach it as an additional top-level entry (parentOf.get(root)
+  // === null, exactly like rootId) so it renders as its own separate tree alongside the
+  // main one instead of disappearing, and stays reachable via expandAncestors/search.
+  const remaining = nodeIds.filter(id => !parentOf.has(id)).sort(compareIpIds);
+  for (const id of remaining) {
+    if (parentOf.has(id)) continue; // already swept into an earlier component this loop
+
+    // Discover this component's full node set via a plain adjacency walk (its root
+    // isn't known yet, so growTreeFrom can't be used for this part).
+    const componentIds = [];
+    const seen = new Set([id]);
+    const stack = [id];
+    while (stack.length > 0) {
+      const cur = stack.pop();
+      componentIds.push(cur);
+      for (const next of (adj.get(cur) || [])) {
+        if (!seen.has(next)) { seen.add(next); stack.push(next); }
+      }
+    }
+
+    const componentIdSet = new Set(componentIds);
+    const componentEdges = edges.filter(e => componentIdSet.has(e.from) && componentIdSet.has(e.to));
+    const localRoot = computeGraphRoot(componentIds, componentEdges);
+    extraRoots.push(localRoot);
+    growTreeFrom(localRoot);
+  }
+
   const secondaryEdges = edges.filter(e => !treeEdgeKeys.has(edgeKey(e.from, e.to)));
 
-  return { parentOf, childrenOf, secondaryEdges };
+  return { parentOf, childrenOf, secondaryEdges, extraRoots };
 }
 
 function collectDescendants(childrenOf, nodeId) {
@@ -114,15 +169,19 @@ function isExpanded(childrenOf, nodeId, expandedNodes, threshold) {
   return childCount <= threshold || expandedNodes.has(nodeId);
 }
 
-function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold) {
+function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold, extraRoots) {
   const visibleNodeIds = [];
   const visibleEdges = [];
   const clusters = new Map();
 
   if (rootId == null) return { visibleNodeIds, visibleEdges, clusters };
 
-  const queue = [rootId];
-  visibleNodeIds.push(rootId);
+  // extraRoots (from buildPrimaryTree) are disconnected fabric islands' own local
+  // roots - rendered as additional top-level entries alongside rootId rather than
+  // silently dropped, so each still needs walking here just like rootId does.
+  const roots = [rootId, ...(extraRoots || [])];
+  const queue = [...roots];
+  visibleNodeIds.push(...roots);
   while (queue.length > 0) {
     const current = queue.shift();
     const children = childrenOf.get(current) || [];

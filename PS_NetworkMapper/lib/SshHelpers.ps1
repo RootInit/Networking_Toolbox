@@ -49,6 +49,26 @@ function Remove-JunosAskPass {
     Remove-Item -Path $AskPassContext.AskPassPath, $AskPassContext.AskPassText -Force -ErrorAction SilentlyContinue
 }
 
+# New-JunosCredentialFile/New-JunosAskPass write the real switch password in plaintext to
+# %TEMP%; normal cleanup happens in a `finally` block that's skipped if the process is
+# hard-killed (crash, task-killed, power loss), so those files can survive indefinitely. Call
+# this once at the start of a new crawl/connect session to sweep up whatever a prior crashed
+# run left behind. Age-gated (not "delete everything matching the pattern") so a genuinely
+# concurrent crawl/connect session running on the same machine doesn't get its still-in-use
+# files deleted out from under it.
+function Clear-StaleJunosTempFiles {
+    param([int]$MaxAgeHours = 4)
+    $Cutoff = (Get-Date).AddHours(-$MaxAgeHours)
+    $Patterns = @("junos_cred_*.json", "ssh_pass_*.txt", "ssh_askpass_*.bat")
+    foreach ($Pattern in $Patterns) {
+        try {
+            Get-ChildItem -Path $env:TEMP -Filter $Pattern -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.LastWriteTime -lt $Cutoff } |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+        } catch {}
+    }
+}
+
 # Standard SSH client options used everywhere in this repo for talking to Junos switches:
 # short connect timeout, no host-key prompt/storage (these are internal, frequently
 # reimaged switches), and password-only auth so SSH_ASKPASS is what actually gets used

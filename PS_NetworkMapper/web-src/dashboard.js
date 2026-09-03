@@ -181,6 +181,11 @@ window.renderFleetDashboard = function() {
     var daisyChainCount = 0;
     devices.forEach(d => { daisyChainCount += window.detectDaisyChains(d).size; });
 
+    // --- Devices that didn't scan cleanly (ScanStatus/ScanError, set server-side; absent or
+    // "Ok" means a normal successful scan) - tallied separately so they don't inflate/hide
+    // inside the plain "Devices" count above. ---
+    var unreachableDevices = devices.filter(d => d.ScanStatus && d.ScanStatus !== "Ok");
+
     // --- New devices detected in exactly this snapshot ---
     var history = window.updateDeviceHistory();
     var newInThisSnapshot = activeSnapshot ? Object.values(history).filter(h => h.firstSeen === activeSnapshot.scanTimestamp).length : 0;
@@ -193,6 +198,7 @@ window.renderFleetDashboard = function() {
     // "New This Snapshot" stays a plain count - it has no single natural list target.
     var html = `<div class="fleet-stats-grid">
         <div class="fleet-stat-card drillable" onclick="window.drillDownStat('devices')"><div class="stat-value">${devices.length}</div><div class="stat-label">Devices</div></div>
+        <div class="fleet-stat-card drillable ${unreachableDevices.length > 0 ? 'critical' : ''}" onclick="window.drillDownStat('unreachable')"><div class="stat-value">${unreachableDevices.length}</div><div class="stat-label">Unreachable / Failed</div></div>
         <div class="fleet-stat-card drillable" onclick="window.drillDownStat('clients')"><div class="stat-value">${totalClients}</div><div class="stat-label">Clients</div></div>
         <div class="fleet-stat-card drillable ${totalAlarms > 0 ? 'critical' : ''}" onclick="window.drillDownStat('alarms')"><div class="stat-value">${totalAlarms}</div><div class="stat-label">Active Alarms</div></div>
         <div class="fleet-stat-card drillable ${dot1xViolations.length > 0 ? 'warn' : ''}" onclick="window.drillDownStat('dot1x')"><div class="stat-value">${dot1xViolations.length}</div><div class="stat-label">Dot1x Violations</div></div>
@@ -813,6 +819,15 @@ window.drillDownStat = function(kind) {
             onClick: () => window.goToSearchResult(String(d.DeviceIP), null, activeSnapshotIndex),
         }));
         headerText = `All ${rows.length} Devices`;
+    } else if (kind === 'unreachable') {
+        devices.filter(d => d.ScanStatus && d.ScanStatus !== "Ok").forEach(d => {
+            rows.push({
+                line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">(${esc(d.DeviceIP)})</span>`,
+                line2Html: `<b style="color:#c0392b;">${esc(d.ScanStatus)}</b>${d.ScanError ? ` — ${esc(d.ScanError)}` : ''}`,
+                onClick: () => window.goToSearchResult(String(d.DeviceIP), null, activeSnapshotIndex),
+            });
+        });
+        headerText = `All ${rows.length} Unreachable / Failed Devices`;
     } else if (kind === 'clients') {
         devices.forEach(d => (d.TrueClients || []).forEach(c => {
             rows.push({

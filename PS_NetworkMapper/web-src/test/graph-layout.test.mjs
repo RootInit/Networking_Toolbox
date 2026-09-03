@@ -115,12 +115,56 @@ test('buildPrimaryTree puts every non-tree edge into secondaryEdges', () => {
   assert.deepEqual([secondaryEdges[0].from, secondaryEdges[0].to].sort(), ['a', 'b']);
 });
 
-test('buildPrimaryTree leaves an unreachable node out of parentOf/childrenOf', () => {
+test('buildPrimaryTree attaches an unreachable single node as its own extra root', () => {
   const nodeIds = ['root', 'a', 'island'];
   const edges = [{ from: 'root', to: 'a' }];
-  const { parentOf, childrenOf } = buildPrimaryTree(nodeIds, edges, 'root');
-  assert.equal(parentOf.has('island'), false);
-  assert.equal(childrenOf.has('island'), false);
+  const { parentOf, childrenOf, extraRoots } = buildPrimaryTree(nodeIds, edges, 'root');
+  // No longer dropped: it becomes a top-level entry of its own (parentOf === null,
+  // just like the main root), rather than silently missing from parentOf/childrenOf.
+  assert.deepEqual(extraRoots, ['island']);
+  assert.equal(parentOf.get('island'), null);
+  assert.deepEqual(childrenOf.get('island'), []);
+});
+
+test('buildPrimaryTree attaches a disconnected 2-node island as its own extra tree, reachable from parentOf/childrenOf', () => {
+  // Main component: root-a. Separate island: island1-island2, with no edge back to
+  // either root or a. This used to vanish entirely - unreachable from rootId, and
+  // never added to parentOf/childrenOf, so computeVisibleTree (which only walks from
+  // rootId) never rendered it and expandAncestors could never find a path to it.
+  const nodeIds = ['root', 'a', 'island1', 'island2'];
+  const edges = [
+    { from: 'root', to: 'a' },
+    { from: 'island1', to: 'island2' },
+  ];
+  const { parentOf, childrenOf, extraRoots } = buildPrimaryTree(nodeIds, edges, 'root');
+
+  assert.equal(extraRoots.length, 1);
+  const islandRoot = extraRoots[0];
+  assert.ok(islandRoot === 'island1' || islandRoot === 'island2');
+  const islandLeaf = islandRoot === 'island1' ? 'island2' : 'island1';
+
+  // Both island nodes are now reachable via parentOf/childrenOf.
+  assert.equal(parentOf.get(islandRoot), null);
+  assert.equal(parentOf.get(islandLeaf), islandRoot);
+  assert.deepEqual(childrenOf.get(islandRoot), [islandLeaf]);
+
+  // The island's own edge became a tree edge (not left dangling in secondaryEdges).
+  const { secondaryEdges } = buildPrimaryTree(nodeIds, edges, 'root');
+  assert.equal(secondaryEdges.length, 0);
+
+  // computeVisibleTree renders the island as a second top-level tree alongside root.
+  const { visibleNodeIds, visibleEdges } = computeVisibleTree('root', childrenOf, new Set(), 8, extraRoots);
+  assert.deepEqual(visibleNodeIds.sort(), ['a', 'island1', 'island2', 'root'].sort());
+  assert.ok(visibleEdges.some(e => (e.from === islandRoot && e.to === islandLeaf)));
+
+  // expandAncestors can walk up from a node buried in the island without silently
+  // no-op'ing on an undefined parentOf entry (the old bug: parentOf.get() on an
+  // unreached node returned undefined, so the ancestor walk below never started).
+  // Threshold 0 makes islandRoot's one child "over threshold", so a real expansion
+  // must happen for this to pass - not just a no-op walk that happens to not throw.
+  const expandedNodes = new Set();
+  expandAncestors(parentOf, childrenOf, islandLeaf, expandedNodes, 0);
+  assert.equal(expandedNodes.has(islandRoot), true);
 });
 
 function starTree(childCount) {

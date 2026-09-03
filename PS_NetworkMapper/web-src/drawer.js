@@ -54,11 +54,25 @@ window.copyConnectCommand = async function() {
 // "Unscanned Node" placeholder case (a device only ever seen as an LLDP neighbor).
 var rescanPollTimer = null;
 
+// Called from app.js's processSelectedFiles when a new file set is loaded mid-poll - a
+// pending rescan's eventual result must not land in whatever snapshot happens to be active
+// once loadedSnapshots gets replaced wholesale.
+window.cancelPendingRescan = function() {
+    if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
+};
+
 window.rescanDevice = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
     var btn = document.getElementById('rescanBtn');
     var original = btn ? btn.textContent : null;
+
+    // Captured now, not re-read live when the poll resolves - if the user switches
+    // snapshots (or loads a new file set) while this rescan is in flight, the result must
+    // still land in the snapshot that was active when the rescan STARTED, not whatever
+    // happens to be active/loaded by the time it completes. A stable object reference
+    // (not just the array index) also survives snapshots being reordered/reloaded.
+    var targetSnapshot = (activeSnapshotIndex >= 0) ? loadedSnapshots[activeSnapshotIndex] : null;
 
     function finish(msg, color) {
         if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
@@ -137,14 +151,39 @@ window.rescanDevice = async function() {
             finish("Rescan failed: " + (status.reason || "unknown error") + " - existing data left unchanged.", "red");
             return;
         }
-        window.mergeRescannedDevice(status.node);
-        finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString() + ".", "green");
+        var merged = window.mergeRescannedDevice(status.node, targetSnapshot);
+        if (!merged) {
+            finish("Rescan of " + ip + " completed, but the snapshot it was scanned against is no longer loaded (a new file set was loaded while it was running) - the result was discarded.", "orange");
+        } else {
+            finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString() + ".", "green");
+        }
     };
     poll();
 };
 
-// Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes,
-// synchronous since it's only a couple seconds (unlike /api/rescan's poll dance).
+// Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes.
+// Offloaded server-side to a background job (the server enforces a 20s timeout on it), so
+// this polls /api/ping/status just like rescanDevice above polls /api/rescan/status.
+var pingPollTimer = null;
+
+// Mirrors cancelPendingRescan (exposed for the same reason: a caller resetting drawer/app
+// state - e.g. a new file set loading - should stop a pending poll from touching it). Not
+// currently wired to a call site; the completion path below is self-defending anyway (see
+// isDrawerShowing) since, unlike a rescan, a ping poll isn't cancelled just by switching
+// which device's drawer is open.
+window.cancelPendingPing = function() {
+    if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+};
+
+// #pingResult (unlike the rest of the drawer body) is a persistent element in index.html,
+// only cleared when openRightDrawer opens a NEW device - so a ping's own poll must re-check
+// this itself before painting a result, or a poll for IP A resolving after the user has
+// switched to viewing IP B's drawer would show A's "Reachable"/"No response" under B's data.
+function isDrawerShowing(ip) {
+    var titleEl = document.getElementById('drawer-title');
+    return !!titleEl && titleEl.innerText === ip;
+}
+
 window.pingDevice = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
@@ -159,6 +198,16 @@ window.pingDevice = async function() {
         resultEl.className = cls || '';
     }
 
+    function finish(msg, cls) {
+        if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+        // Only paint the drawer's inline result if it's still showing the device this ping
+        // was for - see isDrawerShowing. window.setStatus is global and safe either way.
+        if (isDrawerShowing(ip)) showResult(msg, cls);
+        window.setStatus(msg, cls);
+    }
+
+    var jobId;
     try {
         if (btn) { btn.disabled = true; btn.textContent = 'Pinging...'; }
         showResult('Pinging...', '');
@@ -168,28 +217,81 @@ window.pingDevice = async function() {
             body: JSON.stringify({ ip: ip })
         });
         var result = await resp.json();
-        if (!resp.ok) {
-            var errMsg = "Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status));
-            showResult(errMsg, 'red');
-            window.setStatus(errMsg, "red");
+        if (resp.status === 409 && result.jobId) {
+            // Only one ping slot exists server-side; only attach if it's our own device
+            // already in flight, not someone else's running job.
+            if (result.ip !== ip) {
+                finish("A ping of " + result.ip + " is already running - try again once it finishes.", "red");
+                return;
+            }
+            jobId = result.jobId;
+        } else if (!resp.ok) {
+            finish("Could not ping " + ip + ": " + (result.error || ('HTTP ' + resp.status)), "red");
             return;
-        }
-        if (result.alive) {
-            var okMsg = "Reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + ")";
-            showResult(okMsg, 'green');
-            window.setStatus(ip + " is reachable (" + result.avgLatencyMs + "ms avg, " + result.received + "/" + result.sent + " replies).", "green");
         } else {
-            var failMsg = "No response (" + result.received + "/" + result.sent + ")";
-            showResult(failMsg, 'red');
-            window.setStatus(ip + " did not respond to ping (" + result.received + "/" + result.sent + " replies).", "red");
+            jobId = result.jobId;
         }
     } catch (e) {
-        var exMsg = "Could not ping " + ip + ": " + e.message;
-        showResult(exMsg, 'red');
-        window.setStatus(exMsg, "red");
-    } finally {
-        if (btn) { btn.disabled = false; btn.textContent = original; }
+        finish("Could not ping " + ip + ": " + e.message, "red");
+        return;
     }
+
+    var pollStart = Date.now();
+    var poll = async function() {
+        // Stays above the server's own 20s hard timeout.
+        if (Date.now() - pollStart > 25000) { finish("Ping timed out waiting for a response.", "red"); return; }
+
+        var statusResp;
+        try {
+            statusResp = await fetch('/api/ping/status?jobId=' + encodeURIComponent(jobId));
+        } catch (e) {
+            finish("Lost connection to the local server - retry once it's running again.", "red");
+            return;
+        }
+
+        if (statusResp.status === 404) {
+            finish("Ping job expired or the server restarted - try again.", "red");
+            return;
+        }
+
+        var status;
+        try {
+            status = await statusResp.json();
+        } catch (e) {
+            finish("Lost connection to the local server - retry once it's running again.", "red");
+            return;
+        }
+
+        if (!statusResp.ok) {
+            finish("Could not ping " + ip + ": " + (status.reason || ('HTTP ' + statusResp.status)), "red");
+            return;
+        }
+        if (status.status === 'timeout') {
+            finish("Ping of " + ip + " timed out.", "red");
+            return;
+        }
+        if (status.status === 'running') {
+            pingPollTimer = setTimeout(poll, 2000);
+            return;
+        }
+        // status.status === 'complete'
+        if (!status.ok) {
+            finish("Could not ping " + ip + ": " + (status.reason || "unknown error"), "red");
+            return;
+        }
+        if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+        if (btn) { btn.disabled = false; btn.textContent = original; }
+        if (status.alive) {
+            var okMsg = "Reachable (" + status.avgLatencyMs + "ms avg, " + status.received + "/" + status.sent + ")";
+            if (isDrawerShowing(ip)) showResult(okMsg, 'green');
+            window.setStatus(ip + " is reachable (" + status.avgLatencyMs + "ms avg, " + status.received + "/" + status.sent + " replies).", "green");
+        } else {
+            var failMsg = "No response (" + status.received + "/" + status.sent + ")";
+            if (isDrawerShowing(ip)) showResult(failMsg, 'red');
+            window.setStatus(ip + " did not respond to ping (" + status.received + "/" + status.sent + " replies).", "red");
+        }
+    };
+    poll();
 };
 
 // Client-side port of Start-NetworkMapper.ps1's Update-ClientIpCorrelation. A single-device
@@ -212,14 +314,27 @@ function correlateClientIps(topology) {
     });
 }
 
-// Merges a rescan result into the active snapshot's in-memory state only, never written
-// back to disk: the loaded file's password isn't retained, and snapshot immutability is
-// load-bearing for Topology Diff and cross-snapshot config compare. RescannedAt (shown in
-// Summary) surfaces that ephemerality.
-window.mergeRescannedDevice = function(freshDevice) {
-    if (!freshDevice || !freshDevice.DeviceIP || activeSnapshotIndex < 0) return;
+// True when the snapshot a rescan was targeting is no longer among the loaded snapshots -
+// a new file set was loaded (or the same array index now holds a different, reloaded
+// snapshot) while the poll was in flight, and the result must be discarded rather than
+// spliced into whatever now occupies that spot. Pure/DOM-free by design.
+function isRescanTargetSnapshotGone(snapshots, targetSnapshot) {
+    return !targetSnapshot || snapshots.indexOf(targetSnapshot) === -1;
+}
+
+// Merges a rescan result into the SNAPSHOT THAT WAS ACTIVE WHEN THE RESCAN STARTED
+// (targetSnapshot, captured by rescanDevice - not activeSnapshotIndex read live here, which
+// could have moved on to a different snapshot or a whole new file set while the rescan
+// polled). Never written back to disk: the loaded file's password isn't retained, and
+// snapshot immutability is load-bearing for Topology Diff and cross-snapshot config compare.
+// RescannedAt (shown in Summary) surfaces that ephemerality. Returns false (nothing merged)
+// if targetSnapshot no longer exists among loadedSnapshots.
+window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
+    if (!freshDevice || !freshDevice.DeviceIP) return false;
+    if (isRescanTargetSnapshotGone(loadedSnapshots, targetSnapshot)) return false;
+
     var ip = String(freshDevice.DeviceIP);
-    var topology = loadedSnapshots[activeSnapshotIndex].topology; // same array globalTopologyData references
+    var topology = targetSnapshot.topology;
 
     freshDevice.TrueClients = window.asArray(freshDevice.Clients);
     freshDevice.RescannedAt = new Date().toISOString();
@@ -233,10 +348,22 @@ window.mergeRescannedDevice = function(freshDevice) {
 
     correlateClientIps(topology);
 
-    // buildSearchIndex() replaces snapshot.deviceByIp with a new Map rather than mutating
-    // it, so the module-level deviceByIp must be re-pointed here or search would serve stale data.
+    // buildSearchIndex() spans every loaded snapshot and replaces each snapshot.deviceByIp
+    // with a new Map rather than mutating it, so the merged device is searchable regardless
+    // of whether targetSnapshot is still the active one - and the module-level deviceByIp
+    // must be re-pointed at the (possibly still-active) snapshot's fresh map.
     window.buildSearchIndex();
-    deviceByIp = loadedSnapshots[activeSnapshotIndex].deviceByIp;
+    if (activeSnapshotIndex >= 0 && loadedSnapshots[activeSnapshotIndex]) {
+        deviceByIp = loadedSnapshots[activeSnapshotIndex].deviceByIp;
+    }
+
+    // Everything below touches the on-screen graph/drawer/map, which only reflect the
+    // ACTIVE snapshot - if the user switched away from targetSnapshot while this rescan was
+    // running, the merge above still updated that (now background) snapshot's data, but
+    // nothing currently on screen should change (and must not be re-rendered from the wrong
+    // snapshot's now-stale globalTopologyData/deviceByIp).
+    var isActiveSnapshot = (activeSnapshotIndex >= 0 && loadedSnapshots[activeSnapshotIndex] === targetSnapshot);
+    if (!isActiveSnapshot) return true;
 
     window.extractVlans();
 
@@ -257,6 +384,8 @@ window.mergeRescannedDevice = function(freshDevice) {
     // Keeps the Map view in sync too; no-op if Map was never opened this session, and
     // doesn't reset pan/zoom if it has been.
     if (window.renderMapMarkers) window.renderMapMarkers();
+
+    return true;
 };
 
 window.openRightDrawer = function(ip) {
@@ -300,7 +429,17 @@ window.renderSummary = function() {
            </div>`
         : '';
 
+    // Scan didn't fully succeed (see ScanStatus/ScanError, set server-side) - surface that
+    // prominently instead of letting the mostly-empty Neighbors/Clients/Hostname="Unknown"
+    // fields below pass as a normal, fully scanned device.
+    var scanStatusHtml = (d.ScanStatus && d.ScanStatus !== "Ok")
+        ? `<div style="grid-column:1/-1; background:var(--danger-bg); color:var(--danger-text); border:1px solid var(--danger-border); padding:8px 12px; border-radius:4px; font-size:0.85rem; margin-bottom:4px;">
+             <b>Scan ${esc(d.ScanStatus)}</b>${d.ScanError ? ` &mdash; ${esc(d.ScanError)}` : ''} - the data below may be incomplete or stale.
+           </div>`
+        : '';
+
     var html = `
+        ${scanStatusHtml}
         ${rescannedHtml}
         <div class="summary-item"><label>Hostname</label><div>${esc(d.Hostname) || 'N/A'}</div></div>
         <div class="summary-item"><label>IP Address</label><div>${esc(d.DeviceIP) || 'N/A'}</div></div>

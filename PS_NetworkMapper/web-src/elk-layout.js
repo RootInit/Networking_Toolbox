@@ -32,11 +32,44 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
     // synchronous layout crunch blocks the main thread.
     await new Promise(r => setTimeout(r, 0));
     const childrenOf = new Map();
+    const hasIncomingEdge = new Set();
     visibleEdges.forEach(e => {
       if (!childrenOf.has(e.from)) childrenOf.set(e.from, []);
       childrenOf.get(e.from).push(e.to);
+      hasIncomingEdge.add(e.to);
     });
-    return window.GraphLayout.computeRecursiveRadialLayout(visibleNodeIds[0], childrenOf, { ...layoutSettings, deadline });
+
+    // Normally there's exactly one such node - the primary graph root. But a
+    // disconnected fabric island (graph-layout.js's buildPrimaryTree attaches those as
+    // extra top-level entries in visible.visibleNodeIds/visibleEdges rather than
+    // dropping them) surfaces here too: it has no incoming visible edge either, since
+    // nothing connects it to the main tree. Laying out only visibleNodeIds[0]'s subtree
+    // would leave every other component with no computed position at all (graph.js
+    // would then default them all to the same (0, 0), stacking them on top of each
+    // other) - so each root gets its own independent layout pass, offset along x so the
+    // components render as separate, non-overlapping trees.
+    const roots = visibleNodeIds.filter(id => !hasIncomingEdge.has(id));
+    const positions = new Map();
+    // cursorX tracks where the NEXT component's own center should land, computed from
+    // the true extent of the component just placed (not a fixed/one-sided guess) - a
+    // fixed offset derived only from the previous component's extent broke down whenever
+    // a later component (e.g. an unbalanced island, laid out with a much larger radius
+    // than a big-but-round main tree) was wider than the one before it: the two could
+    // still overlap. Each component is centered at cursorX and pushes cursorX out by its
+    // own extent afterward, so the gap between any two components' bounding circles is
+    // always at least NODE_WIDTH*3, regardless of ordering or relative size.
+    let cursorX = null;
+    for (const root of roots) {
+      const sub = window.GraphLayout.computeRecursiveRadialLayout(root, childrenOf, { ...layoutSettings, deadline });
+      let extent = 0;
+      sub.forEach(pos => {
+        extent = Math.max(extent, Math.abs(pos.x), Math.abs(pos.y));
+      });
+      const centerX = (cursorX === null) ? 0 : cursorX + extent;
+      sub.forEach((pos, id) => positions.set(id, { x: pos.x + centerX, y: pos.y }));
+      cursorX = centerX + extent + NODE_WIDTH * 3;
+    }
+    return positions;
   };
 
   // This race is kept as a backstop (e.g. an infinite loop/bug outside computeRecursiveRadialLayout's
@@ -45,8 +78,12 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   // control returns to the event loop for this timer to even run, doLayout() has already
   // settled, whether that took 1 second or 100. computeRecursiveRadialLayout's own `deadline`
   // check above is what actually bounds a slow layout now; see its comment for why.
+  // Tracked so it can be cleared once doLayout() wins the race (the normal case) -
+  // otherwise this timer keeps a Node process (e.g. `node --test`) alive for another
+  // ~9s after every call, waiting to fire a rejection nothing will ever see.
+  let timeoutId;
   const timeout = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('Layout timed out')), LAYOUT_TIMEOUT_MS + 1000);
+    timeoutId = setTimeout(() => reject(new Error('Layout timed out')), LAYOUT_TIMEOUT_MS + 1000);
   });
 
   try {
@@ -66,6 +103,8 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
       }
     }
     return computeGridFallback(visibleNodeIds);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 
