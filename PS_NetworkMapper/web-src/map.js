@@ -287,6 +287,9 @@ window.renderMapMarkers = function() {
     if (window.mapEdgeLayer) { leafletMap.removeLayer(window.mapEdgeLayer); window.mapEdgeLayer = null; }
     // Every marker is about to be torn down and rebuilt - any prior "Edit position" arming
     // pointed at an object that no longer exists on the map.
+    if (currentlyArmedMarker && currentlyArmedMarker._disarmOnMapClick) {
+        leafletMap.off('click', currentlyArmedMarker._disarmOnMapClick);
+    }
     currentlyArmedMarker = null;
 
     var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
@@ -332,7 +335,13 @@ window.renderMapMarkers = function() {
             // indefinitely (dragging.enable() has no other timeout/blur to turn it back off).
             // No-op if a real drag already disabled it via dragend below.
             if (marker.dragging.enabled()) marker.dragging.disable();
-            if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
+            if (currentlyArmedMarker === marker) {
+                currentlyArmedMarker = null;
+                if (marker._disarmOnMapClick) {
+                    leafletMap.off('click', marker._disarmOnMapClick);
+                    marker._disarmOnMapClick = null;
+                }
+            }
             window.openRightDrawer(ip);
         });
         // Second entry point into the same window.openLocationEditor(ip) the Unplaced list

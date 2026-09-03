@@ -79,9 +79,9 @@ window.extractVlans = function() {
     vlanSelect.innerHTML = '<option value="ALL">Show All VLANs</option>';
 
     if (allVlans.size > 0) {
-        var sortedTags = Array.from(allVlans.keys()).map(Number).sort((a,b) => a-b);
+        var sortedTags = Array.from(allVlans.keys()).sort((a,b) => Number(a) - Number(b));
         sortedTags.forEach(tag => {
-            vlanSelect.innerHTML += `<option value="${tag}">VLAN ${tag} - ${esc(allVlans.get(tag.toString()))}</option>`;
+            vlanSelect.innerHTML += `<option value="${esc(tag)}">VLAN ${esc(tag)} - ${esc(allVlans.get(tag))}</option>`;
         });
     }
 };
