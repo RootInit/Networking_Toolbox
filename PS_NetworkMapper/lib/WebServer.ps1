@@ -197,7 +197,7 @@ function Invoke-RescanAction {
     # Test-IpInAllowedScopes) - a manually-triggered rescan target must be held to the same
     # fence, or a typo'd/out-of-scope IP would reach an SSH login with saved credentials.
     if (-not (Test-IpInAllowedScopes -IP $TargetIP -AllowedScopes $AllowedScopes)) {
-        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes" }
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes ($($AllowedScopes -join ', '))" }
         return
     }
 
@@ -585,7 +585,7 @@ function Invoke-ScanNetworkAction {
     # fence, or a typo'd/out-of-scope IP would reach an SSH login with saved credentials
     # before the crawl ever gets a chance to apply scope filtering.
     if (-not (Test-IpInAllowedScopes -IP $StartIP -AllowedScopes $AllowedScopes)) {
-        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes" }
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes ($($AllowedScopes -join ', '))" }
         return
     }
 

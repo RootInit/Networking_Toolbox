@@ -284,7 +284,7 @@ function Invoke-FleetCrawl {
                     # ScanStatus/ScanError contract.
                     $TimeoutNode = @{
                         DeviceIP = $Job.IP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
-                        StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+                        StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @();
                         Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
                         MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
                         MedNeighbors = @(); Configuration = "Unknown";

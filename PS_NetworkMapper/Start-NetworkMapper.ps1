@@ -155,6 +155,16 @@ if ($Log) { Write-Host "[LOGGING ENABLED] Raw payloads will be saved to .\RawDum
 
 . (Join-Path $ScriptDir "lib\FleetCrawl.ps1")
 
+# AllowedScopes is enforced on every crawl-discovered neighbor IP (FleetCrawl.ps1's
+# Test-IpInAllowedScopes) and on the web UI's manual-entry equivalents (WebServer.ps1's
+# /api/scan-network and /api/rescan) - this CLI entry point must be held to the same fence,
+# or a typo'd/out-of-scope -SwitchIP would reach an SSH login with saved credentials before
+# the crawl ever gets a chance to apply scope filtering.
+if (-not (Test-IpInAllowedScopes -IP $SwitchIP -AllowedScopes $AllowedScopes)) {
+    Write-Host "SwitchIP '$SwitchIP' is outside the configured AllowedScopes ($($AllowedScopes -join ', ')). Adjust -AllowedScopes if this IP should be permitted." -ForegroundColor Red
+    exit 1
+}
+
 if (-not (Test-Path $WorkerPath)) { Write-Host "Worker script missing at $WorkerPath!" -ForegroundColor Red; exit }
 
 $CrawlProgress = @{}  # unused by the CLI path - passed only because Invoke-FleetCrawl requires it
