@@ -58,7 +58,6 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.WriteLine("show route 0/0 exact")
         $Process.StandardInput.WriteLine("show interfaces terse")
         $Process.StandardInput.WriteLine("show interfaces descriptions")
-        $Process.StandardInput.WriteLine("show interfaces extensive")
         $Process.StandardInput.WriteLine("show spanning-tree interface")
         $Process.StandardInput.WriteLine("show poe interface")
         $Process.StandardInput.WriteLine("show dot1x interface")
@@ -66,13 +65,21 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.WriteLine("show vlans")
         $Process.StandardInput.WriteLine("show ethernet-switching table")
         $Process.StandardInput.WriteLine("show arp no-resolve")
-        # These four come last, after the ARP table client-IP correlation depends on, so a
-        # timeout truncates only this optional data. Config backup is last of the four since
-        # it's the largest output, so a timeout costs it before uptime/alarms/RE-health.
+        # These five come last, after the ARP table client-IP correlation depends on, so a
+        # timeout truncates only this optional data. Within the five, smallest/most-critical
+        # output goes first and largest/most-optional goes last, so a timeout costs the
+        # least-important data first: uptime/alarms/RE-health are tiny and diagnostically
+        # valuable, so they run right after ARP; config backup is large but has
+        # truncation-tolerant parsing, so it's next; "show interfaces extensive" (feeds only
+        # the optional "Last flapped"/inactive-ports data, with no truncation-tolerant parsing
+        # of its own - an unrecognized/truncated block just leaves that field unset, so it
+        # fails safe) produces by far the largest output of anything in this batch, so it runs
+        # last of all - a timeout costs it before anything else here.
         $Process.StandardInput.WriteLine("show system uptime")
         $Process.StandardInput.WriteLine("show chassis alarms")
         $Process.StandardInput.WriteLine("show chassis routing-engine")
         $Process.StandardInput.WriteLine("show configuration | display set")
+        $Process.StandardInput.WriteLine("show interfaces extensive")
         $Process.StandardInput.WriteLine("quit")
         $Process.StandardInput.Close()
 
@@ -303,12 +310,21 @@ try {
     foreach ($Block in $ExtBlocks) {
         if ($Block -notmatch "^Physical interface:\s*(?<port>(?:ge|xe|et|ae|mge)[^\s,]+)") { continue }
         $p = $Matches.port
-        if (-not $NodeData.Interfaces.ContainsKey($p)) { continue }
-        if ($Block -match "(?i)Last flapped\s*:\s*Never") {
+        if (-not $NodeData.Interfaces.ContainsKey($p)) {
+            Write-LogMsg "INTERFACES_EXT: port '$p' not found in terse output, skipping flap data"
+            continue
+        }
+        if ($Block -match "(?im)^\s*Last flapped\s*:\s*Never") {
             $NodeData.Interfaces[$p].LastFlappedSeconds = $null
             continue
         }
-        if ($Block -match "(?i)Last flapped\s*:[^\(]*\(\s*(?:(?<w>\d+)w)?\s*(?:(?<d>\d+)d)?\s*(?:(?<h>\d+):(?<m>\d+)(?::(?<s>\d+))?)?\s*ago\s*\)") {
+        # Two forms: the usual "w/d/h:m:s ago" duration, and Junos's sub-minute rendering
+        # which drops straight to a bare "(N secs ago)" with no colon-delimited component at
+        # all. Anchored to a genuine "Last flapped" field label at the start of a line
+        # (multiline mode) so a coincidental match inside a free-text "Description:" value
+        # earlier in the same block can't be picked up instead - real Junos output always
+        # emits Description before Last flapped within a physical-interface block.
+        if ($Block -match "(?im)^\s*Last flapped\s*:[^\(]*\(\s*(?:(?<w>\d+)w)?\s*(?:(?<d>\d+)d)?\s*(?:(?<h>\d+):(?<m>\d+)(?::(?<s>\d+))?)?\s*ago\s*\)") {
             $TotalSeconds = 0
             if ($Matches.w) { $TotalSeconds += [int]$Matches.w * 604800 }
             if ($Matches.d) { $TotalSeconds += [int]$Matches.d * 86400 }
@@ -316,6 +332,8 @@ try {
             if ($Matches.m) { $TotalSeconds += [int]$Matches.m * 60 }
             if ($Matches.s) { $TotalSeconds += [int]$Matches.s }
             $NodeData.Interfaces[$p].LastFlappedSeconds = $TotalSeconds
+        } elseif ($Block -match "(?im)^\s*Last flapped\s*:[^\(]*\(\s*(?<secs>\d+)\s*secs?\s*ago\s*\)") {
+            $NodeData.Interfaces[$p].LastFlappedSeconds = [int]$Matches.secs
         }
     }
 
