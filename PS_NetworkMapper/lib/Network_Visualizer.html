@@ -235,8 +235,13 @@ function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold, extraR
   const visibleNodeIds = [];
   const visibleEdges = [];
   const clusters = new Map();
+  // Reverse lookup for every node hidden inside a collapsed cluster: real node id ->
+  // the `cluster:X` placeholder id currently standing in for it. Lets any other edge
+  // referencing a hidden node (e.g. a secondary/redundant-link edge) get rerouted to
+  // the placeholder instead of just being dropped because its real endpoint isn't visible.
+  const hiddenNodeToCluster = new Map();
 
-  if (rootId == null) return { visibleNodeIds, visibleEdges, clusters };
+  if (rootId == null) return { visibleNodeIds, visibleEdges, clusters, hiddenNodeToCluster };
 
   // extraRoots (from buildPrimaryTree) are disconnected fabric islands' own local
   // roots - rendered as additional top-level entries alongside rootId rather than
@@ -258,11 +263,13 @@ function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold, extraR
       const clusterId = `cluster:${current}`;
       visibleNodeIds.push(clusterId);
       visibleEdges.push({ from: current, to: clusterId });
-      clusters.set(clusterId, { parentId: current, memberIds: collectDescendants(childrenOf, current) });
+      const memberIds = collectDescendants(childrenOf, current);
+      clusters.set(clusterId, { parentId: current, memberIds });
+      for (const memberId of memberIds) hiddenNodeToCluster.set(memberId, clusterId);
     }
   }
 
-  return { visibleNodeIds, visibleEdges, clusters };
+  return { visibleNodeIds, visibleEdges, clusters, hiddenNodeToCluster };
 }
 
 function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshold) {
@@ -3199,10 +3206,21 @@ async function doRenderVisibleGraph() {
         });
 
         var visibleSet = new Set(visible.visibleNodeIds);
+        var seenSecondary = new Set();
         primaryTree.secondaryEdges.forEach((e, i) => {
-            if (visibleSet.has(e.from) && visibleSet.has(e.to)) {
-                edgesDataset.add({ id: `secondary-${i}`, from: e.from, to: e.to, width: 1, color: '#c0c0c0', dashes: [4, 4] });
-            }
+            // A secondary/redundant edge whose real endpoint is hidden inside a collapsed
+            // cluster gets rerouted to that cluster's placeholder node instead of being
+            // dropped, mirroring how computeVisibleTree already reroutes primary edges.
+            var from = visibleSet.has(e.from) ? e.from : visible.hiddenNodeToCluster.get(e.from);
+            var to = visibleSet.has(e.to) ? e.to : visible.hiddenNodeToCluster.get(e.to);
+            if (!from || !to || from === to) return;
+            // Several distinct hidden nodes can all reroute to the same cluster placeholder
+            // (e.g. multiple redundant links into one collapsed subtree) - dedupe on the
+            // resolved pair so they don't stack into overlapping parallel edges.
+            var key = from < to ? from + '|' + to : to + '|' + from;
+            if (seenSecondary.has(key)) return;
+            seenSecondary.add(key);
+            edgesDataset.add({ id: `secondary-${i}`, from: from, to: to, width: 1, color: '#c0c0c0', dashes: [4, 4] });
         });
 
         var vlanFilterEl = document.getElementById('vlanFilter');
@@ -4528,6 +4546,11 @@ var rescanPollTimer = null;
 // once loadedSnapshots gets replaced wholesale.
 window.cancelPendingRescan = function() {
     if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
+    // rescanDevice's own finish() restores the button, but that's never reached when the
+    // poll is cancelled externally (e.g. a new file set loading mid-poll) - do the same
+    // restoration here, or #rescanBtn is left disabled/showing "Scanning..." forever.
+    var btn = document.getElementById('rescanBtn');
+    if (btn) { btn.disabled = false; btn.textContent = 'Re-scan'; }
 };
 
 window.rescanDevice = async function() {
@@ -4642,6 +4665,10 @@ var pingPollTimer = null;
 // which device's drawer is open.
 window.cancelPendingPing = function() {
     if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+    // Mirrors cancelPendingRescan above - pingDevice's own finish() restores the button, but
+    // that's never reached when the poll is cancelled externally.
+    var btn = document.getElementById('pingBtn');
+    if (btn) { btn.disabled = false; btn.textContent = 'Ping'; }
 };
 
 // #pingResult (unlike the rest of the drawer body) is a persistent element in index.html,
@@ -4824,6 +4851,15 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
     window.buildSearchIndex();
     if (activeSnapshotIndex >= 0 && loadedSnapshots[activeSnapshotIndex]) {
         deviceByIp = loadedSnapshots[activeSnapshotIndex].deviceByIp;
+    }
+
+    // A visible global search-results row was rendered from the PRE-merge field values (and
+    // its onclick closure is otherwise still fine - deviceIp/snapshotIndex didn't change) -
+    // re-run the search so it reflects the merged data. searchIndex spans every loaded
+    // snapshot regardless of which is active, so this isn't gated on isActiveSnapshot below.
+    var searchBox = document.getElementById('globalSearch');
+    if (searchBox && searchBox.value.trim() && window.performGlobalSearch) {
+        window.performGlobalSearch();
     }
 
     // Everything below touches the on-screen graph/drawer/map, which only reflect the
@@ -5017,7 +5053,7 @@ window.renderClients = function() {
         }
 
         clients = clients.sort((a, b) => {
-            if (a.IP === "Unknown IP") return 1; if (b.IP === "Unknown IP") return -1;
+            if (a.IP === "Unknown") return 1; if (b.IP === "Unknown") return -1;
             var numA = Number(String(a.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
             var numB = Number(String(b.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
             return numA - numB;
@@ -5416,7 +5452,7 @@ window.exportClientsCsv = function() {
 
     if (vlanFilter !== "ALL") { clients = clients.filter(c => String(c.VLAN_Tag) === vlanFilter.toString()); }
     clients.sort((a, b) => {
-        if (a.IP === "Unknown IP") return 1; if (b.IP === "Unknown IP") return -1;
+        if (a.IP === "Unknown") return 1; if (b.IP === "Unknown") return -1;
         var numA = Number(String(a.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
         var numB = Number(String(b.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
         return numA - numB;

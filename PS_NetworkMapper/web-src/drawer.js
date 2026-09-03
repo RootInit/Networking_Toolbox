@@ -59,6 +59,11 @@ var rescanPollTimer = null;
 // once loadedSnapshots gets replaced wholesale.
 window.cancelPendingRescan = function() {
     if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
+    // rescanDevice's own finish() restores the button, but that's never reached when the
+    // poll is cancelled externally (e.g. a new file set loading mid-poll) - do the same
+    // restoration here, or #rescanBtn is left disabled/showing "Scanning..." forever.
+    var btn = document.getElementById('rescanBtn');
+    if (btn) { btn.disabled = false; btn.textContent = 'Re-scan'; }
 };
 
 window.rescanDevice = async function() {
@@ -173,6 +178,10 @@ var pingPollTimer = null;
 // which device's drawer is open.
 window.cancelPendingPing = function() {
     if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+    // Mirrors cancelPendingRescan above - pingDevice's own finish() restores the button, but
+    // that's never reached when the poll is cancelled externally.
+    var btn = document.getElementById('pingBtn');
+    if (btn) { btn.disabled = false; btn.textContent = 'Ping'; }
 };
 
 // #pingResult (unlike the rest of the drawer body) is a persistent element in index.html,
@@ -355,6 +364,15 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
     window.buildSearchIndex();
     if (activeSnapshotIndex >= 0 && loadedSnapshots[activeSnapshotIndex]) {
         deviceByIp = loadedSnapshots[activeSnapshotIndex].deviceByIp;
+    }
+
+    // A visible global search-results row was rendered from the PRE-merge field values (and
+    // its onclick closure is otherwise still fine - deviceIp/snapshotIndex didn't change) -
+    // re-run the search so it reflects the merged data. searchIndex spans every loaded
+    // snapshot regardless of which is active, so this isn't gated on isActiveSnapshot below.
+    var searchBox = document.getElementById('globalSearch');
+    if (searchBox && searchBox.value.trim() && window.performGlobalSearch) {
+        window.performGlobalSearch();
     }
 
     // Everything below touches the on-screen graph/drawer/map, which only reflect the
@@ -548,7 +566,7 @@ window.renderClients = function() {
         }
 
         clients = clients.sort((a, b) => {
-            if (a.IP === "Unknown IP") return 1; if (b.IP === "Unknown IP") return -1;
+            if (a.IP === "Unknown") return 1; if (b.IP === "Unknown") return -1;
             var numA = Number(String(a.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
             var numB = Number(String(b.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
             return numA - numB;
@@ -947,7 +965,7 @@ window.exportClientsCsv = function() {
 
     if (vlanFilter !== "ALL") { clients = clients.filter(c => String(c.VLAN_Tag) === vlanFilter.toString()); }
     clients.sort((a, b) => {
-        if (a.IP === "Unknown IP") return 1; if (b.IP === "Unknown IP") return -1;
+        if (a.IP === "Unknown") return 1; if (b.IP === "Unknown") return -1;
         var numA = Number(String(a.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
         var numB = Number(String(b.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
         return numA - numB;

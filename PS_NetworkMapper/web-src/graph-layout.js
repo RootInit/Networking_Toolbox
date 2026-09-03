@@ -173,8 +173,13 @@ function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold, extraR
   const visibleNodeIds = [];
   const visibleEdges = [];
   const clusters = new Map();
+  // Reverse lookup for every node hidden inside a collapsed cluster: real node id ->
+  // the `cluster:X` placeholder id currently standing in for it. Lets any other edge
+  // referencing a hidden node (e.g. a secondary/redundant-link edge) get rerouted to
+  // the placeholder instead of just being dropped because its real endpoint isn't visible.
+  const hiddenNodeToCluster = new Map();
 
-  if (rootId == null) return { visibleNodeIds, visibleEdges, clusters };
+  if (rootId == null) return { visibleNodeIds, visibleEdges, clusters, hiddenNodeToCluster };
 
   // extraRoots (from buildPrimaryTree) are disconnected fabric islands' own local
   // roots - rendered as additional top-level entries alongside rootId rather than
@@ -196,11 +201,13 @@ function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold, extraR
       const clusterId = `cluster:${current}`;
       visibleNodeIds.push(clusterId);
       visibleEdges.push({ from: current, to: clusterId });
-      clusters.set(clusterId, { parentId: current, memberIds: collectDescendants(childrenOf, current) });
+      const memberIds = collectDescendants(childrenOf, current);
+      clusters.set(clusterId, { parentId: current, memberIds });
+      for (const memberId of memberIds) hiddenNodeToCluster.set(memberId, clusterId);
     }
   }
 
-  return { visibleNodeIds, visibleEdges, clusters };
+  return { visibleNodeIds, visibleEdges, clusters, hiddenNodeToCluster };
 }
 
 function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshold) {

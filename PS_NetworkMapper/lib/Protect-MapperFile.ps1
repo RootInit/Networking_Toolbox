@@ -87,8 +87,11 @@ if ($Decrypt) {
     $TargetPath = if ($OutputFile) { $OutputFile } else { $DefaultOutput }
 
     if (-not (Confirm-Overwrite -Path $TargetPath)) { return }
-    # Re-serialize rather than write the raw string, so output is normalized/readable JSON.
-    ($PlainJson | ConvertFrom-Json) | ConvertTo-Json -Depth 100 | Out-File -FilePath $TargetPath -Encoding utf8 -Force
+    # Write the decrypted plaintext string verbatim, same as the -Encrypt branch writes its
+    # raw input verbatim. Round-tripping through ConvertFrom-Json/ConvertTo-Json here served
+    # no purpose and could reformat date-like string fields (e.g. .ToString("o") timestamps)
+    # differently depending on PowerShell version/culture.
+    $PlainJson | Out-File -FilePath $TargetPath -Encoding utf8 -Force
     Write-Host "Wrote plaintext to: $TargetPath" -ForegroundColor Green
 
 } else {

@@ -210,6 +210,25 @@ test('computeVisibleTree collapses a deep subtree behind its nearest over-thresh
   assert.equal(clusters.get('cluster:mid').memberIds.length, 20);
 });
 
+test('computeVisibleTree returns a hiddenNodeToCluster map so a secondary edge into a collapsed cluster can be rerouted instead of dropped', () => {
+  // root -> mid -> (20 leaves, over threshold so mid's children collapse into cluster:mid).
+  // A secondary/redundant edge from "other" (visible) to one of mid's hidden leaves should
+  // be reroutable to cluster:mid via hiddenNodeToCluster, rather than the leaf being unreachable.
+  const nodeIds = ['root', 'mid', 'other', ...Array.from({ length: 20 }, (_, i) => `leaf${i}`)];
+  const edges = [
+    { from: 'root', to: 'mid' },
+    { from: 'root', to: 'other' },
+    ...Array.from({ length: 20 }, (_, i) => ({ from: 'mid', to: `leaf${i}` })),
+  ];
+  const { childrenOf } = buildPrimaryTree(nodeIds, edges, 'root');
+  const { visibleNodeIds, hiddenNodeToCluster } = computeVisibleTree('root', childrenOf, new Set(), 8);
+
+  assert.equal(visibleNodeIds.includes('leaf0'), false); // leaf0 is hidden, folded into cluster:mid
+  assert.equal(hiddenNodeToCluster.get('leaf0'), 'cluster:mid');
+  assert.equal(hiddenNodeToCluster.get('leaf19'), 'cluster:mid');
+  assert.equal(hiddenNodeToCluster.has('other'), false); // "other" was never hidden, no entry expected
+});
+
 test('expandAncestors reveals a target buried behind an over-threshold ancestor', () => {
   const nodeIds = ['root', 'mid', 'leaf0', 'leaf1'];
   const edges = [

@@ -298,6 +298,22 @@ function Invoke-FleetCrawl {
                     } catch {
                         Write-DebugLogLocal "ORCHESTRATOR ERROR parsing result from $($Job.IP): $_"
                         Write-Host "`n[!] Error processing result from $($Job.IP): $_" -ForegroundColor Red
+
+                        # Same reasoning as the timeout path above: without a synthesized node
+                        # this device silently vanishes from the output (it was already marked
+                        # $Visited before the job ran, so it's never retried either). Mirrors
+                        # $TimeoutNode field-for-field, distinguished by ScanStatus.
+                        $ErrorNode = @{
+                            DeviceIP = $Job.IP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
+                            StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+                            Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
+                            MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
+                            MedNeighbors = @(); Configuration = "Unknown";
+                            ScanStatus = "Error"
+                            ScanError  = "Orchestrator failed to process result from $($Job.IP): $_"
+                        }
+                        $TopologyList.Add($ErrorNode)
+                        $PendingWrites++
                     } finally {
                         $JobsToRemove += $Job
                     }

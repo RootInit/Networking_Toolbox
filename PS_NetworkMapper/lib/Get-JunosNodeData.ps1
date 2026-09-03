@@ -374,29 +374,102 @@ try {
     # up "Unknown" for every client (VLAN_Name is unaffected - it's read straight off the
     # MAC table, not through this lookup - so a mismatch here shows up as "VLAN_Name is
     # right everywhere but VLAN_Tag/the VLAN filter is not").
+    # $VlanDict is keyed "<routing-instance>|<name>" when the layout has an instance column,
+    # so two different routing-instances defining the same VLAN name (e.g. "guest"=100 under
+    # one instance, "guest"=200 under another) don't collide into a single last-write-wins
+    # entry. $VlanNameTagIndex is a parallel name-only index used as a fallback at the MAC-table
+    # join below (which has no routing-instance context of its own): it holds a VLAN name's tag
+    # only while every routing-instance that defines that name agrees on the tag, and is forced
+    # to $null the moment two instances disagree - so an unambiguous name still resolves
+    # correctly, and only a genuinely colliding name falls back to "Unknown" instead of silently
+    # returning whichever instance's tag happened to be seen there.
     $VlanDict = @{}
+    $VlanNameTagIndex = @{}
     $HasRoutingInstanceColumn = $DataDict["VLANS"] -match "(?im)^\s*Routing instance\s"
     foreach ($Line in ($DataDict["VLANS"] -split "`n")) {
         if ($HasRoutingInstanceColumn) {
-            if ($Line -match "^\S+\s+(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = $Matches.tag }
+            if ($Line -match "^(?<inst>\S+)\s+(?<name>\S+)\s+(?<tag>\d+)") {
+                $VlanDict["$($Matches.inst)|$($Matches.name)"] = $Matches.tag
+                if ($VlanNameTagIndex.ContainsKey($Matches.name)) {
+                    if ($null -ne $VlanNameTagIndex[$Matches.name] -and $VlanNameTagIndex[$Matches.name] -ne $Matches.tag) {
+                        $VlanNameTagIndex[$Matches.name] = $null
+                    }
+                } else {
+                    $VlanNameTagIndex[$Matches.name] = $Matches.tag
+                }
+            }
         } else {
             if ($Line -match "^(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = $Matches.tag }
         }
     }
 
+    # Ports with a switch/router LLDP neighbor (not a phone/AP - those are MedNeighbors and
+    # deliberately not excluded here). A downstream switch's uplink shows up in this switch's
+    # MAC table as hundreds of unrelated client MACs; excluded so Clients only reflects
+    # devices this switch is the actual access point for. Built from $LldpSwitchPorts, which
+    # is wider than $NodeData.Neighbors (management IP required there for the topology-edge
+    # display) - it also includes a neighbor confirmed as a switch/router by its LLDP
+    # capabilities even without a management address - but never wider than "confirmed
+    # switch/router or has a management IP", so an unrecognized endpoint device can't be
+    # mistaken for an uplink and silently swallow its own clients. Defined here (rather than
+    # just above the Clients-building loop) because the MAC-table parse loop below needs it
+    # too, to prefer an access-port sighting over an uplink/interconnect one when the same
+    # MAC is seen on both.
+    $UplinkPorts = $LldpSwitchPorts
+
+    # Virtual-chassis interconnect (vcp) and management (bme/reth/me/vme) interfaces are
+    # never LLDP neighbors, so they'd never land in $UplinkPorts above - yet the MAC-table
+    # regex below deliberately still matches them (it needs to, for other VC bookkeeping),
+    # so a MAC learned on one of these must be excluded as a client (below, and at the
+    # dedup preference just below) or it leaks into Clients as a fake directly-attached
+    # device, the same failure shape as the already-fixed LACP/AE trunk-VLAN leak. Defined
+    # here (rather than just above the Clients-building loop) because the MAC-table parse
+    # loop needs it too, to prefer an access-port sighting over an uplink/interconnect one.
+    $InterconnectPortPattern = "^(?:vcp|bme|reth|me|vme)"
+
     # --- Parse MAC Table ---
+    # A MAC can legitimately appear more than once in "show ethernet-switching table" - e.g.
+    # visible via both a real access port and an uplink/interconnect port. Keying $RawMacs by
+    # MAC alone means the last-parsed sighting wins; if that happens to be the uplink/
+    # interconnect one, the client is dropped entirely by the exclusion check below even
+    # though an access-port sighting for the same MAC was right there. Track whether the
+    # currently-stored sighting for a MAC is an access-port one and only let a later line
+    # overwrite it when the incumbent isn't (so an access-port sighting always wins, and among
+    # two non-access sightings the last one parsed still wins, same as before).
     $RawMacs = @{}
+    $CurrentMacInstance = $null
     foreach ($Line in ($DataDict["MAC_TABLE"] -split "`n")) {
+        if ($Line -match "(?i)^\s*Routing instance\s*:\s*(?<inst>\S+)") { $CurrentMacInstance = $Matches.inst; continue }
         # Junos's documented flag legend for "show ethernet-switching table" includes the
         # two-letter flags SE (statistics enabled) and NM (non-configured MAC) alongside the
         # single-letter ones; matching only a single char here failed the whole line's regex
         # and silently dropped that client. Try the two-letter tokens first.
         if ($Line -match "(?<vlan>\S+)\s+(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<flag>SE|NM|[SDLPCNO])\s+.+?(?<interface>(?:ge|xe|et|ae|vcp|bme|reth|me|vme)[a-zA-Z0-9\-\/\.]+)") {
             $VlanName = $Matches.vlan
-            $RawMacs[$Matches.mac.ToLower()] = @{ 
-                Port = $Matches.interface; VLAN_Name = $VlanName; 
-                VLAN_Tag = if ($VlanDict.ContainsKey($VlanName)) { $VlanDict[$VlanName] } else { "Unknown" }; 
-                Type = if ($Matches.flag -eq "D") { "Dynamic" } else { "Static/Other" } 
+            $VlanTag = "Unknown"
+            if ($CurrentMacInstance -and $VlanDict.ContainsKey("$CurrentMacInstance|$VlanName")) {
+                $VlanTag = $VlanDict["$CurrentMacInstance|$VlanName"]
+            } elseif ($VlanNameTagIndex.ContainsKey($VlanName) -and $null -ne $VlanNameTagIndex[$VlanName]) {
+                $VlanTag = $VlanNameTagIndex[$VlanName]
+            } elseif ($VlanDict.ContainsKey($VlanName)) {
+                $VlanTag = $VlanDict[$VlanName]
+            }
+
+            $MacKey = $Matches.mac.ToLower()
+            $NewPhysPort = $Matches.interface -replace "\.\d+$",""
+            $NewIsAccessPort = -not ($UplinkPorts.Contains($NewPhysPort) -or $NewPhysPort -match $InterconnectPortPattern)
+            $Incumbent = $RawMacs[$MacKey]
+            $IncumbentIsAccessPort = $false
+            if ($Incumbent) {
+                $IncumbentPhysPort = $Incumbent.Port -replace "\.\d+$",""
+                $IncumbentIsAccessPort = -not ($UplinkPorts.Contains($IncumbentPhysPort) -or $IncumbentPhysPort -match $InterconnectPortPattern)
+            }
+            if (-not $Incumbent -or -not $IncumbentIsAccessPort -or $NewIsAccessPort) {
+                $RawMacs[$MacKey] = @{
+                    Port = $Matches.interface; VLAN_Name = $VlanName;
+                    VLAN_Tag = $VlanTag;
+                    Type = if ($Matches.flag -eq "D") { "Dynamic" } else { "Static/Other" }
+                }
             }
         }
     }
@@ -412,25 +485,6 @@ try {
             $NodeData.ArpEntries += [PSCustomObject]@{ MAC = $macLower; IP = $Matches.ip }
         }
     }
-
-    # Ports with a switch/router LLDP neighbor (not a phone/AP - those are MedNeighbors and
-    # deliberately not excluded here). A downstream switch's uplink shows up in this switch's
-    # MAC table as hundreds of unrelated client MACs; excluded so Clients only reflects
-    # devices this switch is the actual access point for. Built from $LldpSwitchPorts, which
-    # is wider than $NodeData.Neighbors (management IP required there for the topology-edge
-    # display) - it also includes a neighbor confirmed as a switch/router by its LLDP
-    # capabilities even without a management address - but never wider than "confirmed
-    # switch/router or has a management IP", so an unrecognized endpoint device can't be
-    # mistaken for an uplink and silently swallow its own clients.
-    $UplinkPorts = $LldpSwitchPorts
-
-    # Virtual-chassis interconnect (vcp) and management (bme/reth/me/vme) interfaces are
-    # never LLDP neighbors, so they'd never land in $UplinkPorts above - yet the MAC-table
-    # regex above deliberately still matches them (it needs to, for other VC bookkeeping),
-    # so a MAC learned on one of these must be excluded here explicitly or it leaks into
-    # Clients as a fake directly-attached device, the same failure shape as the
-    # already-fixed LACP/AE trunk-VLAN leak.
-    $InterconnectPortPattern = "^(?:vcp|bme|reth|me|vme)"
 
     # --- Build Clients from the MAC table. IP comes from local ARP when available;
     # otherwise "Unknown" until the orchestrator's global enrichment pass. ---

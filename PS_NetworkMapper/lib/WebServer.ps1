@@ -359,8 +359,12 @@ function Invoke-PingStatusAction {
     $Elapsed = ((Get-Date) - $Job.StartTime).TotalSeconds
     if ($Elapsed -gt 20) {
         # Not force-stopped, same reasoning as Invoke-RescanStatusAction's timeout handling:
-        # free the single active slot and let Invoke-PingAction reap it once it actually
-        # finishes on its own, instead of risking a .Stop() that doesn't return promptly.
+        # .Stop() can't interrupt a pipeline blocked in a synchronous native/WMI ping call, so
+        # risking it here would just trade one indefinite hang for another. This only clears
+        # the HTTP-facing $script:PendingPing slot so a new ping can be *submitted* -
+        # $Job.PS keeps running and keeps occupying a $script:PingPool runspace until it
+        # finishes (or forever, if truly hung) - that's why the pool below is sized with spare
+        # capacity rather than 1, so one stuck ping doesn't queue every later ping behind it.
         $script:OrphanedPings.Add($Job)
         $script:PendingPing = $null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "timeout"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
@@ -416,8 +420,9 @@ function Invoke-RescanStatusAction {
         # Not force-stopped: New-JunosAskPass writes the switch password to a plaintext
         # %TEMP% file cleaned up only by the worker's own finally block, and .Stop()'ing a
         # pipeline blocked in Process.WaitForExit isn't guaranteed to run that promptly.
-        # Instead free the single active slot and let Invoke-RescanAction reap it once it
-        # actually finishes on its own.
+        # Instead free the HTTP-facing slot and let Invoke-RescanAction reap it once it
+        # actually finishes on its own - it still occupies a $script:RescanPool runspace
+        # until then, which is why that pool carries spare capacity (see its creation site).
         $script:OrphanedScans.Add($Job)
         $script:PendingScan = $null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "timeout"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
@@ -812,14 +817,26 @@ function Start-MapperWebServer {
         throw "Could not bind $Prefix - is another instance already running? ($_)"
     }
 
-    # Backs /api/rescan - single-slot, matching Invoke-RescanAction's "one in-flight scan" choice.
-    $script:RescanPool = [runspacefactory]::CreateRunspacePool(1, 1)
+    # Backs /api/rescan. Only one rescan is ever in flight at the HTTP level ($script:PendingScan
+    # gates that with a 409), but the pool itself is sized to 3, not 1: an orphaned rescan
+    # (Invoke-RescanStatusAction's 90s timeout) is never force-stopped - see the comment there -
+    # so a genuinely hung rescan (an SSH session into a dead/slow switch, which can run far
+    # longer than a ping) keeps occupying a runspace indefinitely. With a 1-slot pool that
+    # silently wedges every future rescan behind the zombie job forever; the spare slots give
+    # headroom to absorb that instead.
+    $script:RescanPool = [runspacefactory]::CreateRunspacePool(1, 3)
     $script:RescanPool.Open()
     $script:PendingScan = $null
     $script:OrphanedScans = [System.Collections.Generic.List[object]]::new()
     $script:PendingScanNetwork = $null
-    # Backs /api/ping - single-slot, matching Invoke-RescanAction's "one in-flight job" choice.
-    $script:PingPool = [runspacefactory]::CreateRunspacePool(1, 1)
+    # Backs /api/ping. Only one ping is ever in flight at the HTTP level ($script:PendingPing
+    # gates that with a 409), but the pool itself is sized to 3, not 1: an orphaned ping
+    # (Invoke-PingStatusAction's 20s timeout) is never force-stopped - see the comment there -
+    # so a genuinely hung ping (e.g. the PS 5.1 Test-Connection branch above has no
+    # -TimeoutSeconds bound at all) keeps occupying a runspace indefinitely. With a 1-slot pool
+    # that silently wedges every future ping behind the zombie job forever; the spare slots
+    # give headroom to absorb that instead.
+    $script:PingPool = [runspacefactory]::CreateRunspacePool(1, 3)
     $script:PingPool.Open()
     $script:PendingPing = $null
     $script:OrphanedPings = [System.Collections.Generic.List[object]]::new()

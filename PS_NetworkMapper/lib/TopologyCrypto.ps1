@@ -91,8 +91,17 @@ function Unprotect-TopologyPayload {
     }
     # Same bounds as topology-crypto.js's MIN_ITERATIONS/MAX_ITERATIONS - a CPU-burn guard
     # against a tampered file forcing an absurd PBKDF2 cost, not a security boundary.
-    $IterCheck = 0L
-    if (-not [long]::TryParse([string]$Envelope.iterations, [ref]$IterCheck) -or $IterCheck -lt 1000 -or $IterCheck -gt 5000000) {
+    # Must reject a JSON string value (e.g. "600000") the same way topology-crypto.js's
+    # Number.isInteger(envelope.iterations) check does - ConvertFrom-Json already types a
+    # well-formed JSON number as int/long/double, so require that instead of stringifying
+    # first via [long]::TryParse([string]...), which would silently accept a string.
+    $IterationsValue = $Envelope.iterations
+    $IsNumericType = $IterationsValue -is [int] -or $IterationsValue -is [long] -or $IterationsValue -is [double] -or $IterationsValue -is [decimal]
+    if (-not $IsNumericType) {
+        throw "Iteration count out of range: $($Envelope.iterations)"
+    }
+    $IterCheck = [long]$IterationsValue
+    if ($IterCheck -ne $IterationsValue -or $IterCheck -lt 1000 -or $IterCheck -gt 5000000) {
         throw "Iteration count out of range: $($Envelope.iterations)"
     }
 
@@ -111,6 +120,12 @@ function Unprotect-TopologyPayload {
     # this function's clean error - check explicitly instead of letting parameter binding be
     # the thing that throws.
     if ($SaltBytes.Length -eq 0 -or $IvBytes.Length -eq 0 -or $CipherBytes.Length -eq 0 -or $MacBytes.Length -eq 0) {
+        throw "Incorrect password, or the file is corrupted."
+    }
+    # A present-but-abnormally-short salt (1-7 bytes) can make Rfc2898DeriveBytes throw an
+    # unhandled/raw exception on some .NET runtimes instead of this function's clean error.
+    # 8 bytes is the standard PBKDF2 salt minimum.
+    if ($SaltBytes.Length -lt 8) {
         throw "Incorrect password, or the file is corrupted."
     }
 

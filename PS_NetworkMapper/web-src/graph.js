@@ -230,10 +230,21 @@ async function doRenderVisibleGraph() {
         });
 
         var visibleSet = new Set(visible.visibleNodeIds);
+        var seenSecondary = new Set();
         primaryTree.secondaryEdges.forEach((e, i) => {
-            if (visibleSet.has(e.from) && visibleSet.has(e.to)) {
-                edgesDataset.add({ id: `secondary-${i}`, from: e.from, to: e.to, width: 1, color: '#c0c0c0', dashes: [4, 4] });
-            }
+            // A secondary/redundant edge whose real endpoint is hidden inside a collapsed
+            // cluster gets rerouted to that cluster's placeholder node instead of being
+            // dropped, mirroring how computeVisibleTree already reroutes primary edges.
+            var from = visibleSet.has(e.from) ? e.from : visible.hiddenNodeToCluster.get(e.from);
+            var to = visibleSet.has(e.to) ? e.to : visible.hiddenNodeToCluster.get(e.to);
+            if (!from || !to || from === to) return;
+            // Several distinct hidden nodes can all reroute to the same cluster placeholder
+            // (e.g. multiple redundant links into one collapsed subtree) - dedupe on the
+            // resolved pair so they don't stack into overlapping parallel edges.
+            var key = from < to ? from + '|' + to : to + '|' + from;
+            if (seenSecondary.has(key)) return;
+            seenSecondary.add(key);
+            edgesDataset.add({ id: `secondary-${i}`, from: from, to: to, width: 1, color: '#c0c0c0', dashes: [4, 4] });
         });
 
         var vlanFilterEl = document.getElementById('vlanFilter');
