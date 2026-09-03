@@ -35,15 +35,35 @@ function New-JunosCredentialFile {
     param([Parameter(Mandatory=$true)][string]$Username, [Parameter(Mandatory=$true)][string]$Password)
     $CredPath = Join-Path $env:TEMP "junos_cred_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).json"
     $Json = @{ Username = $Username; Password = $Password } | ConvertTo-Json -Compress
-    # Create the file empty and harden its ACL BEFORE writing the plaintext content, so the
-    # content is never on disk under %TEMP%'s broader default ACL, even momentarily.
-    [System.IO.File]::WriteAllText($CredPath, "")
-    Protect-JunosTempFileAcl -Path $CredPath
-    # WriteAllText, not Out-File -Encoding utf8: "utf8" means BOM in Windows PowerShell 5.1
-    # but no-BOM in pwsh Core, while the reader (Connect-Switch.ps1) is always hardcoded
-    # powershell.exe (5.1). A BOM-less file would hit its Get-Content ANSI-codepage fallback
-    # and corrupt non-ASCII credentials. WriteAllText is UTF-8-without-BOM on both runtimes.
-    [System.IO.File]::WriteAllText($CredPath, $Json)
+    # Whether an already-ACL-hardened empty file keeps that hardened ACL across the later
+    # WriteAllText below (vs. NTFS resetting it to the parent directory's inherited default,
+    # depending on CREATE_ALWAYS/supersede semantics with no explicit SECURITY_ATTRIBUTES
+    # passed) is unconfirmed - this could not be verified on a non-Windows dev machine. Flagged
+    # as an open question for live-Windows verification, not asserted either way.
+    try {
+        # Create the file empty and harden its ACL BEFORE writing the plaintext content, so the
+        # content is never on disk under %TEMP%'s broader default ACL, even momentarily. Note
+        # this guarantee only holds when Protect-JunosTempFileAcl actually succeeds - it swallows
+        # its own failures (Write-Warning, no throw; see its definition), so a silent hardening
+        # failure means the content below still gets written under the broader default ACL, same
+        # as before this ordering fix existed.
+        [System.IO.File]::WriteAllText($CredPath, "")
+        Protect-JunosTempFileAcl -Path $CredPath
+        # WriteAllText, not Out-File -Encoding utf8: "utf8" means BOM in Windows PowerShell 5.1
+        # but no-BOM in pwsh Core, while the reader (Connect-Switch.ps1) is always hardcoded
+        # powershell.exe (5.1). A BOM-less file would hit its Get-Content ANSI-codepage fallback
+        # and corrupt non-ASCII credentials. WriteAllText is UTF-8-without-BOM on both runtimes.
+        [System.IO.File]::WriteAllText($CredPath, $Json)
+    } catch {
+        # Partial-write failure: clean up the file if it already made it to disk before
+        # re-throwing, so the caller (whose assignment to $CredFile never completes since we
+        # never return) has nothing left to leak - it can't call Remove-JunosCredentialFile
+        # without a path.
+        if (Test-Path -LiteralPath $CredPath) {
+            Remove-Item -LiteralPath $CredPath -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
     return $CredPath
 }
 
@@ -59,10 +79,20 @@ function New-JunosAskPass {
     param([Parameter(Mandatory=$true)][string]$Password)
     $AskPassPath = Join-Path $env:TEMP "ssh_askpass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).bat"
     $AskPassText = Join-Path $env:TEMP "ssh_pass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
+    # Whether an already-ACL-hardened empty file keeps that hardened ACL across the later
+    # WriteAllText calls below (vs. NTFS resetting it to the parent directory's inherited
+    # default, depending on CREATE_ALWAYS/supersede semantics with no explicit
+    # SECURITY_ATTRIBUTES passed) is unconfirmed - this could not be verified on a non-Windows
+    # dev machine. Flagged as an open question for live-Windows verification, not asserted
+    # either way.
     try {
         # Create each file empty and harden its ACL BEFORE writing the plaintext content, so
         # the password (and the .bat referencing its path) is never on disk under %TEMP%'s
-        # broader default ACL, even momentarily.
+        # broader default ACL, even momentarily. Note this guarantee only holds when
+        # Protect-JunosTempFileAcl actually succeeds - it swallows its own failures
+        # (Write-Warning, no throw; see its definition), so a silent hardening failure means
+        # the content below still gets written under the broader default ACL, same as before
+        # this ordering fix existed.
         [System.IO.File]::WriteAllText($AskPassText, "")
         Protect-JunosTempFileAcl -Path $AskPassText
         [System.IO.File]::WriteAllText($AskPassText, $Password)
