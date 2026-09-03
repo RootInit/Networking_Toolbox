@@ -65,6 +65,24 @@ function Write-MapperDebugLog {
     try { "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" | Out-File -FilePath $script:DebugLogPath -Append -Encoding utf8 } catch {}
 }
 
+# Max length (chars) accepted per client-error field before truncation (P7LOG-02) - mirrors
+# the 500-char stderr cap Get-JunosNodeData.ps1's $ErrSummary uses for the same "don't let
+# unbounded attacker/bug-controlled text hit the log" reason, just larger since a JS stack
+# trace legitimately runs longer than an ssh stderr dump.
+$script:ClientErrorFieldMaxLength = 4000
+
+# Neutralizes a client-supplied log field: replaces embedded CR/LF with visible escape
+# sequences (so multi-line content stays visible but can't fabricate a second, realistic-
+# looking "[timestamp] ..." line - P7LOG-01) and truncates to $MaxLength (P7LOG-02), so one
+# malicious/buggy report can't inject fake log entries or write unbounded data to the log.
+function ConvertTo-SafeLogField {
+    param([string]$Text, [int]$MaxLength = $script:ClientErrorFieldMaxLength)
+    if ([string]::IsNullOrEmpty($Text)) { return $Text }
+    $Safe = $Text -replace "`r`n", '\r\n' -replace "`r", '\r' -replace "`n", '\n'
+    if ($Safe.Length -gt $MaxLength) { $Safe = $Safe.Substring(0, $MaxLength) + "...(truncated)" }
+    return $Safe
+}
+
 # Lets the browser (window.reportClientError, utils.js) forward client-side errors into
 # Mapper_Debug.log, so server- and client-side failures of a scan end up in one place.
 # Tolerant of a malformed/missing body - a logging endpoint must not itself throw.
@@ -79,10 +97,23 @@ function Invoke-ClientErrorAction {
     $UrlText = if ($Parsed -and $Parsed.url) { [string]$Parsed.url } else { "" }
     $StackText = if ($Parsed -and $Parsed.stack) { [string]$Parsed.stack } else { "" }
 
+    # message/source/url compose the single HeaderLine below and must not be able to smuggle
+    # a CR/LF that fabricates what looks like a separate, legitimate timestamped log entry.
+    $MessageText = ConvertTo-SafeLogField $MessageText
+    $SourceText = ConvertTo-SafeLogField $SourceText
+    $UrlText = ConvertTo-SafeLogField $UrlText
+
     $HeaderLine = "CLIENT ERROR [$SourceText] $MessageText"
     if ($UrlText) { $HeaderLine += " (at $UrlText)" }
     Write-MapperDebugLog $HeaderLine
     if ($StackText) {
+        # Stack is legitimately multi-line and already split on `n before each line gets its
+        # own real "[timestamp]    " prefix from Write-MapperDebugLog, so a line can't forge a
+        # new entry the way an unsanitized message/source/url could - only length-cap it here
+        # (P7LOG-02), don't touch its newline structure.
+        if ($StackText.Length -gt $script:ClientErrorFieldMaxLength) {
+            $StackText = $StackText.Substring(0, $script:ClientErrorFieldMaxLength) + "...(truncated)"
+        }
         foreach ($StackLine in ($StackText -split "`n")) { Write-MapperDebugLog "    $($StackLine.TrimEnd())" }
     }
 
@@ -138,7 +169,7 @@ function Test-SameOriginRequest {
 # $PowerShellExePath is resolved by Start-MapperWebServer from the CURRENT process rather
 # than hardcoded, since a pwsh-only machine has no "powershell.exe" to find.
 function Invoke-ConnectAction {
-    param($Response, [string]$Body, [string]$ConnectScriptPath, [string]$JunosUsername, [string]$JunosPassword, [string]$PowerShellExePath = "powershell.exe")
+    param($Response, [string]$Body, [string]$ConnectScriptPath, [string]$JunosUsername, [string]$JunosPassword, [string]$PowerShellExePath = "powershell.exe", [string[]]$AllowedScopes)
 
     if ([string]::IsNullOrWhiteSpace($JunosUsername) -or [string]::IsNullOrWhiteSpace($JunosPassword)) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "No Juniper login configured - set it in the Settings tab, then try again." }
@@ -151,6 +182,14 @@ function Invoke-ConnectAction {
 
     if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing IP address" }
+        return
+    }
+
+    # AllowedScopes is enforced on every crawl-discovered neighbor IP (FleetCrawl.ps1's
+    # Test-IpInAllowedScopes) - a manually-triggered SSH launch target must be held to the
+    # same fence, or a typo'd/out-of-scope IP would reach an SSH login with saved credentials.
+    if (-not (Test-IpInAllowedScopes -IP $TargetIP -AllowedScopes $AllowedScopes)) {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes ($($AllowedScopes -join ', '))" }
         return
     }
 
@@ -650,6 +689,21 @@ function Invoke-ScanNetworkStatusAction {
         if (-not $Job.Collected) {
             try {
                 $Result = $Job.PS.EndInvoke($Job.Handle)
+
+                # Non-terminating errors/warnings inside the worker don't fail EndInvoke and
+                # would otherwise never surface anywhere - same reasoning as Invoke-FleetCrawl's
+                # drain of these streams for its worker jobs.
+                if ($Job.PS.HadErrors) {
+                    foreach ($ErrRecord in $Job.PS.Streams.Error) {
+                        Write-MapperDebugLog "SCAN-NETWORK ERROR STREAM [$($Job.StartIP)] $ErrRecord"
+                    }
+                }
+                if ($Job.PS.Streams.Warning.Count -gt 0) {
+                    foreach ($WarnRecord in $Job.PS.Streams.Warning) {
+                        Write-MapperDebugLog "SCAN-NETWORK WARNING STREAM [$($Job.StartIP)] $WarnRecord"
+                    }
+                }
+
                 # Index explicitly ($Result[0]) rather than dotting into $Result: PowerShell
                 # member enumeration on a 1-item collection unwraps straight to that item's
                 # own .Topology, which for a single-device crawl is a bare PSCustomObject
@@ -1077,7 +1131,7 @@ function Start-MapperWebServer {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $Body = Read-WebRequestBody -Request $Request
-                        Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -PowerShellExePath $PowerShellExePath
+                        Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -PowerShellExePath $PowerShellExePath -AllowedScopes $AllowedScopes
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/rescan") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
