@@ -114,7 +114,13 @@ function Invoke-ClientErrorAction {
         if ($StackText.Length -gt $script:ClientErrorFieldMaxLength) {
             $StackText = $StackText.Substring(0, $script:ClientErrorFieldMaxLength) + "...(truncated)"
         }
-        foreach ($StackLine in ($StackText -split "`n")) { Write-MapperDebugLog "    $($StackLine.TrimEnd())" }
+        foreach ($StackLine in ($StackText -split "`n")) {
+            # TrimEnd() only strips a trailing `r; a lone mid-line `r (no paired `n) would
+            # otherwise survive into the log and, on playback, carriage-return the cursor back
+            # to overwrite the real timestamp prefix - the same forged-entry effect P7LOG-01
+            # guards against for `r`n, just via a bare `r (P8REC-02). Escape it to a literal.
+            Write-MapperDebugLog "    $($StackLine.Replace("`r", '\r').TrimEnd())"
+        }
     }
 
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "logged" }

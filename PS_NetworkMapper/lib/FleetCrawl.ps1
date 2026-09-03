@@ -82,7 +82,40 @@ function Invoke-FleetCrawl {
             $Envelope = Protect-TopologyPayload -PlainJson $PlainJson -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations $Iterations
             $Envelope | ConvertTo-Json -Depth 5 | Out-File -FilePath $Path -Encoding utf8
         } else {
+            # $Path here is always $TempOutputFile - the same plaintext secrets that make
+            # $OutputFile need ACL hardening (P8SEC-03) pass through this .tmp file first, under
+            # $SnapshotDir's broader default ACL, on every init/periodic/final/salvage write, not
+            # just the last one Move-TopologyOutputAtomicLocal hardens after the move. Match
+            # New-JunosCredentialFile's precedent in SshHelpers.ps1: touch the file empty and
+            # harden its ACL BEFORE the plaintext content lands, so the content is never on disk
+            # under the broader ACL, even momentarily - instead of only hardening $OutputFile
+            # after Move-FileAtomic and leaving each $TempOutputFile write unprotected until then.
+            [System.IO.File]::WriteAllText($Path, "")
+            Protect-JunosSensitiveFileAcl -Path $Path
             $PlainJson | Out-File -FilePath $Path -Encoding utf8
+        }
+    }
+
+    # Wraps every topology-output Move-FileAtomic call (init/periodic/final/salvage - all four
+    # go through here) so a -NoEncryption run's plaintext $OutputFile - which holds the full,
+    # unredacted "show configuration | display set" for every scanned device, SNMP
+    # communities/RADIUS/TACACS+ secrets included (P8SEC-03) - gets the same single-user ACL
+    # hardening New-JunosCredentialFile/New-JunosAskPass already give the credential temp files
+    # in SshHelpers.ps1, instead of sitting under the snapshot directory's broader default ACL.
+    # Move-FileAtomic replaces $OutputFile with a freshly-created file (default ACL) on EVERY
+    # call, not just the first, so this has to run after each move, not once. $TempOutputFile is
+    # separately hardened by Write-TopologyOutputLocal before Move-FileAtomic even runs (see
+    # there) - this hardens the post-move $OutputFile, since [System.IO.File]::Move's ACL
+    # semantics across that rename aren't relied on (unverified on this dev machine - see the
+    # same open question flagged in SshHelpers.ps1). Skipped when $Encrypted - an encrypted
+    # snapshot's content is already opaque without the passphrase, so ACL hardening isn't needed
+    # there (and matches SshHelpers.ps1's precedent of only hardening files that hold plaintext
+    # secrets).
+    function Move-TopologyOutputAtomicLocal {
+        param([string]$SourcePath, [string]$DestinationPath)
+        Move-FileAtomic -SourcePath $SourcePath -DestinationPath $DestinationPath
+        if (-not $Encrypted) {
+            Protect-JunosSensitiveFileAcl -Path $DestinationPath
         }
     }
 
@@ -211,7 +244,7 @@ function Invoke-FleetCrawl {
         # so a Move-FileAtomic failure here still hits the catch below (an empty-topology salvage
         # write is a harmless no-op at this point) and the finally still reaps the leftover .tmp file.
         Write-TopologyOutputLocal -Topology @() -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-        Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
+        Move-TopologyOutputAtomicLocal -SourcePath $TempOutputFile -DestinationPath $OutputFile
 
         while ($Queue.Count -gt 0 -or $Jobs.Count -gt 0) {
 
@@ -316,7 +349,7 @@ function Invoke-FleetCrawl {
 
                         # Same problem for Write-Warning: these are "hostless" runspace jobs
                         # (no host UI attached), so a warning raised inside the worker (e.g.
-                        # Protect-JunosTempFileAcl's ACL-set failure) is captured into
+                        # Protect-JunosSensitiveFileAcl's ACL-set failure) is captured into
                         # .Streams.Warning but never displayed and never drained anywhere else
                         # in the codebase - it would otherwise be silently lost. Drain it here,
                         # alongside .Streams.Error, so it becomes visible for every hostless job.
@@ -483,7 +516,7 @@ function Invoke-FleetCrawl {
                 try {
                     Update-ClientIpCorrelationLocal -Topology $TopologyList
                     Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-                    Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
+                    Move-TopologyOutputAtomicLocal -SourcePath $TempOutputFile -DestinationPath $OutputFile
                     $PendingWrites = 0
                     $LastWriteTime = Get-Date
                 } catch {
@@ -509,7 +542,7 @@ function Invoke-FleetCrawl {
             if ($PendingWrites -gt 0) {
                 Update-ClientIpCorrelationLocal -Topology $TopologyList
                 Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-                Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
+                Move-TopologyOutputAtomicLocal -SourcePath $TempOutputFile -DestinationPath $OutputFile
             }
         } catch {
             Write-DebugLogLocal "FINAL WRITE FAILED: $_"
@@ -543,7 +576,7 @@ function Invoke-FleetCrawl {
                 # Temp file + Move-FileAtomic (not a direct write) so a partway failure here
                 # doesn't replace a good prior snapshot with a truncated one.
                 Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-                Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
+                Move-TopologyOutputAtomicLocal -SourcePath $TempOutputFile -DestinationPath $OutputFile
                 Write-Host "[!] Salvaged $($TopologyList.Count) already-crawled device(s) to $OutputFile before aborting." -ForegroundColor Yellow
             }
         } catch {

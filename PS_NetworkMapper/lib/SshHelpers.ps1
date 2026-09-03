@@ -6,13 +6,17 @@
 #
 # Not meant to be run directly - dot-source it: `. (Join-Path $PSScriptRoot "SshHelpers.ps1")`
 
-# Restricts a just-written credential/askpass temp file's ACL to the current user only,
-# removing any inherited access (e.g. other local accounts/Administrators group entries
-# %TEMP%'s default ACL may grant), so the plaintext password these files hold is only
-# readable by the identity that wrote it while it exists on disk. Best-effort/defense-in-
-# depth: logs a warning on failure (e.g. non-NTFS temp) rather than blocking the SSH flow
-# on an ACL-hardening step.
-function Protect-JunosTempFileAcl {
+# Restricts a just-written file's ACL to the current user only, removing any inherited access
+# (e.g. other local accounts/Administrators group entries the parent directory's default ACL
+# may grant), so plaintext secret content the file holds is only readable by the identity that
+# wrote it. Best-effort/defense-in-depth: logs a warning on failure (e.g. non-NTFS volume)
+# rather than blocking the caller's flow on an ACL-hardening step. Despite the name's origin
+# (originally written only for the SSH credential/askpass %TEMP% files below), the logic here
+# is generic - it just sets a single-user ACE on whatever path it's given - and is also reused
+# by FleetCrawl.ps1 to harden plaintext (-NoEncryption) topology snapshot files, which unlike
+# these temp files already have real content on disk by the time it's called; that's fine, this
+# only ever touches the ACL, never the content.
+function Protect-JunosSensitiveFileAcl {
     param([Parameter(Mandatory=$true)][string]$Path)
     try {
         $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
@@ -22,7 +26,7 @@ function Protect-JunosTempFileAcl {
         $Acl.AddAccessRule($Rule)
         [System.IO.File]::SetAccessControl($Path, $Acl)
     } catch {
-        Write-Warning "ACL hardening failed for temp file '$Path': $_"
+        Write-Warning "ACL hardening failed for file '$Path': $_"
     }
 }
 
@@ -43,12 +47,12 @@ function New-JunosCredentialFile {
     try {
         # Create the file empty and harden its ACL BEFORE writing the plaintext content, so the
         # content is never on disk under %TEMP%'s broader default ACL, even momentarily. Note
-        # this guarantee only holds when Protect-JunosTempFileAcl actually succeeds - it swallows
+        # this guarantee only holds when Protect-JunosSensitiveFileAcl actually succeeds - it swallows
         # its own failures (Write-Warning, no throw; see its definition), so a silent hardening
         # failure means the content below still gets written under the broader default ACL, same
         # as before this ordering fix existed.
         [System.IO.File]::WriteAllText($CredPath, "")
-        Protect-JunosTempFileAcl -Path $CredPath
+        Protect-JunosSensitiveFileAcl -Path $CredPath
         # WriteAllText, not Out-File -Encoding utf8: "utf8" means BOM in Windows PowerShell 5.1
         # but no-BOM in pwsh Core, while the reader (Connect-Switch.ps1) is always hardcoded
         # powershell.exe (5.1). A BOM-less file would hit its Get-Content ANSI-codepage fallback
@@ -89,15 +93,15 @@ function New-JunosAskPass {
         # Create each file empty and harden its ACL BEFORE writing the plaintext content, so
         # the password (and the .bat referencing its path) is never on disk under %TEMP%'s
         # broader default ACL, even momentarily. Note this guarantee only holds when
-        # Protect-JunosTempFileAcl actually succeeds - it swallows its own failures
+        # Protect-JunosSensitiveFileAcl actually succeeds - it swallows its own failures
         # (Write-Warning, no throw; see its definition), so a silent hardening failure means
         # the content below still gets written under the broader default ACL, same as before
         # this ordering fix existed.
         [System.IO.File]::WriteAllText($AskPassText, "")
-        Protect-JunosTempFileAcl -Path $AskPassText
+        Protect-JunosSensitiveFileAcl -Path $AskPassText
         [System.IO.File]::WriteAllText($AskPassText, $Password)
         [System.IO.File]::WriteAllText($AskPassPath, "")
-        Protect-JunosTempFileAcl -Path $AskPassPath
+        Protect-JunosSensitiveFileAcl -Path $AskPassPath
         [System.IO.File]::WriteAllText($AskPassPath, "@type `"$AskPassText`"")
     } catch {
         # Partial-write failure: clean up whichever of the two files actually made it to disk
