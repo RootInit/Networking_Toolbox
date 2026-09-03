@@ -56,10 +56,23 @@ function New-JunosAskPass {
     param([Parameter(Mandatory=$true)][string]$Password)
     $AskPassPath = Join-Path $env:TEMP "ssh_askpass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).bat"
     $AskPassText = Join-Path $env:TEMP "ssh_pass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
-    [System.IO.File]::WriteAllText($AskPassText, $Password)
-    Protect-JunosTempFileAcl -Path $AskPassText
-    [System.IO.File]::WriteAllText($AskPassPath, "@type `"$AskPassText`"")
-    Protect-JunosTempFileAcl -Path $AskPassPath
+    try {
+        [System.IO.File]::WriteAllText($AskPassText, $Password)
+        Protect-JunosTempFileAcl -Path $AskPassText
+        [System.IO.File]::WriteAllText($AskPassPath, "@type `"$AskPassText`"")
+        Protect-JunosTempFileAcl -Path $AskPassPath
+    } catch {
+        # Partial-write failure: clean up whichever of the two files actually made it to disk
+        # before re-throwing, so the caller (whose $AskPass stays $null since we never return)
+        # has nothing left to leak - it can't call Remove-JunosAskPass without a context object.
+        if (Test-Path -LiteralPath $AskPassText) {
+            Remove-Item -LiteralPath $AskPassText -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $AskPassPath) {
+            Remove-Item -LiteralPath $AskPassPath -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    }
     return [PSCustomObject]@{
         AskPassPath          = $AskPassPath
         AskPassText          = $AskPassText
@@ -103,7 +116,7 @@ function Get-JunosSshArgs {
     # closes the injection even for a $Username that reached this function without ever
     # passing through WebServer.ps1's save-time check (e.g. loaded straight from
     # Configuration.json/.enc at process startup). Same character class as that check.
-    if ($Username -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$') {
+    if ($Username -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}\z') {
         throw "Invalid Junos username: must start with a letter or digit and contain only letters, digits, '.', '_', or '-'"
     }
     # Same rationale as the $Username check above: this is the one choke point every
@@ -113,7 +126,7 @@ function Get-JunosSshArgs {
     # validation of its own). Octet-range regex (0-255 each), not just WebServer.ps1's looser
     # `\d{1,3}` shape check, so "10.1.2.999" is rejected here too.
     $Octet = '(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
-    if ($TargetIP -notmatch "^$Octet\.$Octet\.$Octet\.$Octet$") {
+    if ($TargetIP -notmatch "^$Octet\.$Octet\.$Octet\.$Octet\z") {
         throw "Invalid Junos target IP: must be a well-formed IPv4 address (four dot-separated octets, each 0-255)"
     }
     # ServerAliveInterval/ServerAliveCountMax: without a keepalive, a session wedged on a dead
