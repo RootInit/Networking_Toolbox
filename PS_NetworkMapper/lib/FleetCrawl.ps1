@@ -5,6 +5,7 @@
 
 . (Join-Path $PSScriptRoot "TopologyCrypto.ps1")
 . (Join-Path $PSScriptRoot "SshHelpers.ps1")
+. (Join-Path $PSScriptRoot "FileHelpers.ps1")
 
 function Invoke-FleetCrawl {
     param(
@@ -47,31 +48,9 @@ function Invoke-FleetCrawl {
     # appended after it, causing the whole file to be misread as UTF-16LE.
     if ($DebugLogPath) { try { "=== Fleet Crawl Debug Log - $(Get-Date) ===" | Out-File -FilePath $DebugLogPath -Force -Encoding utf8 } catch {} }
 
-    # True atomic replace when $Destination already exists: Move-Item -Force decomposes into
-    # unlink(dest) + rename(source, dest) as two separate syscalls (confirmed via strace against
-    # pwsh 7.6.2), leaving a window where $Destination doesn't exist at all if the process dies
-    # between them. [System.IO.File]::Replace performs a single atomic replace instead. Falls
-    # back to Move-Item when the destination doesn't exist yet (nothing to replace atomically
-    # against, and Move-Item is already atomic in that case).
-    function Move-TopologyOutputLocal {
-        param([string]$Source, [string]$Destination)
-        if (Test-Path -LiteralPath $Destination) {
-            # [System.IO.File]::Replace is a raw .NET static call - it resolves a relative path
-            # against [Environment]::CurrentDirectory, not PowerShell's $PWD (which
-            # Set-Location doesn't keep in sync), unlike Move-Item/Test-Path. Convert-Path
-            # resolves both to full paths against $PWD first so this can't silently touch the
-            # wrong directory - it's safe to call here since $Source was just written and
-            # $Destination is Test-Path-guarded above, so both are known to exist.
-            #
-            # PowerShell coerces a literal $null to an empty string for this string-typed
-            # parameter, which .Replace() then rejects ("value cannot be an empty string") -
-            # [NullString]::Value passes a genuine null through, matching "no backup file" as
-            # the .NET API intends.
-            [System.IO.File]::Replace((Convert-Path -LiteralPath $Source), (Convert-Path -LiteralPath $Destination), [NullString]::Value)
-        } else {
-            Move-Item -Path $Source -Destination $Destination -Force
-        }
-    }
+    # Atomic replace of $OutputFile from $TempOutputFile now goes through the shared
+    # Move-FileAtomic in FileHelpers.ps1 (dot-sourced above) - see that file for the
+    # underlying [System.IO.File]::Move rationale.
 
     # Single write path for init/periodic/final writes so encryption is wired in once.
     function Write-TopologyOutputLocal {
@@ -142,7 +121,7 @@ function Invoke-FleetCrawl {
     $ScanTimestampIso = $ScanDateTime.ToString("o")
     $OutputExtension = if ($Encrypted) { ".json.enc" } else { ".json" }
     $OutputFile = Join-Path $SnapshotDir "NetworkMap_$ScanTimestamp$OutputExtension"
-    $TempOutputFile = Join-Path $SnapshotDir "NetworkMap_$ScanTimestamp.tmp$OutputExtension"
+    $TempOutputFile = Join-Path $SnapshotDir "NetworkMap_$ScanTimestamp.$PID.$([guid]::NewGuid().ToString('N')).tmp$OutputExtension"
 
     $RunspacePool = [runspacefactory]::CreateRunspacePool(1, $MaxConcurrent)
     $RunspacePool.Open()
@@ -210,7 +189,7 @@ function Invoke-FleetCrawl {
         # Move-Item failure here still hits the catch below (an empty-topology salvage write is
         # a harmless no-op at this point) and the finally still reaps the leftover .tmp file.
         Write-TopologyOutputLocal -Topology @() -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-        Move-TopologyOutputLocal -Source $TempOutputFile -Destination $OutputFile
+        Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
 
         while ($Queue.Count -gt 0 -or $Jobs.Count -gt 0) {
 
@@ -313,6 +292,18 @@ function Invoke-FleetCrawl {
                             }
                         }
 
+                        # Same problem for Write-Warning: these are "hostless" runspace jobs
+                        # (no host UI attached), so a warning raised inside the worker (e.g.
+                        # Protect-JunosTempFileAcl's ACL-set failure) is captured into
+                        # .Streams.Warning but never displayed and never drained anywhere else
+                        # in the codebase - it would otherwise be silently lost. Drain it here,
+                        # alongside .Streams.Error, so it becomes visible for every hostless job.
+                        if ($Job.PS.Streams.Warning.Count -gt 0) {
+                            foreach ($WarnRecord in $Job.PS.Streams.Warning) {
+                                Write-DebugLogLocal "WORKER WARNING STREAM ($($Job.IP)): $WarnRecord"
+                            }
+                        }
+
                         if ($Result -and $Result.Node) {
                             $Node = $Result.Node
                             if ($Result.Logs) { foreach ($LogLine in $Result.Logs) { Write-DebugLogLocal $LogLine } }
@@ -347,7 +338,20 @@ function Invoke-FleetCrawl {
                                     $NIP = $Neigh.ManagementIP
                                     if ([string]::IsNullOrEmpty($NIP)) { continue }
                                     $InScope = $false
-                                    foreach ($Scope in $AllowedScopes) { if ($NIP.StartsWith($Scope)) { $InScope = $true; break } }
+                                    # Behavior change: this used to be a bare StartsWith, so a
+                                    # configured scope like "10.1" also matched "10.19.5.5" (a
+                                    # plain string prefix match, no octet boundary). Now the
+                                    # match only counts if the prefix is a full match or is
+                                    # immediately followed by a literal "." - so "10.1" matches
+                                    # "10.1.5.5" but no longer matches "10.19.5.5". Scopes are
+                                    # trimmed of any trailing "." first (the default
+                                    # "131.30." style) so that still matches correctly instead
+                                    # of requiring a doubled "..". Any existing -AllowedScopes
+                                    # config should be reviewed against this stricter behavior.
+                                    foreach ($Scope in $AllowedScopes) {
+                                        $ScopeTrimmed = $Scope.TrimEnd('.')
+                                        if ($NIP -eq $ScopeTrimmed -or $NIP.StartsWith("$ScopeTrimmed.")) { $InScope = $true; break }
+                                    }
 
                                     if ($InScope -and !$Visited.Contains($NIP) -and !$Enqueued.Contains($NIP)) {
                                         $Queue.Enqueue($NIP)
@@ -461,7 +465,7 @@ function Invoke-FleetCrawl {
                 try {
                     Update-ClientIpCorrelationLocal -Topology $TopologyList
                     Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-                    Move-TopologyOutputLocal -Source $TempOutputFile -Destination $OutputFile
+                    Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
                     $PendingWrites = 0
                     $LastWriteTime = Get-Date
                 } catch {
@@ -487,7 +491,7 @@ function Invoke-FleetCrawl {
             if ($PendingWrites -gt 0) {
                 Update-ClientIpCorrelationLocal -Topology $TopologyList
                 Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-                Move-TopologyOutputLocal -Source $TempOutputFile -Destination $OutputFile
+                Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
             }
         } catch {
             Write-DebugLogLocal "FINAL WRITE FAILED: $_"
@@ -521,7 +525,7 @@ function Invoke-FleetCrawl {
                 # Temp file + Move-Item (not a direct write) so a partway failure here
                 # doesn't replace a good prior snapshot with a truncated one.
                 Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-                Move-TopologyOutputLocal -Source $TempOutputFile -Destination $OutputFile
+                Move-FileAtomic -SourcePath $TempOutputFile -DestinationPath $OutputFile
                 Write-Host "[!] Salvaged $($TopologyList.Count) already-crawled device(s) to $OutputFile before aborting." -ForegroundColor Yellow
             }
         } catch {
