@@ -1968,6 +1968,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
             <div class="tabs wrap">
                 <div class="analysis-tab active" onclick="window.switchAnalysisTab('analysis-tab-fleethealth')" id="btn-analysis-tab-fleethealth">Fleet Health</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-newdevices')" id="btn-analysis-tab-newdevices">New Devices</div>
+                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-inactiveports')" id="btn-analysis-tab-inactiveports">Inactive Ports</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-trends')" id="btn-analysis-tab-trends">Trends</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-accounts')" id="btn-analysis-tab-accounts">Local Accounts</div>
                 <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" id="btn-analysis-tab-topodiff">Topology Diff</div>
@@ -1981,6 +1982,13 @@ svg.leaflet-image-layer.leaflet-interactive path {
                 <table id="new-devices-table">
                     <thead><tr><th>First Seen</th><th>MAC</th><th>Vendor</th><th>Last IP</th><th>Last Switch / Port</th><th>Last Seen</th></tr></thead>
                     <tbody id="new-devices-tbody"></tbody>
+                </table>
+            </div>
+            <div id="analysis-tab-inactiveports" class="analysis-tab-content">
+                <p style="font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px;">Physical ports whose link is currently down, sorted by how long ago they last flapped (longest-inactive first) - based on each device's own "Last flapped" clock, captured at scan time. A port with no usable flap data (never flapped since boot, or on a device scanned before this field existed) is listed but not sortable by duration.</p>
+                <table id="inactive-ports-table">
+                    <thead><tr><th>Device</th><th>Port</th><th>Description</th><th>Admin</th><th>Inactive For</th></tr></thead>
+                    <tbody id="inactive-ports-tbody"></tbody>
                 </table>
             </div>
             <div id="analysis-tab-trends" class="analysis-tab-content">
@@ -2318,6 +2326,18 @@ window.formatAge = function(ms) {
 
 var crawlAgeInterval = null;
 
+// Shared "is this actually a valid timestamp" check, used everywhere a *Timestamp field
+// (scanTimestamp, etc - operator-controlled JSON, not guaranteed well-formed) gets sorted,
+// diffed, or plotted. A truthy-but-unparseable string (e.g. "" survives a `!x` check as
+// falsy, but a garbage non-date string doesn't) must never be treated as a valid date -
+// that produces NaN sort comparators (silently "no swap" in some engines), NaN chart
+// x-values, or literal "Invalid Date" text. Returns a finite epoch-ms number, or null.
+window.parseTimestampMs = function(ts) {
+    if (!ts) return null;
+    var ms = new Date(ts).getTime();
+    return isNaN(ms) ? null : ms;
+};
+
 // Shows how old the loaded scan is (ScanTimestamp, written once per crawl by
 // Start-NetworkMapper.ps1), updating live so it doesn't go stale while the tab stays
 // open. Files predating this optional field show "unknown", not an error. Reads
@@ -2327,13 +2347,14 @@ window.renderCrawlAge = function(scanTimestampIso) {
     if (crawlAgeInterval) { clearInterval(crawlAgeInterval); crawlAgeInterval = null; }
     if (!badge) return;
 
-    var scanDate = scanTimestampIso ? new Date(scanTimestampIso) : null;
-    if (!scanDate || isNaN(scanDate.getTime())) {
+    var scanMs = window.parseTimestampMs(scanTimestampIso);
+    if (scanMs === null) {
         badge.className = 'crawl-age unknown';
         badge.textContent = 'Capture time unknown (file predates this field)';
         badge.style.display = 'block';
         return;
     }
+    var scanDate = new Date(scanMs);
 
     function update() {
         var settings = window.loadSettings();
@@ -2757,7 +2778,8 @@ window.updateDeviceHistory = function() {
 
     loadedSnapshots.forEach(snapshot => {
         var ts = snapshot.scanTimestamp;
-        if (!ts) return;
+        var tsMs = window.parseTimestampMs(ts);
+        if (tsMs === null) return;
         snapshot.topology.forEach(device => {
             window.asArray(device.TrueClients).forEach(c => {
                 if (!c.MAC) return;
@@ -2766,8 +2788,11 @@ window.updateDeviceHistory = function() {
                 if (!entry) {
                     history[mac] = { firstSeen: ts, lastSeen: ts, lastDeviceIp: device.DeviceIP, lastPort: c.Port, lastIp: c.IP, lastVlan: c.VLAN_Tag };
                 } else {
-                    if (new Date(ts) < new Date(entry.firstSeen)) entry.firstSeen = ts;
-                    if (new Date(ts) >= new Date(entry.lastSeen)) {
+                    // entry.firstSeen/lastSeen were themselves only ever written from a
+                    // tsMs-validated ts (this guard), so re-parsing them here can't hit the
+                    // null case - safe to compare directly against tsMs.
+                    if (tsMs < window.parseTimestampMs(entry.firstSeen)) entry.firstSeen = ts;
+                    if (tsMs >= window.parseTimestampMs(entry.lastSeen)) {
                         entry.lastSeen = ts;
                         entry.lastDeviceIp = device.DeviceIP;
                         entry.lastPort = c.Port;
@@ -2816,11 +2841,20 @@ window.updateAlarmHistory = function() {
     var lastUptimeSeen = {}; // identity -> uptime string, scoped to this call only
 
     loadedSnapshots
-        .filter(s => s.scanTimestamp)
-        .slice()
-        .sort((a, b) => new Date(a.scanTimestamp) - new Date(b.scanTimestamp))
-        .forEach(snapshot => {
-            var date = snapshot.scanTimestamp.slice(0, 10);
+        .map(s => ({ s: s, ts: window.parseTimestampMs(s.scanTimestamp) }))
+        .filter(x => x.ts !== null)
+        .sort((a, b) => a.ts - b.ts)
+        .forEach(x => {
+            var snapshot = x.s;
+            // x.ts is already parseTimestampMs-validated (see the .filter above), so a raw
+            // slice is safe for the normal "yyyy-MM-dd..." shape FleetCrawl.ps1 writes -
+            // and preserves the original local wall-clock date instead of reinterpreting
+            // through UTC. A parseable-but-differently-shaped string ("08/20/2026", a Unix
+            // timestamp, ...) would otherwise slice into a garbage (non-yyyy-MM-dd) heatmap
+            // column key, so fall back to a UTC-derived key in that case only.
+            var date = /^\d{4}-\d{2}-\d{2}/.test(snapshot.scanTimestamp)
+                ? snapshot.scanTimestamp.slice(0, 10)
+                : new Date(x.ts).toISOString().slice(0, 10);
             (snapshot.topology || []).forEach(device => {
                 if (!device || !device.DeviceIP) return;
                 var identity = window.resolveDeviceIdentity(device);
@@ -3429,6 +3463,7 @@ window.resizeDiagram = function() {
 window.refreshAnalysisDashboard = function() {
     window.renderFleetDashboard();
     window.renderNewDevicesTable();
+    window.renderInactivePortsTable();
     window.populateTrendDeviceSelect();
     window.renderTrendChart();
     window.renderLocalAccountsAudit();
@@ -3514,12 +3549,13 @@ function computeConfigChanges() {
     // captures still accumulates entries under one key.
     var byDevice = new Map(); // identity -> [{idx, ts, config, hostname, ip}]
     loadedSnapshots.forEach((snap, idx) => {
-        if (!snap.scanTimestamp) return;
+        var ts = window.parseTimestampMs(snap.scanTimestamp);
+        if (ts === null) return;
         (snap.topology || []).forEach(d => {
             if (!d || !d.DeviceIP || !d.Configuration || d.Configuration === "Unknown") return;
             var identity = window.resolveDeviceIdentity(d);
             if (!byDevice.has(identity)) byDevice.set(identity, []);
-            byDevice.get(identity).push({ idx: idx, ts: new Date(snap.scanTimestamp).getTime(), config: d.Configuration, hostname: d.Hostname, ip: String(d.DeviceIP) });
+            byDevice.get(identity).push({ idx: idx, ts: ts, config: d.Configuration, hostname: d.Hostname, ip: String(d.DeviceIP) });
         });
     });
 
@@ -3579,12 +3615,15 @@ window.renderFleetDashboard = function() {
     // Distinguishes "checked and found nothing" from "couldn't check" (INV-UI-TRUTH: no
     // scanTimestamp means elapsed-since-boot can't be computed at all, which must not
     // render the same as a genuine zero-result).
-    var rebootCheckPossible = !!(activeSnapshot && activeSnapshot.scanTimestamp);
+    // A truthy scanTimestamp isn't enough - it must also parse (same check renderCrawlAge
+    // in utils.js uses), or snapTime below is NaN and every elapsed-since-boot comparison
+    // silently comes back false, which would otherwise render as a trustworthy "None."
+    var rebootCheckPossible = !!(activeSnapshot && activeSnapshot.scanTimestamp && !isNaN(new Date(activeSnapshot.scanTimestamp).getTime()));
     // Tracks whether at least one device had a usable Uptime to compute from - distinguishes
     // "checked every device, zero had usable data" from a genuine zero-reboot result, one
     // level deeper than rebootCheckPossible (which only covers the snapshot-wide gate above).
     var anyUptimeUsable = false;
-    if (activeSnapshot && activeSnapshot.scanTimestamp) {
+    if (rebootCheckPossible) {
         var snapTime = new Date(activeSnapshot.scanTimestamp).getTime();
         devices.forEach(d => {
             if (!d.Uptime || d.Uptime === "Unknown") return;
@@ -3703,6 +3742,50 @@ window.renderNewDevicesTable = function() {
     }).join('');
 };
 
+// Longest-inactive physical ports (Link === "down"), fleet-wide, sorted with the longest
+// downtime first - LastFlappedSeconds is captured once per scan (see Get-JunosNodeData.ps1),
+// so this reflects "as of the active snapshot's capture," not a live clock like
+// renderCrawlAge. A port with no LastFlappedSeconds (never flapped since boot, or a
+// snapshot predating this field) is listed after every port with known duration, not
+// dropped - the operator still needs to see it's down, just without a fabricated duration.
+window.renderInactivePortsTable = function() {
+    var tbody = document.getElementById('inactive-ports-tbody');
+    if (!tbody) return;
+    var devices = globalTopologyData || [];
+
+    var rows = [];
+    devices.forEach(d => {
+        window.asArray(d.Interfaces).forEach(intf => {
+            if (intf.Link !== 'down') return;
+            rows.push({ device: d, intf: intf });
+        });
+    });
+
+    rows.sort((a, b) => {
+        var av = a.intf.LastFlappedSeconds, bv = b.intf.LastFlappedSeconds;
+        if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
+        if (bv === null || bv === undefined) return -1;
+        return bv - av;
+    });
+
+    if (rows.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="5" style="text-align:center;">No inactive ports.</td></tr>`;
+        return;
+    }
+
+    tbody.innerHTML = rows.map(r => {
+        var secs = r.intf.LastFlappedSeconds;
+        var duration = (secs === null || secs === undefined) ? 'Unknown' : window.formatAge(secs * 1000);
+        return `<tr>
+            <td>${esc(r.device.Hostname || r.device.DeviceIP)}</td>
+            <td style="font-family:monospace;">${esc(r.intf.Port)}</td>
+            <td>${esc(r.intf.Desc && r.intf.Desc !== 'Unknown' ? r.intf.Desc : '-')}</td>
+            <td>${esc(r.intf.Admin)}</td>
+            <td>${esc(duration)}</td>
+        </tr>`;
+    }).join('');
+};
+
 window.populateTrendDeviceSelect = function() {
     var select = document.getElementById('trendDeviceSelect');
     // Keyed by window.resolveDeviceIdentity so a trend line stays continuous across a
@@ -3760,14 +3843,14 @@ window.renderTrendChart = function() {
     if (!deviceIdentity) { centeredMessage('No devices available - load 2+ snapshots first.'); return; }
 
     var points = loadedSnapshots
-        .filter(s => s.scanTimestamp)
-        .slice()
-        .sort((a, b) => new Date(a.scanTimestamp) - new Date(b.scanTimestamp))
-        .map(s => {
-            var device = s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity);
+        .map(s => ({ s: s, ts: window.parseTimestampMs(s.scanTimestamp) }))
+        .filter(x => x.ts !== null)
+        .sort((a, b) => a.ts - b.ts)
+        .map(x => {
+            var device = x.s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity);
             if (!device) return null;
             var v = trendMetricValue(device, metric);
-            return (v === null || isNaN(v)) ? null : { t: new Date(s.scanTimestamp), v: v };
+            return (v === null || isNaN(v)) ? null : { t: new Date(x.ts), v: v };
         })
         .filter(Boolean);
 
@@ -5311,10 +5394,11 @@ window.populateConfigCompareSelect = function() {
         var other = (snap.topology || []).find(dev => dev && dev.DeviceIP && window.resolveDeviceIdentity(dev) === identity);
         if (other && other.Configuration && other.Configuration !== "Unknown") {
             sameDeviceIpByIdx[idx] = String(other.DeviceIP);
+            var snapTs = window.parseTimestampMs(snap.scanTimestamp);
             sameDeviceOptions.push({
                 idx: idx,
-                ts: snap.scanTimestamp ? new Date(snap.scanTimestamp).getTime() : 0,
-                label: snap.scanTimestamp ? new Date(snap.scanTimestamp).toLocaleString() : snap.sourceFile,
+                ts: snapTs !== null ? snapTs : 0,
+                label: snapTs !== null ? new Date(snapTs).toLocaleString() : snap.sourceFile,
             });
         }
     });
@@ -5391,10 +5475,11 @@ window.searchConfigCompareDevices = function() {
             if (!other.Configuration || other.Configuration === "Unknown") return;
             var hostname = (other.Hostname && other.Hostname !== "Unknown") ? other.Hostname : '';
             if (hostname.toLowerCase().indexOf(queryLower) === -1 && String(other.DeviceIP).toLowerCase().indexOf(queryLower) === -1) return;
+            var snapTs = window.parseTimestampMs(snap.scanTimestamp);
             matches.push({
                 idx: idx, ip: String(other.DeviceIP), hostname: hostname,
-                ts: snap.scanTimestamp ? new Date(snap.scanTimestamp).getTime() : 0,
-                snapLabel: snap.scanTimestamp ? new Date(snap.scanTimestamp).toLocaleString() : snap.sourceFile,
+                ts: snapTs !== null ? snapTs : 0,
+                snapLabel: snapTs !== null ? new Date(snapTs).toLocaleString() : snap.sourceFile,
             });
         });
     });
@@ -5712,13 +5797,15 @@ function pollRunningScan() {
     var loadBtn = document.getElementById('loadBtn');
     var loadFolderBtn = document.getElementById('loadFolderBtn');
 
+    // msg/color are optional (see runPoll's catch below) - omitting them still resets the
+    // polling state/buttons but leaves whatever status line is already on screen alone.
     function finish(msg, color) {
         scanNetworkPollActive = false;
         if (scanNetworkPollTimer) { clearTimeout(scanNetworkPollTimer); scanNetworkPollTimer = null; }
         if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
         if (loadBtn) loadBtn.disabled = false;
         if (loadFolderBtn) loadFolderBtn.disabled = false;
-        window.setStatus(msg, color);
+        if (msg) window.setStatus(msg, color);
     }
 
     if (btn) btn.disabled = true;
@@ -5753,7 +5840,7 @@ function pollRunningScan() {
         }
         if (status.status === 'running') {
             if (btn) btn.textContent = 'Scanning (' + status.visited + ' found)...';
-            scanNetworkPollTimer = setTimeout(poll, 2000);
+            scanNetworkPollTimer = setTimeout(runPoll, 2000);
             return;
         }
         // status.status === 'complete'
@@ -5771,7 +5858,28 @@ function pollRunningScan() {
         finish("Scan complete - " + status.visitedCount + " device(s) found. Loading...", "green");
         await window.processSelectedFiles([syntheticFile]);
     };
-    poll();
+    // poll() is fired-and-forgotten (directly here, and via setTimeout above) - without this
+    // catch, an exception it doesn't already handle internally would leave
+    // scanNetworkPollActive stuck true forever (finish(), which resets it, would never run),
+    // permanently disabling the scan/load buttons with no visible error.
+    function runPoll() {
+        poll().catch(function(e) {
+            // Every failure path inside poll() that can occur before the trailing
+            // processSelectedFiles call already handles itself (its own try/catch calls
+            // finish() with a specific message and returns) - so the only way to land here
+            // is that final `await window.processSelectedFiles(...)` throwing. That function
+            // always sets its own specific window.setStatus message (see its catch block)
+            // before rethrowing - or, if superseded by a newer load, doesn't rethrow at all -
+            // so a generic message here would only ever clobber a more useful one already on
+            // screen. Reset the polling state/buttons without touching the status line, but
+            // still log the underlying error for debugging. e may not be an Error (e.g. a
+            // rejected-with-string/undefined promise), hence the defensive message extraction.
+            var msg = (e && e.message) ? e.message : String(e);
+            console.error("Unexpected error while polling scan status:", msg);
+            finish();
+        });
+    }
+    runPoll();
 }
 
 // Page-load reattach (UX-002): a refresh mid-crawl loses scanNetworkPollTimer/pollStart
@@ -5799,6 +5907,17 @@ window.resumeScanIfInProgress = async function() {
         return false;
     }
     if (status.status !== 'running') return false;
+
+    // Re-check the same guard as above (P4UX-001): the await above gave a manually-
+    // triggered Load Folder/File or a user-started Scan Network time to complete and
+    // populate loadedSnapshots/scanNetworkPollActive while this was in flight. Reattaching
+    // now would silently overwrite that just-loaded/just-started data with no confirmation,
+    // unlike startNetworkScan's confirm-before-replace UX (see promptForStartIp's
+    // "replacing" path above) - so abort quietly and let the fresher data/scan stand instead.
+    if (loadedSnapshots.length > 0 || scanNetworkPollActive) {
+        console.warn("resumeScanIfInProgress: state changed while checking scan status - not reattaching, leaving the newer data/scan in place.");
+        return false;
+    }
 
     var btn = document.getElementById('scanNetworkBtn');
     if (btn) btn.textContent = 'Scanning (' + status.visited + ' found)...';

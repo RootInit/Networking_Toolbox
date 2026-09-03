@@ -58,6 +58,7 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.WriteLine("show route 0/0 exact")
         $Process.StandardInput.WriteLine("show interfaces terse")
         $Process.StandardInput.WriteLine("show interfaces descriptions")
+        $Process.StandardInput.WriteLine("show interfaces extensive")
         $Process.StandardInput.WriteLine("show spanning-tree interface")
         $Process.StandardInput.WriteLine("show poe interface")
         $Process.StandardInput.WriteLine("show dot1x interface")
@@ -166,6 +167,7 @@ try {
         elseif ($Sec -match '^(?i)route 0/0 exact\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ROUTE"] = $Matches.content }
         elseif ($Sec -match '^(?i)interfaces terse\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["INTERFACES_TERSE"] = $Matches.content }
         elseif ($Sec -match '^(?i)interfaces descriptions\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["INTERFACES_DESC"] = $Matches.content }
+        elseif ($Sec -match '^(?i)interfaces extensive\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["INTERFACES_EXT"] = $Matches.content }
         elseif ($Sec -match '^(?i)spanning-tree interface\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["STP"] = $Matches.content }
         elseif ($Sec -match '^(?i)poe interface\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["POE"] = $Matches.content }
         elseif ($Sec -match '^(?i)dot1x interface\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["DOT1X"] = $Matches.content }
@@ -273,7 +275,7 @@ try {
             # same dict entry instead of creating duplicate interface rows.
             $p = $Matches.port -replace "\.\d+$",""
             if (-not $NodeData.Interfaces.ContainsKey($p)) {
-                $NodeData.Interfaces[$p] = @{ Port = $p; Admin = $Matches.admin; Link = $Matches.link; Desc = "Unknown"; STP = "Unknown"; PoE = "Unknown" }
+                $NodeData.Interfaces[$p] = @{ Port = $p; Admin = $Matches.admin; Link = $Matches.link; Desc = "Unknown"; STP = "Unknown"; PoE = "Unknown"; LastFlappedSeconds = $null }
             }
         }
     }
@@ -283,6 +285,37 @@ try {
         if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?:up|down)\s+(?:up|down)\s+(?<desc>.+)$") {
             $p = $Matches.port -replace "\.\d+$",""
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].Desc = $Matches.desc.Trim() }
+        }
+    }
+
+    # "Last flapped" duration, from "show interfaces extensive"'s per-physical-interface
+    # blocks (e.g. "Last flapped   : 2024-01-15 08:23:11 PST (5w2d 03:12:34 ago)", or
+    # "Last flapped   : Never"). Deliberately parse only the relative "(... ago)" duration,
+    # not the absolute timestamp - Junos renders that with an abbreviated local timezone
+    # name (e.g. "PST"), which .NET/JS date parsers don't reliably resolve, and the switch's
+    # own clock may not even agree with this host's. The duration needs no timezone at all.
+    # NOTE: parsed against Junos's documented "show interfaces extensive" format; not yet
+    # verified against a live device's actual output (no hardware-in-the-loop test coverage
+    # in this codebase - see AUDIT_REPORT.md's "Remaining risk"). An unrecognized format
+    # leaves LastFlappedSeconds unset rather than guessing, so it fails safe (excluded from
+    # the "longest inactive" view, not shown with a wrong duration).
+    $ExtBlocks = $DataDict["INTERFACES_EXT"] -split "(?=Physical interface:)"
+    foreach ($Block in $ExtBlocks) {
+        if ($Block -notmatch "^Physical interface:\s*(?<port>(?:ge|xe|et|ae|mge)[^\s,]+)") { continue }
+        $p = $Matches.port
+        if (-not $NodeData.Interfaces.ContainsKey($p)) { continue }
+        if ($Block -match "(?i)Last flapped\s*:\s*Never") {
+            $NodeData.Interfaces[$p].LastFlappedSeconds = $null
+            continue
+        }
+        if ($Block -match "(?i)Last flapped\s*:[^\(]*\(\s*(?:(?<w>\d+)w)?\s*(?:(?<d>\d+)d)?\s*(?:(?<h>\d+):(?<m>\d+)(?::(?<s>\d+))?)?\s*ago\s*\)") {
+            $TotalSeconds = 0
+            if ($Matches.w) { $TotalSeconds += [int]$Matches.w * 604800 }
+            if ($Matches.d) { $TotalSeconds += [int]$Matches.d * 86400 }
+            if ($Matches.h) { $TotalSeconds += [int]$Matches.h * 3600 }
+            if ($Matches.m) { $TotalSeconds += [int]$Matches.m * 60 }
+            if ($Matches.s) { $TotalSeconds += [int]$Matches.s }
+            $NodeData.Interfaces[$p].LastFlappedSeconds = $TotalSeconds
         }
     }
 
