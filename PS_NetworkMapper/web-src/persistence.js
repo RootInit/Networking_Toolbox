@@ -185,11 +185,17 @@ window.updateDeviceHistory = function() {
                 if (!entry) {
                     history[mac] = { firstSeen: ts, lastSeen: ts, lastDeviceIp: device.DeviceIP, lastPort: c.Port, lastIp: c.IP, lastVlan: c.VLAN_Tag };
                 } else {
-                    // entry.firstSeen/lastSeen were themselves only ever written from a
-                    // tsMs-validated ts (this guard), so re-parsing them here can't hit the
-                    // null case - safe to compare directly against tsMs.
-                    if (tsMs < window.parseTimestampMs(entry.firstSeen)) entry.firstSeen = ts;
-                    if (tsMs >= window.parseTimestampMs(entry.lastSeen)) {
+                    // entry.firstSeen/lastSeen aren't guaranteed parseable just because this
+                    // guard now validates every ts going in - `entry` can be a survivor from
+                    // localStorage written by an earlier build (DEVICE_HISTORY_STORAGE_KEY was
+                    // never version-bumped the way ALARM_HISTORY_STORAGE_KEY was) that predates
+                    // this validation, so a truthy-garbage firstSeen/lastSeen can already be
+                    // sitting there. A null parse loses the "older/newer" comparison entirely -
+                    // treat it as "replace with this valid ts" rather than as smaller/larger.
+                    var firstSeenMs = window.parseTimestampMs(entry.firstSeen);
+                    if (firstSeenMs === null || tsMs < firstSeenMs) entry.firstSeen = ts;
+                    var lastSeenMs = window.parseTimestampMs(entry.lastSeen);
+                    if (lastSeenMs === null || tsMs >= lastSeenMs) {
                         entry.lastSeen = ts;
                         entry.lastDeviceIp = device.DeviceIP;
                         entry.lastPort = c.Port;

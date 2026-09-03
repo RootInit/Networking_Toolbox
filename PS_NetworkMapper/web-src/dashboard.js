@@ -162,13 +162,13 @@ window.renderFleetDashboard = function() {
     // A truthy scanTimestamp isn't enough - it must also parse (same check renderCrawlAge
     // in utils.js uses), or snapTime below is NaN and every elapsed-since-boot comparison
     // silently comes back false, which would otherwise render as a trustworthy "None."
-    var rebootCheckPossible = !!(activeSnapshot && activeSnapshot.scanTimestamp && !isNaN(new Date(activeSnapshot.scanTimestamp).getTime()));
+    var rebootCheckPossible = !!(activeSnapshot && window.parseTimestampMs(activeSnapshot.scanTimestamp) !== null);
     // Tracks whether at least one device had a usable Uptime to compute from - distinguishes
     // "checked every device, zero had usable data" from a genuine zero-reboot result, one
     // level deeper than rebootCheckPossible (which only covers the snapshot-wide gate above).
     var anyUptimeUsable = false;
     if (rebootCheckPossible) {
-        var snapTime = new Date(activeSnapshot.scanTimestamp).getTime();
+        var snapTime = window.parseTimestampMs(activeSnapshot.scanTimestamp);
         devices.forEach(d => {
             if (!d.Uptime || d.Uptime === "Unknown") return;
             var bootTime = new Date(d.Uptime).getTime();
@@ -208,8 +208,16 @@ window.renderFleetDashboard = function() {
     var unreachableDevices = devices.filter(d => d.ScanStatus && d.ScanStatus !== "Ok");
 
     // --- New devices detected in exactly this snapshot ---
+    // window.updateDeviceHistory skips any snapshot whose scanTimestamp doesn't parse (never
+    // writes a firstSeen from it), so a plain string-equality filter against an unparseable
+    // activeSnapshot.scanTimestamp always comes back empty - that would silently render as a
+    // trustworthy "0 new," indistinguishable from a genuine zero-result (same class of gap
+    // rebootCheckPossible exists to close for the reboot card above). Show "N/A" instead.
     var history = window.updateDeviceHistory();
-    var newInThisSnapshot = activeSnapshot ? Object.values(history).filter(h => h.firstSeen === activeSnapshot.scanTimestamp).length : 0;
+    var activeSnapTs = activeSnapshot ? window.parseTimestampMs(activeSnapshot.scanTimestamp) : null;
+    var newInThisSnapshot = activeSnapTs !== null
+        ? Object.values(history).filter(h => h.firstSeen === activeSnapshot.scanTimestamp).length
+        : null;
 
     // --- Config changes since each device's previous capture (see computeConfigChanges) ---
     var configChanges = computeConfigChanges();
@@ -225,7 +233,7 @@ window.renderFleetDashboard = function() {
         <div class="fleet-stat-card drillable ${dot1xViolations.length > 0 ? 'warn' : ''}" onclick="window.drillDownStat('dot1x')"><div class="stat-value">${dot1xViolations.length}</div><div class="stat-label">Dot1x Violations</div></div>
         <div class="fleet-stat-card drillable" onclick="window.drillDownStat('daisychains')"><div class="stat-value">${daisyChainCount}</div><div class="stat-label">Daisy-Chained Ports</div></div>
         <div class="fleet-stat-card drillable ${configChanges.length > 0 ? 'warn' : ''}" onclick="window.drillDownStat('configchanged')"><div class="stat-value">${configChanges.length}</div><div class="stat-label">Config Changed</div></div>
-        <div class="fleet-stat-card"><div class="stat-value">${newInThisSnapshot}</div><div class="stat-label">New This Snapshot</div></div>
+        <div class="fleet-stat-card"${newInThisSnapshot === null ? ' title="Unable to determine (no scan timestamp on this snapshot)"' : ''}><div class="stat-value">${newInThisSnapshot === null ? 'N/A' : newInThisSnapshot}</div><div class="stat-label">New This Snapshot</div></div>
     </div>`;
 
     html += '<div class="fleet-dashboard-columns">';
@@ -262,8 +270,20 @@ window.renderNewDevicesTable = function() {
     var tbody = document.getElementById('new-devices-tbody');
     var history = window.updateDeviceHistory();
 
+    // history entries are written from parseTimestampMs-validated data going forward (see
+    // window.updateDeviceHistory), but an entry can still be a survivor from localStorage
+    // written by an earlier build that didn't validate on write (DEVICE_HISTORY_STORAGE_KEY
+    // was never version-bumped) - so firstSeen/lastSeen aren't guaranteed parseable here.
+    // Sort those to the bottom (oldest-first-ish, rather than NaN silently no-op-sorting them
+    // into an arbitrary spot) and show "unknown" instead of "Invalid Date".
     var rows = Object.keys(history).map(mac => Object.assign({ mac: mac }, history[mac]));
-    rows.sort((a, b) => new Date(b.firstSeen) - new Date(a.firstSeen));
+    rows.sort((a, b) => {
+        var am = window.parseTimestampMs(a.firstSeen), bm = window.parseTimestampMs(b.firstSeen);
+        if (am === null && bm === null) return 0;
+        if (am === null) return 1;
+        if (bm === null) return -1;
+        return bm - am;
+    });
 
     if (rows.length === 0) {
         tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;">No client history yet.</td></tr>`;
@@ -275,13 +295,15 @@ window.renderNewDevicesTable = function() {
         var vendorStr = vendorInfo.vendor
             ? esc(vendorInfo.vendor) + (vendorInfo.category !== 'Other' ? ` (${esc(vendorInfo.category)})` : '')
             : '-';
+        var firstSeenMs = window.parseTimestampMs(r.firstSeen);
+        var lastSeenMs = window.parseTimestampMs(r.lastSeen);
         return `<tr>
-            <td>${esc(new Date(r.firstSeen).toLocaleString())}</td>
+            <td>${esc(firstSeenMs !== null ? new Date(firstSeenMs).toLocaleString() : 'unknown')}</td>
             <td style="font-family:monospace;">${esc(r.mac.toUpperCase())}</td>
             <td>${vendorStr}</td>
             <td>${esc(r.lastIp)}</td>
             <td>${esc(r.lastDeviceIp)} / ${esc(r.lastPort)}</td>
-            <td>${esc(new Date(r.lastSeen).toLocaleString())}</td>
+            <td>${esc(lastSeenMs !== null ? new Date(lastSeenMs).toLocaleString() : 'unknown')}</td>
         </tr>`;
     }).join('');
 };
@@ -336,7 +358,7 @@ window.populateTrendDeviceSelect = function() {
     // device renumbering instead of forking into two series.
     var deviceMap = new Map(); // identity -> {hostname, ip}, from whichever loaded snapshot last saw it
     loadedSnapshots.slice()
-        .sort((a, b) => new Date(a.scanTimestamp || 0) - new Date(b.scanTimestamp || 0))
+        .sort((a, b) => (window.parseTimestampMs(a.scanTimestamp) ?? 0) - (window.parseTimestampMs(b.scanTimestamp) ?? 0))
         .forEach(s => s.topology.forEach(d => {
             if (!d || !d.DeviceIP) return;
             deviceMap.set(window.resolveDeviceIdentity(d), { hostname: d.Hostname || 'Unknown', ip: String(d.DeviceIP) });
@@ -445,10 +467,10 @@ window.renderTrendChart = function() {
     // over all snapshots (not the metric-filtered `points`), since a reboot is a fact about
     // the device regardless of whether this metric had a value then.
     var deviceSnapshotsSorted = loadedSnapshots
-        .filter(s => s.scanTimestamp)
-        .slice()
-        .sort((a, b) => new Date(a.scanTimestamp) - new Date(b.scanTimestamp))
-        .map(s => ({ t: new Date(s.scanTimestamp), device: s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity) }))
+        .map(s => ({ s: s, ts: window.parseTimestampMs(s.scanTimestamp) }))
+        .filter(x => x.ts !== null)
+        .sort((a, b) => a.ts - b.ts)
+        .map(x => ({ t: new Date(x.ts), device: x.s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity) }))
         .filter(entry => entry.device);
 
     ctx.strokeStyle = dangerColor;
@@ -587,11 +609,14 @@ window.populateTopologyDiffSelects = function() {
     var toSel = document.getElementById('topoDiffToSelect');
     if (!fromSel || !toSel) return;
 
-    var opts = loadedSnapshots.map((s, idx) => ({
-        idx: idx,
-        ts: s.scanTimestamp ? new Date(s.scanTimestamp).getTime() : idx,
-        label: s.scanTimestamp ? new Date(s.scanTimestamp).toLocaleString() : s.sourceFile,
-    })).sort((a, b) => a.ts - b.ts);
+    var opts = loadedSnapshots.map((s, idx) => {
+        var tsMs = window.parseTimestampMs(s.scanTimestamp);
+        return {
+            idx: idx,
+            ts: tsMs !== null ? tsMs : idx,
+            label: tsMs !== null ? new Date(tsMs).toLocaleString() : s.sourceFile,
+        };
+    }).sort((a, b) => a.ts - b.ts);
 
     var optionsHtml = opts.map(o => `<option value="${o.idx}">${esc(o.label)}</option>`).join('');
     var prevFrom = fromSel.value, prevTo = toSel.value;
@@ -811,7 +836,7 @@ window.populateReliabilityDeviceSelect = function() {
     // renumbered device stays one dropdown entry instead of splitting its history.
     var deviceMap = new Map(); // identity -> {hostname, ip}
     loadedSnapshots.slice()
-        .sort((a, b) => new Date(a.scanTimestamp || 0) - new Date(b.scanTimestamp || 0))
+        .sort((a, b) => (window.parseTimestampMs(a.scanTimestamp) ?? 0) - (window.parseTimestampMs(b.scanTimestamp) ?? 0))
         .forEach(s => s.topology.forEach(d => {
             if (!d || !d.DeviceIP) return;
             deviceMap.set(window.resolveDeviceIdentity(d), { hostname: d.Hostname || 'Unknown', ip: String(d.DeviceIP) });

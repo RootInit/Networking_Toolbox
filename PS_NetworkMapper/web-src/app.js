@@ -103,7 +103,8 @@ window.renderSnapshotSwitcher = function() {
     }
 
     select.innerHTML = loadedSnapshots.map((s, idx) => {
-        var label = s.scanTimestamp ? new Date(s.scanTimestamp).toLocaleString() : `${s.sourceFile} (no timestamp)`;
+        var tsMs = window.parseTimestampMs(s.scanTimestamp);
+        var label = tsMs !== null ? new Date(tsMs).toLocaleString() : `${s.sourceFile} (no timestamp)`;
         return `<option value="${idx}">${esc(label)}</option>`;
     }).join('');
     container.style.display = 'block';
@@ -517,9 +518,10 @@ window.processSelectedFiles = async function(files) {
         var totalDevices = loadedSnapshots.reduce((sum, s) => sum + s.topology.length, 0);
         var skippedNote = skipped.length > 0 ? ` (${skipped.length} file(s) skipped - see console)` : '';
         if (skipped.length > 0) skipped.forEach(s => console.warn(`Skipped "${s.name}": ${s.reason}`));
+        var bestSnapTs = window.parseTimestampMs(loadedSnapshots[bestIndex].scanTimestamp);
         window.setStatus(
             loadedSnapshots.length > 1
-                ? `Success! Loaded ${loadedSnapshots.length} snapshots (${totalDevices} device-records total)${skippedNote}. Viewing: ${loadedSnapshots[bestIndex].scanTimestamp ? new Date(loadedSnapshots[bestIndex].scanTimestamp).toLocaleString() : loadedSnapshots[bestIndex].sourceFile}.`
+                ? `Success! Loaded ${loadedSnapshots.length} snapshots (${totalDevices} device-records total)${skippedNote}. Viewing: ${bestSnapTs !== null ? new Date(bestSnapTs).toLocaleString() : loadedSnapshots[bestIndex].sourceFile}.`
                 : `Success! Mapped ${globalTopologyData.length} nodes.`,
             "green"
         );
