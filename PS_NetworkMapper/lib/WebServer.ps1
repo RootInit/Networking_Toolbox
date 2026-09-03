@@ -10,6 +10,7 @@
 # doesn't depend on Start-NetworkMapper.ps1 having loaded these first.
 . (Join-Path $PSScriptRoot "TopologyCrypto.ps1")
 . (Join-Path $PSScriptRoot "SshHelpers.ps1")
+. (Join-Path $PSScriptRoot "FileHelpers.ps1")
 . (Join-Path $PSScriptRoot "FleetCrawl.ps1")
 
 $script:ContentTypes = @{
@@ -202,6 +203,25 @@ function Invoke-RescanAction {
         }
     }
 
+    # A rescan whose result the browser never polled (drawer closed, page reload) would
+    # otherwise hold the single slot forever, 409-ing every future rescan - same reasoning as
+    # Invoke-ScanNetworkAction's reap of an unpolled scan job. If Invoke-RescanStatusAction
+    # already collected the result (Collected=true), PS is already EndInvoke'd/Disposed -
+    # just clear the slot rather than calling EndInvoke a second time (which throws).
+    if ($script:PendingScan -and $script:PendingScan.Handle.IsCompleted) {
+        $Finished = $script:PendingScan
+        if (-not $Finished.Collected) {
+            try {
+                $Finished.PS.EndInvoke($Finished.Handle) | Out-Null
+                Write-MapperDebugLog "RESCAN ORPHAN [$($Finished.IP)] Job completed after client abandoned poll (result discarded)"
+            } catch {
+                Write-MapperDebugLog "RESCAN ORPHAN [$($Finished.IP)] Job completed after client abandoned poll but failed: $_"
+            }
+            try { $Finished.PS.Dispose() } catch {}
+        }
+        $script:PendingScan = $null
+    }
+
     if ($script:PendingScan) {
         Send-WebJson -Response $Response -StatusCode 409 -Object @{
             error = "A rescan is already in progress"; jobId = $script:PendingScan.JobId; ip = $script:PendingScan.IP
@@ -223,7 +243,10 @@ function Invoke-RescanAction {
         throw
     }
 
-    $script:PendingScan = [PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $TargetIP; JobId = $JobId; StartTime = (Get-Date) }
+    # Collected/Outcome: filled in once by Invoke-RescanStatusAction on first completion so
+    # the result can be re-served idempotently to later polls (same pattern as
+    # Invoke-ScanNetworkAction/Invoke-ScanNetworkStatusAction).
+    $script:PendingScan = [PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $TargetIP; JobId = $JobId; StartTime = (Get-Date); Collected = $false; Outcome = $null }
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; jobId = $JobId; ip = $TargetIP }
 }
 
@@ -265,15 +288,20 @@ function Invoke-PingAction {
 
     # A ping whose result the browser never polled (drawer closed, page reload) would
     # otherwise hold the single slot forever, 409-ing every future ping - same reasoning as
-    # Invoke-ScanNetworkAction's reap of an unpolled scan job.
+    # Invoke-ScanNetworkAction's reap of an unpolled scan job. If Invoke-PingStatusAction
+    # already collected the result (Collected=true), PS is already EndInvoke'd/Disposed -
+    # just clear the slot rather than calling EndInvoke a second time (which throws).
     if ($script:PendingPing -and $script:PendingPing.Handle.IsCompleted) {
-        try {
-            $script:PendingPing.PS.EndInvoke($script:PendingPing.Handle) | Out-Null
-            Write-MapperDebugLog "PING ORPHAN [$($script:PendingPing.IP)] Job completed after client abandoned poll (result discarded)"
-        } catch {
-            Write-MapperDebugLog "PING ORPHAN [$($script:PendingPing.IP)] Job completed after client abandoned poll but failed: $_"
+        $Finished = $script:PendingPing
+        if (-not $Finished.Collected) {
+            try {
+                $Finished.PS.EndInvoke($Finished.Handle) | Out-Null
+                Write-MapperDebugLog "PING ORPHAN [$($Finished.IP)] Job completed after client abandoned poll (result discarded)"
+            } catch {
+                Write-MapperDebugLog "PING ORPHAN [$($Finished.IP)] Job completed after client abandoned poll but failed: $_"
+            }
+            try { $Finished.PS.Dispose() } catch {}
         }
-        try { $script:PendingPing.PS.Dispose() } catch {}
         $script:PendingPing = $null
     }
 
@@ -326,7 +354,10 @@ function Invoke-PingAction {
         throw
     }
 
-    $script:PendingPing = [PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $TargetIP; JobId = $JobId; StartTime = (Get-Date) }
+    # Collected/Outcome: filled in once by Invoke-PingStatusAction on first completion so the
+    # result can be re-served idempotently to later polls (same pattern as
+    # Invoke-ScanNetworkAction/Invoke-ScanNetworkStatusAction).
+    $script:PendingPing = [PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $TargetIP; JobId = $JobId; StartTime = (Get-Date); Collected = $false; Outcome = $null }
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; jobId = $JobId; ip = $TargetIP }
 }
 
@@ -346,28 +377,35 @@ function Invoke-PingStatusAction {
     $Job = $script:PendingPing
 
     if ($Job.Handle.IsCompleted) {
-        $script:PendingPing = $null
-        try {
-            $Result = $Job.PS.EndInvoke($Job.Handle)
-        } catch {
-            $Job.PS.Dispose()
-            Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "complete"; ok = $false; ip = $Job.IP; reason = "Ping failed: $_" }
-            return
-        }
-        $Job.PS.Dispose()
+        # Collect (EndInvoke + Dispose) exactly once and cache the outcome - EndInvoke
+        # throws if called twice, and later polls just re-serve the cached outcome. Same
+        # pattern as Invoke-ScanNetworkStatusAction, so a client disconnect between the job
+        # finishing and this response write doesn't lose the result: the next poll (or the
+        # next Invoke-PingAction's reap) finds Collected=true/Outcome already set.
+        if (-not $Job.Collected) {
+            try {
+                $Result = $Job.PS.EndInvoke($Job.Handle)
 
-        # Index explicitly ($Result[0]), not by dotting into $Result, matching
-        # Invoke-ScanNetworkStatusAction's convention - member enumeration on a 1-item
-        # collection would still work for these two scalar properties, but indexing keeps
-        # this consistent with how EndInvoke results are unwrapped elsewhere in this file.
-        $Payload = if ($Result -and $Result.Count -gt 0) { $Result[0] } else { $null }
-        $ReplyCount = if ($Payload) { $Payload.ReplyCount } else { 0 }
-        $AvgLatency = if ($Payload) { $Payload.AvgLatency } else { $null }
+                # Index explicitly ($Result[0]), not by dotting into $Result, matching
+                # Invoke-ScanNetworkStatusAction's convention - member enumeration on a 1-item
+                # collection would still work for these two scalar properties, but indexing keeps
+                # this consistent with how EndInvoke results are unwrapped elsewhere in this file.
+                $Payload = if ($Result -and $Result.Count -gt 0) { $Result[0] } else { $null }
+                $ReplyCount = if ($Payload) { $Payload.ReplyCount } else { 0 }
+                $AvgLatency = if ($Payload) { $Payload.AvgLatency } else { $null }
 
-        Send-WebJson -Response $Response -StatusCode 200 -Object @{
-            status = "complete"; ok = $true; ip = $Job.IP
-            alive = ($ReplyCount -gt 0); sent = 4; received = $ReplyCount; avgLatencyMs = $AvgLatency
+                $Job.Outcome = @{
+                    status = "complete"; ok = $true; ip = $Job.IP
+                    alive = ($ReplyCount -gt 0); sent = 4; received = $ReplyCount; avgLatencyMs = $AvgLatency
+                }
+            } catch {
+                $Job.Outcome = @{ status = "complete"; ok = $false; ip = $Job.IP; reason = "Ping failed: $_" }
+            }
+            try { $Job.PS.Dispose() } catch {}
+            $Job.Collected = $true
         }
+
+        Send-WebJson -Response $Response -StatusCode 200 -Object $Job.Outcome
         return
     }
 
@@ -401,32 +439,39 @@ function Invoke-RescanStatusAction {
     $Job = $script:PendingScan
 
     if ($Job.Handle.IsCompleted) {
-        $script:PendingScan = $null
-        try {
-            $Result = $Job.PS.EndInvoke($Job.Handle)
-        } catch {
-            $Job.PS.Dispose()
-            Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "complete"; ok = $false; ip = $Job.IP; reason = "Scan failed: $_" }
-            return
-        }
-        $Job.PS.Dispose()
+        # Collect (EndInvoke + Dispose) exactly once and cache the outcome - EndInvoke
+        # throws if called twice, and later polls just re-serve the cached outcome. Same
+        # pattern as Invoke-ScanNetworkStatusAction, so a client disconnect between the job
+        # finishing and this response write doesn't lose the result: the next poll finds
+        # Collected=true/Outcome already set.
+        if (-not $Job.Collected) {
+            try {
+                $Result = $Job.PS.EndInvoke($Job.Handle)
 
-        # Success/failure decided here from the CRITICAL log-line signal Get-JunosNodeData.ps1
-        # emits, not inferred by the browser. ok:false omits `node` entirely, since a failed
-        # scan's fields are placeholder-shaped and should not overwrite existing good data.
-        $Logs = if ($Result -and $Result.Logs) { @($Result.Logs) } else { @() }
-        $HasCritical = $false
-        foreach ($LogLine in $Logs) { if ($LogLine -match 'CRITICAL') { $HasCritical = $true; break } }
+                # Success/failure decided here from the CRITICAL log-line signal
+                # Get-JunosNodeData.ps1 emits, not inferred by the browser. ok:false omits
+                # `node` entirely, since a failed scan's fields are placeholder-shaped and
+                # should not overwrite existing good data.
+                $Logs = if ($Result -and $Result.Logs) { @($Result.Logs) } else { @() }
+                $HasCritical = $false
+                foreach ($LogLine in $Logs) { if ($LogLine -match 'CRITICAL') { $HasCritical = $true; break } }
 
-        if (-not $Result -or -not $Result.Node -or $HasCritical) {
-            Send-WebJson -Response $Response -StatusCode 200 -Object @{
-                status = "complete"; ok = $false; ip = $Job.IP
-                reason = "Switch returned empty payload or scan failed - see logs"; logs = $Logs
+                if (-not $Result -or -not $Result.Node -or $HasCritical) {
+                    $Job.Outcome = @{
+                        status = "complete"; ok = $false; ip = $Job.IP
+                        reason = "Switch returned empty payload or scan failed - see logs"; logs = $Logs
+                    }
+                } else {
+                    $Job.Outcome = @{ status = "complete"; ok = $true; ip = $Job.IP; node = $Result.Node; logs = $Logs }
+                }
+            } catch {
+                $Job.Outcome = @{ status = "complete"; ok = $false; ip = $Job.IP; reason = "Scan failed: $_" }
             }
-            return
+            try { $Job.PS.Dispose() } catch {}
+            $Job.Collected = $true
         }
 
-        Send-WebJson -Response $Response -StatusCode 200 -Depth 20 -Object @{ status = "complete"; ok = $true; ip = $Job.IP; node = $Result.Node; logs = $Logs }
+        Send-WebJson -Response $Response -StatusCode 200 -Depth 20 -Object $Job.Outcome
         return
     }
 
@@ -635,6 +680,9 @@ function Invoke-GetConfigAction {
 # Returns "" (not null) when there's nothing to offer - the browser falls back to prompting.
 function Invoke-GetSessionPasswordAction {
     param($Response, [string]$EncryptionPassword)
+    # Must not be cached by an intermediate proxy or the browser's own disk cache - this
+    # response body is the plaintext encryption password.
+    $Response.Headers.Add("Cache-Control", "no-store")
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ password = [string]$EncryptionPassword }
 }
 
@@ -744,8 +792,12 @@ function Invoke-SaveConfigAction {
 
     try {
         if ($NoEncryption) {
-            # Re-serialize rather than raw $Body | Out-File, so the file is consistently formatted.
-            $Parsed | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
+            # Re-serialize rather than raw $Body | Out-File, so the file is consistently
+            # formatted. Written atomically (temp file + rename via FileHelpers.ps1's
+            # Set-FileContentAtomic, dot-sourced above) so a crash/disk-full mid-write can't
+            # leave Configuration.json truncated - it's the operator's only copy of their
+            # saved device list and credentials.
+            Set-FileContentAtomic -DestinationPath $ConfigPath -Content ($Parsed | ConvertTo-Json -Depth 10) -Encoding utf8
         } else {
             $SaltBytes = [byte[]]::new(16)
             $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -758,7 +810,9 @@ function Invoke-SaveConfigAction {
             $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $Iterations
             $Envelope = Protect-TopologyPayload -PlainJson $Body -EncKey $KeyMaterial.EncKey -MacKey $KeyMaterial.MacKey -Salt $SaltBytes -Iterations $Iterations -Format "PSNetworkMapper-EncryptedConfig"
 
-            $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $ConfigPath -Encoding utf8
+            # Same atomic write as the -NoEncryption branch above - Configuration.json.enc is
+            # equally the operator's only copy.
+            Set-FileContentAtomic -DestinationPath $ConfigPath -Content ($Envelope | ConvertTo-Json -Depth 10) -Encoding utf8
         }
 
         # Push just-saved credentials into the running server's live copies so
