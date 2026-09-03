@@ -6,6 +6,24 @@
 #
 # Not meant to be run directly - dot-source it: `. (Join-Path $PSScriptRoot "SshHelpers.ps1")`
 
+# Restricts a just-written credential/askpass temp file's ACL to the current user only,
+# removing any inherited access (e.g. other local accounts/Administrators group entries
+# %TEMP%'s default ACL may grant), so the plaintext password these files hold is only
+# readable by the identity that wrote it while it exists on disk. Best-effort/defense-in-
+# depth: swallows failures (e.g. non-NTFS temp) rather than blocking the SSH flow on an
+# ACL-hardening step.
+function Protect-JunosTempFileAcl {
+    param([Parameter(Mandatory=$true)][string]$Path)
+    try {
+        $CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+        $Acl = New-Object System.Security.AccessControl.FileSecurity
+        $Acl.SetAccessRuleProtection($true, $false)
+        $Rule = New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)
+        $Acl.AddAccessRule($Rule)
+        [System.IO.File]::SetAccessControl($Path, $Acl)
+    } catch {}
+}
+
 # Writes {Username, Password} to a short-lived %TEMP% file for handoff to Connect-Switch.ps1,
 # which runs as a separate OS process via Start-Process (unlike Get-JunosNodeData.ps1, which
 # runs in-process via a runspace and gets credentials directly through .AddParameter, never
@@ -20,6 +38,7 @@ function New-JunosCredentialFile {
     # powershell.exe (5.1). A BOM-less file would hit its Get-Content ANSI-codepage fallback
     # and corrupt non-ASCII credentials. WriteAllText is UTF-8-without-BOM on both runtimes.
     [System.IO.File]::WriteAllText($CredPath, $Json)
+    Protect-JunosTempFileAcl -Path $CredPath
     return $CredPath
 }
 
@@ -36,7 +55,9 @@ function New-JunosAskPass {
     $AskPassPath = Join-Path $env:TEMP "ssh_askpass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).bat"
     $AskPassText = Join-Path $env:TEMP "ssh_pass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
     [System.IO.File]::WriteAllText($AskPassText, $Password)
+    Protect-JunosTempFileAcl -Path $AskPassText
     [System.IO.File]::WriteAllText($AskPassPath, "@type `"$AskPassText`"")
+    Protect-JunosTempFileAcl -Path $AskPassPath
     return [PSCustomObject]@{
         AskPassPath          = $AskPassPath
         AskPassText          = $AskPassText

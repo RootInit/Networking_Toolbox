@@ -191,7 +191,12 @@ function Invoke-RescanAction {
     for ($i = $script:OrphanedScans.Count - 1; $i -ge 0; $i--) {
         $Orphan = $script:OrphanedScans[$i]
         if ($Orphan.Handle.IsCompleted) {
-            try { $Orphan.PS.EndInvoke($Orphan.Handle) | Out-Null } catch {}
+            try {
+                $Orphan.PS.EndInvoke($Orphan.Handle) | Out-Null
+                Write-MapperDebugLog "RESCAN ORPHAN [$($Orphan.IP)] Job completed after client timeout (result discarded)"
+            } catch {
+                Write-MapperDebugLog "RESCAN ORPHAN [$($Orphan.IP)] Job completed after client timeout but failed: $_"
+            }
             $Orphan.PS.Dispose()
             $script:OrphanedScans.RemoveAt($i)
         }
@@ -247,7 +252,12 @@ function Invoke-PingAction {
     for ($i = $script:OrphanedPings.Count - 1; $i -ge 0; $i--) {
         $Orphan = $script:OrphanedPings[$i]
         if ($Orphan.Handle.IsCompleted) {
-            try { $Orphan.PS.EndInvoke($Orphan.Handle) | Out-Null } catch {}
+            try {
+                $Orphan.PS.EndInvoke($Orphan.Handle) | Out-Null
+                Write-MapperDebugLog "PING ORPHAN [$($Orphan.IP)] Job completed after client timeout (result discarded)"
+            } catch {
+                Write-MapperDebugLog "PING ORPHAN [$($Orphan.IP)] Job completed after client timeout but failed: $_"
+            }
             $Orphan.PS.Dispose()
             $script:OrphanedPings.RemoveAt($i)
         }
@@ -697,6 +707,29 @@ function Invoke-SaveConfigAction {
     if (-not $Parsed -or $null -eq $Parsed.devices) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Request body must be JSON with a 'devices' array" }
         return
+    }
+
+    # $Username ends up interpolated unquoted into an ssh.exe/cmd.exe command line
+    # (Get-JunosSshArgs -> Connect-Switch.ps1/Get-JunosNodeData.ps1), so - unlike a normal
+    # form field - a stray space or shell/ssh metacharacter here is a command-injection
+    # vector, not just a cosmetic issue (SSH-001/SSH-002: an unvalidated username such as
+    # `admin -oProxyCommand=calc.exe x` or `admin & calc.exe & echo ` reaches ssh.exe's/
+    # cmd.exe's argv unescaped). Locked to typical Junos login-name shape, mirroring how
+    # $TargetIP is regex-locked elsewhere in this file. Empty string is still allowed
+    # (an explicit {username:"", password:""} intentionally clears saved credentials).
+    #
+    # No PowerShell test runner exists in this repo (only `node --test` under web-src/) to
+    # host an automated regression test for this validation, so a manual repro is recorded
+    # here instead: POST {"devices":[],"credentials":{"username":"admin -oProxyCommand=calc.exe x","password":"x"}}
+    # to /api/save-config (with a matching Origin header) before this check existed and it
+    # would 200 and silently arm the injection; with this check it now 400s with
+    # "Invalid username: ...".
+    if ($Parsed.credentials) {
+        $NewUsername = [string]$Parsed.credentials.username
+        if ($NewUsername -and $NewUsername -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$') {
+            Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid username: must start with a letter or digit and contain only letters, digits, '.', '_', or '-'" }
+            return
+        }
     }
 
     try {
