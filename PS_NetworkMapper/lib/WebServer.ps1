@@ -267,7 +267,12 @@ function Invoke-PingAction {
     # otherwise hold the single slot forever, 409-ing every future ping - same reasoning as
     # Invoke-ScanNetworkAction's reap of an unpolled scan job.
     if ($script:PendingPing -and $script:PendingPing.Handle.IsCompleted) {
-        try { $script:PendingPing.PS.EndInvoke($script:PendingPing.Handle) | Out-Null } catch {}
+        try {
+            $script:PendingPing.PS.EndInvoke($script:PendingPing.Handle) | Out-Null
+            Write-MapperDebugLog "PING ORPHAN [$($script:PendingPing.IP)] Job completed after client abandoned poll (result discarded)"
+        } catch {
+            Write-MapperDebugLog "PING ORPHAN [$($script:PendingPing.IP)] Job completed after client abandoned poll but failed: $_"
+        }
         try { $script:PendingPing.PS.Dispose() } catch {}
         $script:PendingPing = $null
     }
@@ -462,7 +467,12 @@ function Invoke-ScanNetworkAction {
     if ($script:PendingScanNetwork -and $script:PendingScanNetwork.Handle.IsCompleted) {
         $Finished = $script:PendingScanNetwork
         if (-not $Finished.Collected) {
-            try { $Finished.PS.EndInvoke($Finished.Handle) | Out-Null } catch {}
+            try {
+                $Finished.PS.EndInvoke($Finished.Handle) | Out-Null
+                Write-MapperDebugLog "SCAN-NETWORK ORPHAN [$($Finished.StartIP)] Job completed after client abandoned poll (result discarded)"
+            } catch {
+                Write-MapperDebugLog "SCAN-NETWORK ORPHAN [$($Finished.StartIP)] Job completed after client abandoned poll but failed: $_"
+            }
             try { $Finished.PS.Dispose() } catch {}
             try { $Finished.Runspace.Dispose() } catch {}
         }
