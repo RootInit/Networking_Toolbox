@@ -158,12 +158,17 @@ window.renderFleetDashboard = function() {
     // scanTimestamp means elapsed-since-boot can't be computed at all, which must not
     // render the same as a genuine zero-result).
     var rebootCheckPossible = !!(activeSnapshot && activeSnapshot.scanTimestamp);
+    // Tracks whether at least one device had a usable Uptime to compute from - distinguishes
+    // "checked every device, zero had usable data" from a genuine zero-reboot result, one
+    // level deeper than rebootCheckPossible (which only covers the snapshot-wide gate above).
+    var anyUptimeUsable = false;
     if (activeSnapshot && activeSnapshot.scanTimestamp) {
         var snapTime = new Date(activeSnapshot.scanTimestamp).getTime();
         devices.forEach(d => {
             if (!d.Uptime || d.Uptime === "Unknown") return;
             var bootTime = new Date(d.Uptime).getTime();
             if (isNaN(bootTime)) return;
+            anyUptimeUsable = true;
             var elapsedMin = (snapTime - bootTime) / 60000;
             if (elapsedMin >= 0 && elapsedMin < settings.recentRebootMin) {
                 recentlyRebooted.push({ device: d, elapsedMin: elapsedMin });
@@ -232,6 +237,8 @@ window.renderFleetDashboard = function() {
 
     html += '<div><div class="fleet-section"><h3>Recently Rebooted (&lt; ' + settings.recentRebootMin + ' min)</h3>' + (!rebootCheckPossible
         ? '<p class="fleet-list-empty">Unable to determine (no scan timestamp on this snapshot).</p>'
+        : (!anyUptimeUsable && devices.length > 0)
+        ? '<p class="fleet-list-empty">Unable to determine (no devices reported usable uptime data).</p>'
         : recentlyRebooted.length === 0
         ? '<p class="fleet-list-empty">None.</p>'
         : recentlyRebooted.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge accent">${Math.round(x.elapsedMin)} min ago</span></div>`).join('')
