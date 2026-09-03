@@ -132,8 +132,19 @@ try {
 
         # Config backup contains secrets (SNMP communities, RADIUS/TACACS+ shared secrets, etc)
         # and is stored verbatim/unparsed, so redact it here: keep the command echo line,
-        # replace everything after it (safe since this command is written last, see above).
-        $RedactedOutput = $RawOutput -replace '(?ms)(^.*>\s*show\s+configuration\s*\|\s*display\s+set[^\r\n]*[\r\n]+).*\z', '$1[CONFIGURATION REDACTED - not written to RawDumps by design; see the Configuration field in NetworkMap output]'
+        # replace only the config command's OWN output section - bounded to the next command's
+        # echoed prompt line (or end-of-string if config is genuinely last), the same
+        # bounded-capture approach used for $DataDict["CONFIG"] below (via $Sections /
+        # the "stop at the next prompt line" pattern). Deliberately does NOT assume "config is
+        # written last" (it currently is not - see Invoke-InteractiveBatch's comment; "show
+        # interfaces extensive" runs after it) and deliberately uses a non-greedy `.*?` prefix
+        # (matching the FIRST/real echoed config command) rather than a greedy one, so this
+        # can't be fooled into anchoring on a LATER, coincidentally prompt-shaped line inside
+        # some other command's output (e.g. an operator-set interface Description containing
+        # text like "> show configuration | display set") - a greedy prefix would shift the
+        # redaction boundary to that later false match and leave the real config secrets,
+        # earlier in the stream, completely unredacted.
+        $RedactedOutput = $RawOutput -replace '(?ms)(^.*?>\s*show\s+configuration\s*\|\s*display\s+set[^\r\n]*[\r\n]+).*?(?=[\r\n]+(?:\{[^}]+\}[\r\n]+)?\S+@\S+[>#]|\z)', '$1[CONFIGURATION REDACTED - not written to RawDumps by design; see the Configuration field in NetworkMap output]'
         $RedactedOutput | Out-File $RawLogPath -Force -Encoding utf8
         Write-LogMsg "Raw payload saved to $RawLogPath (configuration output redacted)"
     }
@@ -185,12 +196,15 @@ try {
         elseif ($Sec -match '^(?i)system uptime\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["UPTIME"] = $Matches.content }
         elseif ($Sec -match '^(?i)chassis alarms\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ALARMS"] = $Matches.content }
         elseif ($Sec -match '^(?i)chassis routing-engine\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ROUTING_ENGINE"] = $Matches.content }
-        # No "show " follows this section ("quit" does), so stop non-greedily at a trailing
-        # CLI prompt line anchored to end-of-stream (`\z`) rather than on literal "quit" -
-        # large configs often hit the 50s timeout with the prompt flushed but "quit" not yet
-        # written. Anchoring to end-of-stream (not mid-content) avoids false-triggering on a
-        # login banner containing prompt-shaped text like "admin@example.com >". The optional
-        # `{master:N}` group absorbs a VC member's prompt prefix; bare `\z` is the fallback.
+        # "show interfaces extensive" follows this section in the batch above (not "quit"
+        # directly) - the split on "> show " above already separates CONFIG from that section
+        # when the batch completes normally. This regex's trailing CLI-prompt match, anchored
+        # to end-of-stream (`\z`) rather than to literal "quit", instead covers the case where
+        # the 50s timeout hits mid-config, before "show interfaces extensive" is ever sent/
+        # echoed - the prompt is flushed but "quit" not yet written. Anchoring to end-of-stream
+        # (not mid-content) avoids false-triggering on a login banner containing prompt-shaped
+        # text like "admin@example.com >". The optional `{master:N}` group absorbs a VC
+        # member's prompt prefix; bare `\z` is the fallback.
         elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+(?:{[^}]+}[\r\n]+)?\S+@\S+[>#](?s).*)?\z') { $DataDict["CONFIG"] = $Matches.content }
     }
 
