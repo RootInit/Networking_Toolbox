@@ -157,12 +157,15 @@ window.renderFleetDashboard = function() {
     // Distinguishes "checked and found nothing" from "couldn't check" (INV-UI-TRUTH: no
     // scanTimestamp means elapsed-since-boot can't be computed at all, which must not
     // render the same as a genuine zero-result).
-    var rebootCheckPossible = !!(activeSnapshot && activeSnapshot.scanTimestamp);
+    // A truthy scanTimestamp isn't enough - it must also parse (same check renderCrawlAge
+    // in utils.js uses), or snapTime below is NaN and every elapsed-since-boot comparison
+    // silently comes back false, which would otherwise render as a trustworthy "None."
+    var rebootCheckPossible = !!(activeSnapshot && activeSnapshot.scanTimestamp && !isNaN(new Date(activeSnapshot.scanTimestamp).getTime()));
     // Tracks whether at least one device had a usable Uptime to compute from - distinguishes
     // "checked every device, zero had usable data" from a genuine zero-reboot result, one
     // level deeper than rebootCheckPossible (which only covers the snapshot-wide gate above).
     var anyUptimeUsable = false;
-    if (activeSnapshot && activeSnapshot.scanTimestamp) {
+    if (rebootCheckPossible) {
         var snapTime = new Date(activeSnapshot.scanTimestamp).getTime();
         devices.forEach(d => {
             if (!d.Uptime || d.Uptime === "Unknown") return;

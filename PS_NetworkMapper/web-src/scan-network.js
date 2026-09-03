@@ -124,7 +124,7 @@ function pollRunningScan() {
         }
         if (status.status === 'running') {
             if (btn) btn.textContent = 'Scanning (' + status.visited + ' found)...';
-            scanNetworkPollTimer = setTimeout(poll, 2000);
+            scanNetworkPollTimer = setTimeout(runPoll, 2000);
             return;
         }
         // status.status === 'complete'
@@ -142,7 +142,16 @@ function pollRunningScan() {
         finish("Scan complete - " + status.visitedCount + " device(s) found. Loading...", "green");
         await window.processSelectedFiles([syntheticFile]);
     };
-    poll();
+    // poll() is fired-and-forgotten (directly here, and via setTimeout above) - without this
+    // catch, an exception it doesn't already handle internally would leave
+    // scanNetworkPollActive stuck true forever (finish(), which resets it, would never run),
+    // permanently disabling the scan/load buttons with no visible error.
+    function runPoll() {
+        poll().catch(function(e) {
+            finish("Unexpected error while polling scan status: " + e.message, "red");
+        });
+    }
+    runPoll();
 }
 
 // Page-load reattach (UX-002): a refresh mid-crawl loses scanNetworkPollTimer/pollStart
