@@ -19,6 +19,16 @@ window.asArray = function(val) {
     return [val];
 };
 
+// Lets a non-native interactive element (a <div>/<span> tab or close button, kept off
+// <button> for existing styling) respond to keyboard activation the same as a click -
+// used together with tabindex="0" + role="tab"/"button" in index.html.
+window.activateOnKey = function(event, fn) {
+    if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+        event.preventDefault();
+        fn();
+    }
+};
+
 // Mirrors a client-side error into the server's log (Mapper_Debug.log - see WebServer.ps1's
 // Write-MapperDebugLog/Invoke-ClientErrorAction) since the browser console alone is easy
 // to lose after the fact. Fire-and-forget: failed POSTs are swallowed so error reporting

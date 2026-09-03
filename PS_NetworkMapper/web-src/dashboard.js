@@ -144,9 +144,20 @@ window.renderFleetDashboard = function() {
         return value >= critical ? 'red' : (value >= warn ? 'warn-badge' : 'green');
     }
 
+    // Severity as a word, not just a color - mirrors drawer.js's STP/Link badges, which
+    // always pair color with a real status word (e.g. "FWD"/"BLK") rather than relying on
+    // color alone.
+    function thresholdLabel(value, warn, critical) {
+        return value >= critical ? 'critical' : (value >= warn ? 'warning' : 'ok');
+    }
+
     // --- Recently rebooted (elapsed since boot, measured from this snapshot's capture
     // time, not wall-clock "now") ---
     var recentlyRebooted = [];
+    // Distinguishes "checked and found nothing" from "couldn't check" (INV-UI-TRUTH: no
+    // scanTimestamp means elapsed-since-boot can't be computed at all, which must not
+    // render the same as a genuine zero-result).
+    var rebootCheckPossible = !!(activeSnapshot && activeSnapshot.scanTimestamp);
     if (activeSnapshot && activeSnapshot.scanTimestamp) {
         var snapTime = new Date(activeSnapshot.scanTimestamp).getTime();
         devices.forEach(d => {
@@ -211,15 +222,17 @@ window.renderFleetDashboard = function() {
 
     html += '<div><div class="fleet-section"><h3>Highest RE CPU</h3>' + (worstCpu.length === 0
         ? '<p class="fleet-list-empty">No CPU data available.</p>'
-        : worstCpu.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)}">${x.value}%</span></div>`).join('')
+        : worstCpu.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)}" title="${thresholdLabel(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)}">${x.value}% (${thresholdLabel(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)})</span></div>`).join('')
     ) + '</div>';
 
     html += '<div class="fleet-section"><h3>Highest RE Memory</h3>' + (worstMem.length === 0
         ? '<p class="fleet-list-empty">No memory data available.</p>'
-        : worstMem.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.memWarnPct, settings.memCriticalPct)}">${x.value}%</span></div>`).join('')
+        : worstMem.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.memWarnPct, settings.memCriticalPct)}" title="${thresholdLabel(x.value, settings.memWarnPct, settings.memCriticalPct)}">${x.value}% (${thresholdLabel(x.value, settings.memWarnPct, settings.memCriticalPct)})</span></div>`).join('')
     ) + '</div></div>';
 
-    html += '<div><div class="fleet-section"><h3>Recently Rebooted (&lt; ' + settings.recentRebootMin + ' min)</h3>' + (recentlyRebooted.length === 0
+    html += '<div><div class="fleet-section"><h3>Recently Rebooted (&lt; ' + settings.recentRebootMin + ' min)</h3>' + (!rebootCheckPossible
+        ? '<p class="fleet-list-empty">Unable to determine (no scan timestamp on this snapshot).</p>'
+        : recentlyRebooted.length === 0
         ? '<p class="fleet-list-empty">None.</p>'
         : recentlyRebooted.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge accent">${Math.round(x.elapsedMin)} min ago</span></div>`).join('')
     ) + '</div></div></div>';
@@ -725,11 +738,12 @@ window.renderIpSpaceUtilization = function() {
         var inSubnet = Array.from(ips).filter(ip => { var n = ipToInt(ip); return n !== null && networkBase(n, subnet.prefix) === base; });
         var pct = usable > 0 ? Math.round((inSubnet.length / usable) * 100) : 0;
         var pctClass = pct >= 90 ? 'red' : (pct >= 75 ? 'warn-badge' : 'green');
+        var pctLabel = pct >= 90 ? 'critical' : (pct >= 75 ? 'warning' : 'ok');
         return `<tr>
             <td>${esc(vlanName)}</td>
             <td style="font-family:monospace;">${esc(subnet.ip)}/${subnet.prefix}</td>
             <td>${inSubnet.length} / ${usable}</td>
-            <td><span class="badge ${pctClass}">${pct}%</span></td>
+            <td><span class="badge ${pctClass}" title="${pctLabel}">${pct}% (${pctLabel})</span></td>
         </tr>`;
     }).join('');
 };
