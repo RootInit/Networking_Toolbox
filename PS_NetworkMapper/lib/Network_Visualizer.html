@@ -1845,7 +1845,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         <div style="background:var(--panel-bg); width:340px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); overflow:hidden;">
             <div class="drawer-header"><h2 style="font-size:1.05rem;">Scan Network</h2></div>
             <div style="padding:18px;">
-                <p style="margin:0 0 12px; font-size:0.85rem; color:var(--text-muted);">No previous scan is loaded - enter the starting switch's IP address to begin a fleet crawl.</p>
+                <p id="scan-start-ip-desc" style="margin:0 0 12px; font-size:0.85rem; color:var(--text-muted);">No previous scan is loaded - enter the starting switch's IP address to begin a fleet crawl.</p>
                 <div id="scan-start-ip-error" style="display:none; background:var(--danger-bg); color:var(--danger-text); border:1px solid var(--danger-border); border-radius:4px; padding:8px 10px; font-size:0.8rem; margin-bottom:12px;"></div>
                 <input type="text" id="scan-start-ip-input" placeholder="e.g. 10.55.2.2" autocomplete="off">
                 <div style="display:flex; gap:10px; margin-top:4px;">
@@ -1860,10 +1860,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
     <div id="left-panel">
         <div id="left-panel-body">
         <div class="sidebar-tabs">
-            <div class="sidebar-tab active" id="btn-sidebar-tab-load" onclick="window.switchSidebarTab('sidebar-tab-load')">Load File</div>
-            <div class="sidebar-tab" id="btn-sidebar-tab-search" onclick="window.switchSidebarTab('sidebar-tab-search')">Search</div>
-            <div class="sidebar-tab" id="btn-sidebar-tab-settings" onclick="window.switchSidebarTab('sidebar-tab-settings')">Settings</div>
-            <div class="sidebar-tab" id="btn-sidebar-tab-analysis" onclick="window.switchSidebarTab('sidebar-tab-analysis')">Analysis Dashboard</div>
+            <div class="sidebar-tab active" id="btn-sidebar-tab-load" tabindex="0" role="tab" aria-selected="true" onclick="window.switchSidebarTab('sidebar-tab-load')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-load'))">Load File</div>
+            <!-- aria-selected toggled by window.switchSidebarTab (app.js) -->
+            <div class="sidebar-tab" id="btn-sidebar-tab-search" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-search')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-search'))">Search</div>
+            <div class="sidebar-tab" id="btn-sidebar-tab-settings" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-settings')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-settings'))">Settings</div>
+            <div class="sidebar-tab" id="btn-sidebar-tab-analysis" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-analysis')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-analysis'))">Analysis Dashboard</div>
         </div>
 
         <div id="left-panel-content">
@@ -2113,7 +2114,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         <div class="drawer-header">
             <div class="drawer-header-top">
                 <h2 id="drawer-title">Switch Details</h2>
-                <span class="close-btn" onclick="window.closeDrawer()">&times;</span>
+                <span class="close-btn" tabindex="0" role="button" aria-label="Close" onclick="window.closeDrawer()" onkeydown="window.activateOnKey(event, window.closeDrawer)">&times;</span>
             </div>
             <div class="drawer-header-actions">
                 <button type="button" id="rescanBtn" onclick="window.rescanDevice()" title="Re-run the diagnostic scan for just this device, without a full fleet crawl">Re-scan</button>
@@ -2128,13 +2129,14 @@ svg.leaflet-image-layer.leaflet-interactive path {
         </div>
         
         <div class="tabs">
-            <div class="tab active" onclick="window.switchTab('tab-summary')" id="btn-tab-summary">Summary</div>
-            <div class="tab" onclick="window.switchTab('tab-stack')" id="btn-tab-stack">Hardware</div>
-            <div class="tab" onclick="window.switchTab('tab-alarms')" id="btn-tab-alarms">Alarms</div>
-            <div class="tab" onclick="window.switchTab('tab-neighbors')" id="btn-tab-neighbors">Neighbors</div>
-            <div class="tab" onclick="window.switchTab('tab-interfaces')" id="btn-tab-interfaces">Interfaces</div>
-            <div class="tab" onclick="window.switchTab('tab-clients')" id="btn-tab-clients">Clients</div>
-            <div class="tab" onclick="window.switchTab('tab-config')" id="btn-tab-config">Config</div>
+            <div class="tab active" tabindex="0" role="tab" aria-selected="true" onclick="window.switchTab('tab-summary')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-summary'))" id="btn-tab-summary">Summary</div>
+            <!-- aria-selected toggled by window.switchTab (drawer.js) -->
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-stack')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-stack'))" id="btn-tab-stack">Hardware</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-alarms')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-alarms'))" id="btn-tab-alarms">Alarms</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-neighbors')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-neighbors'))" id="btn-tab-neighbors">Neighbors</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-interfaces')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-interfaces'))" id="btn-tab-interfaces">Interfaces</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-clients')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-clients'))" id="btn-tab-clients">Clients</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-config')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-config'))" id="btn-tab-config">Config</div>
         </div>
 
         <div id="tab-summary" class="tab-content active">
@@ -2230,6 +2232,16 @@ window.asArray = function(val) {
     if (Array.isArray(val)) return val;
     if (val === null || val === undefined) return [];
     return [val];
+};
+
+// Lets a non-native interactive element (a <div>/<span> tab or close button, kept off
+// <button> for existing styling) respond to keyboard activation the same as a click -
+// used together with tabindex="0" + role="tab"/"button" in index.html.
+window.activateOnKey = function(event, fn) {
+    if (event.key === 'Enter' || event.key === ' ' || event.key === 'Spacebar') {
+        event.preventDefault();
+        fn();
+    }
 };
 
 // Mirrors a client-side error into the server's log (Mapper_Debug.log - see WebServer.ps1's
@@ -2503,9 +2515,9 @@ var TopologyCrypto = (function() {
         return { encKeyBytes: keyMaterial.slice(0, 32), macKeyBytes: keyMaterial.slice(32, 64) };
     }
 
-    // MIN must stay <= any real file's iteration count (currently 200,000) or it stops
-    // decrypting. MAX is just a CPU-burn guard against a maliciously-crafted file, not a
-    // security boundary.
+    // MIN must stay <= any real file's iteration count (the shared PBKDF2 count is 600,000)
+    // or it stops decrypting. MAX is just a CPU-burn guard against a maliciously-crafted file,
+    // not a security boundary.
     var MIN_ITERATIONS = 1000;
     var MAX_ITERATIONS = 5000000;
 
@@ -3055,9 +3067,9 @@ window.extractVlans = function() {
     vlanSelect.innerHTML = '<option value="ALL">Show All VLANs</option>';
 
     if (allVlans.size > 0) {
-        var sortedTags = Array.from(allVlans.keys()).map(Number).sort((a,b) => a-b);
+        var sortedTags = Array.from(allVlans.keys()).sort((a,b) => Number(a) - Number(b));
         sortedTags.forEach(tag => {
-            vlanSelect.innerHTML += `<option value="${tag}">VLAN ${tag} - ${esc(allVlans.get(tag.toString()))}</option>`;
+            vlanSelect.innerHTML += `<option value="${esc(tag)}">VLAN ${esc(tag)} - ${esc(allVlans.get(tag))}</option>`;
         });
     }
 };
@@ -3554,9 +3566,20 @@ window.renderFleetDashboard = function() {
         return value >= critical ? 'red' : (value >= warn ? 'warn-badge' : 'green');
     }
 
+    // Severity as a word, not just a color - mirrors drawer.js's STP/Link badges, which
+    // always pair color with a real status word (e.g. "FWD"/"BLK") rather than relying on
+    // color alone.
+    function thresholdLabel(value, warn, critical) {
+        return value >= critical ? 'critical' : (value >= warn ? 'warning' : 'ok');
+    }
+
     // --- Recently rebooted (elapsed since boot, measured from this snapshot's capture
     // time, not wall-clock "now") ---
     var recentlyRebooted = [];
+    // Distinguishes "checked and found nothing" from "couldn't check" (INV-UI-TRUTH: no
+    // scanTimestamp means elapsed-since-boot can't be computed at all, which must not
+    // render the same as a genuine zero-result).
+    var rebootCheckPossible = !!(activeSnapshot && activeSnapshot.scanTimestamp);
     if (activeSnapshot && activeSnapshot.scanTimestamp) {
         var snapTime = new Date(activeSnapshot.scanTimestamp).getTime();
         devices.forEach(d => {
@@ -3621,15 +3644,17 @@ window.renderFleetDashboard = function() {
 
     html += '<div><div class="fleet-section"><h3>Highest RE CPU</h3>' + (worstCpu.length === 0
         ? '<p class="fleet-list-empty">No CPU data available.</p>'
-        : worstCpu.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)}">${x.value}%</span></div>`).join('')
+        : worstCpu.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)}" title="${thresholdLabel(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)}">${x.value}% (${thresholdLabel(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)})</span></div>`).join('')
     ) + '</div>';
 
     html += '<div class="fleet-section"><h3>Highest RE Memory</h3>' + (worstMem.length === 0
         ? '<p class="fleet-list-empty">No memory data available.</p>'
-        : worstMem.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.memWarnPct, settings.memCriticalPct)}">${x.value}%</span></div>`).join('')
+        : worstMem.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.memWarnPct, settings.memCriticalPct)}" title="${thresholdLabel(x.value, settings.memWarnPct, settings.memCriticalPct)}">${x.value}% (${thresholdLabel(x.value, settings.memWarnPct, settings.memCriticalPct)})</span></div>`).join('')
     ) + '</div></div>';
 
-    html += '<div><div class="fleet-section"><h3>Recently Rebooted (&lt; ' + settings.recentRebootMin + ' min)</h3>' + (recentlyRebooted.length === 0
+    html += '<div><div class="fleet-section"><h3>Recently Rebooted (&lt; ' + settings.recentRebootMin + ' min)</h3>' + (!rebootCheckPossible
+        ? '<p class="fleet-list-empty">Unable to determine (no scan timestamp on this snapshot).</p>'
+        : recentlyRebooted.length === 0
         ? '<p class="fleet-list-empty">None.</p>'
         : recentlyRebooted.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge accent">${Math.round(x.elapsedMin)} min ago</span></div>`).join('')
     ) + '</div></div></div>';
@@ -4135,11 +4160,12 @@ window.renderIpSpaceUtilization = function() {
         var inSubnet = Array.from(ips).filter(ip => { var n = ipToInt(ip); return n !== null && networkBase(n, subnet.prefix) === base; });
         var pct = usable > 0 ? Math.round((inSubnet.length / usable) * 100) : 0;
         var pctClass = pct >= 90 ? 'red' : (pct >= 75 ? 'warn-badge' : 'green');
+        var pctLabel = pct >= 90 ? 'critical' : (pct >= 75 ? 'warning' : 'ok');
         return `<tr>
             <td>${esc(vlanName)}</td>
             <td style="font-family:monospace;">${esc(subnet.ip)}/${subnet.prefix}</td>
             <td>${inSubnet.length} / ${usable}</td>
-            <td><span class="badge ${pctClass}">${pct}%</span></td>
+            <td><span class="badge ${pctClass}" title="${pctLabel}">${pct}% (${pctLabel})</span></td>
         </tr>`;
     }).join('');
 };
@@ -4521,9 +4547,10 @@ window.closeDrawer = function() {
 
 window.switchTab = function(tabId) {
     document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
     document.getElementById(tabId).classList.add('active');
     document.getElementById('btn-' + tabId).classList.add('active');
+    document.getElementById('btn-' + tabId).setAttribute('aria-selected', 'true');
 
     if (currentSelectedNodeData) {
         if (tabId === 'tab-neighbors') window.renderNeighbors();
@@ -5599,18 +5626,29 @@ window.exportClientsCsv = function() {
 var scanNetworkPollTimer = null;
 
 // Promise-based starting-IP prompt, same resolve/reject shape as window.promptForPassword.
-function promptForStartIp() {
+// prefillIp/replacing let the caller reuse this same confirm modal when a snapshot is
+// already loaded (UX-001): the computed start IP is pre-filled and the description text
+// warns that confirming will replace the currently-loaded data, instead of firing the
+// fleet crawl with no review step at all.
+function promptForStartIp(prefillIp, replacing) {
     return new Promise((resolve, reject) => {
         var modal = document.getElementById('scan-start-ip-modal');
         var input = document.getElementById('scan-start-ip-input');
         var errEl = document.getElementById('scan-start-ip-error');
+        var descEl = document.getElementById('scan-start-ip-desc');
         var confirmBtn = document.getElementById('scan-start-ip-confirm-btn');
         var cancelBtn = document.getElementById('scan-start-ip-cancel-btn');
 
         errEl.style.display = 'none';
-        input.value = '';
+        input.value = prefillIp || '';
+        if (descEl) {
+            descEl.textContent = replacing
+                ? 'A snapshot is already loaded. Confirm the starting switch IP to re-scan the fleet - this will replace the currently-loaded data.'
+                : "No previous scan is loaded - enter the starting switch's IP address to begin a fleet crawl.";
+        }
         modal.style.display = 'flex';
         input.focus();
+        if (prefillIp) input.select();
 
         function cleanup() {
             modal.style.display = 'none';
@@ -5650,38 +5688,15 @@ function bestStartIpFromActiveSnapshot() {
     return window.GraphLayout.computeGraphRoot(nodeIds, edges);
 }
 
-window.startNetworkScan = async function() {
+// Shared poll loop against /api/scan-network/status, used both by a freshly-started scan
+// and by a page-load reattach to a scan already running server-side (UX-002). Disables the
+// scan/load buttons for the duration and shows live progress on scanNetworkBtn, same as
+// before this was extracted.
+function pollRunningScan() {
     var btn = document.getElementById('scanNetworkBtn');
     var loadBtn = document.getElementById('loadBtn');
     var loadFolderBtn = document.getElementById('loadFolderBtn');
-    var startIp;
 
-    if (loadedSnapshots.length === 0) {
-        try {
-            startIp = await promptForStartIp();
-        } catch (cancelErr) {
-            return; // user cancelled - no status message needed, nothing was started
-        }
-    } else {
-        startIp = bestStartIpFromActiveSnapshot();
-        if (!startIp) {
-            // Defensive: no classifiable node even though snapshots are loaded. Fall back
-            // to asking, same as the no-snapshot case.
-            try {
-                startIp = await promptForStartIp();
-            } catch (cancelErr) {
-                return;
-            }
-        }
-    }
-
-    // window.setStatus mirrors to #mapStatusNote when #status-text isn't visible, so scan
-    // messages are seen even if the user switched tabs mid-scan.
-    // Also re-enables loadBtn/loadFolderBtn - they're disabled below for the whole scan
-    // (not just once processSelectedFiles takes over at the end) so a Load click can't
-    // start reading files while a scan the user is about to load is still in flight.
-    // processSelectedFiles has its own generation guard against the two racing regardless,
-    // but blocking the click here avoids wasted work and a confusing status-line back-and-forth.
     function finish(msg, color) {
         if (scanNetworkPollTimer) { clearTimeout(scanNetworkPollTimer); scanNetworkPollTimer = null; }
         if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
@@ -5690,26 +5705,10 @@ window.startNetworkScan = async function() {
         window.setStatus(msg, color);
     }
 
-    try {
-        if (btn) { btn.disabled = true; btn.textContent = 'Starting scan...'; }
-        if (loadBtn) loadBtn.disabled = true;
-        if (loadFolderBtn) loadFolderBtn.disabled = true;
-        var resp = await fetch('/api/scan-network', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ startIp: startIp }),
-        });
-        var result = await resp.json();
-        if (!resp.ok) {
-            finish("Could not start scan: " + (result.error || ('HTTP ' + resp.status)), "red");
-            return;
-        }
-    } catch (e) {
-        finish("Could not start scan: " + e.message, "red");
-        return;
-    }
+    if (btn) btn.disabled = true;
+    if (loadBtn) loadBtn.disabled = true;
+    if (loadFolderBtn) loadFolderBtn.disabled = true;
 
-    var pollStart = Date.now();
     var poll = async function() {
         var statusResp;
         try {
@@ -5757,6 +5756,101 @@ window.startNetworkScan = async function() {
         await window.processSelectedFiles([syntheticFile]);
     };
     poll();
+}
+
+// Page-load reattach (UX-002): a refresh mid-crawl loses scanNetworkPollTimer/pollStart
+// (plain JS vars), so on load check the server's status endpoint directly instead of
+// leaving the UI idle with no way to tell "still running" from "safe to start." If a scan
+// is running, resume the same poll loop and reflect progress on the button instead of
+// silently reverting to idle.
+window.resumeScanIfInProgress = async function() {
+    if (loadedSnapshots.length > 0 || scanNetworkPollTimer) return;
+    var statusResp;
+    try {
+        statusResp = await fetch('/api/scan-network/status');
+    } catch (e) {
+        return;
+    }
+    if (statusResp.status === 404 || !statusResp.ok) return;
+    var status;
+    try {
+        status = await statusResp.json();
+    } catch (e) {
+        return;
+    }
+    if (status.status !== 'running') return;
+
+    var btn = document.getElementById('scanNetworkBtn');
+    if (btn) btn.textContent = 'Scanning (' + status.visited + ' found)...';
+    window.setStatus("A scan is already running - reattaching to progress...", "orange");
+    pollRunningScan();
+};
+
+window.startNetworkScan = async function() {
+    var btn = document.getElementById('scanNetworkBtn');
+    var loadBtn = document.getElementById('loadBtn');
+    var loadFolderBtn = document.getElementById('loadFolderBtn');
+    var startIp;
+
+    if (loadedSnapshots.length === 0) {
+        try {
+            startIp = await promptForStartIp();
+        } catch (cancelErr) {
+            return; // user cancelled - no status message needed, nothing was started
+        }
+    } else {
+        // A snapshot is already loaded - starting a scan here re-crawls the whole fleet
+        // and replaces what's on screen, so require explicit confirmation (UX-001) via
+        // the same start-IP modal, pre-filled with the computed root node.
+        var computedIp = bestStartIpFromActiveSnapshot();
+        try {
+            startIp = await promptForStartIp(computedIp, true);
+        } catch (cancelErr) {
+            return;
+        }
+    }
+
+    // window.setStatus mirrors to #mapStatusNote when #status-text isn't visible, so scan
+    // messages are seen even if the user switched tabs mid-scan.
+    // Also re-enables loadBtn/loadFolderBtn - they're disabled below for the whole scan
+    // (not just once processSelectedFiles takes over at the end) so a Load click can't
+    // start reading files while a scan the user is about to load is still in flight.
+    // processSelectedFiles has its own generation guard against the two racing regardless,
+    // but blocking the click here avoids wasted work and a confusing status-line back-and-forth.
+    try {
+        if (btn) { btn.disabled = true; btn.textContent = 'Starting scan...'; }
+        if (loadBtn) loadBtn.disabled = true;
+        if (loadFolderBtn) loadFolderBtn.disabled = true;
+        var resp = await fetch('/api/scan-network', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ startIp: startIp }),
+        });
+        var result = await resp.json();
+        if (!resp.ok) {
+            if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
+            if (loadBtn) loadBtn.disabled = false;
+            if (loadFolderBtn) loadFolderBtn.disabled = false;
+            if (resp.status === 409) {
+                // A scan is already running server-side (e.g. started from another tab, or
+                // this tab just doesn't know about it yet) - reattach instead of reporting
+                // this as a failure.
+                window.setStatus("A scan is already running - reattaching to progress...", "orange");
+                pollRunningScan();
+            } else {
+                window.setStatus("Could not start scan: " + (result.error || ('HTTP ' + resp.status)), "red");
+            }
+            return;
+        }
+    } catch (e) {
+        if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
+        if (loadBtn) loadBtn.disabled = false;
+        if (loadFolderBtn) loadFolderBtn.disabled = false;
+        window.setStatus("Could not start scan: " + e.message, "red");
+        return;
+    }
+
+    pollRunningScan();
 };
 
 </script>
@@ -6058,6 +6152,9 @@ window.renderMapMarkers = function() {
     if (window.mapEdgeLayer) { leafletMap.removeLayer(window.mapEdgeLayer); window.mapEdgeLayer = null; }
     // Every marker is about to be torn down and rebuilt - any prior "Edit position" arming
     // pointed at an object that no longer exists on the map.
+    if (currentlyArmedMarker && currentlyArmedMarker._disarmOnMapClick) {
+        leafletMap.off('click', currentlyArmedMarker._disarmOnMapClick);
+    }
     currentlyArmedMarker = null;
 
     var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
@@ -6103,7 +6200,13 @@ window.renderMapMarkers = function() {
             // indefinitely (dragging.enable() has no other timeout/blur to turn it back off).
             // No-op if a real drag already disabled it via dragend below.
             if (marker.dragging.enabled()) marker.dragging.disable();
-            if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
+            if (currentlyArmedMarker === marker) {
+                currentlyArmedMarker = null;
+                if (marker._disarmOnMapClick) {
+                    leafletMap.off('click', marker._disarmOnMapClick);
+                    marker._disarmOnMapClick = null;
+                }
+            }
             window.openRightDrawer(ip);
         });
         // Second entry point into the same window.openLocationEditor(ip) the Unplaced list
@@ -6515,11 +6618,16 @@ var IGNORED_ERROR_MESSAGES = /ResizeObserver loop/;
 window.onerror = function(message, source, lineno, colno, error) {
     if (IGNORED_ERROR_MESSAGES.test(message)) return true;
 
-    var errText = `Message: ${message}<br>Line: ${lineno}:${colno}<br>Source: ${source}<br>Stack: ${error ? error.stack : 'N/A'}`;
+    // textContent (not innerHTML) - message/source/stack can embed untrusted text (e.g. a
+    // future Error thrown with a device/file-supplied string), matching the esc()/textContent
+    // convention used for every other error-rendering sink in the app. white-space: pre-line
+    // (index.html) turns the \n separators below into the same line-per-field layout the old
+    // <br>-joined innerHTML gave.
+    var errText = `Message: ${message}\nLine: ${lineno}:${colno}\nSource: ${source}\nStack: ${error ? error.stack : 'N/A'}`;
     var textEl = document.getElementById('fatal-error-text');
     var modalEl = document.getElementById('fatal-error-modal');
     if (textEl && modalEl) {
-        textEl.innerHTML = errText;
+        textEl.textContent = errText;
         modalEl.style.display = 'block';
     }
     if (typeof window.hideProgress === 'function') window.hideProgress();
@@ -6738,9 +6846,10 @@ window.addEventListener('resize', function() {
 // tables/charts don't fit the 320px other tabs use.
 window.switchSidebarTab = async function(tabId) {
     document.querySelectorAll('.sidebar-tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.sidebar-tab').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.sidebar-tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
     document.getElementById(tabId).classList.add('active');
     document.getElementById('btn-' + tabId).classList.add('active');
+    document.getElementById('btn-' + tabId).setAttribute('aria-selected', 'true');
     document.getElementById('left-panel').classList.toggle('wide-panel', tabId === 'sidebar-tab-analysis');
     activeSidebarTab = tabId;
 
@@ -6866,6 +6975,10 @@ window.autoloadLastScan = async function() {
 };
 
 document.addEventListener('DOMContentLoaded', function() {
+    // Reattach first: if a scan is already running server-side (e.g. this tab was
+    // refreshed mid-crawl), autoloadLastScan would otherwise just autoload the previous
+    // archived snapshot and leave the button looking idle (UX-002).
+    if (typeof window.resumeScanIfInProgress === 'function') window.resumeScanIfInProgress();
     window.autoloadLastScan();
 });
 
