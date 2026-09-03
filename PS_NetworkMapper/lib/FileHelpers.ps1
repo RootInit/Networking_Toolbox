@@ -9,8 +9,13 @@
 # the old file intact or the new one, never a corrupt in-between - INV-DATA).
 #
 # [System.IO.File]::Move($src, $dst, overwrite:$true) - the 3-arg overload - was confirmed
-# via strace against the real pwsh 7.6.2 binary to issue exactly one rename() syscall
-# regardless of whether $dst already exists, so it's atomic in both cases. This replaces the
+# via strace against the real pwsh 7.6.2 binary on this Linux dev/test environment to issue
+# exactly one rename() syscall regardless of whether $dst already exists, so it's atomic in
+# both cases there. This codebase's deployment target is Windows, where the same .NET call
+# goes through MoveFileExW rather than POSIX rename(2) - that path has not been independently
+# strace-verified here (no Windows test environment is available), but NTFS's MoveFileEx
+# rename-replace is documented by Microsoft as atomic, so the same single-syscall-atomicity
+# conclusion is expected to hold on the deployed runtime as well. This replaces the
 # previous pattern of [System.IO.File]::Replace() when the destination exists, falling back
 # to Move-Item -Force when it doesn't - correct, but two code paths, independently
 # reimplemented in multiple files, one of which carried a [NullString]::Value gotcha

@@ -35,12 +35,15 @@ function New-JunosCredentialFile {
     param([Parameter(Mandatory=$true)][string]$Username, [Parameter(Mandatory=$true)][string]$Password)
     $CredPath = Join-Path $env:TEMP "junos_cred_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).json"
     $Json = @{ Username = $Username; Password = $Password } | ConvertTo-Json -Compress
+    # Create the file empty and harden its ACL BEFORE writing the plaintext content, so the
+    # content is never on disk under %TEMP%'s broader default ACL, even momentarily.
+    [System.IO.File]::WriteAllText($CredPath, "")
+    Protect-JunosTempFileAcl -Path $CredPath
     # WriteAllText, not Out-File -Encoding utf8: "utf8" means BOM in Windows PowerShell 5.1
     # but no-BOM in pwsh Core, while the reader (Connect-Switch.ps1) is always hardcoded
     # powershell.exe (5.1). A BOM-less file would hit its Get-Content ANSI-codepage fallback
     # and corrupt non-ASCII credentials. WriteAllText is UTF-8-without-BOM on both runtimes.
     [System.IO.File]::WriteAllText($CredPath, $Json)
-    Protect-JunosTempFileAcl -Path $CredPath
     return $CredPath
 }
 
@@ -57,10 +60,15 @@ function New-JunosAskPass {
     $AskPassPath = Join-Path $env:TEMP "ssh_askpass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).bat"
     $AskPassText = Join-Path $env:TEMP "ssh_pass_$($PID)_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
     try {
-        [System.IO.File]::WriteAllText($AskPassText, $Password)
+        # Create each file empty and harden its ACL BEFORE writing the plaintext content, so
+        # the password (and the .bat referencing its path) is never on disk under %TEMP%'s
+        # broader default ACL, even momentarily.
+        [System.IO.File]::WriteAllText($AskPassText, "")
         Protect-JunosTempFileAcl -Path $AskPassText
-        [System.IO.File]::WriteAllText($AskPassPath, "@type `"$AskPassText`"")
+        [System.IO.File]::WriteAllText($AskPassText, $Password)
+        [System.IO.File]::WriteAllText($AskPassPath, "")
         Protect-JunosTempFileAcl -Path $AskPassPath
+        [System.IO.File]::WriteAllText($AskPassPath, "@type `"$AskPassText`"")
     } catch {
         # Partial-write failure: clean up whichever of the two files actually made it to disk
         # before re-throwing, so the caller (whose $AskPass stays $null since we never return)
