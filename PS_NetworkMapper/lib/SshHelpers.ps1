@@ -21,7 +21,9 @@ function Protect-JunosTempFileAcl {
         $Rule = New-Object System.Security.AccessControl.FileSystemAccessRule($CurrentUser, [System.Security.AccessControl.FileSystemRights]::FullControl, [System.Security.AccessControl.AccessControlType]::Allow)
         $Acl.AddAccessRule($Rule)
         [System.IO.File]::SetAccessControl($Path, $Acl)
-    } catch {}
+    } catch {
+        Write-Warning "ACL hardening failed for temp file '$Path': $_"
+    }
 }
 
 # Writes {Username, Password} to a short-lived %TEMP% file for handoff to Connect-Switch.ps1,
@@ -96,6 +98,14 @@ function Clear-StaleJunosTempFiles {
 # instead of falling back to an interactively-prompted key passphrase.
 function Get-JunosSshArgs {
     param([Parameter(Mandatory=$true)][string]$Username, [Parameter(Mandatory=$true)][string]$TargetIP)
+    # Single choke point every SSH-invoking caller in this repo funnels through (CLI crawl,
+    # web-triggered connect/rescan/scan-network, startup-loaded config) - validating here
+    # closes the injection even for a $Username that reached this function without ever
+    # passing through WebServer.ps1's save-time check (e.g. loaded straight from
+    # Configuration.json/.enc at process startup). Same character class as that check.
+    if ($Username -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$') {
+        throw "Invalid Junos username: must start with a letter or digit and contain only letters, digits, '.', '_', or '-'"
+    }
     # ServerAliveInterval/ServerAliveCountMax: without a keepalive, a session wedged on a dead
     # link (e.g. the switch stops responding mid-command) just sits there until something
     # external notices - for Get-JunosNodeData.ps1's batch mode, that's the orchestrator's 65s

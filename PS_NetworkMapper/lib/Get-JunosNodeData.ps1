@@ -18,11 +18,14 @@ param (
 $WorkerScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 . (Join-Path $WorkerScriptDir "SshHelpers.ps1")
 
-$AskPass = New-JunosAskPass -Password $Password
-
-# Everything below runs inside a try/finally so the plaintext askpass files
-# (containing the real switch password) are always removed, even on error or exit.
+# Everything below (including New-JunosAskPass itself) runs inside a try/finally so the
+# plaintext askpass files (containing the real switch password) are always removed, even if
+# New-JunosAskPass fails partway (%TEMP% full/locked), which would otherwise leave the
+# plaintext credential on disk with nothing to remove it.
+$AskPass = $null
 try {
+
+$AskPass = New-JunosAskPass -Password $Password
 
 $Logs = [System.Collections.Generic.List[string]]::new()
 function Write-LogMsg { param([string]$msg) $Logs.Add("[$TargetIP] $msg") }
@@ -605,5 +608,5 @@ if ($HumanReadable) {
 return @{ Node = $NodeData; Logs = $Logs }
 
 } finally {
-    Remove-JunosAskPass -AskPassContext $AskPass
+    if ($AskPass) { Remove-JunosAskPass -AskPassContext $AskPass }
 }
