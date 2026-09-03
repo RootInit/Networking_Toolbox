@@ -59,11 +59,28 @@ const html = readFileSync(htmlPath, 'utf8');
 
 // Deliberately not a full HTML parser for either tag pattern below - the input is one known,
 // hand-written file, not arbitrary HTML. Case-insensitive to tolerate <SCRIPT>/<LINK>, though
-// nothing here actually uses that.
-const SCRIPT_TAG_RE = /<script\b[^>]*\bsrc\s*=\s*"([^"]+)"[^>]*>\s*<\/script>/gi;
-// Matches rel/href in either attribute order (network_vis.html only ever writes rel first,
-// but the source order isn't this build's concern to assume).
-const LINK_TAG_RE = /<link\b[^>]*\brel\s*=\s*"stylesheet"[^>]*\bhref\s*=\s*"([^"]+)"[^>]*>|<link\b[^>]*\bhref\s*=\s*"([^"]+)"[^>]*\brel\s*=\s*"stylesheet"[^>]*>/gi;
+// nothing here actually uses that. Both patterns capture the FULL attribute string (not just
+// src/href) so the replacement tag can preserve every other attribute (type="module", defer,
+// async, crossorigin, media, ...) verbatim - only src/href is special because it becomes the
+// inline content instead of staying an attribute. Attribute-value matching is quote-agnostic
+// (single or double) since nothing here guarantees index.html only ever uses one style.
+const SCRIPT_TAG_RE = /<script\b([^>]*)>\s*<\/script>/gi;
+const LINK_TAG_RE = /<link\b([^>]*)>/gi;
+
+const ATTR_VALUE_RE = (name) => new RegExp(`\\b${name}\\s*=\\s*(?:"([^"]*)"|'([^']*)')`, 'i');
+
+// Pulls an attribute's value out of a raw attribute string, honoring either quote style.
+function getAttr(attrs, name) {
+    const m = ATTR_VALUE_RE(name).exec(attrs);
+    if (!m) return null;
+    return m[1] !== undefined ? m[1] : m[2];
+}
+
+// Removes one attribute (any quote style) from a raw attribute string, collapsing the
+// leftover whitespace so the rebuilt tag doesn't end up with stray double spaces.
+function removeAttr(attrs, name) {
+    return attrs.replace(ATTR_VALUE_RE(name), '').replace(/\s+/g, ' ').trim();
+}
 
 let inlinedCount = 0;
 const skipped = [];
@@ -87,7 +104,11 @@ function inlineLocalFile(src, wrap) {
     return wrap(filePath);
 }
 
-let output = html.replace(SCRIPT_TAG_RE, (fullMatch, src) => {
+let output = html.replace(SCRIPT_TAG_RE, (fullMatch, attrs) => {
+    const src = getAttr(attrs, 'src');
+    if (src === null) return fullMatch; // no src - e.g. an inline <script> block, untouched
+    const restAttrs = removeAttr(attrs, 'src');
+    const openTag = restAttrs ? `<script ${restAttrs}>` : '<script>';
     const result = inlineLocalFile(src, (filePath) => {
         let content = readFileSync(filePath, 'utf8');
         // Defends against a literal "</script" sequence anywhere in the source (a string, a
@@ -96,19 +117,46 @@ let output = html.replace(SCRIPT_TAG_RE, (fullMatch, src) => {
         // "/" to the JS parser (in a string or regex; harmless as inert text inside a comment
         // too), so this never changes what the inlined script actually does.
         content = content.replace(/<\/script/gi, '<\\/script');
-        return `<script>\n${content}\n</script>`;
+        return `${openTag}\n${content}\n</script>`;
     });
     return result === null ? fullMatch : result;
 });
 
-output = output.replace(LINK_TAG_RE, (fullMatch, hrefA, hrefB) => {
-    const src = hrefA || hrefB;
-    const result = inlineLocalFile(src, (filePath) => {
+output = output.replace(LINK_TAG_RE, (fullMatch, attrs) => {
+    const rel = getAttr(attrs, 'rel');
+    const href = getAttr(attrs, 'href');
+    if (rel === null || rel.trim().toLowerCase() !== 'stylesheet' || href === null) return fullMatch;
+    const restAttrs = removeAttr(removeAttr(attrs, 'href'), 'rel');
+    const result = inlineLocalFile(href, (filePath) => {
         const content = inlineCssUrls(readFileSync(filePath, 'utf8'), dirname(filePath));
-        return `<style>\n${content}\n</style>`;
+        // rel="stylesheet" is dropped along with href since a <style> element has no rel
+        // attribute; any other attribute the original <link> carried (media, etc.) survives.
+        const attrComment = restAttrs ? ` /* ${restAttrs} */` : '';
+        return `<style>${attrComment}\n${content}\n</style>`;
     });
     return result === null ? fullMatch : result;
 });
+
+// Safety net for P5FRESH-002: rather than trust SCRIPT_TAG_RE/LINK_TAG_RE to anticipate every
+// future tag shape, scan the OUTPUT for any <script src=...> or stylesheet <link href=...>
+// that is still present verbatim - i.e. the regexes above didn't recognize and replace it -
+// and treat that as a build failure exactly like a required-but-missing file, rather than
+// silently shipping a single-file artifact with a dangling reference to a file that won't be
+// there. Quote-agnostic and attribute-order-agnostic, same as the main patterns.
+const LEFTOVER_SCRIPT_RE = /<script\b([^>]*)>\s*<\/script>/gi;
+const LEFTOVER_LINK_RE = /<link\b([^>]*)>/gi;
+const unresolved = [];
+
+for (const m of output.matchAll(LEFTOVER_SCRIPT_RE)) {
+    const src = getAttr(m[1], 'src');
+    if (src !== null && !/^[a-z][a-z0-9+.-]*:\/\//i.test(src)) unresolved.push(m[0]);
+}
+for (const m of output.matchAll(LEFTOVER_LINK_RE)) {
+    const rel = getAttr(m[1], 'rel');
+    const href = getAttr(m[1], 'href');
+    if (rel !== null && rel.trim().toLowerCase() === 'stylesheet' && href !== null
+        && !/^[a-z][a-z0-9+.-]*:\/\//i.test(href)) unresolved.push(m[0]);
+}
 
 mkdirSync(buildDir, { recursive: true });
 writeFileSync(outPath, output, 'utf8');
@@ -124,5 +172,10 @@ if (skipped.length > 0) {
 const requiredSkipped = skipped.filter((src) => !src.endsWith('vendor/oui-data.js'));
 if (requiredSkipped.length > 0) {
     console.error(`ERROR: ${requiredSkipped.length} required file(s) could not be inlined and are missing from ${outPath}: ${requiredSkipped.join(', ')}`);
+    process.exit(1);
+}
+
+if (unresolved.length > 0) {
+    console.error(`ERROR: ${unresolved.length} local script/stylesheet tag(s) survived inlining unresolved in ${outPath} (a pattern SCRIPT_TAG_RE/LINK_TAG_RE didn't recognize): ${unresolved.join(', ')}`);
     process.exit(1);
 }
