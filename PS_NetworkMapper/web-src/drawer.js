@@ -770,10 +770,11 @@ window.populateConfigCompareSelect = function() {
         var other = (snap.topology || []).find(dev => dev && dev.DeviceIP && window.resolveDeviceIdentity(dev) === identity);
         if (other && other.Configuration && other.Configuration !== "Unknown") {
             sameDeviceIpByIdx[idx] = String(other.DeviceIP);
+            var snapTs = window.parseTimestampMs(snap.scanTimestamp);
             sameDeviceOptions.push({
                 idx: idx,
-                ts: snap.scanTimestamp ? new Date(snap.scanTimestamp).getTime() : 0,
-                label: snap.scanTimestamp ? new Date(snap.scanTimestamp).toLocaleString() : snap.sourceFile,
+                ts: snapTs !== null ? snapTs : 0,
+                label: snapTs !== null ? new Date(snapTs).toLocaleString() : snap.sourceFile,
             });
         }
     });
@@ -850,10 +851,11 @@ window.searchConfigCompareDevices = function() {
             if (!other.Configuration || other.Configuration === "Unknown") return;
             var hostname = (other.Hostname && other.Hostname !== "Unknown") ? other.Hostname : '';
             if (hostname.toLowerCase().indexOf(queryLower) === -1 && String(other.DeviceIP).toLowerCase().indexOf(queryLower) === -1) return;
+            var snapTs = window.parseTimestampMs(snap.scanTimestamp);
             matches.push({
                 idx: idx, ip: String(other.DeviceIP), hostname: hostname,
-                ts: snap.scanTimestamp ? new Date(snap.scanTimestamp).getTime() : 0,
-                snapLabel: snap.scanTimestamp ? new Date(snap.scanTimestamp).toLocaleString() : snap.sourceFile,
+                ts: snapTs !== null ? snapTs : 0,
+                snapLabel: snapTs !== null ? new Date(snapTs).toLocaleString() : snap.sourceFile,
             });
         });
     });

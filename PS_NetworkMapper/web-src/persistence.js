@@ -175,7 +175,8 @@ window.updateDeviceHistory = function() {
 
     loadedSnapshots.forEach(snapshot => {
         var ts = snapshot.scanTimestamp;
-        if (!ts) return;
+        var tsMs = window.parseTimestampMs(ts);
+        if (tsMs === null) return;
         snapshot.topology.forEach(device => {
             window.asArray(device.TrueClients).forEach(c => {
                 if (!c.MAC) return;
@@ -184,8 +185,11 @@ window.updateDeviceHistory = function() {
                 if (!entry) {
                     history[mac] = { firstSeen: ts, lastSeen: ts, lastDeviceIp: device.DeviceIP, lastPort: c.Port, lastIp: c.IP, lastVlan: c.VLAN_Tag };
                 } else {
-                    if (new Date(ts) < new Date(entry.firstSeen)) entry.firstSeen = ts;
-                    if (new Date(ts) >= new Date(entry.lastSeen)) {
+                    // entry.firstSeen/lastSeen were themselves only ever written from a
+                    // tsMs-validated ts (this guard), so re-parsing them here can't hit the
+                    // null case - safe to compare directly against tsMs.
+                    if (tsMs < window.parseTimestampMs(entry.firstSeen)) entry.firstSeen = ts;
+                    if (tsMs >= window.parseTimestampMs(entry.lastSeen)) {
                         entry.lastSeen = ts;
                         entry.lastDeviceIp = device.DeviceIP;
                         entry.lastPort = c.Port;
@@ -234,11 +238,20 @@ window.updateAlarmHistory = function() {
     var lastUptimeSeen = {}; // identity -> uptime string, scoped to this call only
 
     loadedSnapshots
-        .filter(s => s.scanTimestamp)
-        .slice()
-        .sort((a, b) => new Date(a.scanTimestamp) - new Date(b.scanTimestamp))
-        .forEach(snapshot => {
-            var date = snapshot.scanTimestamp.slice(0, 10);
+        .map(s => ({ s: s, ts: window.parseTimestampMs(s.scanTimestamp) }))
+        .filter(x => x.ts !== null)
+        .sort((a, b) => a.ts - b.ts)
+        .forEach(x => {
+            var snapshot = x.s;
+            // x.ts is already parseTimestampMs-validated (see the .filter above), so a raw
+            // slice is safe for the normal "yyyy-MM-dd..." shape FleetCrawl.ps1 writes -
+            // and preserves the original local wall-clock date instead of reinterpreting
+            // through UTC. A parseable-but-differently-shaped string ("08/20/2026", a Unix
+            // timestamp, ...) would otherwise slice into a garbage (non-yyyy-MM-dd) heatmap
+            // column key, so fall back to a UTC-derived key in that case only.
+            var date = /^\d{4}-\d{2}-\d{2}/.test(snapshot.scanTimestamp)
+                ? snapshot.scanTimestamp.slice(0, 10)
+                : new Date(x.ts).toISOString().slice(0, 10);
             (snapshot.topology || []).forEach(device => {
                 if (!device || !device.DeviceIP) return;
                 var identity = window.resolveDeviceIdentity(device);

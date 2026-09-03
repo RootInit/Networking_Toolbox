@@ -92,12 +92,13 @@ function computeConfigChanges() {
     // captures still accumulates entries under one key.
     var byDevice = new Map(); // identity -> [{idx, ts, config, hostname, ip}]
     loadedSnapshots.forEach((snap, idx) => {
-        if (!snap.scanTimestamp) return;
+        var ts = window.parseTimestampMs(snap.scanTimestamp);
+        if (ts === null) return;
         (snap.topology || []).forEach(d => {
             if (!d || !d.DeviceIP || !d.Configuration || d.Configuration === "Unknown") return;
             var identity = window.resolveDeviceIdentity(d);
             if (!byDevice.has(identity)) byDevice.set(identity, []);
-            byDevice.get(identity).push({ idx: idx, ts: new Date(snap.scanTimestamp).getTime(), config: d.Configuration, hostname: d.Hostname, ip: String(d.DeviceIP) });
+            byDevice.get(identity).push({ idx: idx, ts: ts, config: d.Configuration, hostname: d.Hostname, ip: String(d.DeviceIP) });
         });
     });
 
@@ -341,14 +342,14 @@ window.renderTrendChart = function() {
     if (!deviceIdentity) { centeredMessage('No devices available - load 2+ snapshots first.'); return; }
 
     var points = loadedSnapshots
-        .filter(s => s.scanTimestamp)
-        .slice()
-        .sort((a, b) => new Date(a.scanTimestamp) - new Date(b.scanTimestamp))
-        .map(s => {
-            var device = s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity);
+        .map(s => ({ s: s, ts: window.parseTimestampMs(s.scanTimestamp) }))
+        .filter(x => x.ts !== null)
+        .sort((a, b) => a.ts - b.ts)
+        .map(x => {
+            var device = x.s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity);
             if (!device) return null;
             var v = trendMetricValue(device, metric);
-            return (v === null || isNaN(v)) ? null : { t: new Date(s.scanTimestamp), v: v };
+            return (v === null || isNaN(v)) ? null : { t: new Date(x.ts), v: v };
         })
         .filter(Boolean);
 

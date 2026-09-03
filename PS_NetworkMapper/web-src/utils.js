@@ -103,6 +103,18 @@ window.formatAge = function(ms) {
 
 var crawlAgeInterval = null;
 
+// Shared "is this actually a valid timestamp" check, used everywhere a *Timestamp field
+// (scanTimestamp, etc - operator-controlled JSON, not guaranteed well-formed) gets sorted,
+// diffed, or plotted. A truthy-but-unparseable string (e.g. "" survives a `!x` check as
+// falsy, but a garbage non-date string doesn't) must never be treated as a valid date -
+// that produces NaN sort comparators (silently "no swap" in some engines), NaN chart
+// x-values, or literal "Invalid Date" text. Returns a finite epoch-ms number, or null.
+window.parseTimestampMs = function(ts) {
+    if (!ts) return null;
+    var ms = new Date(ts).getTime();
+    return isNaN(ms) ? null : ms;
+};
+
 // Shows how old the loaded scan is (ScanTimestamp, written once per crawl by
 // Start-NetworkMapper.ps1), updating live so it doesn't go stale while the tab stays
 // open. Files predating this optional field show "unknown", not an error. Reads
@@ -112,13 +124,14 @@ window.renderCrawlAge = function(scanTimestampIso) {
     if (crawlAgeInterval) { clearInterval(crawlAgeInterval); crawlAgeInterval = null; }
     if (!badge) return;
 
-    var scanDate = scanTimestampIso ? new Date(scanTimestampIso) : null;
-    if (!scanDate || isNaN(scanDate.getTime())) {
+    var scanMs = window.parseTimestampMs(scanTimestampIso);
+    if (scanMs === null) {
         badge.className = 'crawl-age unknown';
         badge.textContent = 'Capture time unknown (file predates this field)';
         badge.style.display = 'block';
         return;
     }
+    var scanDate = new Date(scanMs);
 
     function update() {
         var settings = window.loadSettings();
