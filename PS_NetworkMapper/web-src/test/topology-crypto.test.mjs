@@ -36,6 +36,12 @@ test('decryptEnvelope round-trips a real envelope built independently (cross-imp
   assert.equal(plain, '{"hello":"world"}');
 });
 
+test('decryptEnvelope round-trips a genuinely empty topology ("[]") byte-for-byte', async () => {
+  const envelope = await buildEnvelope('[]', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  const plain = await TopologyCrypto.decryptEnvelope(envelope, PASSWORD);
+  assert.equal(plain, '[]');
+});
+
 test('decryptEnvelope defaults expectedFormats to the topology format (backward compatible)', async () => {
   const envelope = await buildEnvelope('{"a":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
   const plain = await TopologyCrypto.decryptEnvelope(envelope, PASSWORD); // no third arg

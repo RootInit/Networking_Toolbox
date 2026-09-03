@@ -5122,6 +5122,11 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
     // doesn't reset pan/zoom if it has been.
     if (window.renderMapMarkers) window.renderMapMarkers();
 
+    // Analysis Dashboard also renders this same topology separately (Fleet Health, New
+    // Devices, Trend Chart, etc. - see dashboard.js) - only refresh here if Analysis is the
+    // tab actually showing. Mirrors setActiveSnapshot's identical guard/call in app.js.
+    if (activeSidebarTab === 'sidebar-tab-analysis') window.refreshAnalysisDashboard();
+
     return true;
 };
 
