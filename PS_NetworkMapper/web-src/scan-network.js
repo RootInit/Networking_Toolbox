@@ -83,13 +83,15 @@ function pollRunningScan() {
     var loadBtn = document.getElementById('loadBtn');
     var loadFolderBtn = document.getElementById('loadFolderBtn');
 
+    // msg/color are optional (see runPoll's catch below) - omitting them still resets the
+    // polling state/buttons but leaves whatever status line is already on screen alone.
     function finish(msg, color) {
         scanNetworkPollActive = false;
         if (scanNetworkPollTimer) { clearTimeout(scanNetworkPollTimer); scanNetworkPollTimer = null; }
         if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
         if (loadBtn) loadBtn.disabled = false;
         if (loadFolderBtn) loadFolderBtn.disabled = false;
-        window.setStatus(msg, color);
+        if (msg) window.setStatus(msg, color);
     }
 
     if (btn) btn.disabled = true;
@@ -148,7 +150,19 @@ function pollRunningScan() {
     // permanently disabling the scan/load buttons with no visible error.
     function runPoll() {
         poll().catch(function(e) {
-            finish("Unexpected error while polling scan status: " + e.message, "red");
+            // Every failure path inside poll() that can occur before the trailing
+            // processSelectedFiles call already handles itself (its own try/catch calls
+            // finish() with a specific message and returns) - so the only way to land here
+            // is that final `await window.processSelectedFiles(...)` throwing. That function
+            // always sets its own specific window.setStatus message (see its catch block)
+            // before rethrowing - or, if superseded by a newer load, doesn't rethrow at all -
+            // so a generic message here would only ever clobber a more useful one already on
+            // screen. Reset the polling state/buttons without touching the status line, but
+            // still log the underlying error for debugging. e may not be an Error (e.g. a
+            // rejected-with-string/undefined promise), hence the defensive message extraction.
+            var msg = (e && e.message) ? e.message : String(e);
+            console.error("Unexpected error while polling scan status:", msg);
+            finish();
         });
     }
     runPoll();
@@ -179,6 +193,17 @@ window.resumeScanIfInProgress = async function() {
         return false;
     }
     if (status.status !== 'running') return false;
+
+    // Re-check the same guard as above (P4UX-001): the await above gave a manually-
+    // triggered Load Folder/File or a user-started Scan Network time to complete and
+    // populate loadedSnapshots/scanNetworkPollActive while this was in flight. Reattaching
+    // now would silently overwrite that just-loaded/just-started data with no confirmation,
+    // unlike startNetworkScan's confirm-before-replace UX (see promptForStartIp's
+    // "replacing" path above) - so abort quietly and let the fresher data/scan stand instead.
+    if (loadedSnapshots.length > 0 || scanNetworkPollActive) {
+        console.warn("resumeScanIfInProgress: state changed while checking scan status - not reattaching, leaving the newer data/scan in place.");
+        return false;
+    }
 
     var btn = document.getElementById('scanNetworkBtn');
     if (btn) btn.textContent = 'Scanning (' + status.visited + ' found)...';
