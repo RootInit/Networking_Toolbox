@@ -28,6 +28,8 @@ window.switchCenterView = function(view) {
     document.getElementById('mapUnplacedPanel').style.display = (view === 'map') ? 'block' : 'none';
     document.getElementById('btn-center-view-diagram').classList.toggle('active', view === 'diagram');
     document.getElementById('btn-center-view-map').classList.toggle('active', view === 'map');
+    document.getElementById('btn-center-view-diagram').setAttribute('aria-pressed', String(view === 'diagram'));
+    document.getElementById('btn-center-view-map').setAttribute('aria-pressed', String(view === 'map'));
     // Same leak class as #mapStatusNote above: the floating Save button is also a sibling
     // of #mapview, so hide (not remove) it here to preserve its pending-edit count.
     var saveBtn = document.getElementById('mapSaveConfigBtn');

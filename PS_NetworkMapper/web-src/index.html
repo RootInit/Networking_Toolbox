@@ -695,8 +695,8 @@
     <!-- CENTER PANEL: Diagram / Map -->
     <div id="center-panel">
         <div id="center-view-toggle" class="tabs" style="flex:0 0 auto;">
-            <div class="tab active" id="btn-center-view-diagram" onclick="window.switchCenterView('diagram')">Diagram</div>
-            <div class="tab" id="btn-center-view-map" onclick="window.switchCenterView('map')">Map</div>
+            <div class="tab active" id="btn-center-view-diagram" tabindex="0" role="button" aria-pressed="true" onclick="window.switchCenterView('diagram')" onkeydown="window.activateOnKey(event, () => window.switchCenterView('diagram'))">Diagram</div>
+            <div class="tab" id="btn-center-view-map" tabindex="0" role="button" aria-pressed="false" onclick="window.switchCenterView('map')" onkeydown="window.activateOnKey(event, () => window.switchCenterView('map'))">Map</div>
         </div>
         <div id="loadingBar">
             <div class="progress-border"><div id="progress-fill" class="progress-fill"></div></div>
@@ -768,7 +768,7 @@
             </div>
         </div>
         
-        <div class="tabs">
+        <div class="tabs" id="drawer-tabs">
             <div class="tab active" tabindex="0" role="tab" aria-selected="true" onclick="window.switchTab('tab-summary')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-summary'))" id="btn-tab-summary">Summary</div>
             <!-- aria-selected toggled by window.switchTab (drawer.js) -->
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-stack')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-stack'))" id="btn-tab-stack">Hardware</div>

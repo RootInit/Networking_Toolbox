@@ -2055,8 +2055,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
     <!-- CENTER PANEL: Diagram / Map -->
     <div id="center-panel">
         <div id="center-view-toggle" class="tabs" style="flex:0 0 auto;">
-            <div class="tab active" id="btn-center-view-diagram" onclick="window.switchCenterView('diagram')">Diagram</div>
-            <div class="tab" id="btn-center-view-map" onclick="window.switchCenterView('map')">Map</div>
+            <div class="tab active" id="btn-center-view-diagram" tabindex="0" role="button" aria-pressed="true" onclick="window.switchCenterView('diagram')" onkeydown="window.activateOnKey(event, () => window.switchCenterView('diagram'))">Diagram</div>
+            <div class="tab" id="btn-center-view-map" tabindex="0" role="button" aria-pressed="false" onclick="window.switchCenterView('map')" onkeydown="window.activateOnKey(event, () => window.switchCenterView('map'))">Map</div>
         </div>
         <div id="loadingBar">
             <div class="progress-border"><div id="progress-fill" class="progress-fill"></div></div>
@@ -2128,7 +2128,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
             </div>
         </div>
         
-        <div class="tabs">
+        <div class="tabs" id="drawer-tabs">
             <div class="tab active" tabindex="0" role="tab" aria-selected="true" onclick="window.switchTab('tab-summary')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-summary'))" id="btn-tab-summary">Summary</div>
             <!-- aria-selected toggled by window.switchTab (drawer.js) -->
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-stack')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-stack'))" id="btn-tab-stack">Hardware</div>
@@ -3580,12 +3580,17 @@ window.renderFleetDashboard = function() {
     // scanTimestamp means elapsed-since-boot can't be computed at all, which must not
     // render the same as a genuine zero-result).
     var rebootCheckPossible = !!(activeSnapshot && activeSnapshot.scanTimestamp);
+    // Tracks whether at least one device had a usable Uptime to compute from - distinguishes
+    // "checked every device, zero had usable data" from a genuine zero-reboot result, one
+    // level deeper than rebootCheckPossible (which only covers the snapshot-wide gate above).
+    var anyUptimeUsable = false;
     if (activeSnapshot && activeSnapshot.scanTimestamp) {
         var snapTime = new Date(activeSnapshot.scanTimestamp).getTime();
         devices.forEach(d => {
             if (!d.Uptime || d.Uptime === "Unknown") return;
             var bootTime = new Date(d.Uptime).getTime();
             if (isNaN(bootTime)) return;
+            anyUptimeUsable = true;
             var elapsedMin = (snapTime - bootTime) / 60000;
             if (elapsedMin >= 0 && elapsedMin < settings.recentRebootMin) {
                 recentlyRebooted.push({ device: d, elapsedMin: elapsedMin });
@@ -3654,6 +3659,8 @@ window.renderFleetDashboard = function() {
 
     html += '<div><div class="fleet-section"><h3>Recently Rebooted (&lt; ' + settings.recentRebootMin + ' min)</h3>' + (!rebootCheckPossible
         ? '<p class="fleet-list-empty">Unable to determine (no scan timestamp on this snapshot).</p>'
+        : (!anyUptimeUsable && devices.length > 0)
+        ? '<p class="fleet-list-empty">Unable to determine (no devices reported usable uptime data).</p>'
         : recentlyRebooted.length === 0
         ? '<p class="fleet-list-empty">None.</p>'
         : recentlyRebooted.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge accent">${Math.round(x.elapsedMin)} min ago</span></div>`).join('')
@@ -4547,7 +4554,7 @@ window.closeDrawer = function() {
 
 window.switchTab = function(tabId) {
     document.querySelectorAll('.tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
+    document.querySelectorAll('#drawer-tabs .tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
     document.getElementById(tabId).classList.add('active');
     document.getElementById('btn-' + tabId).classList.add('active');
     document.getElementById('btn-' + tabId).setAttribute('aria-selected', 'true');
@@ -5624,6 +5631,11 @@ window.exportClientsCsv = function() {
 // then feeds the result through processSelectedFiles - same pipeline as a manual file upload.
 
 var scanNetworkPollTimer = null;
+// Re-entrancy guard (P2SCAN-002): set synchronously the instant a poll loop starts, before
+// any await, so a second pollRunningScan() call (e.g. a 409-triggered retry landing while
+// the original reattach loop is still alive) can't spawn a competing chain that fights the
+// first one over the shared scanNetworkPollTimer id.
+var scanNetworkPollActive = false;
 
 // Promise-based starting-IP prompt, same resolve/reject shape as window.promptForPassword.
 // prefillIp/replacing let the caller reuse this same confirm modal when a snapshot is
@@ -5693,11 +5705,15 @@ function bestStartIpFromActiveSnapshot() {
 // scan/load buttons for the duration and shows live progress on scanNetworkBtn, same as
 // before this was extracted.
 function pollRunningScan() {
+    if (scanNetworkPollActive) return; // a poll loop is already driving this scan - let it continue
+    scanNetworkPollActive = true;
+
     var btn = document.getElementById('scanNetworkBtn');
     var loadBtn = document.getElementById('loadBtn');
     var loadFolderBtn = document.getElementById('loadFolderBtn');
 
     function finish(msg, color) {
+        scanNetworkPollActive = false;
         if (scanNetworkPollTimer) { clearTimeout(scanNetworkPollTimer); scanNetworkPollTimer = null; }
         if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
         if (loadBtn) loadBtn.disabled = false;
@@ -5763,27 +5779,32 @@ function pollRunningScan() {
 // leaving the UI idle with no way to tell "still running" from "safe to start." If a scan
 // is running, resume the same poll loop and reflect progress on the button instead of
 // silently reverting to idle.
+// Returns true if a server-side scan was found running and this reattached to it (in which
+// case the caller - app.js's DOMContentLoaded - must not let autoloadLastScan run, since that
+// would overwrite the live poll's status/buttons with a stale archived snapshot - P2SCAN-001),
+// false otherwise.
 window.resumeScanIfInProgress = async function() {
-    if (loadedSnapshots.length > 0 || scanNetworkPollTimer) return;
+    if (loadedSnapshots.length > 0 || scanNetworkPollActive) return false;
     var statusResp;
     try {
         statusResp = await fetch('/api/scan-network/status');
     } catch (e) {
-        return;
+        return false;
     }
-    if (statusResp.status === 404 || !statusResp.ok) return;
+    if (statusResp.status === 404 || !statusResp.ok) return false;
     var status;
     try {
         status = await statusResp.json();
     } catch (e) {
-        return;
+        return false;
     }
-    if (status.status !== 'running') return;
+    if (status.status !== 'running') return false;
 
     var btn = document.getElementById('scanNetworkBtn');
     if (btn) btn.textContent = 'Scanning (' + status.visited + ' found)...';
     window.setStatus("A scan is already running - reattaching to progress...", "orange");
     pollRunningScan();
+    return true;
 };
 
 window.startNetworkScan = async function() {
@@ -5893,6 +5914,8 @@ window.switchCenterView = function(view) {
     document.getElementById('mapUnplacedPanel').style.display = (view === 'map') ? 'block' : 'none';
     document.getElementById('btn-center-view-diagram').classList.toggle('active', view === 'diagram');
     document.getElementById('btn-center-view-map').classList.toggle('active', view === 'map');
+    document.getElementById('btn-center-view-diagram').setAttribute('aria-pressed', String(view === 'diagram'));
+    document.getElementById('btn-center-view-map').setAttribute('aria-pressed', String(view === 'map'));
     // Same leak class as #mapStatusNote above: the floating Save button is also a sibling
     // of #mapview, so hide (not remove) it here to preserve its pending-edit count.
     var saveBtn = document.getElementById('mapSaveConfigBtn');
@@ -6974,12 +6997,16 @@ window.autoloadLastScan = async function() {
     }
 };
 
-document.addEventListener('DOMContentLoaded', function() {
-    // Reattach first: if a scan is already running server-side (e.g. this tab was
-    // refreshed mid-crawl), autoloadLastScan would otherwise just autoload the previous
-    // archived snapshot and leave the button looking idle (UX-002).
-    if (typeof window.resumeScanIfInProgress === 'function') window.resumeScanIfInProgress();
-    window.autoloadLastScan();
+document.addEventListener('DOMContentLoaded', async function() {
+    // Reattach first, and AWAIT it before autoloading (P2SCAN-001): if a scan is already
+    // running server-side (e.g. this tab was refreshed mid-crawl), autoloadLastScan would
+    // otherwise race it and load the previous archived snapshot over the live poll, showing
+    // a false "Success!" and stale topology for the remainder of the scan. If resumeScanIfInProgress
+    // reattaches to a running scan, skip autoloadLastScan entirely - the completing scan will
+    // load its own result via pollRunningScan's own processSelectedFiles call.
+    var resumed = false;
+    if (typeof window.resumeScanIfInProgress === 'function') resumed = await window.resumeScanIfInProgress().catch(function() { return false; });
+    if (!resumed) window.autoloadLastScan();
 });
 
 window.forceLoadFile = async function() {
