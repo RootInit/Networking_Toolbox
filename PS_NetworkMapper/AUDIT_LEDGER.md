@@ -189,6 +189,83 @@ Pass 1: complete, committed. 20 fixes landed (19 original + 1 from fix-review).
 Pass 2: complete, committed. 12 fixes landed (10 original + 1 from fix-review + 1 manual incidental).
 **Pass 2 was NOT clean** (11 confirmed findings, several in files Pass 1 itself had just fixed — proving fixes can and did introduce new bugs). Termination condition (2 consecutive clean passes) not yet reached. The trend across two passes (Pass 1: 20 fixes; Pass 2: 12 fixes, several of which were bugs in Pass 1's own fixes — P2SCAN-CLUSTER, P2CRYPTO-001's non-atomicity, P2-SSH-STARTUP's incomplete coverage) suggests continued high-value findings are still plausible on a Pass 3, though the count is dropping (20 → 12).
 
+## Pass 3 — re-ranked risk (files touched by Pass 2 fixes move to top)
+1. `lib/SshHelpers.ps1` — validation choke-point + ACL warning landed here (P2-SSH-STARTUP, P2-ACL-SILENT), twice-touched
+2. `lib/Get-JunosNodeData.ps1` — try/finally restructure + cleanup guard landed here (P2FRESH-001 + fix-review's follow-on), twice-touched
+3. `lib/Protect-MapperFile.ps1`, `lib/FleetCrawl.ps1` — new atomic-replace helper landed here (P2CRYPTO-001/002), most structurally-changed files this pass
+4. `web-src/app.js`, `web-src/scan-network.js` — reattach sequencing + re-entrancy guard landed here (P2SCAN-CLUSTER), the area that already produced a Pass-1→Pass-2 regression once
+5. `lib/WebServer.ps1` — 2 more logging sites (P2WS-002), lower-risk addition
+6. `web-src/drawer.js`, `web-src/index.html`, `web-src/map.js`, `lib/Network_Visualizer.html` — tab-selector scoping + keyboard/ARIA wiring (P2DASH-001/002)
+7. `web-src/dashboard.js` — third reboot-state (P2DASH-003)
+8. `lib/Update-OuiDatabase.ps1` — temp+rename (P2FRESH-002)
+9. Everything not touched by any Pass 1 or Pass 2 fix — second consecutive re-scan per protocol: `lib/Connect-Switch.ps1` (already correct, re-verify still correct), `Start-NetworkMapper.ps1`, `web-src/graph.js`, `graph-layout.js`, `elk-layout.js`, `persistence.js`, `config-resolve.js`, `search.js`, `topology-crypto.js`/`.ps1`, `utils.js`
+
+## Pass 3 — Phase 1 complete (all 7 agents returned): 16 raw findings, notable pattern emerging
+**Structural observation**: two bug classes have now resurfaced in a THIRD file each, across three passes, because each pass's fix was scoped to specific files rather than factored into one shared implementation:
+- Non-atomic-write bug: Protect-MapperFile.ps1 (Pass 1) → FleetCrawl.ps1 also had it (Pass 2) → WebServer.ps1's Configuration.json save ALSO has it, still unfixed (Pass 3: P3WS-001) → AND FleetCrawl.ps1's own temp-naming still has a gap the sibling fix didn't get (P3ATOMIC-001) → AND the fallback branch has a TOCTOU race reintroducing the exact bug the fix eliminates (P3ATOMIC-002).
+- SSH validation gap: Username-only-at-save (Pass 1) → moved to choke point but warning-log ineffective in the dominant automated path (Pass 3: P3SSH-001) → TargetIP was never validated at all in the same choke point (P3FRESH-001).
+This suggests Pass 4 (if run) should prioritize **consolidation** (one shared atomic-write function, one shared validation module) over continuing to patch individual call sites, or the pattern will likely continue.
+
+| ID | Sev | Claim |
+|---|---|---|
+| P3WS-001 | HIGH | WebServer.ps1's own Configuration.json(.enc) save (`Invoke-SaveConfigAction`) still writes in-place, never got the atomic-write fix applied to Protect-MapperFile.ps1/FleetCrawl.ps1 |
+| P3ATOMIC-001 | HIGH | FleetCrawl.ps1's temp filename has only 1s timestamp granularity, no PID/GUID — two near-simultaneous crawls can still collide |
+| P3SSH-001 | MED/HIGH | P2-ACL-SILENT's Write-Warning fix is silently dropped in the dominant automated (hostless runspace) path — nothing drains .Streams.Warning |
+| P3ATOMIC-002 | MEDIUM | Atomic-write helper's fallback branch (destination absent) has a TOCTOU race that can reintroduce the exact non-atomic Move-Item -Force behavior the fix eliminates |
+| P3SCAN-001 | MEDIUM | pollRunningScan's poll() has zero rejection handling — an exception before finish() leaves the guard stuck true forever, buttons disabled forever, no error shown (defensive gap, no live trigger found) |
+| P3UX-001 | MEDIUM | P2DASH-003's anyUptimeUsable gate validates device Uptime but not scanTimestamp itself — unparseable timestamp still renders "None." instead of "Unable to determine" |
+| P3WS-002 | MEDIUM | Ping/Rescan status actions can lose an already-completed job's result if the client disconnected before the response write (ScanNetworkStatusAction already avoids this, siblings don't) |
+| P3FRESH-001 | MEDIUM | Get-JunosSshArgs (the SSH validation choke point) validates Username but never TargetIP; CLI -SwitchIP reaches SSH unvalidated (lower severity: no cross-principal trigger) |
+| P3FRESH-004 | MEDIUM | -AllowedScopes does a bare substring-prefix match, no octet boundary — "10.1" also admits 10.19.x.x, reachable by operator typo |
+| P3REC-002 | LOW/MED | Protect-MapperFile.ps1's new finally cleanup pairs Test-Path -LiteralPath with Remove-Item -Path (no -LiteralPath) — a bracket character in the directory name makes cleanup silently no-op |
+| P3ATOMIC-003 | LOW | New Convert-Path call is itself a new uncaught-exception failure point in a narrow TOCTOU gap |
+| P3WS-003 | LOW | /api/session-password missing Cache-Control: no-store |
+| P3SSH-002 | LOW/INFO | Stale comment now misleading after the new validation throw, no functional impact |
+| P3UX-002 | LOW/INFO | ARIA pattern calibration note on the Diagram/Map toggle, not a clear defect |
+| P3SCAN-INFO-001 | INFO | No fetch timeout, but concluded NOT a regression (old behavior was worse: showed stale data as success) |
+| P3REC-001 | INFO | Bisect-hygiene only — an intermediate Pass 2 commit's build artifact doesn't match its own source if checked out standalone; HEAD is fine |
+
+## Pass 3 — Phase 2 verification / Phase 3 fixes (deviation logged)
+Given the strong pattern already visible in Phase 1 (two bug classes independently resurfacing in a third file each), consulted the advisor tool before dispatching formal double-verification. Advisor's read: the atomic-write cluster (P3WS-001/P3ATOMIC-001/002/003/P3REC-002) and the SSH/IP-validation cluster (P3SSH-001/P3FRESH-001) are not 5+2 separate bugs but one missing abstraction each, instantiated repeatedly — continuing to verify-then-patch each file individually would reproduce the exact whack-a-mole pattern being complained about. Recommended: (1) empirically re-measure whether a simpler atomic primitive exists before sizing a consolidated helper, (2) escalate the consolidation itself to the human per the protocol's design-change threshold (>~50 lines / touches a critical invariant's implementation) rather than auto-dispatching it, (3) dispatch the genuinely-independent minimal-diff findings immediately without ceremony.
+
+**Empirical re-check**: stracing `[System.IO.File]::Move($src, $dst, $true)` against the real pwsh 7.6.2 binary showed a single `rename()` syscall, atomic regardless of whether the destination exists — simpler than the `File.Replace` pattern already in use (no `[NullString]::Value`, no backup-file semantics). This meant a consolidated helper could be small, which shrank the case for further per-file patching.
+
+**Escalated to user** (3 questions via AskUserQuestion): (1) consolidate now vs. keep patching per-file vs. consolidate-then-stop — user chose **consolidate now**; (2) require new Pester coverage for the consolidated helper vs. manual verification — user chose **manual verification is fine**; (3) P3FRESH-004's octet-boundary fix is a user-visible behavior change (existing `-AllowedScopes` values could admit fewer IPs than before) — fix now with documented change vs. defer — user chose **fix now, document it**.
+
+**Verdicts and outcomes** (informal verify-and-fix per finding, not double-blind adversarial verification — deviation from strict protocol, justified by the corroboration already present across 3 passes for the two dominant bug classes, and by AskUserQuestion putting the one genuinely irreversible/design-level call to the human):
+| ID | Verdict | Outcome |
+|---|---|---|
+| P3WS-001 | CONFIRMED | Fixed via consolidation — `Invoke-SaveConfigAction` now calls shared `Set-FileContentAtomic` |
+| P3ATOMIC-001 | CONFIRMED | Fixed via consolidation — FleetCrawl.ps1 temp names now use `$PID` + GUID, not just 1s timestamp |
+| P3ATOMIC-002 | CONFIRMED | Fixed via consolidation — new `Move-FileAtomic` uses a single `File.Move(...,true)` call, no destination-exists/absent branching, so the TOCTOU race is structurally gone |
+| P3ATOMIC-003 | CONFIRMED | Fixed via consolidation, same reasoning — no separate `Convert-Path`-then-branch sequence remains |
+| P3SSH-001 | CONFIRMED | Fixed — `.Streams.Warning` now drained alongside `.Streams.Error` in FleetCrawl.ps1's job-completion loop (general fix: covers any hostless-job warning, not just this one) |
+| P3FRESH-001 | CONFIRMED | Fixed — `Get-JunosSshArgs` now validates `$TargetIP` (0-255-bounded octet regex); traced end-to-end, `Start-NetworkMapper.ps1 -SwitchIP` confirmed to flow through this choke point |
+| P3FRESH-004 | CONFIRMED | Fixed (user-approved behavior change) — `AllowedScopes` matching now requires an exact match or a literal `.` boundary; default `"131.30."`-style trailing-dot scopes still work via `TrimEnd('.')` |
+| P3SCAN-001 | CONFIRMED (defensive, no live trigger found) | Fixed — `poll()` calls now go through a `runPoll()` wrapper with `.catch`, resetting the guard and surfacing an error via the existing `setStatus` mechanism |
+| P3UX-001 | CONFIRMED | Fixed — `rebootCheckPossible` now also requires `scanTimestamp` to parse (`!isNaN(new Date(...).getTime())`), reusing the same check `utils.js`'s `renderCrawlAge` already uses |
+| P3WS-002 | CONFIRMED | Fixed — `Invoke-PingAction`/`Invoke-RescanAction` job objects now carry `Collected`/`Outcome`; status actions cache the outcome before the response write instead of losing it on a failed write, matching `Invoke-ScanNetworkStatusAction`'s existing pattern |
+| P3REC-002 | CONFIRMED | Fixed — both `Remove-Item -Path` sites in Protect-MapperFile.ps1's cleanup (decrypt + encrypt branches) now use `-LiteralPath` |
+| P3WS-003 | CONFIRMED | Fixed — `/api/session-password` now sends `Cache-Control: no-store` |
+| P3SSH-002 | CONFIRMED (doc-only) | Fixed — stale "swallows failures" comment corrected to describe the current `Write-Warning` behavior |
+| P3UX-002 | Not a defect (re-confirmed) | No fix — `role="tab"` would be worse with no `role="tablist"` present; left as-is |
+| P3SCAN-INFO-001 | Not a regression (re-confirmed) | No fix needed |
+| P3REC-001 | Informational only (re-confirmed) | No fix needed, bisect-hygiene note only |
+
+**Fix-review** (dedicated agent, adversarial pass over the full combined diff spanning 6 concurrently-edited files + 1 new file): checked path-resolution correctness of the new `Move-FileAtomic`/`Set-FileContentAtomic` helpers (parent-dir-missing case throws a clear error, no silent wrong-directory write), confirmed no dead code left behind (`Move-TopologyOutputLocal` and the old local `Move-FileAtomic` fully removed, nothing still references them), traced P3WS-002's job-outcome caching for a double-`EndInvoke`/race risk (none — the HTTP listener handles one request at a time, and double-`Dispose`/`Stop` was empirically confirmed harmless via a live pwsh repro), stress-tested the two new independent IP/scope regexes against edge cases (leading zeros, out-of-range octets, IPv6, empty string, a scope of just `"."` — all handled correctly, `"."` fails closed), and re-read `dashboard.js`/`scan-network.js` in full file context. **Zero new bugs found.** One harmless style asymmetry noted (not fixed): WebServer.ps1's shutdown block disposes `$script:PendingScan`/`$script:PendingPing` unconditionally while `$script:PendingScanNetwork` guards on `.Collected` — proven not to throw either way, cosmetic only.
+
+Full test suite: 91/91 passing throughout (both after the fix batch and after fix-review). All `.ps1` files touched pass a syntax check.
+
+## Pass 3 — final tally
+16 raw findings → 13 CONFIRMED and fixed (4 via consolidation into a new shared `lib/FileHelpers.ps1`, 9 fixed individually) → 3 re-confirmed as not requiring a fix (informational/non-defect). New shared infrastructure: `lib/FileHelpers.ps1` (`Move-FileAtomic`, `Set-FileContentAtomic`), now used by `Protect-MapperFile.ps1`, `FleetCrawl.ps1`, `WebServer.ps1`, `Update-OuiDatabase.ps1` — this directly addresses the whack-a-mole pattern flagged after Phase 1: one write path now serves all four call sites instead of four independent implementations.
+
+## Pass counter (updated)
+Pass 1: complete, committed. 20 fixes landed.
+Pass 2: complete, committed. 12 fixes landed. NOT clean.
+Pass 3: complete, not yet committed. 13 fixes landed (including a consolidation that structurally closes 4 findings at once). NOT clean — but the atomic-write and SSH-validation bug classes that resurfaced in Pass 1→2→3 are now backed by one shared implementation each rather than per-file patches, which is the change most likely to make a Pass 4 clean if run.
+
+## Pass 3 — Phase 2 verification (complete, see above)
+
 ## User request (out-of-band, handled directly, not part of audit findings)
 User asked to remove any code migrating previous scan/config formats. Searched whole repo (envelope `version`/`format` handling in TopologyCrypto.ps1/topology-crypto.js/Protect-MapperFile.ps1, persistence.js localStorage keys, app.js snapshot loading) — **no migration code exists**. Envelope version check is strict (`version === 1`, no fallback/upgrade path). persistence.js's `_v2` localStorage key bump deliberately abandons old entries rather than migrating them (already the "no migration" behavior). Nothing to remove. (2026-09-02)
 
