@@ -549,6 +549,10 @@ function Invoke-ScanNetworkStatusAction {
                         topology = $Payload.Topology; scanTimestamp = $Payload.ScanTimestampIso
                         outputFile = (Split-Path $Payload.OutputFile -Leaf); visitedCount = $Payload.VisitedCount
                     }
+                    if ($Payload.Aborted) {
+                        $Job.Outcome.aborted = [bool]$Payload.Aborted
+                        $Job.Outcome.abortReason = $Payload.AbortReason
+                    }
                 }
             } catch {
                 $Job.Outcome = @{ status = "complete"; ok = $false; reason = "Scan failed: $_" }
@@ -909,76 +913,80 @@ function Start-MapperWebServer {
             try {
                 if ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/connect") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $Body = Read-WebRequestBody -Request $Request
                         Invoke-ConnectAction -Response $Response -Body $Body -ConnectScriptPath $ConnectScriptPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -PowerShellExePath $PowerShellExePath
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/rescan") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $Body = Read-WebRequestBody -Request $Request
                         Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
                         Invoke-RescanStatusAction -Response $Response -JobId $JobId
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/ping") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $Body = Read-WebRequestBody -Request $Request
                         Invoke-PingAction -Response $Response -Body $Body
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/ping/status") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
                         Invoke-PingStatusAction -Response $Response -JobId $JobId
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/client-error") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $Body = Read-WebRequestBody -Request $Request
                         Invoke-ClientErrorAction -Response $Response -Body $Body
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/scan-network") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $Body = Read-WebRequestBody -Request $Request
                         Invoke-ScanNetworkAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations $Iterations
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/scan-network/status") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         Invoke-ScanNetworkStatusAction -Response $Response
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/config") {
-                    Invoke-GetConfigAction -Response $Response -ConfigPath $ConfigPath
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
+                    } else {
+                        Invoke-GetConfigAction -Response $Response -ConfigPath $ConfigPath
+                    }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/session-password") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         Invoke-GetSessionPasswordAction -Response $Response -EncryptionPassword $EncryptionPassword
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/snapshots") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         Invoke-GetSnapshotsAction -Response $Response -SnapshotDir $SnapshotDir
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/save-config") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
-                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $Body = Read-WebRequestBody -Request $Request
                         Invoke-SaveConfigAction -Response $Response -Body $Body -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -NoEncryption:$NoEncryption

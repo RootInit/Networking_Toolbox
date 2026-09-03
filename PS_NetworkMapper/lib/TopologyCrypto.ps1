@@ -80,13 +80,20 @@ function Unprotect-TopologyPayload {
         [string[]]$ExpectedFormats = @("PSNetworkMapper-EncryptedTopology")
     )
 
-    if (-not $Envelope -or $ExpectedFormats -notcontains $Envelope.format) {
+    if (-not $Envelope -or $ExpectedFormats -cnotcontains $Envelope.format) {
         throw "Not a recognized encrypted file (expected one of: $($ExpectedFormats -join ', '))."
     }
-    if ($Envelope.version -ne 1) {
+    # JS's `envelope.version !== 1` is strict: a JSON string "1" is rejected, not coerced.
+    # PowerShell's -ne coerces the right operand to the left operand's (int) type, so a
+    # string "1" would otherwise compare equal - check the runtime type explicitly first,
+    # mirroring the iterations numeric-type check below.
+    if ($Envelope.version -isnot [int] -and $Envelope.version -isnot [long] -and $Envelope.version -isnot [double] -and $Envelope.version -isnot [decimal]) {
         throw "Unsupported envelope version: $($Envelope.version)"
     }
-    if ($Envelope.kdf -ne "PBKDF2-SHA256" -or $Envelope.cipher -ne "AES-256-CBC" -or $Envelope.macAlgorithm -ne "HMAC-SHA256") {
+    if ($Envelope.version -cne 1) {
+        throw "Unsupported envelope version: $($Envelope.version)"
+    }
+    if ($Envelope.kdf -cne "PBKDF2-SHA256" -or $Envelope.cipher -cne "AES-256-CBC" -or $Envelope.macAlgorithm -cne "HMAC-SHA256") {
         throw "Unsupported encryption parameters: $($Envelope.kdf)/$($Envelope.cipher)/$($Envelope.macAlgorithm)"
     }
     # Same bounds as topology-crypto.js's MIN_ITERATIONS/MAX_ITERATIONS - a CPU-burn guard
@@ -98,6 +105,15 @@ function Unprotect-TopologyPayload {
     $IterationsValue = $Envelope.iterations
     $IsNumericType = $IterationsValue -is [int] -or $IterationsValue -is [long] -or $IterationsValue -is [double] -or $IterationsValue -is [decimal]
     if (-not $IsNumericType) {
+        throw "Iteration count out of range: $($Envelope.iterations)"
+    }
+    # A double/decimal far outside Int64 range (e.g. what ConvertFrom-Json produces for a
+    # JSON number like 1e300) makes the [long] cast itself throw a raw
+    # System.Management.Automation.RuntimeException ("Arithmetic operation resulted in an
+    # overflow") before the min/max range check below ever runs. Range-check against the
+    # double's own comparable bounds first so an out-of-range value hits the clean error
+    # instead.
+    if ($IterationsValue -lt [long]::MinValue -or $IterationsValue -gt [long]::MaxValue) {
         throw "Iteration count out of range: $($Envelope.iterations)"
     }
     $IterCheck = [long]$IterationsValue

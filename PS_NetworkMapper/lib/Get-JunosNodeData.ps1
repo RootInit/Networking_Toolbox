@@ -310,7 +310,7 @@ try {
 
     foreach ($Line in ($DataDict["POE"] -split "`n")) {
         $Line = $Line.Trim()
-        if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?<status>Enabled|Disabled)\s+(?<oper>\S+)\s+\S+\s+(?<class>\S+)\s+(?<power>\d+\.\d+W)") {
+        if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?<status>Enabled|Disabled)\s+(?<oper>\S+)\s+\S+\s+(?<class>\S+)\s+(?<power>\d+\.\d+W?)") {
             $p = $Matches.port -replace "\.\d+$",""
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].PoE = "$($Matches.oper) ($($Matches.power))" }
         }
@@ -342,7 +342,15 @@ try {
         if ($Block -match "(?i)Local Interface\s*:\s*(?<port>[^\r\n]+)") { $Neigh.LocalPort = $Matches.port.Trim() }
         if ($Block -match "(?i)Port ID\s*:\s*(?<rport>[^\r\n]+)") { $Neigh.RemotePort = $Matches.rport.Trim() }
         if ($Block -match "(?i)System Name\s*:\s*(?<name>[^\r\n]+)") { $Neigh.Hostname = $Matches.name.Trim() }
-        if ($Block -match "(?i)Chassis ID\s*:\s*(?<mac>[^\r\n]+)") { $Neigh.MacAddress = $Matches.mac.Trim() }
+        # Chassis ID's LLDP subtype isn't guaranteed to be a MAC address (it can be an
+        # interface name, IP address, or locally-assigned string depending on neighbor
+        # config) - only trust it into a field named MacAddress when it actually looks
+        # like one, otherwise leave it "Unknown" rather than mislead downstream MAC-based
+        # correlation.
+        if ($Block -match "(?i)Chassis ID\s*:\s*(?<mac>[^\r\n]+)") {
+            $ChassisId = $Matches.mac.Trim()
+            if ($ChassisId -match "^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$") { $Neigh.MacAddress = $ChassisId }
+        }
         if ($Block -match "(?i)(?:Management Address|Address)\s*:\s*(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)") { $Neigh.ManagementIP = $Matches.ip.Trim() }
         if ($Block -match "(?i)System Description\s*:\s*(?<desc>[^\r\n]+)") { $Neigh.Description = $Matches.desc.Trim() }
 
@@ -386,16 +394,36 @@ try {
     $VlanDict = @{}
     $VlanNameTagIndex = @{}
     $HasRoutingInstanceColumn = $DataDict["VLANS"] -match "(?im)^\s*Routing instance\s"
+    $LastSeenInstance = $null
     foreach ($Line in ($DataDict["VLANS"] -split "`n")) {
         if ($HasRoutingInstanceColumn) {
+            $InstForRow = $null
+            $NameForRow = $null
+            $TagForRow = $null
             if ($Line -match "^(?<inst>\S+)\s+(?<name>\S+)\s+(?<tag>\d+)") {
-                $VlanDict["$($Matches.inst)|$($Matches.name)"] = $Matches.tag
-                if ($VlanNameTagIndex.ContainsKey($Matches.name)) {
-                    if ($null -ne $VlanNameTagIndex[$Matches.name] -and $VlanNameTagIndex[$Matches.name] -ne $Matches.tag) {
-                        $VlanNameTagIndex[$Matches.name] = $null
+                $InstForRow = $Matches.inst
+                $NameForRow = $Matches.name
+                $TagForRow = $Matches.tag
+                $LastSeenInstance = $InstForRow
+            } elseif ($LastSeenInstance -and $Line -match "^(?<name>\S+)\s+(?<tag>\d+)") {
+                # Defensive fallback: if Junos ever blanks the routing-instance column on a
+                # continuation row (rather than repeating it per VLAN, which is the normal
+                # rendering this regex above handles), carry forward the last instance seen
+                # rather than dropping the row's VLAN entirely. Requires a prior 3-token row
+                # in this table so a stray 2-token line (e.g. an interface-list continuation)
+                # can't fabricate a bogus instance-less entry.
+                $InstForRow = $LastSeenInstance
+                $NameForRow = $Matches.name
+                $TagForRow = $Matches.tag
+            }
+            if ($null -ne $InstForRow) {
+                $VlanDict["$InstForRow|$NameForRow"] = $TagForRow
+                if ($VlanNameTagIndex.ContainsKey($NameForRow)) {
+                    if ($null -ne $VlanNameTagIndex[$NameForRow] -and $VlanNameTagIndex[$NameForRow] -ne $TagForRow) {
+                        $VlanNameTagIndex[$NameForRow] = $null
                     }
                 } else {
-                    $VlanNameTagIndex[$Matches.name] = $Matches.tag
+                    $VlanNameTagIndex[$NameForRow] = $TagForRow
                 }
             }
         } else {
@@ -444,7 +472,7 @@ try {
         # two-letter flags SE (statistics enabled) and NM (non-configured MAC) alongside the
         # single-letter ones; matching only a single char here failed the whole line's regex
         # and silently dropped that client. Try the two-letter tokens first.
-        if ($Line -match "(?<vlan>\S+)\s+(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<flag>SE|NM|[SDLPCNO])\s+.+?(?<interface>(?:ge|xe|et|ae|vcp|bme|reth|me|vme)[a-zA-Z0-9\-\/\.]+)") {
+        if ($Line -match "(?<vlan>\S+)\s+(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<flag>SE|NM|[SDLPCNO])\s+.+?(?<interface>(?:ge|xe|et|ae|mge|vcp|bme|reth|me|vme)[a-zA-Z0-9\-\/\.]+)") {
             $VlanName = $Matches.vlan
             $VlanTag = "Unknown"
             if ($CurrentMacInstance -and $VlanDict.ContainsKey("$CurrentMacInstance|$VlanName")) {

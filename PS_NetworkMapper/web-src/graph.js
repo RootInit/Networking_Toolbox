@@ -225,8 +225,16 @@ async function doRenderVisibleGraph() {
             }
         });
 
+        // Tracks each primary edge's resolved endpoint pair (order-independent) so a
+        // rerouted secondary edge landing on the exact same pair - e.g. a switch linked
+        // to a neighbor by both a primary LLDP-tree link and a redundant/backup link,
+        // where that neighbor's own subtree just collapsed into a cluster placeholder -
+        // can be recognized as a visual duplicate of the primary edge already rendered.
+        var primaryPairs = new Set();
         visible.visibleEdges.forEach((e, i) => {
             edgesDataset.add({ id: `primary-${i}`, from: e.from, to: e.to, width: 2, color: '#848484', dashes: false });
+            var pKey = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from;
+            primaryPairs.add(pKey);
         });
 
         var visibleSet = new Set(visible.visibleNodeIds);
@@ -240,9 +248,11 @@ async function doRenderVisibleGraph() {
             if (!from || !to || from === to) return;
             // Several distinct hidden nodes can all reroute to the same cluster placeholder
             // (e.g. multiple redundant links into one collapsed subtree) - dedupe on the
-            // resolved pair so they don't stack into overlapping parallel edges.
+            // resolved pair so they don't stack into overlapping parallel edges. Also skip
+            // a pair that a primary edge already rendered (e.g. the cluster's own primary
+            // parent-to-placeholder edge) so the secondary edge doesn't visually duplicate it.
             var key = from < to ? from + '|' + to : to + '|' + from;
-            if (seenSecondary.has(key)) return;
+            if (seenSecondary.has(key) || primaryPairs.has(key)) return;
             seenSecondary.add(key);
             edgesDataset.add({ id: `secondary-${i}`, from: from, to: to, width: 1, color: '#c0c0c0', dashes: [4, 4] });
         });
@@ -285,12 +295,23 @@ function computeSubtreeVlanSets() {
     return result;
 }
 
-// An edge into a collapsed cluster has the synthetic cluster id (never a key in
-// subtreeVlanSets) as one endpoint - the other, real endpoint's set already includes every
-// VLAN hidden inside that cluster, so resolving whichever side exists is correct.
+// A `cluster:X` placeholder id is never itself a key in subtreeVlanSets (that map is only
+// keyed by real device ids), but X's own entry already IS the union of X's local VLANs plus
+// everything reachable through its full subtree - collapsed or not, since computeSubtreeVlanSets
+// recurses over the full primaryTree.childrenOf regardless of what's currently visible. So a
+// `cluster:X` id resolves to that same entry by stripping the prefix back to X. For a primary
+// cluster edge (real parent -> its own cluster:parent placeholder) this was already safe because
+// the real parent side alone carried the answer; this also makes a cluster-to-cluster secondary
+// edge (both endpoints synthetic, e.g. a redundant link between two independently-collapsed
+// subtrees) resolve correctly instead of always missing.
+function vlanSetKeyFor(id) {
+    var s = String(id);
+    return s.indexOf('cluster:') === 0 ? s.slice('cluster:'.length) : s;
+}
+
 function edgeTrunksVlan(subtreeVlanSets, fromId, toId, vlanTag) {
-    var fromSet = subtreeVlanSets.get(String(fromId));
-    var toSet = subtreeVlanSets.get(String(toId));
+    var fromSet = subtreeVlanSets.get(vlanSetKeyFor(fromId));
+    var toSet = subtreeVlanSets.get(vlanSetKeyFor(toId));
     return !!((fromSet && fromSet.has(vlanTag)) || (toSet && toSet.has(vlanTag)));
 }
 

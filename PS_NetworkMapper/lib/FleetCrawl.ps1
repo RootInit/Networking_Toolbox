@@ -141,6 +141,11 @@ function Invoke-FleetCrawl {
     $ConsecutiveAuthFailures = 0
     $TotalAuthFailures = 0
     $AuthFailureThreshold = 3
+    # Set when the circuit breaker trips below, so the caller (WebServer.ps1's poll handler /
+    # the CLI path) can distinguish an aborted crawl from a genuinely complete one - both
+    # otherwise fall into the same post-loop return.
+    $WasAborted = $false
+    $AbortReason = $null
 
     # PowerShell instances whose async Stop() (BeginStop) is in flight, awaiting EndStop()+
     # Dispose() once it actually completes - see the "async stop" comment at the cleanup site
@@ -169,10 +174,17 @@ function Invoke-FleetCrawl {
         }
     }
 
-    Write-TopologyOutputLocal -Topology @() -Path $OutputFile -ScanTimestampIso $ScanTimestampIso
-
     try {
         Write-Host "`nStarting Crawl with $MaxConcurrent Threads. Press Ctrl+C to abort gracefully.`n" -ForegroundColor Yellow
+
+        # Temp-file + Move-Item, same pattern as every later write in this function (periodic,
+        # final, and the emergency-salvage write in the catch block below) - a partway failure
+        # here (e.g. disk full) then leaves no half-written $OutputFile behind instead of a
+        # truncated one a poller could read mid-write. Inside the try (not above it) so a
+        # Move-Item failure here still hits the catch below (an empty-topology salvage write is
+        # a harmless no-op at this point) and the finally still reaps the leftover .tmp file.
+        Write-TopologyOutputLocal -Topology @() -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
+        Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
 
         while ($Queue.Count -gt 0 -or $Jobs.Count -gt 0) {
 
@@ -181,7 +193,17 @@ function Invoke-FleetCrawl {
             Complete-PendingDisposalsLocal
 
             # 1. Fill available thread slots (Safely dequeueing)
-            while ($Jobs.Count -lt $MaxConcurrent -and $Queue.Count -gt 0) {
+            #
+            # The circuit breaker below only counts COMPLETED results, so it can't stop the
+            # very first wave of dispatches: with $MaxConcurrent=10 and $AuthFailureThreshold=3,
+            # up to 10 jobs can already be in flight against a bad credential before the
+            # breaker has anything to count. Once ANY auth failure has been observed, throttle
+            # new dispatches to 1-per-iteration (~1 every 250ms) instead of filling every free
+            # slot, so exposure to a confirmed-bad credential is bounded even while the breaker
+            # is still accumulating enough evidence to trip. Full-speed dispatch otherwise.
+            $DispatchLimitThisIteration = if ($TotalAuthFailures -gt 0) { 1 } else { $MaxConcurrent }
+            $DispatchedThisIteration = 0
+            while ($Jobs.Count -lt $MaxConcurrent -and $Queue.Count -gt 0 -and $DispatchedThisIteration -lt $DispatchLimitThisIteration) {
                 $NextIP = $Queue.Dequeue()
                 if (!$Visited.Add($NextIP)) { continue }
 
@@ -195,13 +217,21 @@ function Invoke-FleetCrawl {
                     if ($Log) { $PS.AddParameter("Log") | Out-Null }
 
                     $PS.RunspacePool = $RunspacePool
+                    # Captured BEFORE BeginInvoke() (not after): BeginInvoke() can start
+                    # executing on a runspace thread pool thread immediately, so its native
+                    # ssh.exe grandchild's actual CreationDate could otherwise land slightly
+                    # earlier than a StartTime captured after the call returns - letting a
+                    # genuinely orphaned process for this job slip past
+                    # Stop-JunosOrphanProcessesLocal's "CreationDate -ge SinceTime" filter.
+                    $JobStartTime = Get-Date
                     $Handle = $PS.BeginInvoke()
-                    $Jobs.Add([PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $NextIP; StartTime = (Get-Date) })
+                    $Jobs.Add([PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $NextIP; StartTime = $JobStartTime })
                 } catch {
                     Write-DebugLogLocal "ORCHESTRATOR ERROR: failed to start job for $($NextIP): $_"
                     Write-Host "`n[!] Failed to start job for $($NextIP): $_" -ForegroundColor Red
                     if ($PS) { try { $PS.Dispose() } catch {} }
                 }
+                $DispatchedThisIteration++
             }
 
             Write-Host "`r[Threads: $($Jobs.Count)/$MaxConcurrent] [Queue: $($Queue.Count)] [Done: $($TopologyList.Count)]    " -NoNewline -ForegroundColor Cyan
@@ -277,17 +307,31 @@ function Invoke-FleetCrawl {
                                 $ConsecutiveAuthFailures = 0
                             }
 
-                            foreach ($Neigh in $Node.Neighbors) {
-                                $NIP = $Neigh.ManagementIP
-                                if ([string]::IsNullOrEmpty($NIP)) { continue }
-                                $InScope = $false
-                                foreach ($Scope in $AllowedScopes) { if ($NIP.StartsWith($Scope)) { $InScope = $true; break } }
+                            # Own try/catch, local to just this loop: $Node was already added to
+                            # $TopologyList above with real, fully-collected data. A malformed
+                            # neighbor entry throwing partway through (e.g. ManagementIP isn't a
+                            # plain string and .StartsWith() throws) must not fall into the outer
+                            # EndInvoke catch below - that catch synthesizes a ScanStatus="Error"
+                            # placeholder node for $Job.IP, which would land in $TopologyList
+                            # ALONGSIDE the real $Node just added, and since every consumer does
+                            # last-write-wins by DeviceIP, the placeholder would silently clobber
+                            # the good data. So: log and continue here instead.
+                            try {
+                                foreach ($Neigh in $Node.Neighbors) {
+                                    $NIP = $Neigh.ManagementIP
+                                    if ([string]::IsNullOrEmpty($NIP)) { continue }
+                                    $InScope = $false
+                                    foreach ($Scope in $AllowedScopes) { if ($NIP.StartsWith($Scope)) { $InScope = $true; break } }
 
-                                if ($InScope -and !$Visited.Contains($NIP) -and !$Enqueued.Contains($NIP)) {
-                                    $Queue.Enqueue($NIP)
-                                    $Enqueued.Add($NIP) | Out-Null
-                                    Write-DebugLogLocal "ENQUEUED: $NIP"
+                                    if ($InScope -and !$Visited.Contains($NIP) -and !$Enqueued.Contains($NIP)) {
+                                        $Queue.Enqueue($NIP)
+                                        $Enqueued.Add($NIP) | Out-Null
+                                        Write-DebugLogLocal "ENQUEUED: $NIP"
+                                    }
                                 }
+                            } catch {
+                                Write-DebugLogLocal "ORCHESTRATOR ERROR: failed while enqueuing neighbors for $($Job.IP): $_"
+                                Write-Host "`n[!] Error enqueuing neighbors for $($Job.IP): $_" -ForegroundColor Red
                             }
                         } else {
                             # Shouldn't happen (Get-JunosNodeData always returns a Node), but
@@ -346,7 +390,13 @@ function Invoke-FleetCrawl {
                 # Also reap any orphaned ssh.exe/cmd.exe OS child process this job may have left
                 # running - see Stop-JunosOrphanProcessesLocal above for why PS.Stop()/Dispose()
                 # alone can't do this.
-                Stop-JunosOrphanProcessesLocal -TargetIP $DeadJob.IP -SinceTime $DeadJob.StartTime
+                # -2s safety margin: $StartTime is DateTime.Now (~15.6ms timer quantization),
+                # while the orphan filter compares against WMI's CreationDate - different
+                # precisions, so CreationDate can still round below a bare $StartTime even with
+                # it captured before BeginInvoke(). $Visited means this IP is never scanned
+                # twice in one crawl, so a wider window here can't ever reach a different job's
+                # process for the same IP.
+                Stop-JunosOrphanProcessesLocal -TargetIP $DeadJob.IP -SinceTime $DeadJob.StartTime.AddSeconds(-2)
 
                 $Jobs.Remove($DeadJob) | Out-Null
             }
@@ -359,6 +409,8 @@ function Invoke-FleetCrawl {
             if ($ConsecutiveAuthFailures -ge $AuthFailureThreshold -or $TotalAuthFailures -ge $AuthFailureThreshold) {
                 Write-DebugLogLocal "ORCHESTRATOR ABORT: consecutive=$ConsecutiveAuthFailures total=$TotalAuthFailures auth failures (threshold $AuthFailureThreshold) - aborting crawl to avoid a fleet-wide lockout."
                 Write-Host "`n[!] Aborting crawl: repeated authentication failures ($TotalAuthFailures total) - check the credential before retrying (avoiding a possible account lockout)." -ForegroundColor Red
+                $WasAborted = $true
+                $AbortReason = "Aborted after $TotalAuthFailures authentication failures - check the credential before retrying."
 
                 # Jobs still in flight at this point weren't touched by step 3 above (that only
                 # handled completed/timed-out ones this cycle) - stop/dispose and reap them here
@@ -369,7 +421,8 @@ function Invoke-FleetCrawl {
                         $StopHandle = $LiveJob.PS.BeginStop($null, $null)
                         $PendingDisposal.Add([PSCustomObject]@{ PS = $LiveJob.PS; Async = $StopHandle })
                     } catch { try { $LiveJob.PS.Dispose() } catch {} }
-                    Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime
+                    # Same -2s margin as the step-3 cleanup above - see comment there.
+                    Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime.AddSeconds(-2)
                 }
                 $Jobs.Clear()
                 break
@@ -414,12 +467,16 @@ function Invoke-FleetCrawl {
         }
 
         Write-Host "`n`n=================================================" -ForegroundColor Cyan
-        Write-Host "Mapping Complete! Processed $($Visited.Count) devices." -ForegroundColor Green
+        if ($WasAborted) {
+            Write-Host "Crawl Aborted! Processed $($Visited.Count) device(s) before stopping." -ForegroundColor Red
+        } else {
+            Write-Host "Mapping Complete! Processed $($Visited.Count) devices." -ForegroundColor Green
+        }
         Write-Host "Topology saved to: $OutputFile" -ForegroundColor White
         Write-Host "=================================================" -ForegroundColor Cyan
 
         $ProgressTable.Done = $true
-        return @{ Topology = $TopologyList; ScanTimestampIso = $ScanTimestampIso; OutputFile = $OutputFile; VisitedCount = $Visited.Count }
+        return @{ Topology = $TopologyList; ScanTimestampIso = $ScanTimestampIso; OutputFile = $OutputFile; VisitedCount = $Visited.Count; Aborted = $WasAborted; AbortReason = $AbortReason }
     }
     catch {
         # An unexpected throw in the loop above would otherwise skip the final write and

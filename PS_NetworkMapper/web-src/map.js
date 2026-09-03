@@ -372,10 +372,14 @@ window.renderMapMarkers = function() {
             // Covers "changed their mind and clicked elsewhere on the map" - the marker's own
             // click handler above covers "clicked the marker itself instead of dragging it".
             // Harmless no-op if a real drag already disabled dragging by the time this fires.
-            leafletMap.once('click', function () {
+            // Stored on the marker so the dragend handler below can `off` it on a successful
+            // drag - a completed drag doesn't emit a map 'click', so without this the listener
+            // would otherwise dangle until some unrelated future map click consumed it.
+            marker._disarmOnMapClick = function () {
                 marker.dragging.disable();
                 if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
-            });
+            };
+            leafletMap.once('click', marker._disarmOnMapClick);
         });
         popupEl.appendChild(repositionLink);
         marker.bindPopup(popupEl);
@@ -385,6 +389,13 @@ window.renderMapMarkers = function() {
         marker.on('dragend', function () {
             marker.dragging.disable();
             if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
+            // A completed drag doesn't emit a map 'click', so the arm-time disarm listener
+            // (see "Edit position" above) never fires on its own - remove it explicitly here
+            // to avoid leaving a dangling one-shot listener on leafletMap.
+            if (marker._disarmOnMapClick) {
+                leafletMap.off('click', marker._disarmOnMapClick);
+                marker._disarmOnMapClick = null;
+            }
             var newLatLng = marker.getLatLng();
             var currentDevice = deviceByIp.get(String(ip));
             // Guarded the same way commitLocationEdit is - a snapshot reload/rescan while
@@ -499,6 +510,10 @@ window.openLocationEditor = function(ip) {
     document.getElementById('editorLng').value = (existing && Number.isFinite(existing.lng)) ? existing.lng : '';
     document.getElementById('location-editor-modal').style.display = 'flex';
 
+    // Remove any previous registration first - reopening the editor for a different device
+    // (e.g. via a still-open popup's "Edit location" link) without closing it first would
+    // otherwise stack up additional once-listeners alongside this one.
+    leafletMap.off('click', onEditorMapClick);
     leafletMap.once('click', onEditorMapClick);
 };
 

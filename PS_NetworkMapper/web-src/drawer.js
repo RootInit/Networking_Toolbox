@@ -53,12 +53,19 @@ window.copyConnectCommand = async function() {
 // just this IP via WebServer.ps1's /api/rescan (async, polled below). Also works for the
 // "Unscanned Node" placeholder case (a device only ever seen as an LLDP neighbor).
 var rescanPollTimer = null;
+// The IP a rescan poll is currently running for - set as soon as the button is disabled
+// (not just while rescanPollTimer is non-null, which is null during the initial POST and
+// during each in-flight status fetch), cleared on every exit path. Lets openRightDrawer
+// tell "a poll for the device now being opened" (leave the button alone) apart from "a poll
+// for some OTHER device" (reset the shared button - see openRightDrawer below).
+var rescanPollTargetIp = null;
 
 // Called from app.js's processSelectedFiles when a new file set is loaded mid-poll - a
 // pending rescan's eventual result must not land in whatever snapshot happens to be active
 // once loadedSnapshots gets replaced wholesale.
 window.cancelPendingRescan = function() {
     if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
+    rescanPollTargetIp = null;
     // rescanDevice's own finish() restores the button, but that's never reached when the
     // poll is cancelled externally (e.g. a new file set loading mid-poll) - do the same
     // restoration here, or #rescanBtn is left disabled/showing "Scanning..." forever.
@@ -69,6 +76,18 @@ window.cancelPendingRescan = function() {
 window.rescanDevice = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
+
+    // A rescan for a different device is already in flight - openRightDrawer resets this
+    // button's appearance when switching to a different device's drawer (see below), but the
+    // underlying poll for that other device is still running and shares this same server-side
+    // rescan slot/jobId bookkeeping. Starting a second one here would hit the 409 branch below
+    // and call finish(), which clears the OTHER poll's timer out from under it - so refuse
+    // up front instead of silently killing the in-flight rescan.
+    if (rescanPollTargetIp && rescanPollTargetIp !== ip) {
+        window.setStatus("A rescan of " + rescanPollTargetIp + " is still running - wait for it to finish.", "orange");
+        return;
+    }
+
     var btn = document.getElementById('rescanBtn');
     var original = btn ? btn.textContent : null;
 
@@ -81,6 +100,7 @@ window.rescanDevice = async function() {
 
     function finish(msg, color) {
         if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
+        if (rescanPollTargetIp === ip) rescanPollTargetIp = null;
         if (btn) { btn.disabled = false; btn.textContent = original; }
         window.setStatus(msg, color);
     }
@@ -88,6 +108,7 @@ window.rescanDevice = async function() {
     var jobId;
     try {
         if (btn) { btn.disabled = true; btn.textContent = 'Scanning...'; }
+        rescanPollTargetIp = ip;
         var resp = await fetch('/api/rescan', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -170,6 +191,12 @@ window.rescanDevice = async function() {
 // Offloaded server-side to a background job (the server enforces a 20s timeout on it), so
 // this polls /api/ping/status just like rescanDevice above polls /api/rescan/status.
 var pingPollTimer = null;
+// Mirrors rescanPollTargetIp above - the IP a ping poll is currently running for, set as
+// soon as the button is disabled (not just while pingPollTimer is non-null), cleared on
+// every exit path. Lets openRightDrawer reset the shared #pingBtn when switching to a
+// different device's drawer without touching a poll still running for the device now
+// being left behind.
+var pingPollTargetIp = null;
 
 // Mirrors cancelPendingRescan (exposed for the same reason: a caller resetting drawer/app
 // state - e.g. a new file set loading - should stop a pending poll from touching it). Not
@@ -178,6 +205,7 @@ var pingPollTimer = null;
 // which device's drawer is open.
 window.cancelPendingPing = function() {
     if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+    pingPollTargetIp = null;
     // Mirrors cancelPendingRescan above - pingDevice's own finish() restores the button, but
     // that's never reached when the poll is cancelled externally.
     var btn = document.getElementById('pingBtn');
@@ -196,6 +224,15 @@ function isDrawerShowing(ip) {
 window.pingDevice = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
+
+    // Mirrors rescanDevice's guard above - a ping for a different device is already in
+    // flight; starting a second one here would hit the 409 branch below and call finish(),
+    // clearing the OTHER poll's timer out from under it.
+    if (pingPollTargetIp && pingPollTargetIp !== ip) {
+        window.setStatus("A ping of " + pingPollTargetIp + " is still running - wait for it to finish.", "orange");
+        return;
+    }
+
     var btn = document.getElementById('pingBtn');
     var original = btn ? btn.textContent : null;
     // Written directly (in addition to window.setStatus below) since the sidebar's
@@ -209,6 +246,7 @@ window.pingDevice = async function() {
 
     function finish(msg, cls) {
         if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+        if (pingPollTargetIp === ip) pingPollTargetIp = null;
         if (btn) { btn.disabled = false; btn.textContent = original; }
         // Only paint the drawer's inline result if it's still showing the device this ping
         // was for - see isDrawerShowing. window.setStatus is global and safe either way.
@@ -219,6 +257,7 @@ window.pingDevice = async function() {
     var jobId;
     try {
         if (btn) { btn.disabled = true; btn.textContent = 'Pinging...'; }
+        pingPollTargetIp = ip;
         showResult('Pinging...', '');
         var resp = await fetch('/api/ping', {
             method: 'POST',
@@ -289,6 +328,7 @@ window.pingDevice = async function() {
             return;
         }
         if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
+        if (pingPollTargetIp === ip) pingPollTargetIp = null;
         if (btn) { btn.disabled = false; btn.textContent = original; }
         if (status.alive) {
             var okMsg = "Reachable (" + status.avgLatencyMs + "ms avg, " + status.received + "/" + status.sent + ")";
@@ -338,6 +378,12 @@ function isRescanTargetSnapshotGone(snapshots, targetSnapshot) {
 // snapshot immutability is load-bearing for Topology Diff and cross-snapshot config compare.
 // RescannedAt (shown in Summary) surfaces that ephemerality. Returns false (nothing merged)
 // if targetSnapshot no longer exists among loadedSnapshots.
+// True only while openRightDrawer is being called from mergeRescannedDevice's own re-render
+// below (a background poll completing, not the user opening/switching to a device). Lets
+// renderClients (search-result auto-scroll) and populateConfigCompareSelect (compare-target
+// reset) tell that apart from a genuine drawer-open, where their normal behavior is correct.
+var isMergeRerender = false;
+
 window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
     if (!freshDevice || !freshDevice.DeviceIP) return false;
     if (isRescanTargetSnapshotGone(loadedSnapshots, targetSnapshot)) return false;
@@ -370,8 +416,15 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
     // its onclick closure is otherwise still fine - deviceIp/snapshotIndex didn't change) -
     // re-run the search so it reflects the merged data. searchIndex spans every loaded
     // snapshot regardless of which is active, so this isn't gated on isActiveSnapshot below.
+    // Guarded against half-typed, unsubmitted search text: searchHighlightQuery is only ever
+    // set (in performGlobalSearch, search.js) to the LAST SUBMITTED query's trimmed+lowercased
+    // value, on Enter/button-click - not on keystroke. If the box currently holds something
+    // else (the user is mid-typing a new query they haven't submitted yet), re-running the
+    // search here would prematurely submit that half-typed text and overwrite the results/
+    // highlight the user is actually looking at.
     var searchBox = document.getElementById('globalSearch');
-    if (searchBox && searchBox.value.trim() && window.performGlobalSearch) {
+    if (searchBox && searchBox.value.trim() && window.performGlobalSearch
+        && searchBox.value.trim().toLowerCase() === searchHighlightQuery) {
         window.performGlobalSearch();
     }
 
@@ -391,7 +444,12 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
     var drawerIp = document.getElementById('drawer-title').innerText;
     var drawerOpen = document.getElementById('right-panel').style.display !== 'none';
     if (drawerOpen && drawerIp === ip) {
-        window.openRightDrawer(ip); // deviceByIp now resolves to freshDevice - re-renders every tab from it
+        isMergeRerender = true;
+        try {
+            window.openRightDrawer(ip); // deviceByIp now resolves to freshDevice - re-renders every tab from it
+        } finally {
+            isMergeRerender = false;
+        }
     }
 
     // Not a full window.buildSwitchMap() rebuild - that would reset pan/zoom and collapse
@@ -413,6 +471,23 @@ window.openRightDrawer = function(ip) {
     // Clear any stale "Reachable"/"No response" left from the previously open device.
     var pingResultEl = document.getElementById('pingResult');
     if (pingResultEl) { pingResultEl.textContent = ''; pingResultEl.className = ''; }
+
+    // #rescanBtn/#pingBtn are shared DOM elements, not per-device - if a rescan/ping poll is
+    // still running for a DIFFERENT device than the one now being opened, reset the button to
+    // its default look here so it doesn't read as "stuck" under the new device. The poll
+    // itself is left running in the background (not cancelled) and its own finish() will
+    // just no-op re-enable an already-enabled button when it completes. A poll for the SAME
+    // ip being (re-)opened - e.g. mergeRescannedDevice's own re-render after this device's own
+    // rescan completes - is left alone.
+    var openIp = String(ip);
+    if (rescanPollTargetIp && rescanPollTargetIp !== openIp) {
+        var rescanBtn = document.getElementById('rescanBtn');
+        if (rescanBtn) { rescanBtn.disabled = false; rescanBtn.textContent = 'Re-scan'; }
+    }
+    if (pingPollTargetIp && pingPollTargetIp !== openIp) {
+        var pingBtn = document.getElementById('pingBtn');
+        if (pingBtn) { pingBtn.disabled = false; pingBtn.textContent = 'Ping'; }
+    }
 
     var handle = document.getElementById('right-panel-handle');
 
@@ -600,7 +675,10 @@ window.renderClients = function() {
     }
     tbody.innerHTML = html || `<tr><td colspan="3" style="text-align:center;">No edge clients found</td></tr>`;
 
-    if (searchHighlightQuery) {
+    // Skipped on a merge-triggered re-render (background rescan completing) - only scroll on
+    // an actual drawer-open/tab-switch/search-navigation render, so a background merge can't
+    // yank the user's scroll position while they're reading something else in this tab.
+    if (searchHighlightQuery && !isMergeRerender) {
         var highlightedEl = tbody.querySelector('.highlight');
         if (highlightedEl) highlightedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
@@ -661,6 +739,12 @@ window.populateConfigCompareSelect = function() {
     var searchResults = document.getElementById('configCompareSearchResults');
     if (!container || !select) return;
 
+    // Preserve the user's compare selection across a merge-triggered re-render (a background
+    // rescan completing) - only reset it on a genuine drawer-open/switch to a different
+    // device, where clearing it is correct. Re-validated below rather than trusted blindly:
+    // the rescan can rename/reconfigure the OTHER device (or drop its config) too.
+    var preservedTarget = (isMergeRerender && configCompareTarget) ? configCompareTarget : null;
+
     configCompareTarget = null;
     sameDeviceIpByIdx = {};
     if (searchInput) searchInput.value = '';
@@ -698,6 +782,25 @@ window.populateConfigCompareSelect = function() {
         + sameDeviceOptions.map(o => `<option value="${o.idx}">${esc(o.label)}</option>`).join('');
     select.value = '';
     container.style.display = 'flex';
+
+    if (preservedTarget) {
+        var otherSnap = loadedSnapshots[preservedTarget.idx];
+        var other = otherSnap && (otherSnap.topology || []).find(dev => dev && String(dev.DeviceIP) === preservedTarget.ip);
+        var stillValid = other && other.Configuration && other.Configuration !== "Unknown";
+        if (stillValid) {
+            configCompareTarget = preservedTarget;
+            if (sameDeviceIpByIdx[preservedTarget.idx] === preservedTarget.ip) {
+                // Still the "same device, other capture" option - reselect it in the dropdown.
+                select.value = String(preservedTarget.idx);
+            } else if (searchInput) {
+                // Was a cross-device pick made via the search box - restore its label text
+                // (mirrors selectConfigCompareDevice's own label construction).
+                var label = (other.Hostname && other.Hostname !== "Unknown" ? other.Hostname : preservedTarget.ip) + ' (' + preservedTarget.ip + ')';
+                searchInput.value = label;
+            }
+        }
+    }
+
     window.renderConfigDiff();
 };
 

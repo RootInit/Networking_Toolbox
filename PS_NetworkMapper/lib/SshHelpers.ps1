@@ -75,5 +75,11 @@ function Clear-StaleJunosTempFiles {
 # instead of falling back to an interactively-prompted key passphrase.
 function Get-JunosSshArgs {
     param([Parameter(Mandatory=$true)][string]$Username, [Parameter(Mandatory=$true)][string]$TargetIP)
-    return @("-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "$Username@$TargetIP")
+    # ServerAliveInterval/ServerAliveCountMax: without a keepalive, a session wedged on a dead
+    # link (e.g. the switch stops responding mid-command) just sits there until something
+    # external notices - for Get-JunosNodeData.ps1's batch mode, that's the orchestrator's 65s
+    # hang timeout in FleetCrawl.ps1, which still has to abandon the job and reap the process.
+    # 10s x 3 unanswered keepalives (30s) lets ssh.exe itself detect the dead session and exit
+    # well before that, instead of the connection just going idle.
+    return @("-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "$Username@$TargetIP")
 }
