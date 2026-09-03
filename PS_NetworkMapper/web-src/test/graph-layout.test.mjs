@@ -65,7 +65,12 @@ test('computeGraphRoot prefers the largest component over a smaller-eccentricity
   ];
   const root = computeGraphRoot(nodeIds, edges);
   assert.notEqual(root, 'isolated');
-  assert.ok(['c3', 'c4'].includes(root)); // center of a 6-node chain is one of the two middle nodes
+  // The real implementation is deterministic here: sortedIds visits 'c3' before 'c4'
+  // (lowest-ID tie-break, see the test above), and the eccentricity-improvement check
+  // is a strict '<', so 'c3' is set first and 'c4's later-tied eccentricity never
+  // displaces it. Asserting the exact value (rather than accepting either) catches a
+  // regression that flips the tie-break direction (e.g. '<' becoming '<=').
+  assert.equal(root, 'c3'); // center of a 6-node chain, lowest-ID tie-break
 });
 
 test('buildPrimaryTree assigns BFS-order parents on a simple tree', () => {

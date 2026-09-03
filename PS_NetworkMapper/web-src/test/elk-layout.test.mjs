@@ -78,3 +78,35 @@ test('computeLayout gives a disconnected second component (with no incoming edge
     }
   }
 });
+
+// computeLayout's try/catch (elk-layout.js:89-108) is the last-resort safety net when
+// the layout engine throws or times out - none of the tests above ever enter it, since
+// they either call computeGridFallback directly or give computeLayout a well-formed
+// input that completes normally. Force the catch branch via the same
+// window.GraphLayout seam this file's own setup (line 9-10) already uses to reach the
+// engine, and confirm computeLayout returns exactly what computeGridFallback would
+// produce for the same node list, rather than throwing or hanging.
+test('computeLayout falls back to computeGridFallback\'s output when the layout engine throws', async () => {
+  // GraphLayout is a frozen ES module namespace object, so its own
+  // computeRecursiveRadialLayout can't be reassigned - swap out window.GraphLayout
+  // itself (the seam computeLayout actually reads through) for a plain object that
+  // wraps it with a throwing override, then restore the real module namespace after.
+  const original = global.window.GraphLayout;
+  global.window.GraphLayout = { ...GraphLayout, computeRecursiveRadialLayout: () => {
+    throw new Error('simulated layout engine failure');
+  } };
+  try {
+    const visibleNodeIds = ['root', 'a', 'b', 'c'];
+    const visibleEdges = [
+      { from: 'root', to: 'a' }, { from: 'root', to: 'b' }, { from: 'root', to: 'c' },
+    ];
+    const positions = await computeLayout(visibleNodeIds, visibleEdges, {});
+    const expected = computeGridFallback(visibleNodeIds);
+    assert.equal(positions.size, expected.size);
+    for (const id of visibleNodeIds) {
+      assert.deepEqual(positions.get(id), expected.get(id));
+    }
+  } finally {
+    global.window.GraphLayout = original;
+  }
+});
