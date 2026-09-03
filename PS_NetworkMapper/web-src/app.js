@@ -16,11 +16,16 @@ var IGNORED_ERROR_MESSAGES = /ResizeObserver loop/;
 window.onerror = function(message, source, lineno, colno, error) {
     if (IGNORED_ERROR_MESSAGES.test(message)) return true;
 
-    var errText = `Message: ${message}<br>Line: ${lineno}:${colno}<br>Source: ${source}<br>Stack: ${error ? error.stack : 'N/A'}`;
+    // textContent (not innerHTML) - message/source/stack can embed untrusted text (e.g. a
+    // future Error thrown with a device/file-supplied string), matching the esc()/textContent
+    // convention used for every other error-rendering sink in the app. white-space: pre-line
+    // (index.html) turns the \n separators below into the same line-per-field layout the old
+    // <br>-joined innerHTML gave.
+    var errText = `Message: ${message}\nLine: ${lineno}:${colno}\nSource: ${source}\nStack: ${error ? error.stack : 'N/A'}`;
     var textEl = document.getElementById('fatal-error-text');
     var modalEl = document.getElementById('fatal-error-modal');
     if (textEl && modalEl) {
-        textEl.innerHTML = errText;
+        textEl.textContent = errText;
         modalEl.style.display = 'block';
     }
     if (typeof window.hideProgress === 'function') window.hideProgress();
@@ -239,9 +244,10 @@ window.addEventListener('resize', function() {
 // tables/charts don't fit the 320px other tabs use.
 window.switchSidebarTab = async function(tabId) {
     document.querySelectorAll('.sidebar-tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.sidebar-tab').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.sidebar-tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
     document.getElementById(tabId).classList.add('active');
     document.getElementById('btn-' + tabId).classList.add('active');
+    document.getElementById('btn-' + tabId).setAttribute('aria-selected', 'true');
     document.getElementById('left-panel').classList.toggle('wide-panel', tabId === 'sidebar-tab-analysis');
     activeSidebarTab = tabId;
 
@@ -367,6 +373,10 @@ window.autoloadLastScan = async function() {
 };
 
 document.addEventListener('DOMContentLoaded', function() {
+    // Reattach first: if a scan is already running server-side (e.g. this tab was
+    // refreshed mid-crawl), autoloadLastScan would otherwise just autoload the previous
+    // archived snapshot and leave the button looking idle (UX-002).
+    if (typeof window.resumeScanIfInProgress === 'function') window.resumeScanIfInProgress();
     window.autoloadLastScan();
 });
 

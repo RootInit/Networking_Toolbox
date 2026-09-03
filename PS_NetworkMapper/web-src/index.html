@@ -485,7 +485,7 @@
         <div style="background:var(--panel-bg); width:340px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); overflow:hidden;">
             <div class="drawer-header"><h2 style="font-size:1.05rem;">Scan Network</h2></div>
             <div style="padding:18px;">
-                <p style="margin:0 0 12px; font-size:0.85rem; color:var(--text-muted);">No previous scan is loaded - enter the starting switch's IP address to begin a fleet crawl.</p>
+                <p id="scan-start-ip-desc" style="margin:0 0 12px; font-size:0.85rem; color:var(--text-muted);">No previous scan is loaded - enter the starting switch's IP address to begin a fleet crawl.</p>
                 <div id="scan-start-ip-error" style="display:none; background:var(--danger-bg); color:var(--danger-text); border:1px solid var(--danger-border); border-radius:4px; padding:8px 10px; font-size:0.8rem; margin-bottom:12px;"></div>
                 <input type="text" id="scan-start-ip-input" placeholder="e.g. 10.55.2.2" autocomplete="off">
                 <div style="display:flex; gap:10px; margin-top:4px;">
@@ -500,10 +500,11 @@
     <div id="left-panel">
         <div id="left-panel-body">
         <div class="sidebar-tabs">
-            <div class="sidebar-tab active" id="btn-sidebar-tab-load" onclick="window.switchSidebarTab('sidebar-tab-load')">Load File</div>
-            <div class="sidebar-tab" id="btn-sidebar-tab-search" onclick="window.switchSidebarTab('sidebar-tab-search')">Search</div>
-            <div class="sidebar-tab" id="btn-sidebar-tab-settings" onclick="window.switchSidebarTab('sidebar-tab-settings')">Settings</div>
-            <div class="sidebar-tab" id="btn-sidebar-tab-analysis" onclick="window.switchSidebarTab('sidebar-tab-analysis')">Analysis Dashboard</div>
+            <div class="sidebar-tab active" id="btn-sidebar-tab-load" tabindex="0" role="tab" aria-selected="true" onclick="window.switchSidebarTab('sidebar-tab-load')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-load'))">Load File</div>
+            <!-- aria-selected toggled by window.switchSidebarTab (app.js) -->
+            <div class="sidebar-tab" id="btn-sidebar-tab-search" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-search')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-search'))">Search</div>
+            <div class="sidebar-tab" id="btn-sidebar-tab-settings" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-settings')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-settings'))">Settings</div>
+            <div class="sidebar-tab" id="btn-sidebar-tab-analysis" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-analysis')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-analysis'))">Analysis Dashboard</div>
         </div>
 
         <div id="left-panel-content">
@@ -753,7 +754,7 @@
         <div class="drawer-header">
             <div class="drawer-header-top">
                 <h2 id="drawer-title">Switch Details</h2>
-                <span class="close-btn" onclick="window.closeDrawer()">&times;</span>
+                <span class="close-btn" tabindex="0" role="button" aria-label="Close" onclick="window.closeDrawer()" onkeydown="window.activateOnKey(event, window.closeDrawer)">&times;</span>
             </div>
             <div class="drawer-header-actions">
                 <button type="button" id="rescanBtn" onclick="window.rescanDevice()" title="Re-run the diagnostic scan for just this device, without a full fleet crawl">Re-scan</button>
@@ -768,13 +769,14 @@
         </div>
         
         <div class="tabs">
-            <div class="tab active" onclick="window.switchTab('tab-summary')" id="btn-tab-summary">Summary</div>
-            <div class="tab" onclick="window.switchTab('tab-stack')" id="btn-tab-stack">Hardware</div>
-            <div class="tab" onclick="window.switchTab('tab-alarms')" id="btn-tab-alarms">Alarms</div>
-            <div class="tab" onclick="window.switchTab('tab-neighbors')" id="btn-tab-neighbors">Neighbors</div>
-            <div class="tab" onclick="window.switchTab('tab-interfaces')" id="btn-tab-interfaces">Interfaces</div>
-            <div class="tab" onclick="window.switchTab('tab-clients')" id="btn-tab-clients">Clients</div>
-            <div class="tab" onclick="window.switchTab('tab-config')" id="btn-tab-config">Config</div>
+            <div class="tab active" tabindex="0" role="tab" aria-selected="true" onclick="window.switchTab('tab-summary')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-summary'))" id="btn-tab-summary">Summary</div>
+            <!-- aria-selected toggled by window.switchTab (drawer.js) -->
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-stack')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-stack'))" id="btn-tab-stack">Hardware</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-alarms')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-alarms'))" id="btn-tab-alarms">Alarms</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-neighbors')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-neighbors'))" id="btn-tab-neighbors">Neighbors</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-interfaces')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-interfaces'))" id="btn-tab-interfaces">Interfaces</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-clients')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-clients'))" id="btn-tab-clients">Clients</div>
+            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-config')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-config'))" id="btn-tab-config">Config</div>
         </div>
 
         <div id="tab-summary" class="tab-content active">
