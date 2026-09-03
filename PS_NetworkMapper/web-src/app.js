@@ -372,12 +372,16 @@ window.autoloadLastScan = async function() {
     }
 };
 
-document.addEventListener('DOMContentLoaded', function() {
-    // Reattach first: if a scan is already running server-side (e.g. this tab was
-    // refreshed mid-crawl), autoloadLastScan would otherwise just autoload the previous
-    // archived snapshot and leave the button looking idle (UX-002).
-    if (typeof window.resumeScanIfInProgress === 'function') window.resumeScanIfInProgress();
-    window.autoloadLastScan();
+document.addEventListener('DOMContentLoaded', async function() {
+    // Reattach first, and AWAIT it before autoloading (P2SCAN-001): if a scan is already
+    // running server-side (e.g. this tab was refreshed mid-crawl), autoloadLastScan would
+    // otherwise race it and load the previous archived snapshot over the live poll, showing
+    // a false "Success!" and stale topology for the remainder of the scan. If resumeScanIfInProgress
+    // reattaches to a running scan, skip autoloadLastScan entirely - the completing scan will
+    // load its own result via pollRunningScan's own processSelectedFiles call.
+    var resumed = false;
+    if (typeof window.resumeScanIfInProgress === 'function') resumed = await window.resumeScanIfInProgress().catch(function() { return false; });
+    if (!resumed) window.autoloadLastScan();
 });
 
 window.forceLoadFile = async function() {

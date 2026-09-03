@@ -2,6 +2,11 @@
 // then feeds the result through processSelectedFiles - same pipeline as a manual file upload.
 
 var scanNetworkPollTimer = null;
+// Re-entrancy guard (P2SCAN-002): set synchronously the instant a poll loop starts, before
+// any await, so a second pollRunningScan() call (e.g. a 409-triggered retry landing while
+// the original reattach loop is still alive) can't spawn a competing chain that fights the
+// first one over the shared scanNetworkPollTimer id.
+var scanNetworkPollActive = false;
 
 // Promise-based starting-IP prompt, same resolve/reject shape as window.promptForPassword.
 // prefillIp/replacing let the caller reuse this same confirm modal when a snapshot is
@@ -71,11 +76,15 @@ function bestStartIpFromActiveSnapshot() {
 // scan/load buttons for the duration and shows live progress on scanNetworkBtn, same as
 // before this was extracted.
 function pollRunningScan() {
+    if (scanNetworkPollActive) return; // a poll loop is already driving this scan - let it continue
+    scanNetworkPollActive = true;
+
     var btn = document.getElementById('scanNetworkBtn');
     var loadBtn = document.getElementById('loadBtn');
     var loadFolderBtn = document.getElementById('loadFolderBtn');
 
     function finish(msg, color) {
+        scanNetworkPollActive = false;
         if (scanNetworkPollTimer) { clearTimeout(scanNetworkPollTimer); scanNetworkPollTimer = null; }
         if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
         if (loadBtn) loadBtn.disabled = false;
@@ -141,27 +150,32 @@ function pollRunningScan() {
 // leaving the UI idle with no way to tell "still running" from "safe to start." If a scan
 // is running, resume the same poll loop and reflect progress on the button instead of
 // silently reverting to idle.
+// Returns true if a server-side scan was found running and this reattached to it (in which
+// case the caller - app.js's DOMContentLoaded - must not let autoloadLastScan run, since that
+// would overwrite the live poll's status/buttons with a stale archived snapshot - P2SCAN-001),
+// false otherwise.
 window.resumeScanIfInProgress = async function() {
-    if (loadedSnapshots.length > 0 || scanNetworkPollTimer) return;
+    if (loadedSnapshots.length > 0 || scanNetworkPollActive) return false;
     var statusResp;
     try {
         statusResp = await fetch('/api/scan-network/status');
     } catch (e) {
-        return;
+        return false;
     }
-    if (statusResp.status === 404 || !statusResp.ok) return;
+    if (statusResp.status === 404 || !statusResp.ok) return false;
     var status;
     try {
         status = await statusResp.json();
     } catch (e) {
-        return;
+        return false;
     }
-    if (status.status !== 'running') return;
+    if (status.status !== 'running') return false;
 
     var btn = document.getElementById('scanNetworkBtn');
     if (btn) btn.textContent = 'Scanning (' + status.visited + ' found)...';
     window.setStatus("A scan is already running - reattaching to progress...", "orange");
     pollRunningScan();
+    return true;
 };
 
 window.startNetworkScan = async function() {
