@@ -327,6 +327,8 @@ function Invoke-FleetCrawl {
                                         $Queue.Enqueue($NIP)
                                         $Enqueued.Add($NIP) | Out-Null
                                         Write-DebugLogLocal "ENQUEUED: $NIP"
+                                    } elseif (-not $InScope) {
+                                        Write-DebugLogLocal "SKIPPED (out of AllowedScopes): $NIP seen as neighbor of $($Job.IP)"
                                     }
                                 }
                             } catch {
