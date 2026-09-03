@@ -7,6 +7,28 @@
 . (Join-Path $PSScriptRoot "SshHelpers.ps1")
 . (Join-Path $PSScriptRoot "FileHelpers.ps1")
 
+# Shared scope-matching logic, also called from WebServer.ps1 (Invoke-ScanNetworkAction /
+# Invoke-RescanAction) so a manually-entered entry-point IP is checked against the exact
+# same rules as a crawl-discovered neighbor IP. Do not duplicate this matching elsewhere -
+# this codebase's audit history has repeatedly found that duplicated copies of this kind of
+# check drift apart.
+#
+# Match semantics: not a bare string-prefix match - a configured scope like "10.1" must not
+# also match "10.19.5.5". A scope's prefix only counts if it's a full match against $IP or is
+# immediately followed by a literal "." in $IP. Scopes are trimmed of any trailing "." first
+# (the default "131.30." style) so that still matches correctly instead of requiring a
+# doubled "..".
+function Test-IpInAllowedScopes {
+    param([string]$IP, [string[]]$AllowedScopes)
+
+    if ([string]::IsNullOrEmpty($IP)) { return $false }
+    foreach ($Scope in $AllowedScopes) {
+        $ScopeTrimmed = $Scope.TrimEnd('.')
+        if ($IP -eq $ScopeTrimmed -or $IP.StartsWith("$ScopeTrimmed.")) { return $true }
+    }
+    return $false
+}
+
 function Invoke-FleetCrawl {
     param(
         [Parameter(Mandatory=$true)][string]$StartIP,
@@ -337,7 +359,6 @@ function Invoke-FleetCrawl {
                                 foreach ($Neigh in $Node.Neighbors) {
                                     $NIP = $Neigh.ManagementIP
                                     if ([string]::IsNullOrEmpty($NIP)) { continue }
-                                    $InScope = $false
                                     # Behavior change: this used to be a bare StartsWith, so a
                                     # configured scope like "10.1" also matched "10.19.5.5" (a
                                     # plain string prefix match, no octet boundary). Now the
@@ -348,10 +369,7 @@ function Invoke-FleetCrawl {
                                     # "131.30." style) so that still matches correctly instead
                                     # of requiring a doubled "..". Any existing -AllowedScopes
                                     # config should be reviewed against this stricter behavior.
-                                    foreach ($Scope in $AllowedScopes) {
-                                        $ScopeTrimmed = $Scope.TrimEnd('.')
-                                        if ($NIP -eq $ScopeTrimmed -or $NIP.StartsWith("$ScopeTrimmed.")) { $InScope = $true; break }
-                                    }
+                                    $InScope = Test-IpInAllowedScopes -IP $NIP -AllowedScopes $AllowedScopes
 
                                     if ($InScope -and !$Visited.Contains($NIP) -and !$Enqueued.Contains($NIP)) {
                                         $Queue.Enqueue($NIP)

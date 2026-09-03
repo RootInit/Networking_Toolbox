@@ -29,8 +29,14 @@ function Send-WebResponse {
     $Response.StatusCode = $StatusCode
     $Response.ContentType = $ContentType
     $Response.ContentLength64 = $Bytes.Length
-    $Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
-    $Response.OutputStream.Close()
+    try {
+        $Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
+    } finally {
+        # Best-effort: if the client already disconnected mid-write, Close() can itself
+        # throw - that must not mask the original Write failure (or, if Write succeeded,
+        # silently look like a request failure when it wasn't).
+        try { $Response.OutputStream.Close() } catch {}
+    }
 }
 
 function Send-WebJson {
@@ -171,7 +177,7 @@ function Invoke-ConnectAction {
 # Invoke-RescanStatusAction for the result. Only one rescan may be in-flight at a time
 # (hygiene, not a security boundary - the analyst already has SSH access via /api/connect).
 function Invoke-RescanAction {
-    param($Response, [string]$Body, [string]$WorkerPath, [string]$JunosUsername, [string]$JunosPassword)
+    param($Response, [string]$Body, [string]$WorkerPath, [string]$JunosUsername, [string]$JunosPassword, [string[]]$AllowedScopes)
 
     if ([string]::IsNullOrWhiteSpace($JunosUsername) -or [string]::IsNullOrWhiteSpace($JunosPassword)) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "No Juniper login configured - set it in the Settings tab, then try again." }
@@ -184,6 +190,14 @@ function Invoke-RescanAction {
 
     if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing IP address" }
+        return
+    }
+
+    # AllowedScopes is enforced on every crawl-discovered neighbor IP (FleetCrawl.ps1's
+    # Test-IpInAllowedScopes) - a manually-triggered rescan target must be held to the same
+    # fence, or a typo'd/out-of-scope IP would reach an SSH login with saved credentials.
+    if (-not (Test-IpInAllowedScopes -IP $TargetIP -AllowedScopes $AllowedScopes)) {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes" }
         return
     }
 
@@ -563,6 +577,15 @@ function Invoke-ScanNetworkAction {
 
     if (-not $StartIP -or $StartIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing starting IP address" }
+        return
+    }
+
+    # AllowedScopes is enforced on every crawl-discovered neighbor IP (FleetCrawl.ps1's
+    # Test-IpInAllowedScopes) - a manually-entered entry-point IP must be held to the same
+    # fence, or a typo'd/out-of-scope IP would reach an SSH login with saved credentials
+    # before the crawl ever gets a chance to apply scope filtering.
+    if (-not (Test-IpInAllowedScopes -IP $StartIP -AllowedScopes $AllowedScopes)) {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes" }
         return
     }
 
@@ -953,22 +976,35 @@ function Start-MapperWebServer {
     # longer than a ping) keeps occupying a runspace indefinitely. With a 1-slot pool that
     # silently wedges every future rescan behind the zombie job forever; the spare slots give
     # headroom to absorb that instead.
-    $script:RescanPool = [runspacefactory]::CreateRunspacePool(1, 3)
-    $script:RescanPool.Open()
-    $script:PendingScan = $null
-    $script:OrphanedScans = [System.Collections.Generic.List[object]]::new()
-    $script:PendingScanNetwork = $null
-    # Backs /api/ping. Only one ping is ever in flight at the HTTP level ($script:PendingPing
-    # gates that with a 409), but the pool itself is sized to 3, not 1: an orphaned ping
-    # (Invoke-PingStatusAction's 20s timeout) is never force-stopped - see the comment there -
-    # so a genuinely hung ping (e.g. the PS 5.1 Test-Connection branch above has no
-    # -TimeoutSeconds bound at all) keeps occupying a runspace indefinitely. With a 1-slot pool
-    # that silently wedges every future ping behind the zombie job forever; the spare slots
-    # give headroom to absorb that instead.
-    $script:PingPool = [runspacefactory]::CreateRunspacePool(1, 3)
-    $script:PingPool.Open()
-    $script:PendingPing = $null
-    $script:OrphanedPings = [System.Collections.Generic.List[object]]::new()
+    # Both pools' .Open() calls happen before the function's main try/finally below (which
+    # is what disposes them on the way out) - if the second .Open() throws, nothing would
+    # otherwise close the already-Start()ed $Listener or dispose the first pool, since the
+    # exception would propagate straight out of this function with no cleanup at all. Guard
+    # this setup with its own try/catch that tears down whatever was already created.
+    try {
+        $script:RescanPool = [runspacefactory]::CreateRunspacePool(1, 3)
+        $script:RescanPool.Open()
+        $script:PendingScan = $null
+        $script:OrphanedScans = [System.Collections.Generic.List[object]]::new()
+        $script:PendingScanNetwork = $null
+        # Backs /api/ping. Only one ping is ever in flight at the HTTP level ($script:PendingPing
+        # gates that with a 409), but the pool itself is sized to 3, not 1: an orphaned ping
+        # (Invoke-PingStatusAction's 20s timeout) is never force-stopped - see the comment there -
+        # so a genuinely hung ping (e.g. the PS 5.1 Test-Connection branch above has no
+        # -TimeoutSeconds bound at all) keeps occupying a runspace indefinitely. With a 1-slot pool
+        # that silently wedges every future ping behind the zombie job forever; the spare slots
+        # give headroom to absorb that instead.
+        $script:PingPool = [runspacefactory]::CreateRunspacePool(1, 3)
+        $script:PingPool.Open()
+        $script:PendingPing = $null
+        $script:OrphanedPings = [System.Collections.Generic.List[object]]::new()
+    } catch {
+        try { if ($script:PingPool) { $script:PingPool.Close(); $script:PingPool.Dispose() } } catch {}
+        try { if ($script:RescanPool) { $script:RescanPool.Close(); $script:RescanPool.Dispose() } } catch {}
+        try { $Listener.Stop() } catch {}
+        try { $Listener.Close() } catch {}
+        throw
+    }
     # -JunosUsername/-JunosPassword are only the seed (decrypted once at startup).
     # Script-scoped so Invoke-SaveConfigAction can update them live when credentials are
     # saved from the Settings tab, without requiring a process restart.
@@ -1048,7 +1084,7 @@ function Start-MapperWebServer {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
                     } else {
                         $Body = Read-WebRequestBody -Request $Request
-                        Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword
+                        Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -AllowedScopes $AllowedScopes
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
