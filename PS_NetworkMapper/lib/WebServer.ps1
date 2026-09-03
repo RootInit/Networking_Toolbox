@@ -143,7 +143,7 @@ function Invoke-ConnectAction {
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
     $TargetIP = if ($Parsed) { [string]$Parsed.ip } else { $null }
 
-    if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+    if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing IP address" }
         return
     }
@@ -182,7 +182,7 @@ function Invoke-RescanAction {
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
     $TargetIP = if ($Parsed) { [string]$Parsed.ip } else { $null }
 
-    if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+    if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing IP address" }
         return
     }
@@ -265,7 +265,7 @@ function Invoke-PingAction {
 
     # Strict dotted-quad check - stops this from becoming a generic "resolve and probe
     # anything" endpoint (a hostname, a flag-looking string, etc.).
-    if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+    if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing IP address" }
         return
     }
@@ -386,6 +386,20 @@ function Invoke-PingStatusAction {
             try {
                 $Result = $Job.PS.EndInvoke($Job.Handle)
 
+                # Non-terminating errors/warnings inside the worker don't fail EndInvoke and
+                # would otherwise never surface anywhere - same reasoning as Invoke-FleetCrawl's
+                # drain of these streams for its worker jobs.
+                if ($Job.PS.HadErrors) {
+                    foreach ($ErrRecord in $Job.PS.Streams.Error) {
+                        Write-MapperDebugLog "PING ERROR STREAM [$($Job.IP)] $ErrRecord"
+                    }
+                }
+                if ($Job.PS.Streams.Warning.Count -gt 0) {
+                    foreach ($WarnRecord in $Job.PS.Streams.Warning) {
+                        Write-MapperDebugLog "PING WARNING STREAM [$($Job.IP)] $WarnRecord"
+                    }
+                }
+
                 # Index explicitly ($Result[0]), not by dotting into $Result, matching
                 # Invoke-ScanNetworkStatusAction's convention - member enumeration on a 1-item
                 # collection would still work for these two scalar properties, but indexing keeps
@@ -447,6 +461,20 @@ function Invoke-RescanStatusAction {
         if (-not $Job.Collected) {
             try {
                 $Result = $Job.PS.EndInvoke($Job.Handle)
+
+                # Non-terminating errors/warnings inside the worker don't fail EndInvoke and
+                # would otherwise never surface anywhere - same reasoning as Invoke-FleetCrawl's
+                # drain of these streams for its worker jobs.
+                if ($Job.PS.HadErrors) {
+                    foreach ($ErrRecord in $Job.PS.Streams.Error) {
+                        Write-MapperDebugLog "RESCAN ERROR STREAM [$($Job.IP)] $ErrRecord"
+                    }
+                }
+                if ($Job.PS.Streams.Warning.Count -gt 0) {
+                    foreach ($WarnRecord in $Job.PS.Streams.Warning) {
+                        Write-MapperDebugLog "RESCAN WARNING STREAM [$($Job.IP)] $WarnRecord"
+                    }
+                }
 
                 # Success/failure decided here from the CRITICAL log-line signal
                 # Get-JunosNodeData.ps1 emits, not inferred by the browser. ok:false omits
@@ -533,7 +561,7 @@ function Invoke-ScanNetworkAction {
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
     $StartIP = if ($Parsed -and $Parsed.startIp) { [string]$Parsed.startIp } else { $null }
 
-    if (-not $StartIP -or $StartIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$') {
+    if (-not $StartIP -or $StartIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing starting IP address" }
         return
     }
@@ -784,7 +812,7 @@ function Invoke-SaveConfigAction {
     # "Invalid username: ...".
     if ($Parsed.credentials) {
         $NewUsername = [string]$Parsed.credentials.username
-        if ($NewUsername -and $NewUsername -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$') {
+        if ($NewUsername -and $NewUsername -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}\z') {
             Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid username: must start with a letter or digit and contain only letters, digits, '.', '_', or '-'" }
             return
         }
