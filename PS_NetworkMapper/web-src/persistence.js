@@ -5,6 +5,28 @@
 // from a fresh set of snapshots and it rebuilds. Reads `loadedSnapshots`/`activeSnapshotIndex`
 // (app.js) and calls window.renderCrawlAge/window.setStatus (utils.js).
 
+// --- Dark Mode (see .settings-toggle-row in index.html) ---
+// Client-only preference, deliberately separate from the server-synced settings below it -
+// localStorage, not Configuration.json.enc. The actual theme is applied by the inline boot
+// script in index.html's <head> (stamps data-theme before first paint, avoiding a flash of
+// the wrong theme); this just keeps the checkbox and localStorage in sync with it afterward.
+window.initDarkModeToggle = function() {
+    var checkbox = document.getElementById('setting-darkMode');
+    if (!checkbox) return;
+    checkbox.checked = document.documentElement.getAttribute('data-theme') === 'dark';
+    checkbox.addEventListener('change', function() {
+        var dark = checkbox.checked;
+        document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+        try { localStorage.setItem('darkMode', dark ? 'dark' : 'light'); } catch (e) {}
+        // Everything else is plain CSS and repaints on its own - the trend chart is the one
+        // view drawn to a <canvas> (see window.renderTrendChart in dashboard.js), which reads
+        // theme colors at draw time and needs an explicit re-render to pick up the flip.
+        var trendsTab = document.getElementById('analysis-tab-trends');
+        if (trendsTab && trendsTab.classList.contains('active')) window.renderTrendChart();
+    });
+};
+document.addEventListener('DOMContentLoaded', window.initDarkModeToggle);
+
 // --- Configurable Thresholds (see #sidebar-tab-settings) ---
 
 // Threshold + graph-layout settings, persisted in the encrypted Configuration.json.enc (via

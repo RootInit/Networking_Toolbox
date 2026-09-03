@@ -547,3 +547,17 @@ test('computeRecursiveRadialLayout never divides by zero when minRadius is 0 and
     assert.equal(Number.isFinite(p.x) && Number.isFinite(p.y), true, `${id} position was {x: ${p.x}, y: ${p.y}}, expected finite numbers`);
   }
 });
+
+test('computeRecursiveRadialLayout throws once an already-past opts.deadline is checked, rather than running to completion regardless (regression: elk-layout.js used to race this call against a setTimeout to enforce an 8s budget, which cannot work - JS is single-threaded, so the timer cannot preempt this synchronous call no matter how long it runs; the only way to actually bound wall-clock time is a check from inside the computation itself, which is what opts.deadline is for)', () => {
+  const childrenOf = new Map([['root', Array.from({ length: 20 }, (_, i) => `child${i}`)]]);
+  assert.throws(
+    () => computeRecursiveRadialLayout('root', childrenOf, { deadline: Date.now() - 1 }),
+    /time budget/
+  );
+});
+
+test('computeRecursiveRadialLayout completes normally when opts.deadline is omitted or comfortably in the future (no accidental throw on the ordinary, unbounded-budget path every other caller/test relies on)', () => {
+  const childrenOf = new Map([['root', ['a', 'b', 'c']]]);
+  assert.doesNotThrow(() => computeRecursiveRadialLayout('root', childrenOf, {}));
+  assert.doesNotThrow(() => computeRecursiveRadialLayout('root', childrenOf, { deadline: Date.now() + 60000 }));
+});

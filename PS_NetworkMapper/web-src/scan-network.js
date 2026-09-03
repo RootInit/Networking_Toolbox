@@ -57,6 +57,8 @@ function bestStartIpFromActiveSnapshot() {
 
 window.startNetworkScan = async function() {
     var btn = document.getElementById('scanNetworkBtn');
+    var loadBtn = document.getElementById('loadBtn');
+    var loadFolderBtn = document.getElementById('loadFolderBtn');
     var startIp;
 
     if (loadedSnapshots.length === 0) {
@@ -80,14 +82,23 @@ window.startNetworkScan = async function() {
 
     // window.setStatus mirrors to #mapStatusNote when #status-text isn't visible, so scan
     // messages are seen even if the user switched tabs mid-scan.
+    // Also re-enables loadBtn/loadFolderBtn - they're disabled below for the whole scan
+    // (not just once processSelectedFiles takes over at the end) so a Load click can't
+    // start reading files while a scan the user is about to load is still in flight.
+    // processSelectedFiles has its own generation guard against the two racing regardless,
+    // but blocking the click here avoids wasted work and a confusing status-line back-and-forth.
     function finish(msg, color) {
         if (scanNetworkPollTimer) { clearTimeout(scanNetworkPollTimer); scanNetworkPollTimer = null; }
         if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
+        if (loadBtn) loadBtn.disabled = false;
+        if (loadFolderBtn) loadFolderBtn.disabled = false;
         window.setStatus(msg, color);
     }
 
     try {
         if (btn) { btn.disabled = true; btn.textContent = 'Starting scan...'; }
+        if (loadBtn) loadBtn.disabled = true;
+        if (loadFolderBtn) loadFolderBtn.disabled = true;
         var resp = await fetch('/api/scan-network', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

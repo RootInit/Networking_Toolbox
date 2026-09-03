@@ -4,7 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Enterprise Network Visualizer</title>
-    
+
+    <!-- Stamps data-theme on <html> before the <style> block below is even parsed, so the
+         dark override rules apply from first paint - doing this later (e.g. in app.js) would
+         show a flash of the wrong theme while the rest of the scripts load. Persisted choice
+         (window.setDarkMode in persistence.js) wins; otherwise follows the OS setting. -->
+    <script>
+        (function() {
+            try {
+                var saved = localStorage.getItem('darkMode'); // 'dark' | 'light' | null (unset - follow OS)
+                var dark = saved ? saved === 'dark' : (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+                document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+            } catch (e) {}
+        })();
+    </script>
+
     <!-- Load Vis.js (vendored: PS_NetworkMapper/web-src/vendor/vis-network.min.js, v9.1.9 pinned) -->
     <script type="text/javascript" src="vendor/vis-network.min.js"></script>
     <!-- Classic scripts (not ES modules) so this page works under file:// with no local
@@ -22,7 +36,35 @@
     <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 
     <style>
-        :root { --primary: #2c3e50; --accent: #2B7CE9; --bg: #f4f6f9; --panel-bg: #ffffff; --border: #e0e0e0; }
+        :root {
+            --primary: #2c3e50; --accent: #2B7CE9; --bg: #f4f6f9; --panel-bg: #ffffff; --border: #e0e0e0;
+            /* Text tiers: --heading is var(--primary)'s TEXT-color role (headings, emphasized
+               labels) - kept distinct from --primary itself, which stays the dark-navy
+               BACKGROUND used by .drawer-header/.c-vlan (already readable on any theme, so it
+               never needs a dark-mode override; only the heading-as-text usages do). */
+            --text: #333333; --text-muted: #666666; --text-dim: #888888; --heading: var(--primary);
+            /* Neutral fills: --subtle-bg covers every light-gray panel/section/hover
+               (#fafafa/#f7f9fb/#f0f0f0/#eee-as-bg family); --hover-accent-bg is the blue-tinted
+               hover (#eef4fd/#eef2f7 family) used on interactive rows. */
+            --subtle-bg: #f7f9fb; --hover-accent-bg: #eef4fd; --hover-neutral-bg: #eeeeee;
+            /* Status pairs: bg+text (+border where used) kept together so a dark override
+               never mismatches a light background with light foreground text. */
+            --success-bg: #eafaf1; --success-text: #1e7a45;
+            --danger-bg: #fdecea; --danger-text: #c0392b; --danger-border: #f5c6c2;
+            --warn-bg: #fff8e1; --warn-text: #7a6224;
+            color-scheme: light;
+        }
+        /* Stamped onto <html> before first paint by the boot script below (see <head>) -
+           reading localStorage synchronously there avoids a flash of the wrong theme. */
+        :root[data-theme="dark"] {
+            --bg: #14161a; --panel-bg: #1c1f26; --border: #3a3f4a;
+            --text: #e4e6ea; --text-muted: #9aa3b0; --text-dim: #7b8592; --heading: #7fa8d9;
+            --subtle-bg: #232833; --hover-accent-bg: #253247; --hover-neutral-bg: #2a2f3a;
+            --success-bg: #16301f; --success-text: #6fcf97;
+            --danger-bg: #3a1f1d; --danger-text: #e8796c; --danger-border: #6b3a35;
+            --warn-bg: #332b12; --warn-text: #d9ae5c;
+            color-scheme: dark;
+        }
         /* overflow:hidden only hides the scrollbar and blocks user-driven scroll gestures -
            it does NOT stop an element from being scrolled programmatically, including the
            browser's own default scroll-into-view on focus. vis-network calls
@@ -34,7 +76,7 @@
            both axes - use it instead on both html and body so no future focus()/
            scrollIntoView() call anywhere can do this again.  */
         html { height: 100%; overflow: clip; }
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; width: 100vw; overflow: clip; background-color: var(--bg); color: #333; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; width: 100vw; overflow: clip; background-color: var(--bg); color: var(--text); }
         
         /* Layout Panels */
         #left-panel { width: 400px; min-width: 400px; padding: 0; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: row; box-sizing: border-box; position: relative; transition: width 0.15s ease, min-width 0.15s ease; }
@@ -53,9 +95,13 @@
            strip/content when expanded (bordering the graph canvas it show/hides, not the
            outer window edge) - when collapsed it's the only thing left, so it's still what
            renders at the panel's edge either way. */
-        #panel-handle { flex: 0 0 18px; width: 18px; display: flex; align-items: center; justify-content: center; cursor: pointer; background-color: #eef1f5; background-image: repeating-linear-gradient(180deg, rgba(44,62,80,0.16) 0px, rgba(44,62,80,0.16) 2px, transparent 2px, transparent 7px); border-left: 1px solid var(--border); box-sizing: border-box; }
-        #panel-handle:hover { background-color: #e3e9f0; }
-        #panelToggleIcon { transition: transform 0.15s ease; color: var(--primary); pointer-events: none; }
+        #panel-handle { flex: 0 0 18px; width: 18px; display: flex; align-items: center; justify-content: center; cursor: pointer; background-color: var(--hover-accent-bg); background-image: repeating-linear-gradient(180deg, rgba(44,62,80,0.16) 0px, rgba(44,62,80,0.16) 2px, transparent 2px, transparent 7px); border-left: 1px solid var(--border); box-sizing: border-box; }
+        #panel-handle:hover { background-color: var(--hover-neutral-bg); }
+        /* The grip texture's tick color is a literal rgba (not a var - it's a translucent
+           overlay, not a flat fill), so it needs its own dark-mode swap: navy ticks at 16%
+           opacity are barely visible against an already-dark handle background. */
+        :root[data-theme="dark"] #panel-handle { background-image: repeating-linear-gradient(180deg, rgba(220,228,240,0.14) 0px, rgba(220,228,240,0.14) 2px, transparent 2px, transparent 7px); }
+        #panelToggleIcon { transition: transform 0.15s ease; color: var(--heading); pointer-events: none; }
         #left-panel.collapsed #panelToggleIcon { transform: rotate(180deg); }
 
         /* Collapsed left panel: only the handle remains, at its own slim width. */
@@ -80,42 +126,52 @@
         #right-panel-handle:hover, #right-panel-handle.dragging { background: var(--accent); opacity: 0.4; }
         body.resizing-right-panel { cursor: col-resize; user-select: none; }
         
-        #mynetwork { width: 100%; height: 100%; background: #ffffff; }
-        
+        #mynetwork { width: 100%; height: 100%; background: var(--panel-bg); }
+
         /* Left Panel Controls */
         .control-group { margin-bottom: 25px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
-        h2 { font-size: 1.1rem; margin-top: 0; color: var(--primary); margin-bottom: 10px; }
-        input, select, button { width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 10px; border: 1px solid #ccc; border-radius: 4px; font-size: 0.9rem; }
-        
+        h2 { font-size: 1.1rem; margin-top: 0; color: var(--heading); margin-bottom: 10px; }
+        input, select, button { width: 100%; box-sizing: border-box; padding: 8px; margin-bottom: 10px; border: 1px solid var(--border); border-radius: 4px; font-size: 0.9rem; }
+        /* Native form-control chrome (text fields, <select>, its dropdown, checkboxes) only
+           follows the page's colors automatically via color-scheme (set on :root above) if
+           the control itself doesn't paint over that with an explicit light background -
+           browsers don't do it for free otherwise. */
+        input, select { background-color: var(--panel-bg); color: var(--text); }
+
         button { background-color: var(--accent); color: white; font-weight: bold; cursor: pointer; border: none; transition: 0.2s; }
         button:hover { background-color: #1e5cba; }
-        button:disabled { background-color: #cccccc; cursor: not-allowed; }
+        button:disabled { background-color: #555b66; }
+        :root:not([data-theme="dark"]) button:disabled { background-color: #cccccc; }
 
         #globalSearch { border: 2px solid var(--accent); }
 
         .search-fields { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 2px 0 10px; }
-        .search-fields label { display: flex; align-items: center; gap: 4px; width: auto; font-size: 0.75rem; font-weight: normal; color: #555; cursor: pointer; margin: 0; }
+        .search-fields label { display: flex; align-items: center; gap: 4px; width: auto; font-size: 0.75rem; font-weight: normal; color: var(--text-muted); cursor: pointer; margin: 0; }
         .search-fields input { width: auto; margin: 0; padding: 0; }
 
         #searchResults:not(:empty) { display: block; max-height: 280px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; margin-bottom: 10px; }
-        .search-result { padding: 8px 10px; border-bottom: 1px solid #eee; cursor: pointer; font-size: 0.78rem; }
+        .search-result { padding: 8px 10px; border-bottom: 1px solid var(--border); cursor: pointer; font-size: 0.78rem; }
         .search-result:last-child { border-bottom: none; }
-        .search-result:hover { background: #eef4fd; }
-        .search-result .sr-device { font-weight: bold; color: var(--primary); }
-        .search-result .sr-snapshot { display:inline-block; margin-left:8px; font-size:0.68rem; font-weight:normal; color:#888; background:#eef2f7; padding:1px 6px; border-radius:10px; }
-        .search-result .sr-match { color: #777; margin-top: 2px; }
+        .search-result:hover { background: var(--hover-accent-bg); }
+        .search-result .sr-device { font-weight: bold; color: var(--heading); }
+        .search-result .sr-snapshot { display:inline-block; margin-left:8px; font-size:0.68rem; font-weight:normal; color: var(--text-dim); background: var(--subtle-bg); padding:1px 6px; border-radius:10px; }
+        .search-result .sr-match { color: var(--text-muted); margin-top: 2px; }
         .search-result .sr-match b { color: var(--accent); font-weight: bold; }
-        .search-no-results { padding: 10px; font-size: 0.8rem; color: #888; text-align: center; }
+        .search-no-results { padding: 10px; font-size: 0.8rem; color: var(--text-dim); text-align: center; }
         /* Header shown above a dashboard drill-down list (see window.drillDownStat) -
            reuses #searchResults/.search-result so a drill-down list looks and behaves
            exactly like a text search's result list. */
-        .search-results-header { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; background: #f7f9fb; border-bottom: 1px solid var(--border); font-size: 0.72rem; font-weight: bold; color: var(--primary); position: sticky; top: 0; }
+        .search-results-header { display: flex; justify-content: space-between; align-items: center; padding: 7px 10px; background: var(--subtle-bg); border-bottom: 1px solid var(--border); font-size: 0.72rem; font-weight: bold; color: var(--heading); position: sticky; top: 0; }
         .search-results-clear { font-weight: normal; color: var(--accent); cursor: pointer; }
         .search-results-clear:hover { text-decoration: underline; }
 
         /* Loading Overlay */
+        /* rgba (not var(--bg)) - the alpha channel needs to blend over whatever was on screen
+           mid-load, and only var(--bg)'s own RGB is known at dark-mode-override time, not a
+           safe-to-reuse-in-rgba() triplet. */
         #loadingBar { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(255,255,255,0.9); z-index: 999; display: none; justify-content: center; align-items: center; flex-direction: column; }
-        .progress-border { width: 400px; height: 20px; border: 1px solid #ccc; background: #eee; border-radius: 10px; overflow: hidden; }
+        :root[data-theme="dark"] #loadingBar { background: rgba(20,22,26,0.9); }
+        .progress-border { width: 400px; height: 20px; border: 1px solid var(--border); background: var(--subtle-bg); border-radius: 10px; overflow: hidden; }
         .progress-fill { width: 0%; height: 100%; background: var(--accent); transition: width 0.1s; position: relative; overflow: hidden; }
         /* Shown while a phase can't report real incremental progress (index build, layout
            compute) - those run as one uninterrupted synchronous block on the main thread
@@ -135,7 +191,7 @@
         #fatal-error-modal { position: fixed; top: 10%; left: 10%; right: 10%; background: #e74c3c; color: white; padding: 20px; z-index: 9999; border-radius: 8px; box-shadow: 0 4px 15px rgba(0,0,0,0.5); display: none; font-family: monospace; }
         #fatal-error-modal h1 { margin-top: 0; }
         #fatal-error-close { position: absolute; top: 10px; right: 20px; font-size: 20px; cursor: pointer; font-weight: bold; }
-        #fatal-error-text { color: #333; white-space: pre-wrap; word-wrap: break-word; background: #f9f9f9; padding: 10px; border: 1px solid #ccc; max-height: 400px; overflow-y: auto;}
+        #fatal-error-text { color: var(--text); white-space: pre-wrap; word-wrap: break-word; background: var(--subtle-bg); padding: 10px; border: 1px solid var(--border); max-height: 400px; overflow-y: auto;}
 
         /* Password Prompt (encrypted NetworkMap files - see window.promptForPassword) */
         #password-modal { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 9999; display: none; justify-content: center; align-items: center; }
@@ -143,12 +199,12 @@
         #password-modal-box .drawer-header { padding: 14px 18px; }
         #password-modal-box .drawer-header h2 { font-size: 1.05rem; }
         #password-modal-body { padding: 18px; }
-        #password-modal-body p { margin: 0 0 12px; font-size: 0.85rem; color: #666; }
-        #password-error { display: none; background: #fdecea; color: #c0392b; border: 1px solid #f5c6c2; border-radius: 4px; padding: 8px 10px; font-size: 0.8rem; margin-bottom: 12px; }
+        #password-modal-body p { margin: 0 0 12px; font-size: 0.85rem; color: var(--text-muted); }
+        #password-error { display: none; background: var(--danger-bg); color: var(--danger-text); border: 1px solid var(--danger-border); border-radius: 4px; padding: 8px 10px; font-size: 0.8rem; margin-bottom: 12px; }
         #password-modal-actions { display: flex; gap: 10px; margin-top: 4px; }
         #password-modal-actions button { flex: 1; width: auto; margin-bottom: 0; }
-        #password-cancel-btn { background: #eee; color: #333; }
-        #password-cancel-btn:hover { background: #ddd; }
+        #password-cancel-btn { background: var(--hover-neutral-bg); color: var(--text); }
+        #password-cancel-btn:hover { background: var(--border); }
 
         /* Multi-Snapshot Analysis (New Devices / Trends - see window.refreshAnalysisDashboard).
            Lives inline in the Analysis Dashboard sidebar tab, not an overlay. */
@@ -161,32 +217,38 @@
 
         /* Fleet Health Dashboard (see window.renderFleetDashboard) */
         .fleet-stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 12px; margin-bottom: 22px; }
-        .fleet-stat-card { background: #fafafa; border: 1px solid var(--border); border-radius: 6px; padding: 14px; text-align: center; }
+        .fleet-stat-card { background: var(--subtle-bg); border: 1px solid var(--border); border-radius: 6px; padding: 14px; text-align: center; }
         .fleet-stat-card.drillable { cursor: pointer; transition: 0.15s; }
-        .fleet-stat-card.drillable:hover { background: #eef4fd; border-color: var(--accent); }
-        .fleet-stat-card .stat-value { font-size: 1.6rem; font-weight: bold; color: var(--primary); }
-        .fleet-stat-card .stat-label { font-size: 0.7rem; color: #888; text-transform: uppercase; letter-spacing: 0.03em; margin-top: 4px; }
-        .fleet-stat-card.critical .stat-value { color: #c0392b; }
-        .fleet-stat-card.warn .stat-value { color: #d68910; }
+        .fleet-stat-card.drillable:hover { background: var(--hover-accent-bg); border-color: var(--accent); }
+        .fleet-stat-card .stat-value { font-size: 1.6rem; font-weight: bold; color: var(--heading); }
+        .fleet-stat-card .stat-label { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; margin-top: 4px; }
+        .fleet-stat-card.critical .stat-value { color: var(--danger-text); }
+        .fleet-stat-card.warn .stat-value { color: var(--warn-text); }
         .fleet-dashboard-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 0 32px; }
         .fleet-section { margin-bottom: 22px; }
-        .fleet-section h3 { font-size: 0.85rem; margin: 0 0 8px; color: var(--primary); text-transform: uppercase; letter-spacing: 0.02em; }
-        .fleet-list-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid #f0f0f0; font-size: 0.83rem; }
+        .fleet-section h3 { font-size: 0.85rem; margin: 0 0 8px; color: var(--heading); text-transform: uppercase; letter-spacing: 0.02em; }
+        .fleet-list-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.83rem; }
         .fleet-list-row:last-child { border-bottom: none; }
-        .fleet-list-empty { color: #999; font-size: 0.83rem; font-style: italic; padding: 4px 0; }
+        .fleet-list-empty { color: var(--text-dim); font-size: 0.83rem; font-style: italic; padding: 4px 0; }
 
         /* Configurable Thresholds + Layout (see window.populateSettingsInputs) - lives
            inline in the Settings sidebar tab, not an overlay. */
-        .settings-subhead { font-size: 0.7rem; font-weight: bold; color: #888; text-transform: uppercase; letter-spacing: 0.03em; margin: 18px 0 10px; }
+        .settings-subhead { font-size: 0.7rem; font-weight: bold; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; margin: 18px 0 10px; }
         .settings-subhead:first-child { margin-top: 0; }
         .settings-row { margin-bottom: 14px; }
-        .settings-row label { display: block; font-size: 0.78rem; font-weight: bold; color: #555; margin-bottom: 5px; }
+        .settings-row label { display: block; font-size: 0.78rem; font-weight: bold; color: var(--text-muted); margin-bottom: 5px; }
         .settings-pair { display: flex; gap: 8px; }
         .settings-pair input { margin-bottom: 0; }
+        /* Dark Mode toggle row (see window.initDarkModeToggle in persistence.js) - a plain
+           checkbox row like .search-fields label, not wired into the server-synced settings
+           form below it (localStorage only, not part of Configuration.json). */
+        .settings-toggle-row { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
+        .settings-toggle-row input { width: auto; margin: 0; padding: 0; border: none; }
+        .settings-toggle-row label { font-size: 0.85rem; font-weight: bold; color: var(--text); cursor: pointer; }
         #settings-actions { display: flex; gap: 8px; margin-top: 4px; }
         #settings-actions button { flex: 1; width: auto; margin-bottom: 0; padding: 8px 6px; font-size: 0.8rem; }
-        #settings-reset-btn { background: #eee; color: #333; }
-        #settings-reset-btn:hover { background: #ddd; }
+        #settings-reset-btn { background: var(--hover-neutral-bg); color: var(--text); }
+        #settings-reset-btn:hover { background: var(--border); }
 
         /* Sidebar tabs (Load File / Search / Settings / Analysis Dashboard) - a third,
            distinct tab pair alongside .tab (device drawer) and .analysis-tab (Analysis
@@ -196,9 +258,9 @@
            rotates the label text; the extra rotate(180deg) makes it read bottom-to-top,
            the usual convention for a left-docked vertical tab strip. */
         .sidebar-tabs { flex: 0 0 34px; width: 34px; display: flex; flex-direction: column; border-right: 1px solid var(--border); box-sizing: border-box; }
-        .sidebar-tab { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 10px 4px; cursor: pointer; font-size: 0.68rem; font-weight: bold; color: #666; border-right: 3px solid transparent; transition: 0.2s; writing-mode: vertical-rl; transform: rotate(180deg); text-align: center; box-sizing: border-box; }
-        .sidebar-tab:hover { background: #eef2f7; }
-        .sidebar-tab.active { color: var(--accent); border-right: 3px solid var(--accent); background: #fafbfc; }
+        .sidebar-tab { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 10px 4px; cursor: pointer; font-size: 0.68rem; font-weight: bold; color: var(--text-muted); border-right: 3px solid transparent; transition: 0.2s; writing-mode: vertical-rl; transform: rotate(180deg); text-align: center; box-sizing: border-box; }
+        .sidebar-tab:hover { background: var(--hover-accent-bg); }
+        .sidebar-tab.active { color: var(--accent); border-right: 3px solid var(--accent); background: var(--subtle-bg); }
         #left-panel-content { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow-y: auto; padding: 18px; box-sizing: border-box; }
         .sidebar-tab-content { display: none; flex-direction: column; min-height: 0; overflow-y: auto; }
         .sidebar-tab-content.active { display: flex; }
@@ -229,37 +291,44 @@
            configs is too large for the O(n*m) alignment - see CONFIG_DIFF_CELL_LIMIT. */
         .config-diff-table { display: table; width: 100%; border-collapse: collapse; font-family: monospace; font-size: 0.78rem; }
         .config-diff-row { display: table-row; }
+        /* brightness(0.97) darkens a hovered row - correct against a light background, wrong
+           direction against a dark one (it would read as "un-highlighted"), so dark mode
+           flips to a lighten filter instead. */
         .config-diff-row:hover { filter: brightness(0.97); }
-        .config-diff-linenum { display: table-cell; padding: 1px 8px; text-align: right; color: #999; user-select: none; white-space: nowrap; border-right: 1px solid #eee; vertical-align: top; }
+        :root[data-theme="dark"] .config-diff-row:hover { filter: brightness(1.25); }
+        .config-diff-linenum { display: table-cell; padding: 1px 8px; text-align: right; color: var(--text-dim); user-select: none; white-space: nowrap; border-right: 1px solid var(--border); vertical-align: top; }
         .config-diff-cell { display: table-cell; padding: 1px 8px; white-space: pre; vertical-align: top; }
-        .config-diff-cell.new-side { border-left: 1px solid #eee; }
-        .config-diff-row.added .config-diff-linenum.new-side, .config-diff-row.added .config-diff-cell.new-side { background: #eafaf1; color: #1e7a45; }
-        .config-diff-row.removed .config-diff-linenum.old-side, .config-diff-row.removed .config-diff-cell.old-side { background: #fdecea; color: #c0392b; }
+        .config-diff-cell.new-side { border-left: 1px solid var(--border); }
+        .config-diff-row.added .config-diff-linenum.new-side, .config-diff-row.added .config-diff-cell.new-side { background: var(--success-bg); color: var(--success-text); }
+        .config-diff-row.removed .config-diff-linenum.old-side, .config-diff-row.removed .config-diff-cell.old-side { background: var(--danger-bg); color: var(--danger-text); }
         #config-diff-content { overflow-x: auto; }
 
         .config-diff-line { padding: 1px 8px; white-space: pre-wrap; word-break: break-word; }
-        .config-diff-line.added { background: #eafaf1; color: #1e7a45; }
-        .config-diff-line.removed { background: #fdecea; color: #c0392b; }
-        .config-diff-empty { padding: 15px 20px; color: #888; font-style: italic; font-size: 0.85rem; }
-        .config-diff-header { padding: 10px 20px; background: #fff8e1; color: #7a6224; font-size: 0.8rem; border-bottom: 1px solid #eee; }
+        .config-diff-line.added { background: var(--success-bg); color: var(--success-text); }
+        .config-diff-line.removed { background: var(--danger-bg); color: var(--danger-text); }
+        .config-diff-empty { padding: 15px 20px; color: var(--text-dim); font-style: italic; font-size: 0.85rem; }
+        .config-diff-header { padding: 10px 20px; background: var(--warn-bg); color: var(--warn-text); font-size: 0.8rem; border-bottom: 1px solid var(--border); }
 
         /* Config tab's "Compare to" bar (see window.populateConfigCompareSelect /
            window.searchConfigCompareDevices in drawer.js) - a small bounded <select> for
            this same device's other captures, plus a live-search box for any other device
            across any loaded snapshot, since a flat dropdown stopped being usable once the
            fleet got large. */
-        .config-compare-bar { display: flex; flex-direction: column; gap: 8px; padding: 12px 20px; background: #fafafa; border-bottom: 1px solid #eee; }
+        .config-compare-bar { display: flex; flex-direction: column; gap: 8px; padding: 12px 20px; background: var(--subtle-bg); border-bottom: 1px solid var(--border); }
         .config-compare-row { display: flex; align-items: center; gap: 8px; }
         .config-compare-row label { font-weight: bold; white-space: nowrap; width: auto; margin: 0; }
         .config-compare-row select { width: auto; flex-grow: 1; margin: 0; }
         .config-compare-search-wrap { position: relative; }
         .config-compare-search-wrap input { margin: 0; }
-        #configCompareSearchResults:not(:empty) { display: block; max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; margin-top: 4px; background: #fff; }
+        #configCompareSearchResults:not(:empty) { display: block; max-height: 220px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; margin-top: 4px; background: var(--panel-bg); }
 
         /* Reliability heatmap (see window.renderReliabilityHeatmap) - a GitHub-contribution
            style calendar: columns are weeks, rows are Sun-Sat, each cell is one crawled day
            placed by explicit grid-row/grid-column (not auto-flow, since loaded snapshots
-           usually have gaps between days rather than a contiguous run). */
+           usually have gaps between days rather than a contiguous run). The empty-cell gray
+           and the 4 green intensity levels are given explicit dark-mode values (not the
+           generic --subtle-bg/--success-* vars) so the level progression stays visually
+           distinct as a heat scale rather than collapsing toward one flat dark-mode green. */
         .heatmap-grid { display: grid; grid-template-rows: repeat(7, 11px); grid-auto-flow: column; grid-auto-columns: 11px; gap: 2px; overflow-x: auto; padding-bottom: 8px; }
         .heatmap-cell { width: 11px; height: 11px; border-radius: 2px; background: #ebedf0; cursor: default; }
         .heatmap-cell.lvl1 { background: #c6e6d0; }
@@ -267,29 +336,35 @@
         .heatmap-cell.lvl3 { background: #2f9e5c; }
         .heatmap-cell.lvl4 { background: #1e7a45; }
         .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #c0392b inset; }
-        .heatmap-legend { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: #888; margin-top: 10px; }
+        :root[data-theme="dark"] .heatmap-cell { background: #262b35; }
+        :root[data-theme="dark"] .heatmap-cell.lvl1 { background: #234a30; }
+        :root[data-theme="dark"] .heatmap-cell.lvl2 { background: #2d7a4c; }
+        :root[data-theme="dark"] .heatmap-cell.lvl3 { background: #3fae6f; }
+        :root[data-theme="dark"] .heatmap-cell.lvl4 { background: #6fdb9c; }
+        :root[data-theme="dark"] .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #e8796c inset; }
+        .heatmap-legend { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-dim); margin-top: 10px; }
         .heatmap-legend .heatmap-cell { cursor: default; }
-        
+
         /* Tabs */
-        .tabs { display: flex; border-bottom: 1px solid var(--border); background: #fafafa; }
+        .tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--subtle-bg); }
         /* Analysis Dashboard's tab bar has grown past what one row comfortably fits at the
            panel's default width - opt it (only it, not the 7-tab device drawer bar which
            still fits in 500px) into wrapping instead of squeezing every label unreadably. */
         .tabs.wrap { flex-wrap: wrap; }
-        .tab, .analysis-tab { flex: 1; padding: 10px 4px; text-align: center; cursor: pointer; font-size: 0.74rem; font-weight: bold; color: #666; border-bottom: 3px solid transparent; transition: 0.2s; white-space: nowrap; }
-        .tab:hover, .analysis-tab:hover { background: #eee; }
-        .tab.active, .analysis-tab.active { color: var(--accent); border-bottom: 3px solid var(--accent); background: white; }
-        
-        .tab-content { display: none; flex-grow: 1; overflow-y: auto; padding: 0; background: white; height: calc(100vh - 110px); }
+        .tab, .analysis-tab { flex: 1; padding: 10px 4px; text-align: center; cursor: pointer; font-size: 0.74rem; font-weight: bold; color: var(--text-muted); border-bottom: 3px solid transparent; transition: 0.2s; white-space: nowrap; }
+        .tab:hover, .analysis-tab:hover { background: var(--hover-neutral-bg); }
+        .tab.active, .analysis-tab.active { color: var(--accent); border-bottom: 3px solid var(--accent); background: var(--panel-bg); }
+
+        .tab-content { display: none; flex-grow: 1; overflow-y: auto; padding: 0; background: var(--panel-bg); height: calc(100vh - 110px); }
         .tab-content.active { display: block; }
         
         /* Data Tables */
         table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
-        th { position: sticky; top: 0; background: #f0f0f0; padding: 8px; text-align: left; border-bottom: 2px solid #ddd; z-index: 2; }
-        td { padding: 8px; border-bottom: 1px solid #eee; word-break: break-word; }
-        tr:hover { background-color: #f9f9f9; }
-        
-        .link-btn { background: none; border: none; color: #2B7CE9; cursor: pointer; padding: 0; font-size: 0.75rem; text-decoration: underline; }
+        th { position: sticky; top: 0; background: var(--subtle-bg); padding: 8px; text-align: left; border-bottom: 2px solid var(--border); z-index: 2; }
+        td { padding: 8px; border-bottom: 1px solid var(--border); word-break: break-word; }
+        tr:hover { background-color: var(--hover-neutral-bg); }
+
+        .link-btn { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 0.75rem; text-decoration: underline; }
         .link-btn:hover { color: #1a5cb0; }
 
         .badge { padding: 2px 6px; border-radius: 3px; font-size: 0.7rem; font-weight: bold; color: white; display: inline-block;}
@@ -298,35 +373,48 @@
         .badge.gray { background-color: #7f8c8d; }
         .badge.accent { background-color: var(--accent); }
         .badge.warn-badge { background-color: #d68910; }
-        
-        .highlight { background-color: #ffff99 !important; border-left: 3px solid #f39c12 !important;}
-        
+
+        /* Search-match highlight (see resultRow's isHighlighted in drawer.js) - deliberately
+           NOT themed to --success/--danger/etc.: an unmissable, constant-across-themes yellow
+           like an editor's find-highlight. Text color must be forced on every descendant, not
+           just the row itself - drawer.js's cells carry their own inline `color:var(--...)`
+           (MAC/Dot1x-state/port-desc spans), which as a plain inline style would otherwise win
+           over a parent's color and, in dark mode, sit unreadably light-on-pale-yellow. A
+           stylesheet !important beats a non-important inline style, so this reaches them. */
+        /* color only on the wildcard - background-color would also flatten badge/vendor-tag/
+           type-badge chips (which set their own solid background) to plain yellow. */
+        .highlight { background-color: #ffff99 !important; border-left: 3px solid #f39c12 !important; color: #3a3306 !important; }
+        .highlight *:not(.badge):not(.type-badge):not(.vendor-tag):not(.daisy-badge) { color: #3a3306 !important; }
+
         .summary-grid { padding: 20px; display: grid; grid-template-columns: 1fr; gap: 15px; }
-        .summary-item { background: #fafafa; padding: 15px; border: 1px solid #eee; border-radius: 5px; }
-        .summary-item label { display: block; font-size: 0.75rem; color: #888; text-transform: uppercase; margin-bottom: 5px; }
-        .summary-item div { font-size: 1.1rem; font-weight: bold; color: #333; }
-        
-        .toggle-container { padding: 10px 15px; background: #fafafa; border-bottom: 1px solid #eee; font-size: 0.85rem; display: flex; align-items: center; }
+        .summary-item { background: var(--subtle-bg); padding: 15px; border: 1px solid var(--border); border-radius: 5px; }
+        .summary-item label { display: block; font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; margin-bottom: 5px; }
+        .summary-item div { font-size: 1.1rem; font-weight: bold; color: var(--text); }
+
+        .toggle-container { padding: 10px 15px; background: var(--subtle-bg); border-bottom: 1px solid var(--border); font-size: 0.85rem; display: flex; align-items: center; }
         .toggle-container input { width: auto; margin: 0 10px 0 0; }
-        .c-ip { font-weight: bold; color: #2B7CE9; font-size: 0.95rem; }
-        .c-mac { color: #666; font-family: monospace; font-size: 0.75rem; }
-        .c-vlan { display: inline-block; background: #2c3e50; padding: 3px 8px; border-radius: 4px; font-size: 0.7rem; color: white; font-weight: bold; width: fit-content; margin-top: 5px;}
+        .c-ip { font-weight: bold; color: var(--accent); font-size: 0.95rem; }
+        .c-mac { color: var(--text-muted); font-family: monospace; font-size: 0.75rem; }
+        .c-vlan { display: inline-block; background: var(--primary); padding: 3px 8px; border-radius: 4px; font-size: 0.7rem; color: white; font-weight: bold; width: fit-content; margin-top: 5px;}
 
         /* Crawl-age badge (how old is the loaded data - see window.renderCrawlAge) */
         .crawl-age { margin-top: 8px; padding: 6px 10px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; display: none; }
-        .crawl-age.fresh { background: #eafaf1; color: #1e7a45; }
-        .crawl-age.stale { background: #fef5e7; color: #9a6a12; }
-        .crawl-age.old { background: #fdecea; color: #c0392b; }
-        .crawl-age.unknown { background: #f0f0f0; color: #777; }
+        .crawl-age.fresh { background: var(--success-bg); color: var(--success-text); }
+        .crawl-age.stale { background: var(--warn-bg); color: var(--warn-text); }
+        .crawl-age.old { background: var(--danger-bg); color: var(--danger-text); }
+        .crawl-age.unknown { background: var(--subtle-bg); color: var(--text-muted); }
 
-        .legend-item { display: flex; align-items: center; font-size: 0.8rem; color: #555; margin-bottom: 8px; }
+        .legend-item { display: flex; align-items: center; font-size: 0.8rem; color: var(--text-muted); margin-bottom: 8px; }
         .legend-swatch { display: inline-block; width: 14px; height: 14px; border: 2px solid; margin-right: 8px; flex-shrink: 0; }
         .type-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 0.65rem; font-weight: bold; color: white; margin-left: 6px; }
         .type-badge.dynamic { background-color: #2B7CE9; }
         .type-badge.static { background-color: #8e44ad; }
 
         /* MAC vendor/category fingerprinting (see window.lookupVendor in app.js) - hover
-           for the full IEEE-registered vendor name behind the category label. */
+           for the full IEEE-registered vendor name behind the category label. Most of these
+           are solid saturated fills with white text, which read fine unchanged on a dark
+           page; vendor-other/vendor-unknown are the two near-white exceptions that need a
+           dark-mode swap so they don't sit as jarring light patches on a dark panel. */
         .vendor-tag { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 3px; font-size: 0.65rem; font-weight: bold; color: white; cursor: help; }
         .vendor-tag.vendor-network-infra { background-color: #2B7CE9; }
         .vendor-tag.vendor-phone { background-color: #16a085; }
@@ -334,6 +422,8 @@
         .vendor-tag.vendor-dock-adapter-chipset { background-color: #7f8c8d; }
         .vendor-tag.vendor-other { background-color: #bdc3c7; color: #333; }
         .vendor-tag.vendor-unknown { background-color: #ecf0f1; color: #7f8c8d; border: 1px solid #dcdfe1; }
+        :root[data-theme="dark"] .vendor-tag.vendor-other { background-color: #4a5058; color: #e4e6ea; }
+        :root[data-theme="dark"] .vendor-tag.vendor-unknown { background-color: #2a2f3a; color: #9aa3b0; border-color: #454b57; }
 
         /* Daisy-chain detection (see window.detectDaisyChains in app.js) - "confirmed"
            means an LLDP-MED phone/AP block was seen on this port, "possible" is the
@@ -395,11 +485,11 @@
         <div style="background:var(--panel-bg); width:340px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); overflow:hidden;">
             <div class="drawer-header"><h2 style="font-size:1.05rem;">Scan Network</h2></div>
             <div style="padding:18px;">
-                <p style="margin:0 0 12px; font-size:0.85rem; color:#666;">No previous scan is loaded - enter the starting switch's IP address to begin a fleet crawl.</p>
-                <div id="scan-start-ip-error" style="display:none; background:#fdecea; color:#c0392b; border:1px solid #f5c6c2; border-radius:4px; padding:8px 10px; font-size:0.8rem; margin-bottom:12px;"></div>
+                <p style="margin:0 0 12px; font-size:0.85rem; color:var(--text-muted);">No previous scan is loaded - enter the starting switch's IP address to begin a fleet crawl.</p>
+                <div id="scan-start-ip-error" style="display:none; background:var(--danger-bg); color:var(--danger-text); border:1px solid var(--danger-border); border-radius:4px; padding:8px 10px; font-size:0.8rem; margin-bottom:12px;"></div>
                 <input type="text" id="scan-start-ip-input" placeholder="e.g. 10.55.2.2" autocomplete="off">
                 <div style="display:flex; gap:10px; margin-top:4px;">
-                    <button id="scan-start-ip-cancel-btn" type="button" style="background:#eee; color:#333; flex:1; width:auto; margin-bottom:0;">Cancel</button>
+                    <button id="scan-start-ip-cancel-btn" type="button" style="background:var(--hover-neutral-bg); color:var(--text); flex:1; width:auto; margin-bottom:0;">Cancel</button>
                     <button id="scan-start-ip-confirm-btn" type="button" style="flex:1; width:auto; margin-bottom:0;">Start Scan</button>
                 </div>
             </div>
@@ -421,9 +511,9 @@
             <input type="file" id="jsonUpload" accept=".json,.enc,.json.enc" multiple>
             <button id="loadBtn" onclick="window.forceLoadFile()">Render Topology</button>
             <input type="file" id="jsonUploadFolder" webkitdirectory multiple style="display:none;" onchange="window.forceLoadFolder()">
-            <button id="loadFolderBtn" type="button" style="background:#eee; color:#333;" onclick="document.getElementById('jsonUploadFolder').click()">Load Folder of Snapshots</button>
-            <button id="scanNetworkBtn" type="button" style="background:#2c3e50; color:white;" onclick="window.startNetworkScan()">Scan Network</button>
-            <p id="status-text" style="font-size: 0.85rem; color: #666; margin: 0; font-weight: bold;">Waiting for file...</p>
+            <button id="loadFolderBtn" type="button" style="background:var(--hover-neutral-bg); color:var(--text);" onclick="document.getElementById('jsonUploadFolder').click()">Load Folder of Snapshots</button>
+            <button id="scanNetworkBtn" type="button" style="background:var(--primary); color:white;" onclick="window.startNetworkScan()">Scan Network</button>
+            <p id="status-text" style="font-size: 0.85rem; color: var(--text-muted); margin: 0; font-weight: bold;">Waiting for file...</p>
             <div id="crawl-age-badge" class="crawl-age"></div>
             <div id="snapshotSwitcherContainer" style="display:none; margin-top:10px;">
                 <label for="snapshotSwitcher" style="font-size:0.8rem; font-weight:bold; display:block; margin-bottom:4px;">Viewing snapshot:</label>
@@ -453,6 +543,16 @@
         </div>
 
         <div id="sidebar-tab-settings" class="sidebar-tab-content">
+            <div class="settings-subhead">Display</div>
+            <!-- Client-only preference (localStorage, see window.initDarkModeToggle in
+                 persistence.js) - deliberately NOT part of the server-synced form below
+                 (Save/Reset/Configuration.json.enc), since it's a per-browser UI choice, not
+                 fleet configuration. -->
+            <div class="settings-toggle-row">
+                <input type="checkbox" id="setting-darkMode">
+                <label for="setting-darkMode">Dark Mode</label>
+            </div>
+
             <div class="settings-subhead">Juniper Switch Login</div>
             <div class="settings-row">
                 <label>Username</label>
@@ -462,7 +562,7 @@
                 <label>Password</label>
                 <input type="password" id="setting-junosPassword" autocomplete="current-password">
             </div>
-            <p style="font-size:0.75rem; color:#888; margin:0 0 4px;">Optional - required for Crawl, Rescan, and Launch SSH Session. Stored in the encrypted Configuration.json.enc, same as saved device locations.</p>
+            <p style="font-size:0.75rem; color:var(--text-dim); margin:0 0 4px;">Optional - required for Crawl, Rescan, and Launch SSH Session. Stored in the encrypted Configuration.json.enc, same as saved device locations.</p>
 
             <div class="settings-subhead">Fleet Health Thresholds</div>
             <div class="settings-row">
@@ -544,7 +644,7 @@
                     <div class="fleet-stat-card drillable warn" onclick="window.drillDownStat('noauth')"><div class="stat-value" id="accounts-noauth-count">0</div><div class="stat-label">No Centralized Auth</div></div>
                     <div class="fleet-stat-card"><div class="stat-value" id="accounts-total-count">0</div><div class="stat-label">Local Accounts (Fleet)</div></div>
                 </div>
-                <p style="font-size: 0.78rem; color: #888; margin: 0 0 12px;">Every local account found in captured configs, for human review - usernames are never auto-flagged as suspicious. The one objective check made here is whether centralized RADIUS/TACACS+ authentication is configured at all.</p>
+                <p style="font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px;">Every local account found in captured configs, for human review - usernames are never auto-flagged as suspicious. The one objective check made here is whether centralized RADIUS/TACACS+ authentication is configured at all.</p>
                 <table id="accounts-table">
                     <thead><tr><th>Username</th><th>Class</th><th>Centralized Auth</th><th>Switches</th></tr></thead>
                     <tbody id="accounts-tbody"></tbody>
@@ -560,7 +660,7 @@
             </div>
 
             <div id="analysis-tab-ipspace" class="analysis-tab-content">
-                <p style="font-size: 0.78rem; color: #888; margin: 0 0 12px;">Subnet boundaries are read opportunistically from captured configs (IRB/L3-gateway lines) - only reliable if a device with that VLAN's L3 gateway was actually crawled. VLANs with no discovered boundary still show a live IP count with no fabricated percentage.</p>
+                <p style="font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px;">Subnet boundaries are read opportunistically from captured configs (IRB/L3-gateway lines) - only reliable if a device with that VLAN's L3 gateway was actually crawled. VLANs with no discovered boundary still show a live IP count with no fabricated percentage.</p>
                 <table id="ipspace-table">
                     <thead><tr><th>VLAN</th><th>Subnet</th><th>Used / Usable</th><th>Utilization</th></tr></thead>
                     <tbody id="ipspace-tbody"></tbody>
@@ -599,12 +699,16 @@
         </div>
         <div id="loadingBar">
             <div class="progress-border"><div id="progress-fill" class="progress-fill"></div></div>
-            <div id="progress-text" style="margin-top: 10px; font-weight: bold; color: #333;">Initializing Engine...</div>
+            <div id="progress-text" style="margin-top: 10px; font-weight: bold; color: var(--text);">Initializing Engine...</div>
         </div>
         <div id="mynetwork"></div>
         <div id="mapview" style="display:none; position:absolute; inset:0; top:40px;"></div>
-        <div id="mapUnplacedPanel" style="display:none; position:absolute; top:50px; left:10px; z-index:1001; background:white; border:1px solid var(--border); border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.15); max-width:320px; max-height:60vh; overflow-y:auto;">
-            <div style="padding:8px 12px; font-weight:bold; font-size:0.85rem; border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; gap:8px; cursor:pointer;" onclick="window.toggleUnplacedPanel()">
+        <!-- Deliberately NOT theme-var'd (background/border/text all pinned light literals,
+             like .map-marker-label) - this panel floats over the Map view's tiles, which stay
+             light in both themes (see map.js's header comment), so it must too or a dark
+             panel would clash with the light map underneath it. -->
+        <div id="mapUnplacedPanel" style="display:none; position:absolute; top:50px; left:10px; z-index:1001; background:white; color:#333; border:1px solid #e0e0e0; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.15); max-width:320px; max-height:60vh; overflow-y:auto;">
+            <div style="padding:8px 12px; font-weight:bold; font-size:0.85rem; border-bottom:1px solid #e0e0e0; display:flex; justify-content:space-between; align-items:center; gap:8px; cursor:pointer;" onclick="window.toggleUnplacedPanel()">
                 <span id="mapUnplacedCount">0 devices with no location set</span>
                 <button type="button" id="mapUnplacedExportBtn" style="display:none; width:auto; margin:0; padding:3px 8px; font-size:0.68rem; font-weight:normal;" title="Export this list (hostname, serial, model, etc.) as a CSV" onclick="event.stopPropagation(); window.exportUnplacedDevicesCsv();">Export CSV</button>
                 <span id="mapUnplacedToggleIcon">&#9660;</span>
@@ -619,7 +723,7 @@
         <div style="background:var(--panel-bg); width:360px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); overflow:hidden; pointer-events:auto;">
             <div class="drawer-header"><h2 id="editorDeviceLabel">Set Location</h2></div>
             <div style="padding:18px;">
-                <p style="font-size:0.82rem; color:#666; margin:0 0 12px;">Click a spot on the map to place this device, or type coordinates directly below, then fill in the details.</p>
+                <p style="font-size:0.82rem; color:var(--text-muted); margin:0 0 12px;">Click a spot on the map to place this device, or type coordinates directly below, then fill in the details.</p>
                 <!-- type="text", no inputmode, not type="number": longitude can be negative,
                      but type="number" and inputmode="decimal" virtual keypads both omit the
                      minus key (the HTML spec defines "decimal" as non-negative). Plain text
@@ -636,7 +740,7 @@
                 <label style="font-size:0.8rem; font-weight:bold;">Notes</label>
                 <input type="text" id="editorNotes" placeholder="Notes">
                 <div style="display:flex; gap:10px; margin-top:4px;">
-                    <button type="button" id="editorCancelBtn" style="background:#eee; color:#333;" onclick="window.closeLocationEditor()">Cancel</button>
+                    <button type="button" id="editorCancelBtn" style="background:var(--hover-neutral-bg); color:var(--text);" onclick="window.closeLocationEditor()">Cancel</button>
                     <button type="button" id="editorSaveBtn" onclick="window.commitLocationEdit()">Set Pin</button>
                 </div>
             </div>

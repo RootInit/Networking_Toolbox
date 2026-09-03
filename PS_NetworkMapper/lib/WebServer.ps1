@@ -209,7 +209,14 @@ function Invoke-RescanAction {
     $JobId = [guid]::NewGuid().ToString()
     $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $TargetIP).AddParameter("Username", $JunosUsername).AddParameter("Password", $JunosPassword)
     $PS.RunspacePool = $script:RescanPool
-    $Handle = $PS.BeginInvoke()
+    # $PS isn't reachable from $script:PendingScan until BeginInvoke succeeds below - if it
+    # throws, dispose it here or it leaks (nothing else references it to clean up later).
+    try {
+        $Handle = $PS.BeginInvoke()
+    } catch {
+        $PS.Dispose()
+        throw
+    }
 
     $script:PendingScan = [PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $TargetIP; JobId = $JobId; StartTime = (Get-Date) }
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; jobId = $JobId; ip = $TargetIP }
@@ -384,10 +391,18 @@ function Invoke-ScanNetworkAction {
     $FleetCrawlPath = Join-Path $PSScriptRoot "FleetCrawl.ps1"
     $InitialState.StartupScripts.Add($FleetCrawlPath) | Out-Null
     $Runspace = [runspacefactory]::CreateRunspace($InitialState)
-    $Runspace.Open()
-    $PS.Runspace = $Runspace
-
-    $Handle = $PS.BeginInvoke()
+    # $PS/$Runspace aren't reachable from $script:PendingScanNetwork until BeginInvoke
+    # succeeds below - if Open()/BeginInvoke() throws, dispose both here or they leak
+    # (nothing else references them to clean up later).
+    try {
+        $Runspace.Open()
+        $PS.Runspace = $Runspace
+        $Handle = $PS.BeginInvoke()
+    } catch {
+        $PS.Dispose()
+        $Runspace.Dispose()
+        throw
+    }
     # Collected/Outcome: filled in once by Invoke-ScanNetworkStatusAction on first
     # completion so the result can be re-served idempotently to later polls.
     $script:PendingScanNetwork = [PSCustomObject]@{ PS = $PS; Runspace = $Runspace; Handle = $Handle; StartIP = $StartIP; StartTime = (Get-Date); ProgressTable = $ProgressTable; Collected = $false; Outcome = $null }
@@ -492,6 +507,48 @@ function Invoke-GetConfigAction {
 function Invoke-GetSessionPasswordAction {
     param($Response, [string]$EncryptionPassword)
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ password = [string]$EncryptionPassword }
+}
+
+# Backs the browser's startup autoload (window.autoloadLastScan in app.js) - hands back
+# every archived snapshot's raw content so the browser can feed them straight into the same
+# processSelectedFiles() path a manual folder-pick uses, without a file-picker gesture.
+# Same NetworkMap_*.json(.enc) naming/exclusion convention as the folder-picker filter in
+# app.js's forceLoadFolder - a mid-crawl *.tmp.json(.enc) must not be picked up as finished.
+#
+# Gated by Test-SameOriginRequest for the same reason as Invoke-GetSessionPasswordAction:
+# this is read-only but hands back full topology contents on a bare GET.
+function Invoke-GetSnapshotsAction {
+    param($Response, [string]$SnapshotDir)
+
+    if (-not (Test-Path $SnapshotDir)) {
+        Send-WebJson -Response $Response -StatusCode 200 -Object @{ snapshots = @() }
+        return
+    }
+
+    try {
+        $Files = Get-ChildItem -LiteralPath $SnapshotDir -File |
+            Where-Object { $_.Name -match '^NetworkMap_.*\.json(\.enc)?$' -and $_.Name -notmatch '\.tmp\.json(\.enc)?$' }
+
+        # Per-file try/catch: a single locked/unreadable file (e.g. a concurrent crawl mid-
+        # write, a permissions issue) must not 500 the whole autoload - skip it and serve
+        # every other snapshot, matching processSelectedFiles' own "one bad file in a batch
+        # doesn't discard the rest" convention (app.js). -LiteralPath on both calls - a
+        # filename containing [ or ] would otherwise be wildcard-interpreted by -Path.
+        $Snapshots = @($Files | ForEach-Object {
+            try {
+                $Content = Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8
+                if ([string]::IsNullOrEmpty($Content)) { return }
+                @{ name = $_.Name; content = $Content }
+            } catch {
+                Write-MapperDebugLog "GET-SNAPSHOTS WARNING [$($_.FullName)] Skipped unreadable snapshot: $_"
+            }
+        })
+
+        Send-WebJson -Response $Response -StatusCode 200 -Object @{ snapshots = $Snapshots }
+    } catch {
+        Write-MapperDebugLog "GET-SNAPSHOTS ERROR [$SnapshotDir] Failed to read snapshot(s): $_"
+        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to read snapshot(s): $_" }
+    }
 }
 
 # Encrypts and writes Configuration.json.enc. The browser sends PLAINTEXT edited config
@@ -672,27 +729,44 @@ function Start-MapperWebServer {
             # BeginGetContext/WaitOne(250) instead of a blocking GetContext(): a blocking
             # call gives the engine no statement boundary to act on, so Ctrl+C is ignored.
             # Polling on a timeout hands control back every 250ms, making Ctrl+C work.
-            $AsyncResult = $Listener.BeginGetContext($null, $null)
-            while (-not $AsyncResult.AsyncWaitHandle.WaitOne(250)) {
-                if ($script:PendingScanNetwork) {
-                    $Progress = $script:PendingScanNetwork.ProgressTable
-                    if ($Progress.Done) {
-                        if ($script:ScanProgressSnapshot -ne 'done') {
-                            Write-Host "`r[Scan] Complete - $($Progress.Visited) device(s) visited.                        " -ForegroundColor Green
-                            $script:ScanProgressSnapshot = 'done'
+            #
+            # This accept machinery (as opposed to the per-request dispatch below, which has
+            # its own try/catch) used to run bare: an HttpListenerException here - e.g. a
+            # transient EndGetContext failure - fell all the way out of this function
+            # uncaught, silently killing the whole server process with nothing written to
+            # Mapper_Debug.log and the browser just reporting "Lost connection to the local
+            # server". Log and retry instead of dying.
+            try {
+                $AsyncResult = $Listener.BeginGetContext($null, $null)
+                while (-not $AsyncResult.AsyncWaitHandle.WaitOne(250)) {
+                    if ($script:PendingScanNetwork) {
+                        $Progress = $script:PendingScanNetwork.ProgressTable
+                        if ($Progress.Done) {
+                            if ($script:ScanProgressSnapshot -ne 'done') {
+                                Write-Host "`r[Scan] Complete - $($Progress.Visited) device(s) visited.                        " -ForegroundColor Green
+                                $script:ScanProgressSnapshot = 'done'
+                            }
+                        } else {
+                            $Snapshot = "$($Progress.Visited)|$($Progress.QueueDepth)|$($Progress.ActiveJobs)"
+                            if ($Snapshot -ne $script:ScanProgressSnapshot) {
+                                Write-Host "`r[Scan] Visited: $($Progress.Visited)  Queue: $($Progress.QueueDepth)  Active: $($Progress.ActiveJobs)    " -NoNewline -ForegroundColor Cyan
+                                $script:ScanProgressSnapshot = $Snapshot
+                            }
                         }
-                    } else {
-                        $Snapshot = "$($Progress.Visited)|$($Progress.QueueDepth)|$($Progress.ActiveJobs)"
-                        if ($Snapshot -ne $script:ScanProgressSnapshot) {
-                            Write-Host "`r[Scan] Visited: $($Progress.Visited)  Queue: $($Progress.QueueDepth)  Active: $($Progress.ActiveJobs)    " -NoNewline -ForegroundColor Cyan
-                            $script:ScanProgressSnapshot = $Snapshot
-                        }
+                    } elseif ($script:ScanProgressSnapshot) {
+                        $script:ScanProgressSnapshot = $null
                     }
-                } elseif ($script:ScanProgressSnapshot) {
-                    $script:ScanProgressSnapshot = $null
                 }
+                $Context = $Listener.EndGetContext($AsyncResult)
+            } catch {
+                Write-MapperDebugLog "ACCEPT LOOP ERROR: $_"
+                Write-Host "`nAccept loop error (logged to Mapper_Debug.log): $_" -ForegroundColor Red
+                # Guards against a tight CPU-spinning retry loop if the listener is failing
+                # every call (e.g. IsListening hasn't flipped false yet but the underlying
+                # socket is already dead) - a real per-request hiccup only costs 250ms.
+                Start-Sleep -Milliseconds 250
+                continue
             }
-            $Context = $Listener.EndGetContext($AsyncResult)
             $Request = $Context.Request
             $Response = $Context.Response
 
@@ -712,8 +786,12 @@ function Start-MapperWebServer {
                         Invoke-RescanAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/rescan/status") {
-                    $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
-                    Invoke-RescanStatusAction -Response $Response -JobId $JobId
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        $JobId = Get-QueryParam -Query $Request.Url.Query -Name "jobId"
+                        Invoke-RescanStatusAction -Response $Response -JobId $JobId
+                    }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/ping") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
@@ -736,7 +814,11 @@ function Start-MapperWebServer {
                         Invoke-ScanNetworkAction -Response $Response -Body $Body -WorkerPath $WorkerPath -JunosUsername $script:JunosUsername -JunosPassword $script:JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations $Iterations
                     }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/scan-network/status") {
-                    Invoke-ScanNetworkStatusAction -Response $Response
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        Invoke-ScanNetworkStatusAction -Response $Response
+                    }
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/config") {
                     Invoke-GetConfigAction -Response $Response -ConfigPath $ConfigPath
                 } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/session-password") {
@@ -744,6 +826,12 @@ function Start-MapperWebServer {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
                     } else {
                         Invoke-GetSessionPasswordAction -Response $Response -EncryptionPassword $EncryptionPassword
+                    }
+                } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/snapshots") {
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused" }
+                    } else {
+                        Invoke-GetSnapshotsAction -Response $Response -SnapshotDir $SnapshotDir
                     }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/save-config") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {

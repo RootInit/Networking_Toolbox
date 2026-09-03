@@ -43,6 +43,15 @@ var searchHighlightQuery = "";
 // graph is single-snapshot.
 var loadedSnapshots = [];   // {sourceFile, scanTimestamp, topology, deviceByIp}[]
 var activeSnapshotIndex = -1;
+
+// Guards window.processSelectedFiles against two independent triggers overlapping - a
+// manual Load Folder/File click and a Scan Network completion both funnel through it, and
+// each only disabled its own button, so nothing stopped one from starting mid-flight of the
+// other. Same "claim a generation, bail if superseded" pattern as search.js's
+// goToSearchResultGeneration, applied here so a slower call can't clobber loadedSnapshots/
+// activeSnapshotIndex/deviceByIp with stale data (or report a misleading "Success") after a
+// newer call already replaced them.
+var loadFilesGeneration = 0;
 // Which sidebar tab is showing (see window.switchSidebarTab).
 var activeSidebarTab = 'sidebar-tab-load';
 // Which center-panel view (Diagram / Map) is showing - see map.js's switchCenterView.
@@ -300,6 +309,58 @@ function readSnapshotFile(file) {
     });
 }
 
+// Startup autoload: fetches every archived snapshot from /api/snapshots and feeds them
+// through the same path a manual "Load Folder" pick uses, so the last scan is on screen
+// without a file-picker gesture. Silently does nothing (leaves manual load available) if
+// there's nothing to load, the fetch fails, or snapshots are encrypted but no session
+// password is cached yet - a surprise password prompt on page load would be worse than
+// just requiring one manual load in that case.
+window.autoloadLastScan = async function() {
+    if (loadedSnapshots.length > 0) return; // already loaded by something else
+    // Snapshotted before any `await` below - if a manual Load/Scan Network starts (bumps
+    // this) or finishes (populates loadedSnapshots) while this function is still awaiting,
+    // the re-check right before processSelectedFiles bails instead of clobbering it. A plain
+    // "loadedSnapshots.length > 0" re-check alone wouldn't catch a call that's in-flight but
+    // hasn't populated loadedSnapshots yet.
+    var myGenerationAtStart = loadFilesGeneration;
+
+    var entries;
+    try {
+        var resp = await fetch('/api/snapshots');
+        if (!resp.ok) return;
+        entries = (await resp.json()).snapshots;
+    } catch (err) {
+        return;
+    }
+    if (!Array.isArray(entries) || entries.length === 0) return;
+
+    var encryptedEntries = entries.filter(e => {
+        try { return JSON.parse(e.content).format === 'PSNetworkMapper-EncryptedTopology'; }
+        catch (err) { return false; }
+    });
+    if (encryptedEntries.length > 0) {
+        var sessionPassword = await window.getSessionEncryptionPassword();
+        if (!sessionPassword) return;
+        // Not just "a password is cached" - it must actually decrypt, or processSelectedFiles
+        // would fall through to promptForPassword, exactly the surprise prompt this is meant
+        // to avoid. Only the first encrypted entry is checked: they're all written by the same
+        // running server with the same session password, so one failure means they all would.
+        try {
+            await window.TopologyCrypto.decryptEnvelope(JSON.parse(encryptedEntries[0].content), sessionPassword);
+        } catch (err) {
+            return;
+        }
+    }
+
+    if (loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0) return;
+    var files = entries.map(e => new File([e.content], e.name, { type: 'application/json' }));
+    await window.processSelectedFiles(files);
+};
+
+document.addEventListener('DOMContentLoaded', function() {
+    window.autoloadLastScan();
+});
+
 window.forceLoadFile = async function() {
     var input = document.getElementById('jsonUpload');
     if (!input.files || input.files.length === 0) {
@@ -331,10 +392,16 @@ window.forceLoadFolder = async function() {
 // Shared by forceLoadFile and forceLoadFolder - turns a list of File objects into
 // loadedSnapshots plus the active graph/search state.
 window.processSelectedFiles = async function(files) {
+    var myGeneration = ++loadFilesGeneration;
     var btn = document.getElementById('loadBtn');
     var folderBtn = document.getElementById('loadFolderBtn');
+    // Also locked out here (rather than only by its own click handler) so a Scan Network
+    // run in progress can't have its eventual processSelectedFiles call race this one - see
+    // loadFilesGeneration's comment.
+    var scanBtn = document.getElementById('scanNetworkBtn');
     btn.disabled = true;
     if (folderBtn) folderBtn.disabled = true;
+    if (scanBtn) scanBtn.disabled = true;
     window.closeDrawer();
     // Reset the map's location editor too, before loadedSnapshots/deviceByIp are reassigned
     // wholesale - left open, its editorTargetIp would point into data that no longer exists.
@@ -344,7 +411,7 @@ window.processSelectedFiles = async function(files) {
     var skipped = []; // {name, reason}[] - only used/reported for multi-file batches
     var parseSucceeded = false;
     // Single file: any failure aborts the whole load with no data shown. A multi-file/
-    // folder batch is more forgiving - one bad or cancelled file shouldn't discard the rest.
+    // folder batch is more forgiving - one bad file shouldn't discard the rest.
     var tolerateFailures = files.length > 1;
 
     try {
@@ -357,11 +424,18 @@ window.processSelectedFiles = async function(files) {
                 try {
                     newSnapshots.push(await readSnapshotFile(files[i]));
                 } catch (fileErr) {
+                    // A cancelled password prompt aborts the whole batch rather than being
+                    // treated as "this one file is bad" - otherwise Cancel on file 1 of a
+                    // folder of encrypted files just re-prompts for file 2, file 3, ...,
+                    // forcing the user to dismiss the modal once per remaining file to
+                    // actually stop the load.
+                    if (fileErr && fileErr.message === 'Cancelled') throw fileErr;
                     skipped.push({ name: files[i].name, reason: fileErr.message });
                 }
             } else {
                 newSnapshots.push(await readSnapshotFile(files[i]));
             }
+            if (myGeneration !== loadFilesGeneration) return; // superseded mid-read
         }
 
         if (newSnapshots.length === 0) {
@@ -371,9 +445,11 @@ window.processSelectedFiles = async function(files) {
         }
         parseSucceeded = true;
 
+        if (myGeneration !== loadFilesGeneration) return; // superseded while reading files
         loadedSnapshots = newSnapshots;
         window.showProgress("Indexing search data...", 100, true);
         await nextPaint();
+        if (myGeneration !== loadFilesGeneration) return;
         window.buildSearchIndex();
 
         // Active = most recently captured snapshot. Files with no ScanTimestamp fall back
@@ -392,7 +468,9 @@ window.processSelectedFiles = async function(files) {
         if (activeSidebarTab === 'sidebar-tab-analysis') window.refreshAnalysisDashboard();
         window.showProgress("Rendering Topology...", 100, true);
         await nextPaint();
+        if (myGeneration !== loadFilesGeneration) return;
         await window.setActiveSnapshot(bestIndex);
+        if (myGeneration !== loadFilesGeneration) return; // a newer load reassigned loadedSnapshots while this awaited
 
         document.getElementById('legend-group').style.display = 'block';
         var totalDevices = loadedSnapshots.reduce((sum, s) => sum + s.topology.length, 0);
@@ -405,6 +483,7 @@ window.processSelectedFiles = async function(files) {
             "green"
         );
     } catch (err) {
+        if (myGeneration !== loadFilesGeneration) return; // superseded - a newer call owns the status line now
         if (err && err.message === 'Cancelled') {
             window.setStatus("Decryption cancelled.", "orange");
         } else {
@@ -412,8 +491,14 @@ window.processSelectedFiles = async function(files) {
             throw err;
         }
     } finally {
-        window.hideProgress();
-        btn.disabled = false;
-        if (folderBtn) folderBtn.disabled = false;
+        // Only the still-current call resets the busy UI - if a newer call has since
+        // started, it owns the progress bar/buttons and this stale call must not clear
+        // state out from under it.
+        if (myGeneration === loadFilesGeneration) {
+            window.hideProgress();
+            btn.disabled = false;
+            if (folderBtn) folderBtn.disabled = false;
+            if (scanBtn) scanBtn.disabled = false;
+        }
     }
 };

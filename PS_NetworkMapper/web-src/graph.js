@@ -86,8 +86,19 @@ window.extractVlans = function() {
     }
 };
 
+// Bumped by buildSwitchMap before it mutates allNodeMeta/graphRoot/primaryTree/expandedNodes
+// and tears down/recreates `network`. renderVisibleGraph's own queuing only serializes CALLS
+// to it - it doesn't stop buildSwitchMap from mutating this state out from under a render
+// that's already in progress (e.g. still awaiting ElkLayout.computeLayout) when a snapshot
+// switch or reload triggers a fresh buildSwitchMap. doRenderVisibleGraph checks this after
+// its own await and bails rather than resuming against a mix of the old visible-set/positions
+// and the new allNodeMeta/primaryTree - a subsequent renderVisibleGraph() (buildSwitchMap
+// always calls one itself, at the end) supersedes it with a consistent render anyway.
+var renderGeneration = 0;
+
 // 2. Topology data -> node/edge metadata (positions are computed separately by renderVisibleGraph)
 window.buildSwitchMap = async function() {
+    renderGeneration++;
     allNodeMeta.clear();
     allEdges = window.TopologyGraph.computeNeighborEdges(globalTopologyData);
 
@@ -173,6 +184,7 @@ window.renderVisibleGraph = function() {
 };
 
 async function doRenderVisibleGraph() {
+    var myGeneration = renderGeneration;
     window.showProgress("Computing layout...", 100, true);
     await nextPaint();
     // Wrapped so a thrown error can't leave the loading overlay stuck at "Computing
@@ -180,6 +192,11 @@ async function doRenderVisibleGraph() {
     try {
         var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, getClusterThreshold());
         var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges, getLayoutSettings());
+        // buildSwitchMap ran while the above awaited - graphRoot/primaryTree/allNodeMeta/
+        // `network` are now for a different topology than `visible` was computed from.
+        // Bail without touching nodesDataset/edgesDataset; buildSwitchMap's own trailing
+        // renderVisibleGraph() call will render the new topology correctly right after this.
+        if (myGeneration !== renderGeneration) return;
 
         nodesDataset.clear(); edgesDataset.clear();
 

@@ -295,7 +295,7 @@ window.renderSummary = function() {
         : `<span class="badge green">None</span>`;
 
     var rescannedHtml = d.RescannedAt
-        ? `<div style="grid-column:1/-1; background:#fff8e1; color:#7a6224; padding:6px 12px; border-radius:4px; font-size:0.8rem; margin-bottom:4px;">
+        ? `<div style="grid-column:1/-1; background:var(--warn-bg); color:var(--warn-text); padding:6px 12px; border-radius:4px; font-size:0.8rem; margin-bottom:4px;">
              Live rescan at ${esc(new Date(d.RescannedAt).toLocaleTimeString())} - not saved to the snapshot file, this session only.
            </div>`
         : '';
@@ -352,9 +352,9 @@ window.renderNeighbors = function() {
         neighborRows.forEach(n => {
             html += `<tr>
                 <td><b>${esc(n.LocalPort) || "?"}</b></td>
-                <td>${esc(n.Hostname) || "Unknown"}<br><span style="font-family:monospace; color:#666; font-size:0.75rem;">${esc(n.ManagementIP) || "Unknown"}</span></td>
+                <td>${esc(n.Hostname) || "Unknown"}<br><span style="font-family:monospace; color:var(--text-muted); font-size:0.75rem;">${esc(n.ManagementIP) || "Unknown"}</span></td>
                 <td>${esc(n.RemotePort) || "?"}</td>
-                <td style="font-style:italic; color:#666;">${esc(n.Description)}</td>
+                <td style="font-style:italic; color:var(--text-muted);">${esc(n.Description)}</td>
             </tr>`;
         });
     }
@@ -387,7 +387,7 @@ window.renderInterfaces = function() {
                 <td><span class="badge ${linkBadge}">${esc(intf.Admin)}/${esc(intf.Link)}</span></td>
                 <td><span class="badge ${stpBadge}">${esc(intf.STP) || "?"}</span></td>
                 <td>${esc(poeTxt)}</td>
-                <td style="font-style:italic; color:#666;">${esc(intf.Desc)}</td>
+                <td style="font-style:italic; color:var(--text-muted);">${esc(intf.Desc)}</td>
             </tr>`;
         });
     }
@@ -420,9 +420,9 @@ window.renderClients = function() {
             var rowClass = isHighlighted ? 'highlight' : '';
 
             var dotUserStr = (c.Dot1x_User && c.Dot1x_User !== "Unknown") ? esc(c.Dot1x_User) : "None";
-            var dotStateColor = (c.Dot1x_State && String(c.Dot1x_State).includes('Auth')) ? 'green' : (c.Dot1x_State !== "Unknown" ? 'red' : 'gray');
+            var dotStateColor = (c.Dot1x_State && String(c.Dot1x_State).includes('Auth')) ? 'var(--success-text)' : (c.Dot1x_State !== "Unknown" ? 'var(--danger-text)' : 'var(--text-muted)');
             var dotStateStr = c.Dot1x_State !== "Unknown" ? `<br><span style="font-size:0.7rem; color:${dotStateColor};">(${esc(c.Dot1x_State)})</span>` : "";
-            var descStr = (c.PortDesc && c.PortDesc !== "Unknown") ? `<br><span style="font-size:0.75rem; color:#888;">${esc(c.PortDesc)}</span>` : "";
+            var descStr = (c.PortDesc && c.PortDesc !== "Unknown") ? `<br><span style="font-size:0.75rem; color:var(--text-dim);">${esc(c.PortDesc)}</span>` : "";
             var typeClass = String(c.Type).toLowerCase().startsWith('dynamic') ? 'dynamic' : 'static';
             var typeStr = (c.Type && c.Type !== "Unknown") ? `<span class="type-badge ${typeClass}">${esc(c.Type)}</span>` : "";
 
@@ -435,8 +435,8 @@ window.renderClients = function() {
             var daisyStr = chain ? `<br>${window.renderDaisyChainBadge(chain)}` : "";
 
             html += `<tr class="${rowClass}">
-                <td><span style="font-weight:bold; color:#2B7CE9; font-size:1rem;">${esc(c.IP)}</span><br><span style="font-family:monospace; color:#666;">${esc(String(c.MAC).toUpperCase())}</span>${vendorStr}</td>
-                <td><b>${esc(c.Port)}</b><br><span class="badge" style="background:#2c3e50;">VLAN ${esc(c.VLAN_Tag)}</span>${typeStr}${descStr}${daisyStr}</td>
+                <td><span style="font-weight:bold; color:var(--accent); font-size:1rem;">${esc(c.IP)}</span><br><span style="font-family:monospace; color:var(--text-muted);">${esc(String(c.MAC).toUpperCase())}</span>${vendorStr}</td>
+                <td><b>${esc(c.Port)}</b><br><span class="badge" style="background:var(--primary);">VLAN ${esc(c.VLAN_Tag)}</span>${typeStr}${descStr}${daisyStr}</td>
                 <td><b>${dotUserStr}</b>${dotStateStr}</td>
             </tr>`;
         });
@@ -604,7 +604,7 @@ window.searchConfigCompareDevices = function() {
     var rows = matches.map(m => {
         var snapshotTag = loadedSnapshots.length > 1 ? `<span class="sr-snapshot">${esc(m.snapLabel)}</span>` : '';
         return {
-            line1Html: `${esc(m.hostname || m.ip)}${m.hostname ? ` <span style="color:#999; font-weight:normal;">(${esc(m.ip)})</span>` : ''}${snapshotTag}`,
+            line1Html: `${esc(m.hostname || m.ip)}${m.hostname ? ` <span style="color:var(--text-dim); font-weight:normal;">(${esc(m.ip)})</span>` : ''}${snapshotTag}`,
             onClick: () => window.selectConfigCompareDevice(m.idx, m.ip),
         };
     });

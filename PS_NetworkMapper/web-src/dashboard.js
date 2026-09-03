@@ -291,11 +291,19 @@ window.renderTrendChart = function() {
     // Despite the name, this is a resolveDeviceIdentity key, not a literal IP.
     var deviceIdentity = document.getElementById('trendDeviceSelect').value;
 
+    // Canvas 2D draws are invisible to CSS - reading the live custom properties (rather than
+    // duplicating a light/dark palette here) keeps this chart in sync with the CSS theme
+    // with one source of truth, and picks up a live toggle without a page reload.
+    var rootStyle = getComputedStyle(document.documentElement);
+    var cssVar = function(name) { return rootStyle.getPropertyValue(name).trim(); };
+    var gridColor = cssVar('--border'), dimColor = cssVar('--text-dim'), mutedColor = cssVar('--text-muted');
+    var headingColor = cssVar('--heading'), dangerColor = cssVar('--danger-text'), accentColor = cssVar('--accent');
+
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.font = '13px sans-serif';
 
     function centeredMessage(msg) {
-        ctx.fillStyle = '#888';
+        ctx.fillStyle = dimColor;
         ctx.font = '14px sans-serif';
         ctx.textAlign = 'center';
         ctx.fillText(msg, canvas.width / 2, canvas.height / 2);
@@ -329,8 +337,8 @@ window.renderTrendChart = function() {
     function y(v) { return pad.top + h - ((v - minV) / (maxV - minV || 1)) * h; }
 
     // Gridlines + Y-axis labels
-    ctx.strokeStyle = '#eee';
-    ctx.fillStyle = '#888';
+    ctx.strokeStyle = gridColor;
+    ctx.fillStyle = dimColor;
     ctx.font = '11px sans-serif';
     ctx.textAlign = 'right';
     var ySteps = 5;
@@ -342,7 +350,7 @@ window.renderTrendChart = function() {
     }
 
     // Axes
-    ctx.strokeStyle = '#999';
+    ctx.strokeStyle = mutedColor;
     ctx.beginPath();
     ctx.moveTo(pad.left, pad.top);
     ctx.lineTo(pad.left, pad.top + h);
@@ -350,7 +358,7 @@ window.renderTrendChart = function() {
     ctx.stroke();
 
     // X-axis labels (first, middle, last point - avoids overlap from labeling every point)
-    ctx.fillStyle = '#888';
+    ctx.fillStyle = dimColor;
     ctx.textAlign = 'center';
     var xLabelPoints = points.length <= 2 ? points : [points[0], points[Math.floor(points.length / 2)], points[points.length - 1]];
     xLabelPoints.forEach(p => {
@@ -368,9 +376,9 @@ window.renderTrendChart = function() {
         .map(s => ({ t: new Date(s.scanTimestamp), device: s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity) }))
         .filter(entry => entry.device);
 
-    ctx.strokeStyle = '#c0392b';
+    ctx.strokeStyle = dangerColor;
     ctx.setLineDash([4, 3]);
-    ctx.fillStyle = '#c0392b';
+    ctx.fillStyle = dangerColor;
     ctx.font = 'bold 10px sans-serif';
     ctx.textAlign = 'center';
     for (var di = 1; di < deviceSnapshotsSorted.length; di++) {
@@ -386,7 +394,7 @@ window.renderTrendChart = function() {
     ctx.setLineDash([]);
 
     // Line
-    ctx.strokeStyle = '#2B7CE9';
+    ctx.strokeStyle = accentColor;
     ctx.lineWidth = 2;
     ctx.beginPath();
     points.forEach((p, i) => {
@@ -396,7 +404,7 @@ window.renderTrendChart = function() {
     ctx.stroke();
 
     // Points
-    ctx.fillStyle = '#2B7CE9';
+    ctx.fillStyle = accentColor;
     points.forEach(p => {
         ctx.beginPath();
         ctx.arc(x(p.t.getTime()), y(p.v), 3.5, 0, Math.PI * 2);
@@ -405,7 +413,7 @@ window.renderTrendChart = function() {
 
     // Title uses the selected <option>'s text, not deviceIdentity (an opaque "serial:..." key).
     var selectedOption = document.getElementById('trendDeviceSelect').selectedOptions[0];
-    ctx.fillStyle = '#2c3e50';
+    ctx.fillStyle = headingColor;
     ctx.font = 'bold 13px sans-serif';
     ctx.textAlign = 'left';
     ctx.fillText(`${TREND_METRIC_LABELS[metric]} — ${selectedOption ? selectedOption.textContent : deviceIdentity}`, pad.left, 18);

@@ -323,7 +323,14 @@ window.renderMapMarkers = function() {
                 className: dimmedByVlan ? 'map-marker-label vlan-dimmed' : 'map-marker-label',
             });
         }
-        marker.on('click', function () { window.openRightDrawer(ip); });
+        marker.on('click', function () {
+            // A plain click (not a drag) after "Edit position" armed dragging means the user
+            // changed their mind - disarm rather than leaving the marker draggable
+            // indefinitely (dragging.enable() has no other timeout/blur to turn it back off).
+            // No-op if a real drag already disabled it via dragend below.
+            if (marker.dragging.enabled()) marker.dragging.disable();
+            window.openRightDrawer(ip);
+        });
         // Second entry point into the same window.openLocationEditor(ip) the Unplaced list
         // uses, so an already-placed marker can also edit its location. Built via DOM methods
         // (not innerHTML) since nothing here needs escaping.
@@ -338,7 +345,59 @@ window.renderMapMarkers = function() {
             window.openLocationEditor(ip);
         });
         popupEl.appendChild(editLink);
+        // Lighter alternative to "Edit location" above - repositions this one marker by drag
+        // instead of opening the full building/room/notes modal. Only offered here (an
+        // already-placed marker); an unplaced device has no marker yet to drag.
+        var repositionLink = document.createElement('a');
+        repositionLink.href = '#';
+        repositionLink.textContent = 'Edit position';
+        repositionLink.style.cssText = 'color:var(--accent); cursor:pointer; margin-left:10px;';
+        repositionLink.addEventListener('click', function (evt) {
+            evt.preventDefault();
+            marker.closePopup();
+            marker.dragging.enable();
+            window.showMapStatus('Drag "' + (meta.hostname !== 'Unknown' ? meta.hostname : ip) + '" to reposition it - release to stage the change.');
+            // Covers "changed their mind and clicked elsewhere on the map" - the marker's own
+            // click handler above covers "clicked the marker itself instead of dragging it".
+            // Harmless no-op if a real drag already disabled dragging by the time this fires.
+            leafletMap.once('click', function () { marker.dragging.disable(); });
+        });
+        popupEl.appendChild(repositionLink);
         marker.bindPopup(popupEl);
+        // Bound once at creation, not inside the click handler above - dragging.enable()/
+        // disable() only toggles whether drags are possible, this listener just no-ops
+        // (never fires) until "Edit position" arms it.
+        marker.on('dragend', function () {
+            marker.dragging.disable();
+            var newLatLng = marker.getLatLng();
+            var currentDevice = deviceByIp.get(String(ip));
+            // Guarded the same way commitLocationEdit is - a snapshot reload/rescan while
+            // this marker was mid-drag can leave `device` (the classification-time capture
+            // above) stale relative to deviceByIp.
+            if (!currentDevice) {
+                marker.setLatLng([entry.lat, entry.lng]); // snap back - nothing to stage
+                window.showMapStatus('That device is no longer in the currently loaded data (the topology was reloaded or rescanned while dragging) - the position was not saved.');
+                return;
+            }
+            var keyInfo = window.ConfigResolve.bestKeyForSave(currentDevice);
+            var deviceKeysAtCommit = window.ConfigResolve.extractDeviceKeys(currentDevice);
+            // Preserves building/room/notes - a drag only ever changes lat/lng. Prefers an
+            // already-pending edit (e.g. from "Edit location") over the render-time `entry`
+            // closure above, which is the last-SAVED value and would otherwise silently
+            // revert an unsaved building/room/notes edit made since this marker was drawn.
+            var alreadyPending = pendingConfigEdits.get(keyInfo.keyType + ':' + keyInfo.key);
+            var preserveFrom = alreadyPending ? alreadyPending.entry : entry;
+            var newEntry = {
+                key: keyInfo.key, keyType: keyInfo.keyType,
+                lat: newLatLng.lat, lng: newLatLng.lng,
+                building: preserveFrom.building || '', room: preserveFrom.room || '', notes: preserveFrom.notes || '',
+            };
+            pendingConfigEdits.set(keyInfo.keyType + ':' + keyInfo.key, {
+                entry: newEntry, deviceIp: ip, deviceKeysAtCommit: deviceKeysAtCommit,
+            });
+            window.showMapStatus(pendingConfigEdits.size + ' unsaved change(s) - click Save Configuration to write them.');
+            window.renderSaveConfigButton();
+        });
         mapMarkersByIp.set(ip, marker);
     });
 
@@ -401,8 +460,13 @@ window.openLocationEditor = function(ip) {
     document.getElementById('editorDeviceLabel').textContent = 'Set Location: ' + (device && device.Hostname !== 'Unknown' ? device.Hostname : ip);
     // Editor is reachable both from the Unplaced list (no existing location) and from an
     // already-placed marker's popup - prefill from the existing entry when there is one, so
-    // re-saving without touching a field doesn't wipe it to empty.
-    var existing = device ? window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries) : null;
+    // re-saving without touching a field doesn't wipe it to empty. A not-yet-saved drag (see
+    // "Edit position" above) takes priority over the saved config entry - otherwise clicking
+    // Set Pin here without touching lat/lng would silently overwrite the drag with the old,
+    // pre-drag position (both write into the same pendingConfigEdits key).
+    var deviceKeyInfo = device ? window.ConfigResolve.bestKeyForSave(device) : null;
+    var pending = deviceKeyInfo ? pendingConfigEdits.get(deviceKeyInfo.keyType + ':' + deviceKeyInfo.key) : null;
+    var existing = pending ? pending.entry : (device ? window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries) : null);
     document.getElementById('editorBuilding').value = existing ? (existing.building || '') : '';
     document.getElementById('editorRoom').value = existing ? (existing.room || '') : '';
     document.getElementById('editorNotes').value = existing ? (existing.notes || '') : '';

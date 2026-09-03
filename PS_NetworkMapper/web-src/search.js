@@ -175,11 +175,14 @@ window.goToSearchResult = function(targetIp, tab, snapshotIndex) {
             await window.setActiveSnapshot(snapshotIndex);
         }
         if (myGeneration !== goToSearchResultGeneration) return; // superseded by a newer click
+        // Open the drawer before the graph re-render below - the ELK layout pass can take
+        // a few seconds on a large visible set, and the device info the user actually
+        // wants is available immediately without waiting on it.
+        window.openRightDrawer(targetIp);
+        if (tab) window.switchTab(tab);
         window.GraphLayout.expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, getClusterThreshold());
         await window.renderVisibleGraph();
         if (myGeneration !== goToSearchResultGeneration) return;
         window.revealDeviceInActiveView(targetIp);
-        window.openRightDrawer(targetIp);
-        if (tab) window.switchTab(tab);
     })();
 };

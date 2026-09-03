@@ -172,6 +172,22 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const leafSpacing = opts.leafSpacing ?? 250;
   const minRadius = opts.minRadius ?? 250;
   const relaxIterations = opts.relaxIterations ?? 150;
+  // Absolute Date.now() timestamp (not a duration - this function runs synchronously
+  // start-to-finish, so there's no "elapsed since call" to track against; the caller,
+  // elk-layout.js, computes this from its own timeout budget). Undefined/null means no
+  // bound, which is what every existing caller (including every test) gets by omitting it.
+  //
+  // This exists because racing this call against a timer Promise (elk-layout.js used to do
+  // this alone, with no cap in here) cannot work: JS is single-threaded, so a pending
+  // setTimeout callback can't run until this synchronous computation returns control to the
+  // event loop - by which point it has already finished, whether that took 1 second or 100.
+  // The only way to actually cap wall-clock time is to check it from inside the computation.
+  const deadline = opts.deadline ?? null;
+  function checkDeadline() {
+    if (deadline !== null && Date.now() > deadline) {
+      throw new Error(`Layout exceeded its time budget (${relaxIterations} max relax iterations/level)`);
+    }
+  }
 
   const positions = new Map();
   if (rootId == null) return positions;
@@ -262,6 +278,10 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     const isLeafOrdered = orderedKids.map(isLeaf);
 
     for (let iter = 0; iter < relaxIterations; iter++) {
+      // Cheap relative to the O(n^2) sweep below - checked every iteration so one
+      // pathologically large sibling set (the case this whole budget exists for) can't run
+      // unbounded even within a single relaxRadii call.
+      checkDeadline();
       // Jacobi-style: reads `radii` as of the start of the sweep and applies all updates
       // together at the end. Updating in place (Gauss-Seidel) makes the result depend on
       // processing order - confirmed empirically, 40 identical leaves converged to wildly
@@ -339,6 +359,10 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
 
   function childLayout(nodeId) {
     if (layoutCache.has(nodeId)) return layoutCache.get(nodeId);
+    // Also checked here (once per distinct node, vs. once per relaxation sweep above) so
+    // the budget is enforced across a WIDE tree (many cheap nodes) as well as a single
+    // expensive one.
+    checkDeadline();
     const kids = childrenOf.get(nodeId) || [];
     const extents = kids.map(extent);
     const spacing = allChildrenAreLeaves(kids) ? leafSpacing : nodeSpacing;

@@ -23,6 +23,10 @@ function computeGridFallback(visibleNodeIds) {
 async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   if (visibleNodeIds.length === 0) return new Map();
 
+  // Absolute deadline, computed from "now" rather than from whenever doLayout's yield below
+  // resolves, so it reflects the same budget the (now-vestigial, see below) race timer used.
+  const deadline = Date.now() + LAYOUT_TIMEOUT_MS;
+
   const doLayout = async () => {
     // Yield once so the caller's "Computing layout..." text can paint before the
     // synchronous layout crunch blocks the main thread.
@@ -32,11 +36,17 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
       if (!childrenOf.has(e.from)) childrenOf.set(e.from, []);
       childrenOf.get(e.from).push(e.to);
     });
-    return window.GraphLayout.computeRecursiveRadialLayout(visibleNodeIds[0], childrenOf, layoutSettings);
+    return window.GraphLayout.computeRecursiveRadialLayout(visibleNodeIds[0], childrenOf, { ...layoutSettings, deadline });
   };
 
+  // This race is kept as a backstop (e.g. an infinite loop/bug outside computeRecursiveRadialLayout's
+  // own deadline checks) but can no longer be the primary enforcement: JS is single-threaded,
+  // so a pending setTimeout here cannot preempt doLayout()'s synchronous work - by the time
+  // control returns to the event loop for this timer to even run, doLayout() has already
+  // settled, whether that took 1 second or 100. computeRecursiveRadialLayout's own `deadline`
+  // check above is what actually bounds a slow layout now; see its comment for why.
   const timeout = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('Layout timed out')), LAYOUT_TIMEOUT_MS);
+    setTimeout(() => reject(new Error('Layout timed out')), LAYOUT_TIMEOUT_MS + 1000);
   });
 
   try {

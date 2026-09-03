@@ -124,7 +124,7 @@ $PBKDF2_ITERATIONS = Get-TopologyPbkdf2Iterations
 $EncKeyBytes = $null; $MacKeyBytes = $null; $SaltBytes = $null
 
 if (-not $NoEncryption -and $EncryptionPassword) {
-    Write-Host "Output encryption enabled - Network_Visualizer will prompt for this same password when the file is opened." -ForegroundColor Yellow
+    Write-Host "Output encryption enabled - the viewer will use this password automatically while this server is running; opening the file elsewhere (or after a restart) will prompt for it." -ForegroundColor Yellow
 
     $SaltBytes = [byte[]]::new(16)
     $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
