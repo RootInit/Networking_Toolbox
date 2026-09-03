@@ -93,8 +93,9 @@ window.performGlobalSearch = function() {
         var device = snapshot ? snapshot.deviceByIp.get(m.deviceIp) : null;
         var hostname = device && device.Hostname ? ` (${esc(device.Hostname)})` : '';
         // Only show which snapshot a match came from when more than one is loaded.
+        var snapshotTs = snapshot ? window.parseTimestampMs(snapshot.scanTimestamp) : null;
         var snapshotTag = (loadedSnapshots.length > 1 && snapshot)
-            ? `<span class="sr-snapshot">${esc(snapshot.scanTimestamp ? new Date(snapshot.scanTimestamp).toLocaleString() : snapshot.sourceFile)}</span>`
+            ? `<span class="sr-snapshot">${esc(snapshotTs !== null ? new Date(snapshotTs).toLocaleString() : snapshot.sourceFile)}</span>`
             : '';
         return {
             line1Html: `${esc(m.deviceIp)}${hostname}${snapshotTag}`,
@@ -184,5 +185,8 @@ window.goToSearchResult = function(targetIp, tab, snapshotIndex) {
         await window.renderVisibleGraph();
         if (myGeneration !== goToSearchResultGeneration) return;
         window.revealDeviceInActiveView(targetIp);
-    })();
+    })().catch(e => {
+        console.error('goToSearchResult failed:', e);
+        window.setStatus("Could not go to search result: " + e.message, "red");
+    });
 };
