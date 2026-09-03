@@ -364,6 +364,23 @@
         td { padding: 8px; border-bottom: 1px solid var(--border); word-break: break-word; }
         tr:hover { background-color: var(--hover-neutral-bg); }
 
+        /* th[data-sort-key] click-to-sort (window.sortInterfacesBy, drawer.js) - .sort-arrow's
+           text content (^ / v) is set only on the active column so the others stay blank
+           rather than all showing a neutral placeholder glyph. */
+        th.sortable { cursor: pointer; user-select: none; }
+        th.sortable:hover { background: var(--hover-accent-bg); }
+        .sort-arrow { display: inline-block; margin-left: 4px; font-size: 0.7rem; color: var(--accent); }
+
+        /* Client rows nested under their interface's <tr> (window.renderInterfaces, drawer.js) -
+           an indent + left accent bar reads as "belongs to the row above" without a real tree
+           widget. Kept in the interfaces table itself (colspan across all its columns) rather
+           than a separate table, since a client only ever exists on record on one port line. */
+        tr.client-subrow td { padding: 6px 8px 6px 28px; border-bottom: 1px solid var(--border); background: var(--subtle-bg); border-left: 3px solid var(--accent); }
+        tr.client-subrow:last-of-type td { border-bottom: 1px solid var(--border); }
+        .client-subrow-inner { display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: baseline; font-size: 0.78rem; }
+        .client-subrow-inner .csr-identity { font-weight: bold; color: var(--accent); }
+        .client-subrow-inner .csr-mac { font-family: monospace; color: var(--text-muted); }
+
         .link-btn { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 0.75rem; text-decoration: underline; }
         .link-btn:hover { color: #1a5cb0; }
 
@@ -775,7 +792,6 @@
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-alarms')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-alarms'))" id="btn-tab-alarms">Alarms</div>
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-neighbors')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-neighbors'))" id="btn-tab-neighbors">Neighbors</div>
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-interfaces')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-interfaces'))" id="btn-tab-interfaces">Interfaces</div>
-            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-clients')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-clients'))" id="btn-tab-clients">Clients</div>
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-config')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-config'))" id="btn-tab-config">Config</div>
         </div>
 
@@ -809,21 +825,21 @@
             <div class="toggle-container">
                 <input type="checkbox" id="hideDownPorts" checked onchange="window.renderInterfaces()">
                 <label for="hideDownPorts" style="cursor: pointer; font-weight: bold; flex-grow:1;">Hide Inactive Ports (Link Down)</label>
-                <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportInterfacesCsv()">Export CSV</button>
+                <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportInterfacesCsv()">Export Interfaces CSV</button>
+                <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportClientsCsv()">Export Clients CSV</button>
             </div>
             <table id="interfaces-table">
-                <thead><tr><th>Port</th><th>State</th><th>STP</th><th>PoE</th><th>Description</th><th>Inactive For</th></tr></thead>
+                <!-- data-sort-key matches a field window.sortInterfacesBy/window.INTERFACE_SORT_COMPARATORS
+                     (drawer.js) knows how to compare; clicking toggles asc/desc, see window.sortInterfacesBy -->
+                <thead><tr>
+                    <th class="sortable" data-sort-key="port" onclick="window.sortInterfacesBy('port')">Port<span class="sort-arrow" id="sort-arrow-port"></span></th>
+                    <th class="sortable" data-sort-key="state" onclick="window.sortInterfacesBy('state')">State<span class="sort-arrow" id="sort-arrow-state"></span></th>
+                    <th class="sortable" data-sort-key="stp" onclick="window.sortInterfacesBy('stp')">STP<span class="sort-arrow" id="sort-arrow-stp"></span></th>
+                    <th class="sortable" data-sort-key="poe" onclick="window.sortInterfacesBy('poe')">PoE<span class="sort-arrow" id="sort-arrow-poe"></span></th>
+                    <th class="sortable" data-sort-key="description" onclick="window.sortInterfacesBy('description')">Description<span class="sort-arrow" id="sort-arrow-description"></span></th>
+                    <th class="sortable" data-sort-key="inactiveFor" onclick="window.sortInterfacesBy('inactiveFor')">Inactive For<span class="sort-arrow" id="sort-arrow-inactiveFor"></span></th>
+                </tr></thead>
                 <tbody id="interfaces-tbody"></tbody>
-            </table>
-        </div>
-
-        <div id="tab-clients" class="tab-content">
-            <div class="toggle-container" style="justify-content:flex-end;">
-                <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportClientsCsv()">Export CSV</button>
-            </div>
-            <table id="clients-table">
-                <thead><tr><th>IP / MAC</th><th>Port & VLAN</th><th>802.1X User</th></tr></thead>
-                <tbody id="clients-tbody"></tbody>
             </table>
         </div>
 

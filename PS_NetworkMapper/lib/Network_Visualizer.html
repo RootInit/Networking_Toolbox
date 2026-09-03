@@ -1725,6 +1725,23 @@ svg.leaflet-image-layer.leaflet-interactive path {
         td { padding: 8px; border-bottom: 1px solid var(--border); word-break: break-word; }
         tr:hover { background-color: var(--hover-neutral-bg); }
 
+        /* th[data-sort-key] click-to-sort (window.sortInterfacesBy, drawer.js) - .sort-arrow's
+           text content (^ / v) is set only on the active column so the others stay blank
+           rather than all showing a neutral placeholder glyph. */
+        th.sortable { cursor: pointer; user-select: none; }
+        th.sortable:hover { background: var(--hover-accent-bg); }
+        .sort-arrow { display: inline-block; margin-left: 4px; font-size: 0.7rem; color: var(--accent); }
+
+        /* Client rows nested under their interface's <tr> (window.renderInterfaces, drawer.js) -
+           an indent + left accent bar reads as "belongs to the row above" without a real tree
+           widget. Kept in the interfaces table itself (colspan across all its columns) rather
+           than a separate table, since a client only ever exists on record on one port line. */
+        tr.client-subrow td { padding: 6px 8px 6px 28px; border-bottom: 1px solid var(--border); background: var(--subtle-bg); border-left: 3px solid var(--accent); }
+        tr.client-subrow:last-of-type td { border-bottom: 1px solid var(--border); }
+        .client-subrow-inner { display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: baseline; font-size: 0.78rem; }
+        .client-subrow-inner .csr-identity { font-weight: bold; color: var(--accent); }
+        .client-subrow-inner .csr-mac { font-family: monospace; color: var(--text-muted); }
+
         .link-btn { background: none; border: none; color: var(--accent); cursor: pointer; padding: 0; font-size: 0.75rem; text-decoration: underline; }
         .link-btn:hover { color: #1a5cb0; }
 
@@ -2136,7 +2153,6 @@ svg.leaflet-image-layer.leaflet-interactive path {
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-alarms')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-alarms'))" id="btn-tab-alarms">Alarms</div>
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-neighbors')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-neighbors'))" id="btn-tab-neighbors">Neighbors</div>
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-interfaces')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-interfaces'))" id="btn-tab-interfaces">Interfaces</div>
-            <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-clients')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-clients'))" id="btn-tab-clients">Clients</div>
             <div class="tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchTab('tab-config')" onkeydown="window.activateOnKey(event, () => window.switchTab('tab-config'))" id="btn-tab-config">Config</div>
         </div>
 
@@ -2170,21 +2186,21 @@ svg.leaflet-image-layer.leaflet-interactive path {
             <div class="toggle-container">
                 <input type="checkbox" id="hideDownPorts" checked onchange="window.renderInterfaces()">
                 <label for="hideDownPorts" style="cursor: pointer; font-weight: bold; flex-grow:1;">Hide Inactive Ports (Link Down)</label>
-                <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportInterfacesCsv()">Export CSV</button>
+                <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportInterfacesCsv()">Export Interfaces CSV</button>
+                <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportClientsCsv()">Export Clients CSV</button>
             </div>
             <table id="interfaces-table">
-                <thead><tr><th>Port</th><th>State</th><th>STP</th><th>PoE</th><th>Description</th><th>Inactive For</th></tr></thead>
+                <!-- data-sort-key matches a field window.sortInterfacesBy/window.INTERFACE_SORT_COMPARATORS
+                     (drawer.js) knows how to compare; clicking toggles asc/desc, see window.sortInterfacesBy -->
+                <thead><tr>
+                    <th class="sortable" data-sort-key="port" onclick="window.sortInterfacesBy('port')">Port<span class="sort-arrow" id="sort-arrow-port"></span></th>
+                    <th class="sortable" data-sort-key="state" onclick="window.sortInterfacesBy('state')">State<span class="sort-arrow" id="sort-arrow-state"></span></th>
+                    <th class="sortable" data-sort-key="stp" onclick="window.sortInterfacesBy('stp')">STP<span class="sort-arrow" id="sort-arrow-stp"></span></th>
+                    <th class="sortable" data-sort-key="poe" onclick="window.sortInterfacesBy('poe')">PoE<span class="sort-arrow" id="sort-arrow-poe"></span></th>
+                    <th class="sortable" data-sort-key="description" onclick="window.sortInterfacesBy('description')">Description<span class="sort-arrow" id="sort-arrow-description"></span></th>
+                    <th class="sortable" data-sort-key="inactiveFor" onclick="window.sortInterfacesBy('inactiveFor')">Inactive For<span class="sort-arrow" id="sort-arrow-inactiveFor"></span></th>
+                </tr></thead>
                 <tbody id="interfaces-tbody"></tbody>
-            </table>
-        </div>
-
-        <div id="tab-clients" class="tab-content">
-            <div class="toggle-container" style="justify-content:flex-end;">
-                <button type="button" style="width:auto; margin:0; padding:6px 12px;" onclick="window.exportClientsCsv()">Export CSV</button>
-            </div>
-            <table id="clients-table">
-                <thead><tr><th>IP / MAC</th><th>Port & VLAN</th><th>802.1X User</th></tr></thead>
-                <tbody id="clients-tbody"></tbody>
             </table>
         </div>
 
@@ -2460,8 +2476,8 @@ window.resolveDeviceIdentity = function(device) {
     return k.keyType + ':' + k.key;
 };
 
-// Shared badge markup for a daisy-chain hit, used by both renderInterfaces (once per
-// port) and renderClients (once per client sharing a flagged port).
+// Shared badge markup for a daisy-chain hit - renderInterfaces (drawer.js) calls this once
+// per port row and once per nested client sub-row sharing a flagged port.
 window.renderDaisyChainBadge = function(chain) {
     if (chain.confidence === 'confirmed') {
         return `<span class="daisy-badge confirmed" title="LLDP-MED identified: ${esc(chain.medDescription)}">Phone + PC (confirmed)</span>`;
@@ -4338,7 +4354,7 @@ window.drillDownStat = function(kind) {
             rows.push({
                 line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">/ ${esc(c.Port || '')}</span>`,
                 line2Html: `Client: <b>${esc(c.IP || c.MAC || 'Unknown')}</b>${c.MAC ? ` (${esc(c.MAC)})` : ''}`,
-                onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-clients', activeSnapshotIndex),
+                onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex),
             });
         }));
         headerText = `All ${rows.length} Clients`;
@@ -4357,7 +4373,7 @@ window.drillDownStat = function(kind) {
                 rows.push({
                     line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">/ ${esc(c.Port || '')}</span>`,
                     line2Html: `<b style="color:#c0392b;">${esc(c.Dot1x_State)}</b>${c.MAC ? ` — ${esc(c.MAC)}` : ''}`,
-                    onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-clients', activeSnapshotIndex),
+                    onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex),
                 });
             }
         }));
@@ -4420,7 +4436,7 @@ window.drillDownStat = function(kind) {
 // look like a hit on the switch's own management IP.
 var SEARCH_FIELD_LABELS = { ip: 'IP Address', client_ip: 'Client IP', hostname: 'Hostname', mac: 'MAC Address', user: 'Username', serial: 'Serial Number' };
 // Which tab to jump to for a match in each field - null leaves the active tab as-is.
-var SEARCH_FIELD_TABS = { ip: null, client_ip: 'tab-clients', hostname: null, mac: 'tab-clients', user: 'tab-clients', serial: 'tab-stack' };
+var SEARCH_FIELD_TABS = { ip: null, client_ip: 'tab-interfaces', hostname: null, mac: 'tab-interfaces', user: 'tab-interfaces', serial: 'tab-stack' };
 // The UI only exposes one "IP Address" checkbox for both the device's own IP and a
 // client's IP - this maps a search-index field back to the checkbox id that gates it.
 var SEARCH_FIELD_CHECKBOX = { ip: 'ip', client_ip: 'ip', hostname: 'hostname', mac: 'mac', user: 'user', serial: 'serial' };
@@ -4605,8 +4621,9 @@ window.goToSearchResult = function(targetIp, tab, snapshotIndex) {
 
 </script>
     <script>
-// Right-hand device detail drawer: tabs (Summary/Hardware/Alarms/Neighbors/Interfaces/
-// Clients/Config), CSV/config export, printable report, and drawer open/close/tab-switch.
+// Right-hand device detail drawer: tabs (Summary/Hardware/Alarms/Neighbors/Interfaces incl.
+// nested edge clients/Config), CSV/config export, printable report, and drawer open/close/
+// tab-switch.
 // Reads currentSelectedNodeData/deviceByIp/loadedSnapshots/activeSnapshotIndex/
 // searchHighlightQuery from app.js.
 
@@ -4628,7 +4645,6 @@ window.switchTab = function(tabId) {
     if (currentSelectedNodeData) {
         if (tabId === 'tab-neighbors') window.renderNeighbors();
         if (tabId === 'tab-interfaces') window.renderInterfaces();
-        if (tabId === 'tab-clients') window.renderClients();
     }
 };
 
@@ -4988,8 +5004,9 @@ function isRescanTargetSnapshotGone(snapshots, targetSnapshot) {
 // if targetSnapshot no longer exists among loadedSnapshots.
 // True only while openRightDrawer is being called from mergeRescannedDevice's own re-render
 // below (a background poll completing, not the user opening/switching to a device). Lets
-// renderClients (search-result auto-scroll) and populateConfigCompareSelect (compare-target
-// reset) tell that apart from a genuine drawer-open, where their normal behavior is correct.
+// renderInterfaces (search-result auto-scroll to a highlighted client sub-row) and
+// populateConfigCompareSelect (compare-target reset) tell that apart from a genuine drawer-open,
+// where their normal behavior is correct.
 var isMergeRerender = false;
 
 window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
@@ -5115,7 +5132,6 @@ window.openRightDrawer = function(ip) {
     window.renderStack();
     window.renderNeighbors();
     window.renderInterfaces();
-    window.renderClients();
     window.renderConfig();
 
     panel.style.display = 'flex';
@@ -5206,11 +5222,78 @@ window.renderNeighbors = function() {
     tbody.innerHTML = html || `<tr><td colspan="4" style="text-align:center;">No LLDP neighbors found</td></tr>`;
 };
 
+// Column-click sort state for #interfaces-table (window.sortInterfacesBy below). null column
+// means "use the default down-first/longest-inactive-first order" - clicking a header switches
+// to a plain per-column sort until the drawer is reopened for a different device.
+var interfaceSortState = { column: null, dir: 1 };
+
+// One comparator per data-sort-key in index.html's #interfaces-table <thead>. Each returns the
+// usual negative/zero/positive "a before b" value in ASCENDING order; window.sortInterfacesBy
+// applies interfaceSortState.dir on top, so a comparator never needs to know which direction
+// is currently active.
+var INTERFACE_SORT_COMPARATORS = {
+    port: (a, b) => String(a.Port || '').localeCompare(String(b.Port || ''), undefined, { numeric: true, sensitivity: 'base' }),
+    state: (a, b) => `${a.Admin}/${a.Link}`.localeCompare(`${b.Admin}/${b.Link}`, undefined, { sensitivity: 'base' }),
+    stp: (a, b) => String(a.STP || '').localeCompare(String(b.STP || ''), undefined, { sensitivity: 'base' }),
+    poe: (a, b) => String(a.PoE || '').localeCompare(String(b.PoE || ''), undefined, { numeric: true, sensitivity: 'base' }),
+    description: (a, b) => String(a.Desc || '').localeCompare(String(b.Desc || ''), undefined, { sensitivity: 'base' }),
+    // Nulls (never flapped / pre-dates this field) always sort after every known duration,
+    // regardless of interfaceSortState.dir - matches the default order's tiebreak, and avoids
+    // "Unknown" jumping to the very top of a descending sort just because null > any number.
+    inactiveFor: (a, b) => {
+        var av = a.LastFlappedSeconds, bv = b.LastFlappedSeconds;
+        if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
+        if (bv === null || bv === undefined) return -1;
+        return av - bv;
+    },
+};
+
+window.sortInterfacesBy = function(column) {
+    if (interfaceSortState.column === column) {
+        interfaceSortState.dir *= -1;
+    } else {
+        interfaceSortState.column = column;
+        interfaceSortState.dir = 1;
+    }
+    window.renderInterfaces();
+};
+
+function updateInterfaceSortArrows() {
+    Object.keys(INTERFACE_SORT_COMPARATORS).forEach(col => {
+        var el = document.getElementById('sort-arrow-' + col);
+        if (!el) return;
+        el.textContent = (interfaceSortState.column !== col) ? '' : (interfaceSortState.dir === 1 ? '▲' : '▼');
+    });
+}
+
+// Interfaces + their edge clients, combined into one table (formerly two separate tabs) - a
+// client only ever belongs to exactly one port, so nesting it under that port's row reads
+// naturally and avoids cross-referencing two lists by hand. Clients still honor the VLAN
+// Highlight Layer filter (#vlanFilter, shared with graph.js's applyVlanFilter) the old
+// standalone Clients tab used.
 window.renderInterfaces = function() {
     var tbody = document.getElementById('interfaces-tbody');
     var hideDown = document.getElementById('hideDownPorts').checked;
+    var vlanFilter = document.getElementById('vlanFilter').value;
     var daisyChains = window.detectDaisyChains(currentSelectedNodeData);
     var html = "";
+
+    var clientsByPort = new Map();
+    var clients = window.asArray(currentSelectedNodeData.TrueClients).slice();
+    if (vlanFilter !== "ALL") {
+        clients = clients.filter(c => String(c.VLAN_Tag) === vlanFilter.toString());
+    }
+    clients.sort((a, b) => {
+        if (a.IP === "Unknown") return 1; if (b.IP === "Unknown") return -1;
+        var numA = Number(String(a.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
+        var numB = Number(String(b.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
+        return numA - numB;
+    });
+    clients.forEach(c => {
+        var key = window.normalizePort(c.Port);
+        if (!clientsByPort.has(key)) clientsByPort.set(key, []);
+        clientsByPort.get(key).push(c);
+    });
 
     if (currentSelectedNodeData.Interfaces) {
         var rows = window.asArray(currentSelectedNodeData.Interfaces).filter(intf => {
@@ -5219,19 +5302,25 @@ window.renderInterfaces = function() {
             return true;
         });
 
-        // Down ports sort first, longest-inactive first (unknown duration last among downs) -
-        // same tiebreak the old fleet-wide Inactive Ports dashboard tab used - so the ports
-        // most worth an operator's attention on THIS switch surface at the top. Up ports keep
-        // their original relative order (stable sort, comparator returns 0 for any up/up pair).
-        rows.sort((a, b) => {
-            var aDown = String(a.Link).toLowerCase() !== "up", bDown = String(b.Link).toLowerCase() !== "up";
-            if (aDown !== bDown) return aDown ? -1 : 1;
-            if (!aDown) return 0;
-            var av = a.LastFlappedSeconds, bv = b.LastFlappedSeconds;
-            if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
-            if (bv === null || bv === undefined) return -1;
-            return bv - av;
-        });
+        if (interfaceSortState.column && INTERFACE_SORT_COMPARATORS[interfaceSortState.column]) {
+            var cmp = INTERFACE_SORT_COMPARATORS[interfaceSortState.column];
+            rows.sort((a, b) => interfaceSortState.dir * cmp(a, b));
+        } else {
+            // Default: down ports first, longest-inactive first (unknown duration last among
+            // downs) - same tiebreak the old fleet-wide Inactive Ports dashboard tab used, so
+            // the ports most worth an operator's attention on THIS switch surface at the top.
+            // Up ports keep their original relative order (stable sort, comparator returns 0
+            // for any up/up pair).
+            rows.sort((a, b) => {
+                var aDown = String(a.Link).toLowerCase() !== "up", bDown = String(b.Link).toLowerCase() !== "up";
+                if (aDown !== bDown) return aDown ? -1 : 1;
+                if (!aDown) return 0;
+                var av = a.LastFlappedSeconds, bv = b.LastFlappedSeconds;
+                if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
+                if (bv === null || bv === undefined) return -1;
+                return bv - av;
+            });
+        }
 
         rows.forEach(intf => {
             var linkBadge = String(intf.Link).toLowerCase() === "up" ? "green" : "red";
@@ -5255,59 +5344,15 @@ window.renderInterfaces = function() {
                 <td style="font-style:italic; color:var(--text-muted);">${esc(intf.Desc)}</td>
                 <td>${esc(inactiveFor)}</td>
             </tr>`;
+
+            var portClients = clientsByPort.get(window.normalizePort(intf.Port)) || [];
+            portClients.forEach(c => {
+                html += renderClientSubRow(c, daisyChains);
+            });
         });
     }
     tbody.innerHTML = html || `<tr><td colspan="6" style="text-align:center;">No interface data</td></tr>`;
-};
-
-window.renderClients = function() {
-    var tbody = document.getElementById('clients-tbody');
-    var vlanFilter = document.getElementById('vlanFilter').value;
-    var daisyChains = window.detectDaisyChains(currentSelectedNodeData);
-    var html = "";
-
-    var trueClientRows = window.asArray(currentSelectedNodeData.TrueClients);
-    if (trueClientRows.length > 0) {
-        var clients = trueClientRows.slice();
-
-        if (vlanFilter !== "ALL") {
-            clients = clients.filter(c => String(c.VLAN_Tag) === vlanFilter.toString());
-        }
-
-        clients = clients.sort((a, b) => {
-            if (a.IP === "Unknown") return 1; if (b.IP === "Unknown") return -1;
-            var numA = Number(String(a.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
-            var numB = Number(String(b.IP).split('.').map(n => (`000${n}`).slice(-3)).join(''));
-            return numA - numB;
-        });
-
-        clients.forEach(c => {
-            var isHighlighted = searchHighlightQuery && ((c.IP && String(c.IP).toLowerCase().includes(searchHighlightQuery)) || (c.MAC && String(c.MAC).toLowerCase().includes(searchHighlightQuery)) || (c.Dot1x_User && String(c.Dot1x_User).toLowerCase().includes(searchHighlightQuery)));
-            var rowClass = isHighlighted ? 'highlight' : '';
-
-            var dotUserStr = (c.Dot1x_User && c.Dot1x_User !== "Unknown") ? esc(c.Dot1x_User) : "None";
-            var dotStateColor = (c.Dot1x_State && String(c.Dot1x_State).includes('Auth')) ? 'var(--success-text)' : (c.Dot1x_State !== "Unknown" ? 'var(--danger-text)' : 'var(--text-muted)');
-            var dotStateStr = c.Dot1x_State !== "Unknown" ? `<br><span style="font-size:0.7rem; color:${dotStateColor};">(${esc(c.Dot1x_State)})</span>` : "";
-            var descStr = (c.PortDesc && c.PortDesc !== "Unknown") ? `<br><span style="font-size:0.75rem; color:var(--text-dim);">${esc(c.PortDesc)}</span>` : "";
-            var typeClass = String(c.Type).toLowerCase().startsWith('dynamic') ? 'dynamic' : 'static';
-            var typeStr = (c.Type && c.Type !== "Unknown") ? `<span class="type-badge ${typeClass}">${esc(c.Type)}</span>` : "";
-
-            var vendorInfo = window.lookupVendor(c.MAC);
-            var vendorStr = vendorInfo.vendor
-                ? `<br><span class="vendor-tag vendor-${vendorInfo.category.toLowerCase().replace('/', '-')}" title="Category: ${esc(vendorInfo.category)}">${esc(vendorInfo.vendor)}</span>`
-                : "";
-
-            var chain = daisyChains.get(window.normalizePort(c.Port));
-            var daisyStr = chain ? `<br>${window.renderDaisyChainBadge(chain)}` : "";
-
-            html += `<tr class="${rowClass}">
-                <td><span style="font-weight:bold; color:var(--accent); font-size:1rem;">${esc(c.IP)}</span><br><span style="font-family:monospace; color:var(--text-muted);">${esc(String(c.MAC).toUpperCase())}</span>${vendorStr}</td>
-                <td><b>${esc(c.Port)}</b><br><span class="badge" style="background:var(--primary);">VLAN ${esc(c.VLAN_Tag)}</span>${typeStr}${descStr}${daisyStr}</td>
-                <td><b>${dotUserStr}</b>${dotStateStr}</td>
-            </tr>`;
-        });
-    }
-    tbody.innerHTML = html || `<tr><td colspan="3" style="text-align:center;">No edge clients found</td></tr>`;
+    updateInterfaceSortArrows();
 
     // Skipped on a merge-triggered re-render (background rescan completing) - only scroll on
     // an actual drawer-open/tab-switch/search-navigation render, so a background merge can't
@@ -5317,6 +5362,37 @@ window.renderClients = function() {
         if (highlightedEl) highlightedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 };
+
+function renderClientSubRow(c, daisyChains) {
+    var isHighlighted = searchHighlightQuery && ((c.IP && String(c.IP).toLowerCase().includes(searchHighlightQuery)) || (c.MAC && String(c.MAC).toLowerCase().includes(searchHighlightQuery)) || (c.Dot1x_User && String(c.Dot1x_User).toLowerCase().includes(searchHighlightQuery)));
+    var rowClass = 'client-subrow' + (isHighlighted ? ' highlight' : '');
+
+    var dotUserStr = (c.Dot1x_User && c.Dot1x_User !== "Unknown") ? esc(c.Dot1x_User) : "None";
+    var dotStateColor = (c.Dot1x_State && String(c.Dot1x_State).includes('Auth')) ? 'var(--success-text)' : (c.Dot1x_State !== "Unknown" ? 'var(--danger-text)' : 'var(--text-muted)');
+    var dotStateStr = c.Dot1x_State !== "Unknown" ? ` <span style="font-size:0.7rem; color:${dotStateColor};">(${esc(c.Dot1x_State)})</span>` : "";
+    var descStr = (c.PortDesc && c.PortDesc !== "Unknown") ? `<span style="color:var(--text-dim);">${esc(c.PortDesc)}</span>` : "";
+    var typeClass = String(c.Type).toLowerCase().startsWith('dynamic') ? 'dynamic' : 'static';
+    var typeStr = (c.Type && c.Type !== "Unknown") ? `<span class="type-badge ${typeClass}">${esc(c.Type)}</span>` : "";
+
+    var vendorInfo = window.lookupVendor(c.MAC);
+    var vendorStr = vendorInfo.vendor
+        ? `<span class="vendor-tag vendor-${vendorInfo.category.toLowerCase().replace('/', '-')}" title="Category: ${esc(vendorInfo.category)}">${esc(vendorInfo.vendor)}</span>`
+        : "";
+
+    var chain = daisyChains.get(window.normalizePort(c.Port));
+    var daisyStr = chain ? window.renderDaisyChainBadge(chain) : "";
+
+    return `<tr class="${rowClass}"><td colspan="6"><div class="client-subrow-inner">
+        <span class="csr-identity">${esc(c.IP)}</span>
+        <span class="csr-mac">${esc(String(c.MAC).toUpperCase())}</span>
+        ${vendorStr}
+        <span class="badge" style="background:var(--primary);">VLAN ${esc(c.VLAN_Tag)}</span>
+        ${typeStr}
+        <span><b>${dotUserStr}</b>${dotStateStr}</span>
+        ${descStr}
+        ${daisyStr}
+    </div></td></tr>`;
+}
 
 // CSV export - mirrors the currently displayed (filtered) rows for the selected switch,
 // not the full unfiltered dataset, so what downloads matches what's on screen.

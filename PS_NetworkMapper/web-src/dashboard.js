@@ -883,7 +883,7 @@ window.drillDownStat = function(kind) {
             rows.push({
                 line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">/ ${esc(c.Port || '')}</span>`,
                 line2Html: `Client: <b>${esc(c.IP || c.MAC || 'Unknown')}</b>${c.MAC ? ` (${esc(c.MAC)})` : ''}`,
-                onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-clients', activeSnapshotIndex),
+                onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex),
             });
         }));
         headerText = `All ${rows.length} Clients`;
@@ -902,7 +902,7 @@ window.drillDownStat = function(kind) {
                 rows.push({
                     line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">/ ${esc(c.Port || '')}</span>`,
                     line2Html: `<b style="color:#c0392b;">${esc(c.Dot1x_State)}</b>${c.MAC ? ` — ${esc(c.MAC)}` : ''}`,
-                    onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-clients', activeSnapshotIndex),
+                    onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex),
                 });
             }
         }));

@@ -244,8 +244,8 @@ window.resolveDeviceIdentity = function(device) {
     return k.keyType + ':' + k.key;
 };
 
-// Shared badge markup for a daisy-chain hit, used by both renderInterfaces (once per
-// port) and renderClients (once per client sharing a flagged port).
+// Shared badge markup for a daisy-chain hit - renderInterfaces (drawer.js) calls this once
+// per port row and once per nested client sub-row sharing a flagged port.
 window.renderDaisyChainBadge = function(chain) {
     if (chain.confidence === 'confirmed') {
         return `<span class="daisy-badge confirmed" title="LLDP-MED identified: ${esc(chain.medDescription)}">Phone + PC (confirmed)</span>`;

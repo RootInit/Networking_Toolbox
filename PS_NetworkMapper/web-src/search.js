@@ -8,7 +8,7 @@
 // look like a hit on the switch's own management IP.
 var SEARCH_FIELD_LABELS = { ip: 'IP Address', client_ip: 'Client IP', hostname: 'Hostname', mac: 'MAC Address', user: 'Username', serial: 'Serial Number' };
 // Which tab to jump to for a match in each field - null leaves the active tab as-is.
-var SEARCH_FIELD_TABS = { ip: null, client_ip: 'tab-clients', hostname: null, mac: 'tab-clients', user: 'tab-clients', serial: 'tab-stack' };
+var SEARCH_FIELD_TABS = { ip: null, client_ip: 'tab-interfaces', hostname: null, mac: 'tab-interfaces', user: 'tab-interfaces', serial: 'tab-stack' };
 // The UI only exposes one "IP Address" checkbox for both the device's own IP and a
 // client's IP - this maps a search-index field back to the checkbox id that gates it.
 var SEARCH_FIELD_CHECKBOX = { ip: 'ip', client_ip: 'ip', hostname: 'hostname', mac: 'mac', user: 'user', serial: 'serial' };
