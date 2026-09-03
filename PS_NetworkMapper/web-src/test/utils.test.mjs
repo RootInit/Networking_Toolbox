@@ -13,6 +13,7 @@ global.window.location = global.window.location || { href: 'http://localhost/' }
 await import('../utils.js');
 
 const parseTimestampMs = global.window.parseTimestampMs;
+const esc = global.window.esc;
 
 // Contract (see utils.js's own comment above the definition): returns a finite epoch-ms
 // number for anything Date can parse, or null for anything falsy/unparseable. Never
@@ -44,4 +45,26 @@ test('parseTimestampMs treats an epoch-zero-adjacent timestamp string as a valid
   // One millisecond after epoch is unambiguous either way - guards against an
   // implementation that only special-cases exactly 0.
   assert.equal(parseTimestampMs('1970-01-01T00:00:00.001Z'), 1);
+});
+
+// Contract (see utils.js's own comment above the definition): esc() is the single
+// XSS-escaping choke point for every device-supplied string interpolated into innerHTML
+// elsewhere in the app, via the HTML_ESCAPES map: & < > " '.
+
+test('esc escapes each HTML_ESCAPES character individually', () => {
+  assert.equal(esc('&'), '&amp;');
+  assert.equal(esc('<'), '&lt;');
+  assert.equal(esc('>'), '&gt;');
+  assert.equal(esc('"'), '&quot;');
+  assert.equal(esc("'"), '&#39;');
+});
+
+test('esc escapes a string exercising the full HTML_ESCAPES map together', () => {
+  assert.equal(esc(`<script>alert("x" & 'y')</script>`),
+    '&lt;script&gt;alert(&quot;x&quot; &amp; &#39;y&#39;)&lt;/script&gt;');
+});
+
+test('esc leaves a string with no special characters unchanged', () => {
+  assert.equal(esc('switch-01.example.com'), 'switch-01.example.com');
+  assert.equal(esc(''), '');
 });

@@ -635,7 +635,7 @@ window.renderClients = function() {
 
     var trueClientRows = window.asArray(currentSelectedNodeData.TrueClients);
     if (trueClientRows.length > 0) {
-        var clients = trueClientRows;
+        var clients = trueClientRows.slice();
 
         if (vlanFilter !== "ALL") {
             clients = clients.filter(c => String(c.VLAN_Tag) === vlanFilter.toString());

@@ -94,7 +94,8 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
       var textEl = document.getElementById('fatal-error-text');
       var modalEl = document.getElementById('fatal-error-modal');
       if (textEl && modalEl) {
-        // Build via textContent, not innerHTML, so err.message can't be interpreted as markup.
+        // Static wrapper markup is a fixed literal, so innerHTML here is safe; the untrusted
+        // part (err.message) is appended below via textContent, not interpreted as markup.
         textEl.innerHTML = 'Layout engine failed, showing a basic grid instead of the normal tree view.<br><br>';
         var errMsgEl = document.createElement('span');
         errMsgEl.textContent = (err && err.message) ? err.message : String(err);
