@@ -47,6 +47,32 @@ function Invoke-FleetCrawl {
     # appended after it, causing the whole file to be misread as UTF-16LE.
     if ($DebugLogPath) { try { "=== Fleet Crawl Debug Log - $(Get-Date) ===" | Out-File -FilePath $DebugLogPath -Force -Encoding utf8 } catch {} }
 
+    # True atomic replace when $Destination already exists: Move-Item -Force decomposes into
+    # unlink(dest) + rename(source, dest) as two separate syscalls (confirmed via strace against
+    # pwsh 7.6.2), leaving a window where $Destination doesn't exist at all if the process dies
+    # between them. [System.IO.File]::Replace performs a single atomic replace instead. Falls
+    # back to Move-Item when the destination doesn't exist yet (nothing to replace atomically
+    # against, and Move-Item is already atomic in that case).
+    function Move-TopologyOutputLocal {
+        param([string]$Source, [string]$Destination)
+        if (Test-Path -LiteralPath $Destination) {
+            # [System.IO.File]::Replace is a raw .NET static call - it resolves a relative path
+            # against [Environment]::CurrentDirectory, not PowerShell's $PWD (which
+            # Set-Location doesn't keep in sync), unlike Move-Item/Test-Path. Convert-Path
+            # resolves both to full paths against $PWD first so this can't silently touch the
+            # wrong directory - it's safe to call here since $Source was just written and
+            # $Destination is Test-Path-guarded above, so both are known to exist.
+            #
+            # PowerShell coerces a literal $null to an empty string for this string-typed
+            # parameter, which .Replace() then rejects ("value cannot be an empty string") -
+            # [NullString]::Value passes a genuine null through, matching "no backup file" as
+            # the .NET API intends.
+            [System.IO.File]::Replace((Convert-Path -LiteralPath $Source), (Convert-Path -LiteralPath $Destination), [NullString]::Value)
+        } else {
+            Move-Item -Path $Source -Destination $Destination -Force
+        }
+    }
+
     # Single write path for init/periodic/final writes so encryption is wired in once.
     function Write-TopologyOutputLocal {
         param($Topology, [string]$Path, [string]$ScanTimestampIso)
@@ -184,7 +210,7 @@ function Invoke-FleetCrawl {
         # Move-Item failure here still hits the catch below (an empty-topology salvage write is
         # a harmless no-op at this point) and the finally still reaps the leftover .tmp file.
         Write-TopologyOutputLocal -Topology @() -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-        Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
+        Move-TopologyOutputLocal -Source $TempOutputFile -Destination $OutputFile
 
         while ($Queue.Count -gt 0 -or $Jobs.Count -gt 0) {
 
@@ -435,7 +461,7 @@ function Invoke-FleetCrawl {
                 try {
                     Update-ClientIpCorrelationLocal -Topology $TopologyList
                     Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-                    Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
+                    Move-TopologyOutputLocal -Source $TempOutputFile -Destination $OutputFile
                     $PendingWrites = 0
                     $LastWriteTime = Get-Date
                 } catch {
@@ -461,7 +487,7 @@ function Invoke-FleetCrawl {
             if ($PendingWrites -gt 0) {
                 Update-ClientIpCorrelationLocal -Topology $TopologyList
                 Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-                Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
+                Move-TopologyOutputLocal -Source $TempOutputFile -Destination $OutputFile
             }
         } catch {
             Write-DebugLogLocal "FINAL WRITE FAILED: $_"
@@ -495,7 +521,7 @@ function Invoke-FleetCrawl {
                 # Temp file + Move-Item (not a direct write) so a partway failure here
                 # doesn't replace a good prior snapshot with a truncated one.
                 Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
-                Move-Item -Path $TempOutputFile -Destination $OutputFile -Force
+                Move-TopologyOutputLocal -Source $TempOutputFile -Destination $OutputFile
                 Write-Host "[!] Salvaged $($TopologyList.Count) already-crawled device(s) to $OutputFile before aborting." -ForegroundColor Yellow
             }
         } catch {

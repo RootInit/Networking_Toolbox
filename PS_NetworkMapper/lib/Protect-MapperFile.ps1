@@ -38,6 +38,33 @@ param(
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 . (Join-Path $ScriptDir "TopologyCrypto.ps1")
 
+# True atomic replace when $Destination already exists: Move-Item -Force decomposes into
+# unlink(dest) + rename(source, dest) as two separate syscalls (confirmed via strace against
+# pwsh 7.6.2), leaving a window where $Destination doesn't exist at all if the process dies
+# between them - the worst case for the in-place decrypt/encrypt use below, where $Destination
+# can be the operator's only copy of the data. [System.IO.File]::Replace performs a single
+# atomic replace instead. Falls back to Move-Item when the destination doesn't exist yet -
+# nothing to replace atomically against, and Move-Item is already atomic in that case.
+function Move-FileAtomic {
+    param([string]$Source, [string]$Destination)
+    if (Test-Path -LiteralPath $Destination) {
+        # [System.IO.File]::Replace is a raw .NET static call - it resolves a relative path
+        # against [Environment]::CurrentDirectory, not PowerShell's $PWD (which Set-Location
+        # doesn't keep in sync), unlike Move-Item/Test-Path. Convert-Path resolves both to
+        # full paths against $PWD first so this can't silently touch the wrong directory - it's
+        # safe to call here since $Source was just written and $Destination is Test-Path-
+        # guarded above, so both are known to exist.
+        #
+        # PowerShell coerces a literal $null to an empty string for this string-typed
+        # parameter, which .Replace() then rejects ("value cannot be an empty string") -
+        # [NullString]::Value passes a genuine null through, matching "no backup file" as the
+        # .NET API intends.
+        [System.IO.File]::Replace((Convert-Path -LiteralPath $Source), (Convert-Path -LiteralPath $Destination), [NullString]::Value)
+    } else {
+        Move-Item -Path $Source -Destination $Destination -Force
+    }
+}
+
 # Standard cross-runtime SecureString->plaintext idiom (avoids manual BSTR marshaling/cleanup).
 function ConvertFrom-SecurePassword {
     param([Parameter(Mandatory = $true)][securestring]$SecureString)
@@ -92,13 +119,19 @@ if ($Decrypt) {
     # no purpose and could reformat date-like string fields (e.g. .ToString("o") timestamps)
     # differently depending on PowerShell version/culture.
     #
-    # Temp-file + Move-Item, same pattern as FleetCrawl.ps1's topology writes - a partway
+    # Temp-file + atomic replace, same pattern as FleetCrawl.ps1's topology writes - a partway
     # failure (e.g. disk full, kill mid-write) then leaves no half-written $TargetPath behind
     # instead of a truncated one, which matters most here since -OutputFile can equal
-    # -InputFile (in-place decrypt), making $TargetPath the operator's only copy.
-    $TempTargetPath = "$TargetPath.tmp"
-    $PlainJson | Out-File -FilePath $TempTargetPath -Encoding utf8 -Force
-    Move-Item -Path $TempTargetPath -Destination $TargetPath -Force
+    # -InputFile (in-place decrypt), making $TargetPath the operator's only copy. Temp name
+    # includes $PID so two concurrent invocations against the same target can't collide, and
+    # the try/finally cleans it up if the write or replace fails partway through.
+    $TempTargetPath = "$TargetPath.$PID.tmp"
+    try {
+        $PlainJson | Out-File -FilePath $TempTargetPath -Encoding utf8 -Force
+        Move-FileAtomic -Source $TempTargetPath -Destination $TargetPath
+    } finally {
+        if (Test-Path -LiteralPath $TempTargetPath) { Remove-Item -Path $TempTargetPath -Force }
+    }
     Write-Host "Wrote plaintext to: $TargetPath" -ForegroundColor Green
 
 } else {
@@ -127,10 +160,15 @@ if ($Decrypt) {
     $TargetPath = if ($OutputFile) { $OutputFile } else { $DefaultOutput }
 
     if (-not (Confirm-Overwrite -Path $TargetPath)) { return }
-    # Temp-file + Move-Item - see the -Decrypt branch's comment above; same in-place-overwrite
-    # risk applies here (-OutputFile can equal -InputFile.enc when re-encrypting in place).
-    $TempTargetPath = "$TargetPath.tmp"
-    $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $TempTargetPath -Encoding utf8 -Force
-    Move-Item -Path $TempTargetPath -Destination $TargetPath -Force
+    # Temp-file + atomic replace - see the -Decrypt branch's comment above; same in-place-
+    # overwrite risk applies here (-OutputFile can equal -InputFile.enc when re-encrypting in
+    # place), same $PID-uniqued temp name and try/finally cleanup.
+    $TempTargetPath = "$TargetPath.$PID.tmp"
+    try {
+        $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $TempTargetPath -Encoding utf8 -Force
+        Move-FileAtomic -Source $TempTargetPath -Destination $TargetPath
+    } finally {
+        if (Test-Path -LiteralPath $TempTargetPath) { Remove-Item -Path $TempTargetPath -Force }
+    }
     Write-Host "Encrypted (format: $Format) to: $TargetPath" -ForegroundColor Green
 }
