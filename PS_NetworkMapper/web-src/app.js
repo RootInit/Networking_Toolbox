@@ -89,6 +89,15 @@ window.setActiveSnapshot = async function(index) {
     // Map view (map.js) renders this same topology separately, so it needs its own
     // refresh on snapshot switch. No-op if Map view was never opened (leafletMap===null).
     window.renderMapMarkers();
+
+    // Analysis Dashboard also renders this same topology separately (Fleet Health, New
+    // Devices, Trend Chart, etc. - see dashboard.js). Its container elements exist in the
+    // DOM regardless of which sidebar tab is active (index.html just toggles a CSS class),
+    // so the guards inside those render functions don't skip real work when the tab is
+    // hidden - only refresh here if Analysis is the tab actually showing. switchSidebarTab
+    // (below) already refreshes on activation, so a hidden dashboard is still fresh the
+    // instant the user opens it.
+    if (activeSidebarTab === 'sidebar-tab-analysis') window.refreshAnalysisDashboard();
 };
 
 // Shows the snapshot picker only when more than one snapshot is loaded.
@@ -498,16 +507,13 @@ window.processSelectedFiles = async function(files) {
         // to selection order, preferring later ones.
         var bestIndex = 0, bestTime = -Infinity;
         loadedSnapshots.forEach((s, idx) => {
-            var t = s.scanTimestamp ? new Date(s.scanTimestamp).getTime() : NaN;
-            var effectiveTime = Number.isFinite(t) ? t : idx;
+            var t = window.parseTimestampMs(s.scanTimestamp);
+            var effectiveTime = t !== null ? t : idx;
             if (effectiveTime >= bestTime) { bestTime = effectiveTime; bestIndex = idx; }
         });
 
         window.renderSnapshotSwitcher();
         window.updateDeviceHistory();
-        // Refresh Analysis Dashboard now if it's already the visible tab, rather than
-        // leaving it stale until the user clicks away and back.
-        if (activeSidebarTab === 'sidebar-tab-analysis') window.refreshAnalysisDashboard();
         window.showProgress("Rendering Topology...", 100, true);
         await nextPaint();
         if (myGeneration !== loadFilesGeneration) return;

@@ -171,8 +171,8 @@ window.renderFleetDashboard = function() {
         var snapTime = window.parseTimestampMs(activeSnapshot.scanTimestamp);
         devices.forEach(d => {
             if (!d.Uptime || d.Uptime === "Unknown") return;
-            var bootTime = new Date(d.Uptime).getTime();
-            if (isNaN(bootTime)) return;
+            var bootTime = window.parseTimestampMs(d.Uptime);
+            if (bootTime === null) return;
             anyUptimeUsable = true;
             var elapsedMin = (snapTime - bootTime) / 60000;
             if (elapsedMin >= 0 && elapsedMin < settings.recentRebootMin) {
