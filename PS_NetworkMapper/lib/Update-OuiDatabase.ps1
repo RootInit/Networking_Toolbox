@@ -16,10 +16,21 @@ $Session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 $Headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36" }
 
 Write-Host "Fetching IEEE OUI registry (standards-oui.ieee.org/oui/oui.txt)..." -ForegroundColor Cyan
+# Download to a temp file and re-read it as explicit UTF-8, rather than trusting
+# Invoke-WebRequest's .Content decode (which follows the runtime/response default and can
+# silently mojibake-corrupt the non-ASCII vendor names IEEE's registry legitimately contains -
+# same "explicit UTF-8, not system-default" concern Get-JunosNodeData.ps1 handles with
+# Get-Content -Encoding UTF8 on SSH output.
+$TempFile = New-TemporaryFile
 try {
-    $RawText = (Invoke-WebRequest -Uri "https://standards-oui.ieee.org/oui/oui.txt" -WebSession $Session -Headers $Headers).Content
-} catch {
-    throw "Failed to fetch the IEEE OUI registry: $_"
+    try {
+        Invoke-WebRequest -Uri "https://standards-oui.ieee.org/oui/oui.txt" -WebSession $Session -Headers $Headers -OutFile $TempFile.FullName
+    } catch {
+        throw "Failed to fetch the IEEE OUI registry: $_"
+    }
+    $RawText = Get-Content $TempFile.FullName -Raw -Encoding UTF8
+} finally {
+    Remove-Item $TempFile.FullName -Force -ErrorAction SilentlyContinue
 }
 
 # Real line format: "286FB9     (base 16)\t\tNokia Shanghai Bell Co., Ltd." - address

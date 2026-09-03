@@ -16,12 +16,12 @@ function asArray(val) {
 function extractDeviceKeys(device) {
   var serial = null;
   asArray(device.StackMembers).forEach(function (member) {
-    if (member && (member.Role === 'Standalone' || member.Role === 'Master') && member.Serial) {
+    if (serial === null && member && (member.Role === 'Standalone' || member.Role === 'Master') && member.Serial) {
       serial = member.Serial;
     }
   });
   var hostname = (device.Hostname && device.Hostname !== 'Unknown') ? device.Hostname : null;
-  return { serial: serial, hostname: hostname, ip: String(device.DeviceIP) };
+  return { serial: serial, hostname: hostname, ip: device.DeviceIP ? String(device.DeviceIP) : null };
 }
 
 function resolveDeviceLocation(device, configEntries) {
