@@ -29,9 +29,9 @@ var TopologyCrypto = (function() {
         return { encKeyBytes: keyMaterial.slice(0, 32), macKeyBytes: keyMaterial.slice(32, 64) };
     }
 
-    // MIN must stay <= any real file's iteration count (currently 200,000) or it stops
-    // decrypting. MAX is just a CPU-burn guard against a maliciously-crafted file, not a
-    // security boundary.
+    // MIN must stay <= any real file's iteration count (the shared PBKDF2 count is 600,000)
+    // or it stops decrypting. MAX is just a CPU-burn guard against a maliciously-crafted file,
+    // not a security boundary.
     var MIN_ITERATIONS = 1000;
     var MAX_ITERATIONS = 5000000;
 

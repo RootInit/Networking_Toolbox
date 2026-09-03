@@ -91,7 +91,14 @@ if ($Decrypt) {
     # raw input verbatim. Round-tripping through ConvertFrom-Json/ConvertTo-Json here served
     # no purpose and could reformat date-like string fields (e.g. .ToString("o") timestamps)
     # differently depending on PowerShell version/culture.
-    $PlainJson | Out-File -FilePath $TargetPath -Encoding utf8 -Force
+    #
+    # Temp-file + Move-Item, same pattern as FleetCrawl.ps1's topology writes - a partway
+    # failure (e.g. disk full, kill mid-write) then leaves no half-written $TargetPath behind
+    # instead of a truncated one, which matters most here since -OutputFile can equal
+    # -InputFile (in-place decrypt), making $TargetPath the operator's only copy.
+    $TempTargetPath = "$TargetPath.tmp"
+    $PlainJson | Out-File -FilePath $TempTargetPath -Encoding utf8 -Force
+    Move-Item -Path $TempTargetPath -Destination $TargetPath -Force
     Write-Host "Wrote plaintext to: $TargetPath" -ForegroundColor Green
 
 } else {
@@ -120,6 +127,10 @@ if ($Decrypt) {
     $TargetPath = if ($OutputFile) { $OutputFile } else { $DefaultOutput }
 
     if (-not (Confirm-Overwrite -Path $TargetPath)) { return }
-    $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $TargetPath -Encoding utf8 -Force
+    # Temp-file + Move-Item - see the -Decrypt branch's comment above; same in-place-overwrite
+    # risk applies here (-OutputFile can equal -InputFile.enc when re-encrypting in place).
+    $TempTargetPath = "$TargetPath.tmp"
+    $Envelope | ConvertTo-Json -Depth 10 | Out-File -FilePath $TempTargetPath -Encoding utf8 -Force
+    Move-Item -Path $TempTargetPath -Destination $TargetPath -Force
     Write-Host "Encrypted (format: $Format) to: $TargetPath" -ForegroundColor Green
 }
