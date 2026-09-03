@@ -10,8 +10,8 @@
 # removing any inherited access (e.g. other local accounts/Administrators group entries
 # %TEMP%'s default ACL may grant), so the plaintext password these files hold is only
 # readable by the identity that wrote it while it exists on disk. Best-effort/defense-in-
-# depth: swallows failures (e.g. non-NTFS temp) rather than blocking the SSH flow on an
-# ACL-hardening step.
+# depth: logs a warning on failure (e.g. non-NTFS temp) rather than blocking the SSH flow
+# on an ACL-hardening step.
 function Protect-JunosTempFileAcl {
     param([Parameter(Mandatory=$true)][string]$Path)
     try {
@@ -105,6 +105,16 @@ function Get-JunosSshArgs {
     # Configuration.json/.enc at process startup). Same character class as that check.
     if ($Username -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$') {
         throw "Invalid Junos username: must start with a letter or digit and contain only letters, digits, '.', '_', or '-'"
+    }
+    # Same rationale as the $Username check above: this is the one choke point every
+    # SSH-invoking caller funnels through, so validating $TargetIP here closes the gap even
+    # for a caller that never ran it through a prior shape check (e.g. Start-NetworkMapper.ps1's
+    # -SwitchIP CLI parameter, which reaches here via Invoke-FleetCrawl's -StartIP with no
+    # validation of its own). Octet-range regex (0-255 each), not just WebServer.ps1's looser
+    # `\d{1,3}` shape check, so "10.1.2.999" is rejected here too.
+    $Octet = '(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])'
+    if ($TargetIP -notmatch "^$Octet\.$Octet\.$Octet\.$Octet$") {
+        throw "Invalid Junos target IP: must be a well-formed IPv4 address (four dot-separated octets, each 0-255)"
     }
     # ServerAliveInterval/ServerAliveCountMax: without a keepalive, a session wedged on a dead
     # link (e.g. the switch stops responding mid-command) just sits there until something
