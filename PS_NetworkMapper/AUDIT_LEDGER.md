@@ -121,8 +121,73 @@ Two other items surfaced by fix-review, judged non-blocking, logged for awarenes
 
 WS-1 remains REJECTED (not fixed — no real bug, see Phase 2 verdicts).
 
-## Pass counter (final)
-Pass 1: complete. 23 raw findings → 21 unique after dedup → 20 CONFIRMED (1 REJECTED: WS-1, 1 downgraded to informational: GRAPH-002 but still given a cheap defensive fix) → 19 fixed + 1 new finding from fix-review (UX-005b) also fixed = 20 total fixes landed. Full test suite: 80 → 91 passing (11 new regression tests added). Not yet at the 2-consecutive-clean-passes termination condition — see final report for residual risk / recommended next pass scope.
+## Pass counter
+Pass 1: complete, committed (10 commits, `13736ee`..`949e803`). 23 raw findings → 21 unique after dedup → 20 CONFIRMED (1 REJECTED: WS-1, 1 downgraded to informational: GRAPH-002 but still given a cheap defensive fix) → 19 fixed + 1 new finding from fix-review (UX-005b) also fixed = 20 total fixes landed. Full test suite: 80 → 91 passing (11 new regression tests added).
+
+## Pass 2 — re-ranked risk (files touched by Pass 1 fixes move to top, per protocol)
+1. `lib/WebServer.ps1` — SSH-001/002 username validation + WS-2 logging landed here; re-scan for the escalated regex-strictness concern and any new bug from the fix itself
+2. `lib/SshHelpers.ps1` — SEC-1 ACL fix landed here
+3. `lib/Protect-MapperFile.ps1` — CRYPTO-001 temp+rename landed here
+4. `lib/FleetCrawl.ps1` — CFG-001 logging landed here
+5. `web-src/scan-network.js`, `web-src/app.js`, `web-src/index.html` — UX-001/002/SEC-2/UX-005b landed here (most files touched by any single fix group, highest re-scan priority for interaction bugs)
+6. `web-src/dashboard.js`, `web-src/drawer.js`, `web-src/utils.js` — UX-004/005/006 landed here
+7. `web-src/map.js`, `web-src/graph.js` — GRAPH-001/002 landed here
+8. `web-src/tools/build-inline.mjs` — CFG-002 landed here
+9. `web-src/test/*.mjs`, `lib/Network_Visualizer.html` — test/generated-artifact changes, lower priority (test-only / derived)
+10. Everything not touched by Pass 1 fixes (Connect-Switch.ps1, Get-JunosNodeData.ps1, Update-OuiDatabase.ps1, Start-NetworkMapper.ps1, search.js, config-resolve.js, persistence.js, elk-layout.js, graph-layout.js) — re-scan per protocol ("do not skip categories because we already looked there"), lower priority than fixed files but not zero
+
+## Pass 2 — Phase 1 complete (all 7 agents returned)
+16 raw findings, deduplicated to 11 unique clusters (2 pairs independently corroborated by different agents — strong signal):
+
+| Cluster ID | Merged from | Track | Severity | Claim |
+|---|---|---|---|---|
+| P2-SSH-STARTUP | P2SSH-1 + P2WS-001 (independently found twice) | CORE/SERVICE | HIGH | SSH-001/002's username validation only runs at the web save endpoint; `Start-NetworkMapper.ps1` loading `Configuration.json(.enc)` at startup, and the CLI crawl path, reach `ssh.exe`/`cmd.exe` with a completely unvalidated username |
+| P2WS-002 | P2WS-002 | SERVICE | LOW | WS-2's logging fix only covered 2 of 4 structurally identical silent-discard sites in WebServer.ps1 |
+| P2-ACL-SILENT | P2SSH-2 + P2REC-003 (independently found twice) | CORE | LOW/MED | `Protect-JunosTempFileAcl` (SEC-1 fix) fails open with a bare `catch {}` — an ACL-hardening failure is invisible, in the same commit that fixed an identical pattern (WS-2) elsewhere |
+| P2CRYPTO-001 | P2CRYPTO-001 | DATA | HIGH | CRYPTO-001's "atomic" `Move-Item -Force` isn't atomic on overwrite — strace-confirmed `unlink(dest)` then `rename(tmp,dest)` as separate syscalls; a kill in that gap leaves the target file entirely gone |
+| P2CRYPTO-002 | P2CRYPTO-002 | DATA | MEDIUM | Fixed temp filename (no per-run uniqueness, no try/finally) unlike the FleetCrawl.ps1 pattern it claims to follow — concurrent-run collision + orphaned `.tmp` on failure |
+| P2FRESH-001 | P2FRESH-001 | CORE | HIGH | `Get-JunosNodeData.ps1`'s `New-JunosAskPass` call sits outside its own try/finally (unlike the correct sibling in Connect-Switch.ps1) — plaintext askpass file orphaned up to 4h on failure, INV-CREDS |
+| P2FRESH-002 | P2FRESH-002 | DATA | MEDIUM | `Update-OuiDatabase.ps1` writes in place with no temp+rename — same failure class as original CRYPTO-001, never scanned in Pass 1 (low-priority file) |
+| P2DASH-001/002 | P2DASH-001 + P2DASH-002 | USER-FACING | MED/HIGH | The Diagram/Map center-panel toggle shares drawer.js's `.tab` class (selector collision, pre-existing) but UX-005's keyboard fix never touched it — now also getting invalid `aria-selected` stamped on it by drawer.js's `switchTab` |
+| P2DASH-003 | P2DASH-003 | USER-FACING | MEDIUM | UX-006's fix only gates at snapshot level (`scanTimestamp` present); a snapshot with a timestamp but zero devices with valid `Uptime` still renders "None." — same conflation one level deeper |
+| P2SCAN-CLUSTER | P2SCAN-001 + P2SCAN-002 + P2REC-002 (independently found 3x from different angles) | USER-FACING | HIGH | UX-002's reattach fix has no sequencing against `autoloadLastScan` (deterministic stale-data-shown-as-success on mid-scan refresh with a prior snapshot) and `pollRunningScan` has no re-entrancy guard (shared timer var lets concurrent loops cancel each other) |
+| P2REC-001 | P2REC-001 | — | LOW/informational | Pass 1 commit `804e8c6`'s message doesn't mention UX-005 though its diff includes UX-005 markup, and `5c4058d`'s message claims tabindex/role work its diff doesn't contain — intermediate commits reference `activateOnKey` before it's defined. HEAD is fine (bisect-hygiene issue only, not a live bug) |
+
+## Pass 2 — Phase 2 verification: COMPLETE, all 11 clusters CONFIRMED
+- P2-SSH-STARTUP (HIGH): CONFIRMED — validation only exists at WebServer.ps1's save endpoint; every other path (startup config load, CLI crawl) reaches ssh.exe/cmd.exe unvalidated.
+- P2WS-002 (LOW): CONFIRMED — 2 of 4 identical silent-discard sites still unfixed.
+- P2-ACL-SILENT (LOW/MED): CONFIRMED, slightly stronger — no logging function is even in scope in SshHelpers.ps1/Get-JunosNodeData.ps1/Connect-Switch.ps1, so this needs a small plumbing addition, not a one-liner.
+- P2CRYPTO-001 (HIGH): CONFIRMED via independent strace re-repro (not just re-reading prior evidence) — `Move-Item -Force` is genuinely non-atomic on overwrite. **Scope widened**: FleetCrawl.ps1's own topology writes use the identical non-atomic pattern (the pattern pass 1 held up as "the established safe pattern" has the same flaw) — include it in the fix.
+- P2CRYPTO-002 (MEDIUM): CONFIRMED — no try/finally, fixed non-unique temp name.
+- P2FRESH-001 (HIGH): CONFIRMED — exposure capped at ~4h by FleetCrawl.ps1's existing Clear-StaleJunosTempFiles sweep (mitigating factor noted, doesn't change verdict).
+- P2FRESH-002: CONFIRMED but DOWNGRADED HIGH→LOW/MEDIUM (checked-into-git vendored asset, trivially recoverable, not part of the automated crawl path).
+- P2DASH-001/002 (MED/HIGH): CONFIRMED with a live visible-regression repro (drawer tab click strips highlight from the Diagram/Map toggle).
+- P2DASH-003 (MEDIUM): CONFIRMED — plausible real scan-failure mode, not contrived.
+- P2SCAN-CLUSTER (HIGH): CONFIRMED, and P2REC-002 reclassified as a subset of P2SCAN-001 (merge, track as one HIGH finding) rather than a separate LOW.
+- P2REC-001: informational only, HEAD state is fine, no code fix needed (bisect-hygiene note, not tracked as a fix item).
+
+## Pass 2 — Phase 3 fix groups (dispatched)
+1. lib/SshHelpers.ps1 — P2-SSH-STARTUP (move validation into Get-JunosSshArgs, the single choke point all paths funnel through, closing CLI/startup/web paths uniformly) + P2-ACL-SILENT (log ACL failures)
+2. lib/Get-JunosNodeData.ps1 — P2FRESH-001 (move New-JunosAskPass call inside try/finally)
+3. lib/WebServer.ps1 — P2WS-002 (2 remaining silent-discard logging sites)
+4. lib/Protect-MapperFile.ps1 + lib/FleetCrawl.ps1 — P2CRYPTO-001/002 (true atomic replace, unique temp name, try/finally cleanup, applied to both files)
+5. lib/Update-OuiDatabase.ps1 — P2FRESH-002 (temp+rename)
+6. web-src/drawer.js + web-src/index.html — P2DASH-001/002 (scope switchTab's selector, add keyboard accessibility to the Diagram/Map toggle)
+7. web-src/dashboard.js — P2DASH-003 (third state for "possible but zero valid devices")
+8. web-src/app.js + web-src/scan-network.js — P2SCAN-CLUSTER (sequence resumeScanIfInProgress before autoloadLastScan proceeds; add re-entrancy guard to pollRunningScan)
+
+## Pass 2 — Phase 3 complete, fix-review complete, committed
+All 8 fix groups landed (10 findings + P2REC-001 informational-only). Fix-review over the combined Pass 2 diff found and fixed one small bug directly (Remove-JunosAskPass's mandatory parameter rejecting a null $AskPass in the P2FRESH-001 fix's cleanup guard — empirically confirmed via pwsh, re-verified fixed). Everything else in the fix-review's 8-point checklist (atomic-replace correctness incl. two bugs the fix agent itself caught during its own verification, SSH validation error propagation at every call site, app.js await-ordering on first-load, poll re-entrancy guard's every exit path, drawer-tab container scoping, cross-cutting hunk check, full test suite, build artifact freshness) checked out clean. Manually fixed one additional small gap noticed during this pass: web-src/map.js's switchCenterView wasn't updating aria-pressed on view switch after the drawer-tab fix added that attribute to the Diagram/Map toggle.
+
+Full test suite: 91/91 passing throughout. Commits: `e24f17e`..`0948584` (7 commits, one per fix group; two groups combined per commit where a single root cause spanned files).
+
+## Pass 2 — final tally
+11 unique clusters → 11 CONFIRMED (0 rejected, 1 downgraded HIGH→LOW/MEDIUM on severity) → 10 fixed as code changes + 1 informational-only (P2REC-001, no fix needed) = 10 total fixes landed, plus 1 more caught by Pass 2's own fix-review, plus 1 manual incidental fix.
+
+## Pass counter (updated)
+Pass 1: complete, committed. 20 fixes landed (19 original + 1 from fix-review).
+Pass 2: complete, committed. 12 fixes landed (10 original + 1 from fix-review + 1 manual incidental).
+**Pass 2 was NOT clean** (11 confirmed findings, several in files Pass 1 itself had just fixed — proving fixes can and did introduce new bugs). Termination condition (2 consecutive clean passes) not yet reached. The trend across two passes (Pass 1: 20 fixes; Pass 2: 12 fixes, several of which were bugs in Pass 1's own fixes — P2SCAN-CLUSTER, P2CRYPTO-001's non-atomicity, P2-SSH-STARTUP's incomplete coverage) suggests continued high-value findings are still plausible on a Pass 3, though the count is dropping (20 → 12).
 
 ## User request (out-of-band, handled directly, not part of audit findings)
 User asked to remove any code migrating previous scan/config formats. Searched whole repo (envelope `version`/`format` handling in TopologyCrypto.ps1/topology-crypto.js/Protect-MapperFile.ps1, persistence.js localStorage keys, app.js snapshot loading) — **no migration code exists**. Envelope version check is strict (`version === 1`, no fallback/upgrade path). persistence.js's `_v2` localStorage key bump deliberately abandons old entries rather than migrating them (already the "no migration" behavior). Nothing to remove. (2026-09-02)
