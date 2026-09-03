@@ -2,75 +2,73 @@
 
 Date: 2026-09-02 to 2026-09-03. Full detail and raw agent output live in `.claude/audit-findings-*.md`, `.claude/verify-*.md` (Pass 1), `.claude/p2-findings-*.md`, `.claude/p2-verify-*.md` (Pass 2), `.claude/p3-findings-*.md` (Pass 3); process state in `AUDIT_LEDGER.md`.
 
-## Status: three passes complete (Phase 0-3 each). Termination condition (2 consecutive clean passes) NOT reached — none of the three passes was clean. Stopped after Pass 3 by user direction, with remaining risk accepted rather than continuing to the 8-pass cap.
+## Status: four passes complete (Phase 0-3 each). Termination condition (2 consecutive clean passes) NOT reached — none of the four passes was clean. 4 of the 8-pass cap used.
 
 ## Passes run
 - **Pass 1**: 23 findings reported → 21 unique after dedup → 20 CONFIRMED, 1 REJECTED (WS-1), 1 downgraded to informational. 20 fixed; fix-review found 1 more (UX-005b) from the fix diff itself. **21 total fixes.**
 - **Pass 2**: 11 unique clusters, all CONFIRMED (several inside Pass 1's own fixes — proving a fix pass can introduce new bugs even within the same review). 10 fixed as code changes, 1 informational-only. Fix-review found 1 more; 1 additional manual incidental fix. **12 total fixes.**
-- **Pass 3**: 16 raw findings → 13 CONFIRMED and fixed, 3 re-confirmed as not requiring a fix. A structural pattern emerged during Phase 1: the non-atomic-write bug and the SSH/IP-validation gap had each independently resurfaced in a *third* file, because each pass's fix was scoped to specific call sites rather than a shared implementation. Consulted the advisor tool, empirically re-measured the atomic-write primitive (confirmed `[System.IO.File]::Move(...,true)` is a single atomic `rename()` on this pwsh — simpler than the pattern already in use), and escalated the consolidation decision to the user rather than auto-implementing a >50-line, invariant-touching design change. User approved consolidation now, manual verification (no new Pester dependency), and a documented behavior change to `-AllowedScopes` matching. 4 findings collapsed into one new shared `lib/FileHelpers.ps1`; 9 more fixed individually. Fix-review over the full combined diff (spanning 6 concurrently-edited files) found zero new bugs. **13 total fixes.**
+- **Pass 3**: 16 raw findings → 13 CONFIRMED and fixed, 3 re-confirmed as not requiring a fix. A structural pattern emerged: the non-atomic-write bug and the SSH/IP-validation gap had each independently resurfaced in a *third* file, because each pass's fix was scoped to specific call sites rather than a shared implementation. Consulted the advisor tool, empirically re-measured the atomic-write primitive (confirmed `[System.IO.File]::Move(...,true)` is a single atomic `rename()` on this pwsh), and escalated the consolidation decision to the user. User approved consolidation now, manual verification (no new Pester dependency), and a documented behavior change to `-AllowedScopes` matching. 4 findings collapsed into one new shared `lib/FileHelpers.ps1`; 9 more fixed individually. Fix-review found zero new bugs. **13 total fixes.**
+- **Pass 4**: ~20 raw findings across 7 category-cluster agents → 13 CONFIRMED and fixed. Most of Pass 3's own fixes re-verified clean. Two notable outcomes: (1) a security/invariant cross-cut agent found that every command-injection validation regex in the codebase (`Get-JunosSshArgs`'s Username/TargetIP checks, WebServer.ps1's own IP-shape/username checks) used `$` as its end anchor — in .NET regex, `$` matches before a trailing `\n`, not true end-of-string, so a value like `"admin\n"` passed validation and reached a raw command-line string. Independently re-verified live via `pwsh` before treating as confirmed, given the severity (HIGH) — this is a real bypass of the choke point this audit has hardened across three prior passes. (2) The timestamp-parseability bug class Pass 3 fixed once turned out to have 6 more untouched instances (`dashboard.js` x2, `persistence.js` x2, `drawer.js` x2) — consolidated into one shared `parseTimestampMs` helper in `utils.js` rather than patching a 7th ad-hoc instance. Also fixed: a plaintext-credential leak on askpass partial-write failure (P4FRESH-1), a missed warning-stream-drain instance in WebServer.ps1 (P4SEC-JOBS-1), a missed `-LiteralPath` cleanup site, and two scan-network.js UX bugs (a reattach-guard race, an error-message-clobbering bug). Fix-review over the combined diff — including verifying that concurrent edits to the same two files by different fix agents coexisted correctly — found zero new bugs. **13 total fixes.**
 
-Total across all three passes: **46 fixes landed**, plus the consolidation of what had been 3 independent atomic-write implementations (and would likely have become a 4th) into 1 shared function.
+Total across all four passes: **59 fixes landed**, plus two consolidations (atomic file writes into `lib/FileHelpers.ps1`; timestamp parseability into `utils.js`'s `parseTimestampMs`) that each closed what had become 3-4+ independent per-file instances of the same bug class.
 
-## Critical invariants — evidence they hold after Pass 3
-1. **INV-DATA** (topology file never silently corrupted) — every write path in the codebase (`Protect-MapperFile.ps1`, `FleetCrawl.ps1`, `WebServer.ps1`'s config save, `Update-OuiDatabase.ps1`) now goes through one shared `lib/FileHelpers.ps1` (`Move-FileAtomic`/`Set-FileContentAtomic`), built on an empirically-verified single-syscall atomic rename. This is materially stronger evidence than Pass 1's or Pass 2's per-file fixes, both of which turned out to have gaps found in the following pass.
-2. **INV-CREDS** — unchanged from Pass 1/2 status; no new findings in Pass 3 (re-scanned fresh, clean).
-3. **INV-CMDPATH** — the SSH-arg choke point (`Get-JunosSshArgs`) now validates both `$Username` (Pass 1/2) and `$TargetIP` (Pass 3, P3FRESH-001), traced end-to-end to confirm `Start-NetworkMapper.ps1 -SwitchIP` actually flows through it. `-AllowedScopes` matching now respects octet boundaries (P3FRESH-004, user-approved behavior change — see below).
-4. **INV-JOBS** — WS-1 (Pass 1) correctly rejected via live empirical testing. `.Streams.Warning` from hostless runspace jobs is now drained (P3SSH-001), closing a gap where a Pass 2 fix (`Write-Warning` on ACL failure) was silently ineffective in the dominant automated path. Ping/rescan job outcomes are now cached before the response write (P3WS-002), closing a result-loss gap `Invoke-ScanNetworkStatusAction` already avoided.
-5. **INV-UI-TRUTH** — P3UX-001 closed the same bug class as Pass 1's UX-006 and Pass 2's P2DASH-003, but on the other operand (`scanTimestamp` parseability, not just `Uptime`). This is itself a small instance of the whack-a-mole pattern — worth checking `persistence.js`, noted but not separately filed, if a future pass runs.
-6. **INV-NO-LOCKOUT** — no new findings in Pass 3.
+## Critical invariants — evidence they hold after Pass 4
+1. **INV-DATA** (topology file never silently corrupted) — every write path goes through `lib/FileHelpers.ps1`. No new findings in Pass 4's dedicated deep re-scan of this file and its 4 call sites (the single point of failure for all operator data writes) — reviewed for races, exception-path cleanup, ACL preservation, and encoding correctness; all clean or pre-existing/non-regressions.
+2. **INV-CREDS** — `New-JunosAskPass`'s partial-write plaintext-leak gap (P4FRESH-1) is now closed. The new `.Streams.Warning` draining added in Pass 3/4 was checked to confirm it can never itself leak credential material (the only live warning message contains a file path and exception text, never a password).
+3. **INV-CMDPATH** — **the regex end-anchor bypass (P4SEC-CMDPATH-1) is the most significant finding of the audit.** It shows that even a "single validated choke point," confirmed correct in Pass 1-3 by tracing every call site, can still have a bug in the validation logic itself that survives multiple passes of scrutiny until an agent specifically re-derives the invariant from first principles (in this case, a cross-cutting security-invariant re-verification agent explicitly tasked with "re-derive independently, don't trust the prior verdict"). Now fixed (`$` → `\z`) at every validation regex in the codebase, empirically re-verified to close the bypass with no new false rejections.
+4. **INV-JOBS** — `.Streams.Warning` draining now applied consistently to both the fleet-crawl path (Pass 3) and the single-device ping/rescan path (Pass 4, P4SEC-JOBS-1) — closing the same gap the audit found twice in different files.
+5. **INV-UI-TRUTH** — the timestamp-parseability check is now one shared implementation (`parseTimestampMs`) used by 7 call sites, rather than the single instance fixed in Pass 3 that left 6 more places with the same bug.
+6. **INV-NO-LOCKOUT** — no new findings in Pass 4.
 
-No critical invariant has a known-live violation remaining as of Pass 3. The atomic-write consolidation is the single strongest piece of new evidence this pass produced, since it removes an entire class of "same bug, different file" recurrence rather than patching one more instance of it.
+No critical invariant has a known-live violation remaining as of Pass 4. Two bug classes (atomic writes, timestamp parseability) that repeatedly resurfaced per-file across passes are now backed by a single shared implementation each. The regex-anchor finding is a reminder that "the choke point is correct" and "the choke point exists and is called everywhere" are different claims — this audit had strong evidence for the second since Pass 1 but only got real evidence for the first in Pass 4.
 
 ## Fixed bugs by pass
-See `AUDIT_LEDGER.md` for the full per-finding tables (Pass 1, Pass 2, Pass 3 sections) including finding IDs, severities, files, and verification method for all 46 fixes. Pass 3's table is reproduced below since it's the newest and includes the consolidation:
+See `AUDIT_LEDGER.md` for full per-finding tables across all 4 passes. Pass 4's table:
 
 | ID | Sev | Description | Outcome |
 |----|-----|-------------|---------|
-| P3WS-001 | HIGH | WebServer.ps1's config save never got atomic-write protection | Fixed via consolidation |
-| P3ATOMIC-001 | HIGH | FleetCrawl.ps1 temp-filename collision (1s granularity, no PID/GUID) | Fixed via consolidation |
-| P3SSH-001 | MED/HIGH | `.Streams.Warning` never drained from hostless jobs, silently dropping a Pass 2 fix | Fixed |
-| P3ATOMIC-002 | MEDIUM | TOCTOU race in the destination-absent fallback branch | Fixed via consolidation (branch eliminated) |
-| P3SCAN-001 | MEDIUM | `poll()` had no rejection handling; guard could stick `true` forever | Fixed |
-| P3UX-001 | MEDIUM | reboot-history gate didn't validate `scanTimestamp` parseability | Fixed |
-| P3WS-002 | MEDIUM | Ping/rescan status actions could lose a completed job's result | Fixed |
-| P3FRESH-001 | MEDIUM | SSH choke point validated Username but never TargetIP | Fixed |
-| P3FRESH-004 | MEDIUM | `-AllowedScopes` bare substring match, no octet boundary | Fixed (user-approved behavior change) |
-| P3REC-002 | LOW/MED | Temp-file cleanup used `-Path` not `-LiteralPath` (glob-interpretation gap) | Fixed |
-| P3ATOMIC-003 | LOW | `Convert-Path` was a new uncaught-exception failure point | Fixed via consolidation (call eliminated) |
-| P3WS-003 | LOW | `/api/session-password` missing `Cache-Control: no-store` | Fixed |
-| P3SSH-002 | LOW/INFO | Stale comment describing removed silent-catch behavior | Fixed |
-| P3UX-002 | LOW/INFO | ARIA role calibration note on Diagram/Map toggle | Not a defect, re-confirmed |
-| P3SCAN-INFO-001 | INFO | No fetch timeout | Not a regression, re-confirmed |
-| P3REC-001 | INFO | Bisect-hygiene note on an intermediate Pass 2 commit | No fix needed, HEAD is fine |
+| P4SEC-CMDPATH-1 | **HIGH** | Every validation regex used `$` (matches before trailing `\n`) instead of `\z` (true end-of-string) — a newline-suffixed username/IP bypassed the injection choke point | Fixed |
+| P4FRESH-1 | MEDIUM | `New-JunosAskPass` could leave a plaintext credential file on disk up to 4h if its second write failed | Fixed |
+| P4UX-001 | MEDIUM | `resumeScanIfInProgress()`'s guard wasn't re-checked after its status-check await, allowing a silent overwrite race | Fixed |
+| P4UX-003/004/005, P4SEC-UI-1 | MEDIUM/LOW (4 sites) | Timestamp-parseability bug recurred in `dashboard.js` x2, `persistence.js` x2, `drawer.js` x2 | Fixed via consolidation into `utils.js`'s `parseTimestampMs` |
+| P4SEC-JOBS-1 | LOW | Ping/rescan status actions never drained `.Streams.Warning`, unlike FleetCrawl.ps1 (fixed Pass 3) | Fixed |
+| P4UX-002 | LOW | `runPoll()`'s catch always clobbered a more specific error message with a generic one | Fixed |
+| P4REC-002 | LOW/INFO | One more `Remove-Item -Path` (not `-LiteralPath`) cleanup site missed in Pass 3 | Fixed |
+| P4REC-001 | INFO | Two stale comments still describing the pre-Pass-3 write mechanism | Fixed |
+| P4REC-004 | INFO/nitpick | Non-Error rejection would render as "...: undefined" | Fixed |
+| P4WS-001, P4WS-002, P4WS-003 | LOW/INFO | Shutdown-dispose asymmetry, endpoint-ordering divergence, response-write-failure shape | Re-confirmed pre-existing/harmless, not fixed |
+| P4FH-01 through 07 | LOW/INFO | ACL non-preservation across writes, doc-precision nits, Windows sharing-violation window, same-second crawl collision | Re-confirmed pre-existing/non-regressions, not fixed |
+| P4SSH-001 through 004 | INFO | SSH choke-point coverage, regex edge cases, `AllowedScopes` exact-match bonus fix, no bypass paths found | Verification only, no fix needed |
 
-Commits: `b95caa3`, `c5e5cd2`, `8776511`, `7590a58`, `d256ee7`, `e17f476` (6 commits, one per file/theme group).
+Commits: `70d6f6c`, `14e8bb2`, `ee28a70`, `37b38ca`, `0587f8c`, `7326e51` (6 commits).
 
 ## REJECTED findings (kept for future-pass dedup, not proof of correctness)
-- **WS-1** (Pass 1): claimed unguarded `.Dispose()` could throw and leak an SSH session. Empirically disproven — `PowerShell.Dispose()` doesn't throw under Running/Stopping/double-dispose/pool-closed conditions.
+- **WS-1** (Pass 1): claimed unguarded `.Dispose()` could throw and leak an SSH session. Empirically disproven.
 
 ## CONFIRMED-UNTESTABLE findings
-None across all three passes — every CONFIRMED finding got either an automated JS regression test or a documented/live-repro'd manual PS verification (no Pester framework exists — see CFG-004, still open).
+None across all four passes — every CONFIRMED finding got either an automated JS regression test or a documented/live-repro'd manual PS verification.
 
 ## Escalated to the human
-1. **SSH-001/002's validation regex strictness** (Pass 1) — still open; needs a real-world answer about whether this deployment uses realm-qualified usernames.
-2. **CFG-004 (no PowerShell test suite)** (Pass 1) — still open. Directly relevant to Pass 3: the consolidation of atomic-write logic into one shared function was explicitly offered with Pester coverage as an option; user chose manual verification, accepting that the shared helper's only regression coverage is the manual scripts run during this audit, not an automated suite.
-3. **Pass 3 consolidation decision** — resolved. User approved consolidating atomic-write and SSH/IP-validation logic into shared implementations (`lib/FileHelpers.ps1`, extended `Get-JunosSshArgs`) rather than continuing per-file patches.
-4. **P3FRESH-004's `-AllowedScopes` behavior change** — resolved. User approved fixing the octet-boundary bug now, with the understanding that an existing config relying on the old loose substring match to admit a wider range than a plain reading of the value suggests should be reviewed.
+1. **SSH-001/002's validation regex strictness** (Pass 1) — still open.
+2. **CFG-004 (no PowerShell test suite)** — still open across all four passes.
+3. **Pass 3 consolidation decision** — resolved, user approved.
+4. **P3FRESH-004's `-AllowedScopes` behavior change** — resolved, user approved.
+5. Pass 4 required no new escalations — all findings were concrete bugs with clear fixes, not design-level or irreversible decisions.
 
 ## UX gaps summary
-Unchanged from Pass 1/2's summary for anything not re-touched. Pass 3 added: reboot-history "None." vs "Unable to determine" now correctly handles a bad `scanTimestamp`, not just a bad `Uptime` (closing the same INV-UI-TRUTH class Pass 1's UX-006 and Pass 2's P2DASH-003 opened, on the other operand); scan polling now fails visibly instead of silently wedging the UI.
+Unchanged from Pass 1-3's summary for anything not re-touched. Pass 4 added: `resumeScanIfInProgress()` no longer has a silent-overwrite race against a manual action completing during its status check; scan-polling errors now show the actual specific cause instead of a generic message that could clobber it; the "None." vs "Unable to determine" / mis-sorted / "Invalid Date" family of timestamp-parseability bugs is now closed everywhere it was found, not just the one spot Pass 3 fixed.
 
 ## Remaining risk (top areas for a human to look at next)
-1. **No PowerShell test infrastructure** (CFG-004) — still the single biggest gap in "evidence a fix stays fixed." Every PS-side fix across all three passes, including the new shared `lib/FileHelpers.ps1`, was verified by manual trace/live-repro scripts, not a running regression suite.
-2. **SSH username validation strictness** — still needs a real-world answer (see above).
-3. **`persistence.js` may share P3UX-001's root cause** (noted in Pass 3 but not separately filed/fixed) — worth a quick look if any future pass runs.
-4. **Hardware-in-the-loop / simulator coverage** — unchanged from Pass 1: nothing is tested against a real or simulated Junos device.
-5. **Screen-reader-level accessibility** beyond keyboard/aria-selected — not audited in any pass.
-6. **The audit did not reach 2 consecutive clean passes** — Pass 3 found and fixed 13 real issues, so a hypothetical Pass 4 could still find something, though the trend across all three passes (20 → 12 → 13, with Pass 3's count including 4 collapsed by one consolidation rather than 4 independent patches) suggests the *rate of newly-appearing bug classes* is dropping even where raw counts don't. The consolidation done this pass is the change most likely to produce an actually-clean Pass 4, since it removes the mechanism (per-file patching) that produced a new instance of the same two bug classes in each of the first three passes.
+1. **No PowerShell test infrastructure** (CFG-004) — still the single biggest gap in "evidence a fix stays fixed," including for the two consolidated shared functions (`Move-FileAtomic`/`Set-FileContentAtomic`, `parseTimestampMs`) that now carry more weight than any single prior per-file implementation did.
+2. **SSH username validation strictness** — still needs a real-world answer.
+3. **Hardware-in-the-loop / simulator coverage** — unchanged: nothing is tested against a real or simulated Junos device.
+4. **Screen-reader-level accessibility** beyond keyboard/aria-selected — not audited in any pass.
+5. **The audit did not reach 2 consecutive clean passes.** Unlike Pass 3 (where the raw finding count held roughly steady at a lower severity mix), Pass 4 found a HIGH-severity finding that had survived three prior passes' direct scrutiny of the exact code it lived in — found only because a dedicated agent was tasked with re-deriving the invariant from scratch rather than re-checking the prior pass's specific claims. This is evidence that per-pass value has not obviously exhausted itself, even as the whack-a-mole bug classes (atomic writes, timestamp parseability) get progressively closed off by consolidation.
 
-## Baseline vs final (Pass 1 start → Pass 3 end)
-- JS test count: **80 → 91** passing throughout Pass 2 and Pass 3 (no new JS tests added after Pass 1's +11; Pass 3 fixes were verified via the existing suite plus manual click-path/rejection-handling checks, consistent with the user's choice not to add new automated coverage this pass).
-- PowerShell: 0 → 0 tests (still no framework — CFG-004 remains open across all three passes).
-- Write-path architecture: went from 4 independent atomic-write implementations across 3 files (1 of them, WebServer.ps1's, not atomic at all) to 1 shared implementation used by all 4 call sites, built on an empirically-simpler primitive (`File.Move(...,true)`, single `rename()` syscall) than any of the prior per-file implementations used.
-- SSH-arg validation: went from Username-only (Pass 1/2) to Username+TargetIP, at the same single choke point, traced end-to-end against the one live unvalidated entry point (`-SwitchIP`).
+## Baseline vs final (Pass 1 start → Pass 4 end)
+- JS test count: **80 → 91** passing throughout Passes 2-4 (no new automated tests added after Pass 1's +11 — all Pass 2-4 fixes verified via the existing suite plus manual/live-repro checks).
+- PowerShell: 0 → 0 tests (still no framework — CFG-004 remains open).
+- Write-path architecture: 4 independent atomic-write implementations (1 not atomic at all) → 1 shared implementation (`lib/FileHelpers.ps1`) used by all 4 call sites.
+- Timestamp-parseability: 1 fixed instance + 6 unfixed instances of the same bug (end of Pass 3) → 1 shared implementation (`utils.js`'s `parseTimestampMs`) used by all 7 call sites (end of Pass 4).
+- SSH-arg / command-injection validation: closed a HIGH-severity anchor bug in every validation regex in the codebase, on top of the Username+TargetIP choke-point coverage established in Pass 1-3.
 - Working tree: clean after 6 commits this pass; no unrelated changes.
