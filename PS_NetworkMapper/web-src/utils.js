@@ -139,7 +139,7 @@ window.renderCrawlAge = function(scanTimestampIso) {
         var ageMin = ageMs / 60000;
         var freshness = ageMin < settings.crawlAgeFreshMin ? 'fresh' : (ageMin < settings.crawlAgeStaleMin ? 'stale' : 'old');
         badge.className = 'crawl-age ' + freshness;
-        badge.textContent = `Captured ${scanDate.toLocaleString()} (${window.formatAge(ageMs)})`;
+        badge.textContent = `Captured ${scanDate.toLocaleString('en-US')} (${window.formatAge(ageMs)})`;
         badge.style.display = 'block';
     }
     update();

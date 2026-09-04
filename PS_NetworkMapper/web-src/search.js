@@ -95,7 +95,7 @@ window.performGlobalSearch = function() {
         // Only show which snapshot a match came from when more than one is loaded.
         var snapshotTs = snapshot ? window.parseTimestampMs(snapshot.scanTimestamp) : null;
         var snapshotTag = (loadedSnapshots.length > 1 && snapshot)
-            ? `<span class="sr-snapshot">${esc(snapshotTs !== null ? new Date(snapshotTs).toLocaleString() : snapshot.sourceFile)}</span>`
+            ? `<span class="sr-snapshot">${esc(snapshotTs !== null ? new Date(snapshotTs).toLocaleString('en-US') : snapshot.sourceFile)}</span>`
             : '';
         return {
             line1Html: `${esc(m.deviceIp)}${hostname}${snapshotTag}`,

@@ -190,7 +190,7 @@ window.rescanDevice = async function() {
             if (!merged) {
                 finish("Rescan of " + ip + " completed, but the snapshot it was scanned against is no longer loaded (a new file set was loaded while it was running) - the result was discarded.", "orange");
             } else {
-                finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString() + ".", "green");
+                finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString('en-US') + ".", "green");
             }
         } catch (e) {
             finish("Rescan of " + ip + " completed, but showing the result failed: " + e.message + " - the underlying data may still have been updated.", "red");
@@ -563,7 +563,7 @@ window.renderSummary = function() {
 
     var rescannedHtml = d.RescannedAt
         ? `<div style="grid-column:1/-1; background:var(--warn-bg); color:var(--warn-text); padding:6px 12px; border-radius:4px; font-size:0.8rem; margin-bottom:4px;">
-             Live rescan at ${esc(new Date(d.RescannedAt).toLocaleTimeString())} - not saved to the snapshot file, this session only.
+             Live rescan at ${esc(new Date(d.RescannedAt).toLocaleTimeString('en-US'))} - not saved to the snapshot file, this session only.
            </div>`
         : '';
 
@@ -994,7 +994,7 @@ window.populateConfigCompareSelect = function() {
             sameDeviceOptions.push({
                 idx: idx,
                 ts: snapTs !== null ? snapTs : 0,
-                label: snapTs !== null ? new Date(snapTs).toLocaleString() : snap.sourceFile,
+                label: snapTs !== null ? new Date(snapTs).toLocaleString('en-US') : snap.sourceFile,
             });
         }
     });
@@ -1075,7 +1075,7 @@ window.searchConfigCompareDevices = function() {
             matches.push({
                 idx: idx, ip: String(other.DeviceIP), hostname: hostname,
                 ts: snapTs !== null ? snapTs : 0,
-                snapLabel: snapTs !== null ? new Date(snapTs).toLocaleString() : snap.sourceFile,
+                snapLabel: snapTs !== null ? new Date(snapTs).toLocaleString('en-US') : snap.sourceFile,
             });
         });
     });
@@ -1230,7 +1230,7 @@ window.printDeviceReport = function() {
 </head><body>
 <div id="printBar"><button onclick="window.print()">Print / Save as PDF</button></div>
 <h1>${esc(d.Hostname || 'Unknown')}</h1>
-<div class="subtitle">${esc(d.DeviceIP)} &mdash; Junos ${esc(d.JunosVersion)} &mdash; report generated ${esc(new Date().toLocaleString())}</div>
+<div class="subtitle">${esc(d.DeviceIP)} &mdash; Junos ${esc(d.JunosVersion)} &mdash; report generated ${esc(new Date().toLocaleString('en-US'))}</div>
 
 <h2>Identity</h2>
 ${table(['Field', 'Value'], [

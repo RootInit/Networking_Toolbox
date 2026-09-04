@@ -113,7 +113,7 @@ window.renderSnapshotSwitcher = function() {
 
     select.innerHTML = loadedSnapshots.map((s, idx) => {
         var tsMs = window.parseTimestampMs(s.scanTimestamp);
-        var label = tsMs !== null ? new Date(tsMs).toLocaleString() : `${s.sourceFile} (no timestamp)`;
+        var label = tsMs !== null ? new Date(tsMs).toLocaleString('en-US') : `${s.sourceFile} (no timestamp)`;
         return `<option value="${idx}">${esc(label)}</option>`;
     }).join('');
     container.style.display = 'block';
@@ -560,7 +560,7 @@ window.processSelectedFiles = async function(files) {
         var bestSnapTs = window.parseTimestampMs(loadedSnapshots[bestIndex].scanTimestamp);
         window.setStatus(
             loadedSnapshots.length > 1
-                ? `Success! Loaded ${loadedSnapshots.length} snapshots (${totalDevices} device-records total)${skippedNote}. Viewing: ${bestSnapTs !== null ? new Date(bestSnapTs).toLocaleString() : loadedSnapshots[bestIndex].sourceFile}.`
+                ? `Success! Loaded ${loadedSnapshots.length} snapshots (${totalDevices} device-records total)${skippedNote}. Viewing: ${bestSnapTs !== null ? new Date(bestSnapTs).toLocaleString('en-US') : loadedSnapshots[bestIndex].sourceFile}.`
                 : `Success! Mapped ${globalTopologyData.length} nodes.`,
             "green"
         );
