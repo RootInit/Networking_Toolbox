@@ -27,6 +27,11 @@ test('extractDeviceKeys always returns ip', () => {
   assert.equal(extractDeviceKeys(NO_SERIAL_NO_HOSTNAME).ip, '10.0.0.4');
 });
 
+test('extractDeviceKeys tolerates a null/undefined element in StackMembers (malformed scan data)', () => {
+  const withNulls = { DeviceIP: '10.0.0.5', Hostname: 'sw5', StackMembers: [null, { Serial: 'SER5', Role: 'Standalone' }, undefined] };
+  assert.equal(extractDeviceKeys(withNulls).serial, 'SER5');
+});
+
 test('resolveDeviceLocation matches by serial first', () => {
   const entries = [
     { key: '10.0.0.1', keyType: 'ip', building: 'Wrong (stale IP-keyed entry)' },

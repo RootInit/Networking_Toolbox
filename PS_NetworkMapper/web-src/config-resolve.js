@@ -8,7 +8,7 @@
 // StackMembers - normally exactly one entry - arrives as {..} instead of [{..}] and must be
 // normalized before .forEach, or every standalone device throws here.
 function asArray(val) {
-  if (Array.isArray(val)) return val;
+  if (Array.isArray(val)) return val.filter(function (item) { return item !== null && item !== undefined; });
   if (val === null || val === undefined) return [];
   return [val];
 }
