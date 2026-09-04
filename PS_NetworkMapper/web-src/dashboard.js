@@ -19,9 +19,10 @@ window.refreshAnalysisDashboard = function() {
 
 window.switchAnalysisTab = function(tabId) {
     document.querySelectorAll('.analysis-tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.analysis-tab').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.analysis-tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
     document.getElementById(tabId).classList.add('active');
     document.getElementById('btn-' + tabId).classList.add('active');
+    document.getElementById('btn-' + tabId).setAttribute('aria-selected', 'true');
     if (tabId === 'analysis-tab-trends') window.renderTrendChart();
     if (tabId === 'analysis-tab-fleethealth') window.renderFleetDashboard();
     if (tabId === 'analysis-tab-accounts') window.renderLocalAccountsAudit();
