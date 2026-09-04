@@ -69,9 +69,35 @@ function computeNeighborEdges(topology) {
   return edges;
 }
 
+// Topology -> per-node {label, shape, isStack, scanned, vlanCache} metadata for the switch
+// diagram, keyed by IP. Extracted from graph.js's buildSwitchMap so the node-construction
+// logic (classification + device lookup + VLAN cache -> label/shape) has exactly one
+// implementation, shared by the real caller and its regression test, instead of drifting
+// between graph.js and a hand-copied test double. buildSwitchMap itself stays in graph.js -
+// it owns the vis-network-specific pieces (dataset diffing, layout, DOM) this function
+// deliberately has no dependency on.
+function buildSwitchMapNodeMeta(topology) {
+  var allNodeMeta = new Map();
+  var classification = computeDeviceClassification(topology);
+  var deviceByIpLocal = new Map(topology.filter(function (d) { return d && d.DeviceIP; }).map(function (d) { return [String(d.DeviceIP), d]; }));
+  var vlanCacheByIp = computeVlanCache(topology);
+
+  classification.forEach(function (meta, ip) {
+    var device = deviceByIpLocal.get(ip);
+    var stackIcon = meta.isStack ? `\n[VC: ${device.StackMembers.length} Node]` : '';
+    allNodeMeta.set(ip, {
+      label: meta.scanned ? `Switch\n${ip}\n(${meta.hostname})${stackIcon}` : `Switch\n${ip}\n(${meta.hostname})`,
+      shape: meta.isStack ? 'database' : 'box', isStack: meta.isStack, scanned: meta.scanned,
+      vlanCache: vlanCacheByIp.get(ip) || [],
+    });
+  });
+
+  return allNodeMeta;
+}
+
 // Dual-mode export: node:test (CJS/ESM interop) vs. browser <script> (no `module`).
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache };
+    module.exports = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache, buildSwitchMapNodeMeta: buildSwitchMapNodeMeta };
 } else if (typeof window !== 'undefined') {
-    window.TopologyGraph = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache };
+    window.TopologyGraph = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache, buildSwitchMapNodeMeta: buildSwitchMapNodeMeta };
 }

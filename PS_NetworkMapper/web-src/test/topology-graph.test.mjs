@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeDeviceClassification, computeNeighborEdges, computeVlanCache } from '../topology-graph.js';
+import { computeDeviceClassification, computeNeighborEdges, computeVlanCache, buildSwitchMapNodeMeta } from '../topology-graph.js';
 
 const SCANNED_STANDALONE = {
   DeviceIP: '10.0.0.1', Hostname: 'sw1', StackMembers: [{ FPC: '0', Serial: 'ABC123', Role: 'Standalone' }],
@@ -119,29 +119,16 @@ test('computeDeviceClassification: a pass-2-only (unscanned) placeholder is alwa
   assert.deepEqual(placeholder, { scanned: false, isStack: false, hostname: 'ghost' });
 });
 
-// This mirrors graph.js's buildSwitchMap node-construction loop (src/graph.js, the
-// `classification.forEach(...)` block) exactly, using the real exported functions above.
-// graph.js itself has no test file - like every other file in this app that touches the
-// DOM/vis-network/window globals directly, it isn't unit-testable without a browser - so
-// this is the closest committed regression coverage for that integration point,
-// specifically the `device === undefined` path for an unscanned placeholder, which
-// neither committed sample snapshot exercises (see task-3-report.md for the differential
-// check run against both real snapshots during manual verification).
-function buildSwitchMapNodeMeta(topology) {
-  const allNodeMeta = new Map();
-  const classification = computeDeviceClassification(topology);
-  const deviceByIpLocal = new Map(topology.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
-  classification.forEach((meta, ip) => {
-    const device = deviceByIpLocal.get(ip);
-    const stackIcon = meta.isStack ? `\n[VC: ${device.StackMembers.length} Node]` : '';
-    allNodeMeta.set(ip, {
-      label: meta.scanned ? `Switch\n${ip}\n(${meta.hostname})${stackIcon}` : `Switch\n${ip}\n(${meta.hostname})`,
-      shape: meta.isStack ? 'database' : 'box', isStack: meta.isStack, scanned: meta.scanned,
-      vlanCache: (device && device.TrueClients) ? device.TrueClients.map(c => String(c.VLAN_Tag)) : [],
-    });
-  });
-  return allNodeMeta;
-}
+// graph.js's buildSwitchMap (window.buildSwitchMap) itself has no test file - like every
+// other file in this app that touches the DOM/vis-network/window globals directly, it isn't
+// unit-testable without a browser. Its node-construction logic (classification + device
+// lookup + VLAN cache -> label/shape) has no such dependency though, so it lives here as
+// buildSwitchMapNodeMeta and graph.js calls this exact function - making the tests below
+// real regression coverage of the shipped code, not a frozen copy of it. This is the closest
+// committed regression coverage for that integration point, specifically the
+// `device === undefined` path for an unscanned placeholder, which neither committed sample
+// snapshot exercises (see task-3-report.md for the differential check run against both real
+// snapshots during manual verification).
 
 test('buildSwitchMap-equivalent node-meta construction does not throw and produces a plain gray placeholder node for an unscanned neighbor (device undefined case)', () => {
   const device = { DeviceIP: '10.0.3.1', Hostname: 'd1', Neighbors: [{ ManagementIP: '10.0.3.99', Hostname: 'ghost' }] };
