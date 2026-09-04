@@ -81,6 +81,10 @@ function datedSnapshotsAsc() {
 // snapshot object - detectDaisyChains over every device isn't free and the dashboard
 // re-renders on every activation.
 var fleetTotalsCache = new WeakMap();
+// Called wherever a snapshot's topology is mutated in place (see drawer.js's
+// mergeRescannedDevice) so a stale cached total can never be drawn next to a stat that
+// WAS recomputed live from the same mutated data.
+window.invalidateFleetTotalsCache = function(snapshot) { fleetTotalsCache.delete(snapshot); };
 function fleetTotalsFor(snapshot) {
     if (fleetTotalsCache.has(snapshot)) return fleetTotalsCache.get(snapshot);
     var t = { devices: 0, unreachable: 0, clients: 0, alarms: 0, dot1x: 0, daisy: 0 };
@@ -307,7 +311,9 @@ window.renderFleetDashboard = function() {
     function barList(rows, warn, critical, unit) {
         return rows.map(x => {
             var tier = severityTier(x.value, warn, critical);
-            return `<div class="fleet-bar-row"><span class="fleet-bar-name" title="${esc(x.device.DeviceIP)}">${esc(x.device.Hostname || x.device.DeviceIP)}</span>${inlineBar(x.value, `${x.value}${unit} ${SEVERITY_WORD[tier]}`, tier)}</div>`;
+            var name = x.device.Hostname || x.device.DeviceIP;
+            var tip = x.device.Hostname ? `${x.device.Hostname} (${x.device.DeviceIP})` : x.device.DeviceIP;
+            return `<div class="fleet-bar-row"><span class="fleet-bar-name" title="${esc(tip)}">${esc(name)}</span>${inlineBar(x.value, `${x.value}${unit} ${SEVERITY_WORD[tier]}`, tier)}</div>`;
         }).join('');
     }
 
@@ -324,7 +330,11 @@ window.renderFleetDashboard = function() {
         ? '<p class="fleet-list-empty">Unable to determine (no devices reported usable uptime data).</p>'
         : recentlyRebooted.length === 0
         ? '<p class="fleet-list-empty">None.</p>'
-        : recentlyRebooted.sort((a, b) => a.elapsedMin - b.elapsedMin).map(x => `<div class="fleet-bar-row"><span class="fleet-bar-name">${esc(x.device.Hostname || x.device.DeviceIP)}</span>${inlineBar(100 - (x.elapsedMin / settings.recentRebootMin) * 100, `${Math.round(x.elapsedMin)} min ago`, 'warn', 'Booted ' + Math.round(x.elapsedMin) + ' minutes before this scan')}</div>`).join('')
+        : recentlyRebooted.sort((a, b) => a.elapsedMin - b.elapsedMin).map(x => {
+            var name = x.device.Hostname || x.device.DeviceIP;
+            var tip = x.device.Hostname ? `${x.device.Hostname} (${x.device.DeviceIP})` : x.device.DeviceIP;
+            return `<div class="fleet-bar-row"><span class="fleet-bar-name" title="${esc(tip)}">${esc(name)}</span>${inlineBar(100 - (x.elapsedMin / settings.recentRebootMin) * 100, `${Math.round(x.elapsedMin)} min ago`, 'warn', 'Booted ' + Math.round(x.elapsedMin) + ' minutes before this scan')}</div>`;
+        }).join('')
     ) + '</div>';
     html += '</div>';
 
@@ -523,7 +533,7 @@ window.renderTrendChart = function() {
         container.innerHTML = `<p class="fleet-hint">One dated snapshot is loaded, so there is no trend to draw yet - load a folder of snapshots to see ${TREND_METRIC_LABELS[metric]} over time. Current values, highest first:</p>
             <div class="trend-rank">${ranked.map(e => {
                 var tier = th ? severityTier(e.last, th.warn, th.crit) : 'neutral';
-                return `<div class="fleet-bar-row"><span class="fleet-bar-name">${esc(e.label)}</span>${inlineBar(e.last / maxLast * 100, `${e.last}${unit}${th ? ' ' + SEVERITY_WORD[tier] : ''}`, tier)}</div>`;
+                return `<div class="fleet-bar-row"><span class="fleet-bar-name" title="${esc(e.label)}">${esc(e.label)}</span>${inlineBar(e.last / maxLast * 100, `${e.last}${unit}${th ? ' ' + SEVERITY_WORD[tier] : ''}`, tier)}</div>`;
             }).join('')}</div>`;
         return;
     }
@@ -777,7 +787,15 @@ function extractSubnetsFromConfigs(devices) {
         // between the two interface types.
         var irbToSubnet = new Map(); // "irb.N" or "vlan.N" -> {ip, prefix}, scoped to this device only
         var irbRe = /set interfaces (irb|vlan) unit (\d+)[^\r\n]*family inet address (\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})/g;
-        while ((m = irbRe.exec(text)) !== null) irbToSubnet.set(m[1] + '.' + m[2], { ip: m[3], prefix: parseInt(m[4], 10) });
+        while ((m = irbRe.exec(text)) !== null) {
+            var prefix = parseInt(m[4], 10);
+            // The regex's \d{1,2} matches 0-99, but a valid IPv4 prefix length is 0-32 - a
+            // malformed/truncated config line (or a typo upstream) could otherwise produce a
+            // negative or fractional "usable addresses" count below. Drop it here so the vlan
+            // falls into the existing "boundary not found" empty state instead.
+            if (prefix < 0 || prefix > 32) continue;
+            irbToSubnet.set(m[1] + '.' + m[2], { ip: m[3], prefix: prefix });
+        }
 
         var vlanRe = /set vlans (\S+) l3-interface ((?:irb|vlan)\.\d+)/g;
         while ((m = vlanRe.exec(text)) !== null) {
@@ -919,7 +937,16 @@ window.renderReliabilityHeatmap = function() {
             var day = r.days[d];
             if (!day) return '<div class="rel-cell none" title="' + esc(d + ': not crawled') + '"></div>';
             var title = `${d}: ${day.alarmCount} alarm${day.alarmCount === 1 ? '' : 's'}${day.rebooted ? ' - rebooted' : ''}`;
-            return `<div class="rel-cell heatmap-cell ${level(day.alarmCount)}${day.rebooted ? ' rebooted' : ''}" title="${esc(title)}" onclick="window.goToSearchResult(${JSON.stringify(r.ip).replace(/"/g, '&quot;')}, 'tab-alarms')"></div>`;
+            // Colour alone (WCAG 1.4.1) isn't enough to read severity here, and a title
+            // attribute alone is hover-only - unreachable by keyboard/screen-reader users. The
+            // alarm count is printed in the cell itself as a second, non-colour encoding, and
+            // tabindex/aria-label/onkeydown put the same detail behind focus, not just hover.
+            // showDays (dense-column check above) also gates the printed digit - a genuine
+            // count is only useful if the cell is wide enough to show it whole; below that
+            // width, a clipped "12" reading as "1" would be worse than no digit at all. Colour,
+            // title and aria-label still carry the full count either way.
+            var countText = (showDays && day.alarmCount > 0) ? day.alarmCount : '';
+            return `<div class="rel-cell heatmap-cell ${level(day.alarmCount)}${day.rebooted ? ' rebooted' : ''}" title="${esc(title)}" aria-label="${esc(title)}" tabindex="0" role="button" onclick="window.goToSearchResult(${JSON.stringify(r.ip).replace(/"/g, '&quot;')}, 'tab-alarms')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">${countText}</div>`;
         }).join('') +
         `<div class="rel-row-total" title="alarm-days / reboots">${r.alarms}<span class="rel-sep">/</span>${r.reboots}</div>`).join('');
 
