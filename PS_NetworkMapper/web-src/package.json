@@ -1,0 +1,11 @@
+{
+  "name": "network-visualizer-build",
+  "private": true,
+  "description": "Build-time-only tooling for inlining/minifying web-src into ../lib/Network_Visualizer.html. Not shipped - a release ships only Start-NetworkMapper.ps1 + lib/.",
+  "scripts": {
+    "build": "node tools/build-inline.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
+}

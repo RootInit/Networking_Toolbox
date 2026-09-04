@@ -363,7 +363,7 @@ function Invoke-RescanAction {
 # Quick reachability check (a few ICMP echoes). Async, same "don't block the accept loop"
 # reasoning as Invoke-RescanAction: Test-Connection -Count 4 -TimeoutSeconds 2 can take up
 # to ~8s against an unreachable device, and the accept loop dispatches every request inline
-# on a single thread - a synchronous call here used to stall scan/rescan status polling and
+# on a single thread - a synchronous call here would stall scan/rescan status polling and
 # every other request for that long. Offloaded to a single-slot runspace pool, mirroring the
 # rescan pattern; the browser polls Invoke-PingStatusAction for the result.
 function Invoke-PingAction {
@@ -948,9 +948,7 @@ function Invoke-SaveConfigAction {
     # No PowerShell test runner exists in this repo (only `node --test` under web-src/) to
     # host an automated regression test for this validation, so a manual repro is recorded
     # here instead: POST {"devices":[],"credentials":{"username":"admin -oProxyCommand=calc.exe x","password":"x"}}
-    # to /api/save-config (with a matching Origin header) before this check existed and it
-    # would 200 and silently arm the injection; with this check it now 400s with
-    # "Invalid username: ...".
+    # to /api/save-config (with a matching Origin header) should 400 with "Invalid username: ...".
     if ($Parsed.credentials) {
         $NewUsername = [string]$Parsed.credentials.username
         if ($NewUsername -and $NewUsername -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}\z') {
@@ -1155,10 +1153,10 @@ function Start-MapperWebServer {
             # call gives the engine no statement boundary to act on, so Ctrl+C is ignored.
             # Polling on a timeout hands control back every 250ms, making Ctrl+C work.
             #
-            # This accept machinery (as opposed to the per-request dispatch below, which has
-            # its own try/catch) used to run bare: an HttpListenerException here - e.g. a
-            # transient EndGetContext failure - fell all the way out of this function
-            # uncaught, silently killing the whole server process with nothing written to
+            # This accept machinery needs its own try/catch, separate from the per-request
+            # dispatch below: an uncaught HttpListenerException here - e.g. a transient
+            # EndGetContext failure - would otherwise fall all the way out of this function,
+            # silently killing the whole server process with nothing written to
             # Mapper_Debug.log and the browser just reporting "Lost connection to the local
             # server". Log and retry instead of dying.
             try {

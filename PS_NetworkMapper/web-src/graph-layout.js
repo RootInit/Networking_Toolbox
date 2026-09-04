@@ -30,13 +30,12 @@ function buildAdjacency(nodeIds, edges) {
 // BFS distances from `startId` to every reachable node.
 //
 // Perf: `queue.shift()` is O(n) per call (array-backed queues shift every remaining
-// element down), so a naive BFS here is worse than its nominal O(V+E) - replaced with
-// an index pointer (O(1) dequeue). Also dropped the neighbor sort that used to run on
-// every visit: only dist.size (component size) and the max depth reached matter to
-// computeGraphRoot's caller, and BFS reaches the same set of nodes at the same depths
-// regardless of the order neighbors are visited in, so sorting them bought nothing here
-// (unlike buildPrimaryTree's BFS, where visit order determines which parent a node
-// gets - that sort stays).
+// element down), so a naive BFS here would be worse than its nominal O(V+E) - an index
+// pointer keeps dequeue O(1). Neighbors are visited unsorted: only dist.size (component
+// size) and the max depth reached matter to computeGraphRoot's caller, and BFS reaches
+// the same set of nodes at the same depths regardless of the order neighbors are visited
+// in (unlike buildPrimaryTree's BFS below, where visit order determines which parent a
+// node gets).
 function bfsDistances(adj, startId) {
   const dist = new Map([[startId, 0]]);
   const queue = [startId];
@@ -116,14 +115,13 @@ function buildPrimaryTree(nodeIds, edges, rootId) {
 
   // Anything the BFS from rootId never reached is a separate fabric island (2+ devices
   // that only connect to each other, not to the main graph) or a single unreachable
-  // node. It used to just vanish from the diagram here - parentOf/childrenOf never got
-  // an entry for it, so computeVisibleTree (which only walks from rootId) never saw it,
-  // and expandAncestors' parentOf.get() would silently return undefined for it too.
-  // Instead, give each such component its own local root - picked with the same
-  // heuristic as the main root (computeGraphRoot), scoped to just that component's own
-  // nodes/edges - and attach it as an additional top-level entry (parentOf.get(root)
-  // === null, exactly like rootId) so it renders as its own separate tree alongside the
-  // main one instead of disappearing, and stays reachable via expandAncestors/search.
+  // node. Without an entry here, computeVisibleTree (which only walks from rootId) would
+  // never see it, and expandAncestors' parentOf.get() would silently return undefined for
+  // it. So each such component gets its own local root - picked with the same heuristic
+  // as the main root (computeGraphRoot), scoped to just that component's own nodes/edges
+  // - and is attached as an additional top-level entry (parentOf.get(root) === null,
+  // exactly like rootId) so it renders as its own separate tree alongside the main one
+  // and stays reachable via expandAncestors/search.
   const remaining = nodeIds.filter(id => !parentOf.has(id)).sort(compareIpIds);
   for (const id of remaining) {
     if (parentOf.has(id)) continue; // already swept into an earlier component this loop
@@ -243,11 +241,11 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   // elk-layout.js, computes this from its own timeout budget). Undefined/null means no
   // bound, which is what every existing caller (including every test) gets by omitting it.
   //
-  // This exists because racing this call against a timer Promise (elk-layout.js used to do
-  // this alone, with no cap in here) cannot work: JS is single-threaded, so a pending
-  // setTimeout callback can't run until this synchronous computation returns control to the
-  // event loop - by which point it has already finished, whether that took 1 second or 100.
-  // The only way to actually cap wall-clock time is to check it from inside the computation.
+  // Racing this call against a timer Promise cannot work: JS is single-threaded, so a
+  // pending setTimeout callback can't run until this synchronous computation returns
+  // control to the event loop - by which point it has already finished, whether that took
+  // 1 second or 100. The only way to actually cap wall-clock time is to check it from
+  // inside the computation, which is what this deadline does.
   const deadline = opts.deadline ?? null;
   function checkDeadline() {
     if (deadline !== null && Date.now() > deadline) {

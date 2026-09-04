@@ -64,10 +64,7 @@ test('computeNeighborEdges skips neighbors with no usable ManagementIP', () => {
   assert.deepEqual(computeNeighborEdges([device]), []);
 });
 
-// --- Additional coverage added after code review (post-commit d49f9d0) ---
-//
-// The 8 tests above are the brief's original test set, kept verbatim. The tests below
-// close two gaps the review found: (1) nothing asserted the actual insertion ORDER of
+// The tests below close two gaps: (1) nothing asserted the actual insertion ORDER of
 // computeDeviceClassification's result, which is what makes "two full separate passes"
 // a real, order-independent guarantee rather than an implementation detail that happens
 // to pass under one specific array ordering; (2) nothing exercised, at the topology-graph
@@ -133,8 +130,7 @@ test('computeDeviceClassification: a pass-2-only (unscanned) placeholder is alwa
 // real regression coverage of the shipped code, not a frozen copy of it. This is the closest
 // committed regression coverage for that integration point, specifically the
 // `device === undefined` path for an unscanned placeholder, which neither committed sample
-// snapshot exercises (see task-3-report.md for the differential check run against both real
-// snapshots during manual verification).
+// snapshot exercises.
 
 test('buildSwitchMap-equivalent node-meta construction does not throw and produces a plain gray placeholder node for an unscanned neighbor (device undefined case)', () => {
   const device = { DeviceIP: '10.0.3.1', Hostname: 'd1', Neighbors: [{ ManagementIP: '10.0.3.99', Hostname: 'ghost' }] };

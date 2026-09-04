@@ -37,11 +37,10 @@ test('computeGridFallback returns an empty map for no nodes', () => {
   assert.equal(computeGridFallback([]).size, 0);
 });
 
-// Regression: computeLayout used to lay out only visibleNodeIds[0]'s subtree, so a
-// disconnected fabric island (graph-layout.js's buildPrimaryTree attaches those as
-// extra top-level entries rather than dropping them) got no computed position at all -
-// graph.js then defaulted every one of its nodes to (0, 0), stacking them on top of
-// whatever was already there. computeLayout now finds every node with no incoming
+// A disconnected fabric island (graph-layout.js's buildPrimaryTree attaches those as
+// extra top-level entries rather than dropping them) must still get a computed position -
+// without one, graph.js would default every one of its nodes to (0, 0), stacking them on
+// top of whatever else is there. computeLayout finds every node with no incoming
 // visible edge and lays each out as its own component, offset along x.
 test('computeLayout gives a disconnected second component (with no incoming edge) its own non-overlapping positions', async () => {
   // Main component: small 3-node star.

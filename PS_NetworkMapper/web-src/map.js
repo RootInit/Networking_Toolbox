@@ -492,7 +492,7 @@ window.renderMapMarkers = function() {
 };
 
 // Pans/zooms to the device's marker if it has a resolved location; returns whether it did,
-// so search.js (Task 9) knows whether to show a "no location set" status note instead.
+// so search.js knows whether to show a "no location set" status note instead.
 window.revealDeviceOnMap = function(ip) {
     var marker = mapMarkersByIp.get(String(ip));
     if (!marker) return false;

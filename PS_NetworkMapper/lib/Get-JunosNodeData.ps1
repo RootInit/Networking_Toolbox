@@ -518,7 +518,7 @@ try {
     # regex below deliberately still matches them (it needs to, for other VC bookkeeping),
     # so a MAC learned on one of these must be excluded as a client (below, and at the
     # dedup preference just below) or it leaks into Clients as a fake directly-attached
-    # device, the same failure shape as the already-fixed LACP/AE trunk-VLAN leak. Defined
+    # device, the same failure shape as the LACP/AE trunk-VLAN leak above. Defined
     # here (rather than just above the Clients-building loop) because the MAC-table parse
     # loop needs it too, to prefer an access-port sighting over an uplink/interconnect one.
     $InterconnectPortPattern = "^(?:vcp|bme|reth|me|vme)"

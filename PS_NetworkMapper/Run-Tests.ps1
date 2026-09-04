@@ -27,8 +27,9 @@
          NOT a substitute for coverage-5 itself.
 
 .USAGE
-    pwsh ./Run-Tests.ps1
-    (run from the PS_NetworkMapper project root)
+    powershell.exe -File .\Run-Tests.ps1
+    (run from the PS_NetworkMapper project root; plain functions/scriptblocks only, so this
+    also runs fine under pwsh if that's what's on hand)
 
     Exits 0 if every case passed, 1 otherwise - suitable for wiring into CI later even though
     none currently exists.

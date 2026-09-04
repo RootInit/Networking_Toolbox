@@ -19,9 +19,9 @@ const asArray = global.window.asArray;
 // Contract (see utils.js's own comment above the definition): normalizes PowerShell's
 // ConvertTo-Json single-element-array-as-bare-object quirk - null/undefined becomes [],
 // a bare (non-null, non-array) value becomes a 1-element array, an actual array passes
-// through - and, per nullopt-1, strips any null/undefined elements an array itself
-// contains (e.g. from a hand-edited or corrupted uploaded topology file), since callers
-// dereference elements unguarded.
+// through - and strips any null/undefined elements an array itself contains (e.g. from
+// a hand-edited or corrupted uploaded topology file), since callers dereference elements
+// unguarded.
 
 test('asArray passes an array through unchanged when it has no null/undefined elements', () => {
   var input = [{ a: 1 }, { a: 2 }];

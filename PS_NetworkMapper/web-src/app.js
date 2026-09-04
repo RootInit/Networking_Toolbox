@@ -242,8 +242,6 @@ window.sidePanelHandleKeydown = function(e) {
     try { localStorage.setItem('sidePanelWidth', String(newWidth)); } catch (err) {}
 };
 
-// Restores a previously dragged width on load - a display preference, not part of
-// Configuration.json's saved state, so a plain localStorage read.
 // Drag the divider between the tool pane (Load File / Search / Settings) and the device
 // area. Until dragged, the pane sizes to its content (capped by CSS); after the first drag it
 // holds the dragged height (#tool-panel.sized) and remembers it across reloads.
@@ -300,6 +298,8 @@ window.toolDividerKeydown = function(e) {
     } catch (err) {}
 })();
 
+// Restores a previously dragged width on load - a display preference, not part of
+// Configuration.json's saved state, so a plain localStorage read.
 (function restoreSidePanelWidth() {
     try {
         var saved = parseFloat(localStorage.getItem('sidePanelWidth'));

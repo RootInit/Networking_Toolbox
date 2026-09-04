@@ -43,7 +43,7 @@ test('activityState: link up is green regardless of flap age', () => {
   assert.equal(linkState({ Link: 'up' }), 'green');
 });
 
-// consistency-1: a down port shows the same "down" state chassis-side as the red badge the
+// A down port shows the same "down" state chassis-side as the red badge the
 // Interfaces table shows for it (drawer.js renderInterfaces) - 'off' is reserved for a port
 // the artwork has but the device didn't report at all (linkState never even gets called for
 // those - lightStates only iterates device.Interfaces).
@@ -53,7 +53,7 @@ test('linkState: down is red (matches the table\'s down badge), no interface dat
   assert.equal(linkState(null), 'off');
 });
 
-// timeclock-1: LastFlappedSeconds is captured once, as of the snapshot's own scan - a stale
+// LastFlappedSeconds is captured once, as of the snapshot's own scan - a stale
 // snapshot must not read as "recently active" just because its age isn't accounted for.
 test('activityState: an ageSec offset (time since the snapshot was captured) ages out a stale-but-recent flap', () => {
   assert.equal(activityState({ Link: 'down', LastFlappedSeconds: H72_S - 1 }, 0), 'green');
@@ -157,7 +157,7 @@ test('buildMembers handles a single-element StackMembers object (PowerShell Conv
   assert.ok(members[0].html.includes('data-port="ge-0/0/11"'));
 });
 
-// operatorux-1: the ALM LED must reflect device.Alarms, both for the statusCluster-drawn
+// The ALM LED must reflect device.Alarms, both for the statusCluster-drawn
 // families (EX2300 right section) and RIGHT.lcd, which draws its ALM dot directly.
 test('buildMembers wires the ALM LED to device.Alarms', () => {
   const withAlarm = vcDevice();
@@ -207,9 +207,9 @@ test('buildMembers falls back to the inferred layout when catalogue art covers u
   assert.equal(g.catalogueKey, 'EX4300-48P');
 });
 
-// parsing-1: inferModel used to flag an entire 12-port block as mgig once any mge port fell
-// in it, which renamed/mislabeled the ge ports sharing that block. mge ports here (14, 15)
-// don't align to the 12-port boundary (block 2 starts at port 12).
+// mgig must be flagged per port, not per 12-port block, or a ge port sharing a block with
+// an mge port would get renamed/mislabeled too. mge ports here (14, 15) don't align to the
+// 12-port boundary (block 2 starts at port 12).
 test('inferModel flags mgig per port, not per 12-port block', () => {
   const ifs = [];
   for (let n = 0; n < 14; n++) ifs.push({ Port: `ge-0/0/${n}` });

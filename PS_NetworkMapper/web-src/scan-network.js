@@ -2,7 +2,7 @@
 // then feeds the result through processSelectedFiles - same pipeline as a manual file upload.
 
 var scanNetworkPollTimer = null;
-// Re-entrancy guard (P2SCAN-002): set synchronously the instant a poll loop starts, before
+// Re-entrancy guard: set synchronously the instant a poll loop starts, before
 // any await, so a second pollRunningScan() call (e.g. a 409-triggered retry landing while
 // the original reattach loop is still alive) can't spawn a competing chain that fights the
 // first one over the shared scanNetworkPollTimer id.
@@ -10,7 +10,7 @@ var scanNetworkPollActive = false;
 
 // Promise-based starting-IP prompt, same resolve/reject shape as window.promptForPassword.
 // prefillIp/replacing let the caller reuse this same confirm modal when a snapshot is
-// already loaded (UX-001): the computed start IP is pre-filled and the description text
+// already loaded: the computed start IP is pre-filled and the description text
 // warns that confirming will replace the currently-loaded data, instead of firing the
 // fleet crawl with no review step at all.
 function promptForStartIp(prefillIp, replacing) {
@@ -72,9 +72,8 @@ function bestStartIpFromActiveSnapshot() {
 }
 
 // Shared poll loop against /api/scan-network/status, used both by a freshly-started scan
-// and by a page-load reattach to a scan already running server-side (UX-002). Disables the
-// scan/load buttons for the duration and shows live progress on scanNetworkBtn, same as
-// before this was extracted.
+// and by a page-load reattach to a scan already running server-side. Disables the
+// scan/load buttons for the duration and shows live progress on scanNetworkBtn.
 function pollRunningScan() {
     if (scanNetworkPollActive) return; // a poll loop is already driving this scan - let it continue
     scanNetworkPollActive = true;
@@ -168,14 +167,14 @@ function pollRunningScan() {
     runPoll();
 }
 
-// Page-load reattach (UX-002): a refresh mid-crawl loses scanNetworkPollTimer/pollStart
+// Page-load reattach: a refresh mid-crawl loses scanNetworkPollTimer/pollStart
 // (plain JS vars), so on load check the server's status endpoint directly instead of
 // leaving the UI idle with no way to tell "still running" from "safe to start." If a scan
 // is running, resume the same poll loop and reflect progress on the button instead of
 // silently reverting to idle.
 // Returns true if a server-side scan was found running and this reattached to it (in which
 // case the caller - app.js's DOMContentLoaded - must not let autoloadLastScan run, since that
-// would overwrite the live poll's status/buttons with a stale archived snapshot - P2SCAN-001),
+// would overwrite the live poll's status/buttons with a stale archived snapshot),
 // false otherwise.
 window.resumeScanIfInProgress = async function() {
     if (loadedSnapshots.length > 0 || scanNetworkPollActive) return false;
@@ -194,7 +193,7 @@ window.resumeScanIfInProgress = async function() {
     }
     if (status.status !== 'running') return false;
 
-    // Re-check the same guard as above (P4UX-001): the await above gave a manually-
+    // Re-check the same guard as above: the await above gave a manually-
     // triggered Load Folder/File or a user-started Scan Network time to complete and
     // populate loadedSnapshots/scanNetworkPollActive while this was in flight. Reattaching
     // now would silently overwrite that just-loaded/just-started data with no confirmation,
@@ -226,7 +225,7 @@ window.startNetworkScan = async function() {
         }
     } else {
         // A snapshot is already loaded - starting a scan here re-crawls the whole fleet
-        // and replaces what's on screen, so require explicit confirmation (UX-001) via
+        // and replaces what's on screen, so require explicit confirmation via
         // the same start-IP modal, pre-filled with the computed root node.
         var computedIp = bestStartIpFromActiveSnapshot();
         try {

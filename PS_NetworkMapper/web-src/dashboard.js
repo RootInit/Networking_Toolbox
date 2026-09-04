@@ -103,9 +103,6 @@ function fleetTotalsFor(snapshot) {
     return t;
 }
 
-// Aggregates the ACTIVE snapshot only - merging snapshots from different times would
-// double-count devices and mix states never simultaneously true.
-
 // Plain set difference of "display set" config lines (order isn't stable between Junos
 // commits, so this isn't a positional diff). Blank/whitespace-only differences are ignored.
 function configSetDiff(oldText, newText) {
@@ -180,7 +177,7 @@ function computeConfigChanges() {
         if (entries.length < 2) return;
         entries.sort((a, b) => b.ts - a.ts);
         if (entries[0].config !== entries[1].config) {
-            // deviceIp is the newest capture's IP, for drill-down opening the drawer now.
+            // deviceIp is the newest capture's IP, so drill-down opens the drawer on it.
             changed.push({ deviceIp: entries[0].ip, hostname: entries[0].hostname, newIdx: entries[0].idx, oldIdx: entries[1].idx });
         }
     });
@@ -192,6 +189,8 @@ window.renderFleetDashboard = function() {
     if (!container) return;
     var settings = window.loadSettings();
     var activeSnapshot = loadedSnapshots[activeSnapshotIndex];
+    // Aggregates the ACTIVE snapshot only - merging snapshots from different times would
+    // double-count devices and mix states never simultaneously true.
     var devices = globalTopologyData || [];
 
     if (devices.length === 0) {

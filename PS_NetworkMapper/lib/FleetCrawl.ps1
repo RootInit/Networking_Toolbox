@@ -119,9 +119,9 @@ function Invoke-FleetCrawl {
     # appended after it, causing the whole file to be misread as UTF-16LE.
     if ($DebugLogPath) { try { "=== Fleet Crawl Debug Log - $(Get-Date) ===" | Out-File -FilePath $DebugLogPath -Force -Encoding utf8 } catch {} }
 
-    # Atomic replace of $OutputFile from $TempOutputFile now goes through the shared
+    # Atomic replace of $OutputFile from $TempOutputFile goes through the shared
     # Move-FileAtomic in FileHelpers.ps1 (dot-sourced above) - see that file for the
-    # underlying [System.IO.File]::Move rationale.
+    # underlying [System.IO.File]::Replace rationale.
 
     # Single write path for init/periodic/final writes so encryption is wired in once.
     function Write-TopologyOutputLocal {
@@ -154,7 +154,7 @@ function Invoke-FleetCrawl {
     # Move-FileAtomic replaces $OutputFile with a freshly-created file (default ACL) on EVERY
     # call, not just the first, so this has to run after each move, not once. $TempOutputFile is
     # separately hardened by Write-TopologyOutputLocal before Move-FileAtomic even runs (see
-    # there) - this hardens the post-move $OutputFile, since [System.IO.File]::Move's ACL
+    # there) - this hardens the post-move $OutputFile, since [System.IO.File]::Replace's ACL
     # semantics across that rename aren't relied on (unverified on this dev machine - see the
     # same open question flagged in SshHelpers.ps1). Skipped when $Encrypted - an encrypted
     # snapshot's content is already opaque without the passphrase, so ACL hardening isn't needed
@@ -324,11 +324,11 @@ function Invoke-FleetCrawl {
                     Write-DebugLogLocal "ORCHESTRATOR TIMEOUT: Abandoning hung thread for $($Job.IP)"
                     Write-Host "`n[!] Timed out waiting on $($Job.IP) - abandoning and continuing." -ForegroundColor Red
 
-                    # Previously this device was just dropped from $TopologyList - silently
-                    # different from a worker-level failure (bad password, connection refused),
-                    # which DOES get added with its own ScanStatus. Add a synthetic minimal node
-                    # so both failure classes are represented consistently for the UI/consumers.
-                    # Mirrors Get-JunosNodeData.ps1's $NodeData initializer field-for-field
+                    # A synthetic minimal node keeps this failure class represented consistently
+                    # alongside a worker-level failure (bad password, connection refused), which
+                    # DOES get added with its own ScanStatus - a silently dropped device would
+                    # otherwise vanish from the output instead. Mirrors Get-JunosNodeData.ps1's
+                    # $NodeData initializer field-for-field
                     # (Devices consuming this - the web UI - are owned by other agents; a node
                     # missing keys a real one always has would fail there, not here) plus the
                     # ScanStatus/ScanError contract.
@@ -409,16 +409,6 @@ function Invoke-FleetCrawl {
                                 foreach ($Neigh in $Node.Neighbors) {
                                     $NIP = $Neigh.ManagementIP
                                     if ([string]::IsNullOrEmpty($NIP)) { continue }
-                                    # Behavior change: this used to be a bare StartsWith, so a
-                                    # configured scope like "10.1" also matched "10.19.5.5" (a
-                                    # plain string prefix match, no octet boundary). Now the
-                                    # match only counts if the prefix is a full match or is
-                                    # immediately followed by a literal "." - so "10.1" matches
-                                    # "10.1.5.5" but no longer matches "10.19.5.5". Scopes are
-                                    # trimmed of any trailing "." first (the default
-                                    # "131.30." style) so that still matches correctly instead
-                                    # of requiring a doubled "..". Any existing -AllowedScopes
-                                    # config should be reviewed against this stricter behavior.
                                     $InScope = Test-IpInAllowedScopes -IP $NIP -AllowedScopes $AllowedScopes
 
                                     if ($InScope -and !$Visited.Contains($NIP) -and !$Enqueued.Contains($NIP)) {

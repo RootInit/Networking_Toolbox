@@ -49,7 +49,8 @@ window.__debug = {
     get clusterThreshold() { return getClusterThreshold(); },
 };
 
-// Ensure Vis.js is ready before declaring DataSets
+// Guards against the Vis.js CDN failing to load: surfaces a clear error via
+// window.onerror instead of a cryptic ReferenceError the first time vis.DataSet is used.
 document.addEventListener("DOMContentLoaded", function() {
     try {
         if (typeof vis !== 'undefined') {
@@ -433,7 +434,7 @@ window.resizeDiagram = function() {
 // 15 degrees per click. Drawn once as SVG; the same element survives graph rebuilds because
 // it lives in #center-panel, not inside #mynetwork.
 var DIAGRAM_NAV_STEP_PX = 120;      // pan distance per tick, in screen pixels
-var DIAGRAM_NAV_ZOOM = 1.18;        // zoom factor per tick
+var DIAGRAM_NAV_ZOOM = 1.18;
 var DIAGRAM_NAV_ROTATE_DEG = 15;
 
 window.buildDiagramNav = function() {
@@ -441,7 +442,7 @@ window.buildDiagramNav = function() {
     if (!host || host.dataset.built) return;
     host.dataset.built = '1';
     var C = 75, R = 72, r = 32;   // centre, outer radius, inner (button) radius
-    // Segment order clockwise from the top: up, rotate-right, right, zoom-in, down, zoom-out, left, rotate-left.
+    // Segments are laid out clockwise starting from the top.
     var segs = [
         { a: 'up',      glyph: 'M-6,3 L0,-3 L6,3' },
         { a: 'rotcw',   glyph: 'M-5,4 A7,7 0 1 1 5,-2 M5,-2 L5,-7 M5,-2 L0,-2' },
@@ -470,7 +471,6 @@ window.buildDiagramNav = function() {
             '<circle class="nav-ring" cx="' + C + '" cy="' + C + '" r="' + R + '"></circle></svg>';
     host.innerHTML = html;
 
-    // Press-and-hold repeat for pan/zoom; single step for rotate and fit.
     var holdTimer = null, heldEl = null;
     var stop = function () { if (holdTimer) { clearInterval(holdTimer); holdTimer = null; } if (heldEl) { heldEl.classList.remove('held'); heldEl = null; } };
     host.addEventListener('mousedown', function (ev) {

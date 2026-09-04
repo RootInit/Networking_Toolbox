@@ -124,8 +124,8 @@ test('buildPrimaryTree attaches an unreachable single node as its own extra root
   const nodeIds = ['root', 'a', 'island'];
   const edges = [{ from: 'root', to: 'a' }];
   const { parentOf, childrenOf, extraRoots } = buildPrimaryTree(nodeIds, edges, 'root');
-  // No longer dropped: it becomes a top-level entry of its own (parentOf === null,
-  // just like the main root), rather than silently missing from parentOf/childrenOf.
+  // It becomes a top-level entry of its own (parentOf === null, just like the main
+  // root), rather than silently missing from parentOf/childrenOf.
   assert.deepEqual(extraRoots, ['island']);
   assert.equal(parentOf.get('island'), null);
   assert.deepEqual(childrenOf.get('island'), []);
@@ -133,9 +133,9 @@ test('buildPrimaryTree attaches an unreachable single node as its own extra root
 
 test('buildPrimaryTree attaches a disconnected 2-node island as its own extra tree, reachable from parentOf/childrenOf', () => {
   // Main component: root-a. Separate island: island1-island2, with no edge back to
-  // either root or a. This used to vanish entirely - unreachable from rootId, and
-  // never added to parentOf/childrenOf, so computeVisibleTree (which only walks from
-  // rootId) never rendered it and expandAncestors could never find a path to it.
+  // either root or a. Without its own extra root it would be unreachable from rootId
+  // and never added to parentOf/childrenOf, so computeVisibleTree (which only walks
+  // from rootId) would never render it and expandAncestors could never find a path to it.
   const nodeIds = ['root', 'a', 'island1', 'island2'];
   const edges = [
     { from: 'root', to: 'a' },
@@ -163,8 +163,8 @@ test('buildPrimaryTree attaches a disconnected 2-node island as its own extra tr
   assert.ok(visibleEdges.some(e => (e.from === islandRoot && e.to === islandLeaf)));
 
   // expandAncestors can walk up from a node buried in the island without silently
-  // no-op'ing on an undefined parentOf entry (the old bug: parentOf.get() on an
-  // unreached node returned undefined, so the ancestor walk below never started).
+  // no-op'ing on an undefined parentOf entry (parentOf.get() on an unreached node
+  // returns undefined, which would stop the ancestor walk before it starts).
   // Threshold 0 makes islandRoot's one child "over threshold", so a real expansion
   // must happen for this to pass - not just a no-op walk that happens to not throw.
   const expandedNodes = new Set();
@@ -309,7 +309,7 @@ test('computeRecursiveRadialLayout centers a non-root leaf-parent\'s cluster on 
   });
   // At least one leaf should fall on the ROOT-FACING side of mid (within 90 degrees of
   // pointing back toward root, i.e. roughly PI away from mid's own outward angle) - proof
-  // the cluster isn't confined to the outward-only wedge the old grid/wedge designs used.
+  // the cluster gets a full circle around mid, not an outward-only wedge.
   const facesRootward = leafAngles.some(a => {
     let delta = a - (midAngle + Math.PI);
     while (delta > Math.PI) delta -= 2 * Math.PI;
@@ -462,10 +462,10 @@ test('computeRecursiveRadialLayout: nodeSpacing and leafSpacing move independent
     'shrinking nodeSpacing should not change a cluster\'s own internal leaf packing extent');
 
   // Growing leafSpacing should make the cluster's own extent (furthest leaf from mid)
-  // bigger. mid itself legitimately moves further from root too now (mid has no
-  // siblings to space out from, but its own bigger cluster still needs enough
-  // clearance from root not to crowd it - unlike the old uniform-ring design, a lone
-  // child's distance from its parent depends on its own size, not just a flat minRadius).
+  // bigger. mid itself legitimately moves further from root too (mid has no siblings
+  // to space out from, but its own bigger cluster still needs enough clearance from
+  // root not to crowd it - a lone child's distance from its parent depends on its own
+  // size, not just a flat minRadius).
   const midPosBase = base.get('mid'), midPosWider = widerLeaves.get('mid');
   const midRadiusBase = Math.hypot(midPosBase.x, midPosBase.y);
   const midRadiusWider = Math.hypot(midPosWider.x, midPosWider.y);
@@ -496,8 +496,8 @@ test('computeRecursiveRadialLayout stays fast and does not blow up radius on the
   for (const p of result.values()) maxRadius = Math.max(maxRadius, Math.hypot(p.x, p.y));
   // A generous but meaningful bound: the huge branch's own cluster needs
   // clusterRadius(150) from ITSELF, plus root's own ring radius to reach that branch in
-  // the first place - a small constant multiple of that sum catches the earlier ~135000px
-  // blowup (which was roughly 15x this bound) while still allowing real, proportionate growth.
+  // the first place - a small constant multiple of that sum catches an unbounded blowup
+  // (an order of magnitude beyond this bound) while still allowing real, proportionate growth.
   const totalLeaves = 150 + Array.from({ length: 15 }, (_, i) => 5 + (i % 8)).reduce((a, b) => a + b, 0);
   const roughClusterRadius = 190 * Math.sqrt(150 / (2 * Math.PI)); // same math as clusterRadius(150), inlined
   const bound = 5 * (roughClusterRadius + 190 * 16); // + a generous root-ring allowance
@@ -543,11 +543,11 @@ test('computeRecursiveRadialLayout lets modest siblings sit closer to a structur
       minDistToHub = Math.min(minDistToHub, Math.hypot(a.x - b.x, a.y - b.y));
     }
   }
-  // Comparing directly against the old, unmodified omnidirectional-extent algorithm on
-  // this exact tree shape (measured, not assumed): old gave a closest true clearance of
-  // 1157px; directional reach gives 906px, a real (if here modest - the effect compounds
-  // much more on the real sample's deeper, wider tree) reduction. 5.5x nodeSpacing sits
-  // comfortably between the two, so this catches a regression back toward the old
+  // An omnidirectional-extent algorithm (charging a neighbor for a branch's farthest
+  // reach in ANY direction, not just toward that neighbor) gives a closest true clearance
+  // of 1157px on this exact tree shape; directional reach gives 906px, a real (if here
+  // modest - the effect compounds much more on a deeper, wider tree) reduction. 5.5x
+  // nodeSpacing sits comfortably between the two, catching a regression back toward
   // omnidirectional behavior without being so tight it's fragile to unrelated changes.
   assert.equal(minDistToHub < nodeSpacing * 5.5, true,
     `closest true clearance to hub's subtree was ${minDistToHub.toFixed(0)}, expected under ${nodeSpacing * 5.5} (nodeSpacing=${nodeSpacing})`);

@@ -2,7 +2,7 @@
 // nested edge clients/Config), CSV/config export, printable report, and drawer open/close/
 // tab-switch.
 // Reads currentSelectedNodeData/deviceByIp/loadedSnapshots/activeSnapshotIndex/
-// searchHighlightQuery from app.js.
+// searchHighlightQuery/network/activeCenterView from app.js.
 
 // The side panel itself stays (it also hosts the Load File / Search / Settings tabs); only
 // the device section under them is shown/hidden.
@@ -210,11 +210,10 @@ var pingPollTimer = null;
 // being left behind.
 var pingPollTargetIp = null;
 
-// Mirrors cancelPendingRescan (exposed for the same reason: a caller resetting drawer/app
-// state - e.g. a new file set loading - should stop a pending poll from touching it). Not
-// currently wired to a call site; the completion path below is self-defending anyway (see
-// isDrawerShowing) since, unlike a rescan, a ping poll isn't cancelled just by switching
-// which device's drawer is open.
+// Mirrors cancelPendingRescan (called from the same place in app.js's processSelectedFiles,
+// for the same reason: a new file set loading should stop a pending poll from touching it).
+// The completion path below is also self-defending regardless (see isDrawerShowing), since,
+// unlike a rescan, a ping poll isn't cancelled just by switching which device's drawer is open.
 window.cancelPendingPing = function() {
     if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
     pingPollTargetIp = null;
@@ -383,13 +382,6 @@ function isRescanTargetSnapshotGone(snapshots, targetSnapshot) {
     return !targetSnapshot || snapshots.indexOf(targetSnapshot) === -1;
 }
 
-// Merges a rescan result into the SNAPSHOT THAT WAS ACTIVE WHEN THE RESCAN STARTED
-// (targetSnapshot, captured by rescanDevice - not activeSnapshotIndex read live here, which
-// could have moved on to a different snapshot or a whole new file set while the rescan
-// polled). Never written back to disk: the loaded file's password isn't retained, and
-// snapshot immutability is load-bearing for Topology Diff and cross-snapshot config compare.
-// RescannedAt (shown in Summary) surfaces that ephemerality. Returns false (nothing merged)
-// if targetSnapshot no longer exists among loadedSnapshots.
 // True only while openRightDrawer is being called from mergeRescannedDevice's own re-render
 // below (a background poll completing, not the user opening/switching to a device). Lets
 // renderInterfaces (search-result auto-scroll to a highlighted client sub-row) and
@@ -397,6 +389,13 @@ function isRescanTargetSnapshotGone(snapshots, targetSnapshot) {
 // where their normal behavior is correct.
 var isMergeRerender = false;
 
+// Merges a rescan result into the SNAPSHOT THAT WAS ACTIVE WHEN THE RESCAN STARTED
+// (targetSnapshot, captured by rescanDevice - not activeSnapshotIndex read live here, which
+// could have moved on to a different snapshot or a whole new file set while the rescan
+// polled). Never written back to disk: the loaded file's password isn't retained, and
+// snapshot immutability is load-bearing for Topology Diff and cross-snapshot config compare.
+// RescannedAt (shown in Summary) surfaces that ephemerality. Returns false (nothing merged)
+// if targetSnapshot no longer exists among loadedSnapshots.
 window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
     if (!freshDevice || !freshDevice.DeviceIP) return false;
     if (isRescanTargetSnapshotGone(loadedSnapshots, targetSnapshot)) return false;
@@ -640,7 +639,7 @@ window.renderNeighbors = function() {
 
 // Column-click sort state for #interfaces-table (window.sortInterfacesBy below). null column
 // means "use the default down-first/longest-inactive-first order" - clicking a header switches
-// to a plain per-column sort until the drawer is reopened for a different device.
+// to a plain per-column sort. Not reset by openRightDrawer, so it persists across devices too.
 var interfaceSortState = { column: null, dir: 1 };
 
 // One comparator per data-sort-key in index.html's #interfaces-table <thead>. Each returns the
@@ -894,8 +893,6 @@ function renderClientSubRow(c, daisyChains) {
     </div></td></tr>`;
 }
 
-// CSV export - mirrors the currently displayed (filtered) rows for the selected switch,
-// not the full unfiltered dataset, so what downloads matches what's on screen.
 function csvEscapeField(val) {
     var s = (val === null || val === undefined) ? '' : String(val);
     if (/[",\r\n]/.test(s)) { s = '"' + s.replace(/"/g, '""') + '"'; }
@@ -1258,6 +1255,8 @@ ${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(
     }
 };
 
+// CSV export - mirrors the currently displayed (filtered) rows for the selected switch,
+// not the full unfiltered dataset, so what downloads matches what's on screen.
 window.exportInterfacesCsv = function() {
     if (!currentSelectedNodeData) { window.setStatus("Select a switch first.", "red"); return; }
     var hideDown = document.getElementById('hideDownPorts').checked;

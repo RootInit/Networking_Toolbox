@@ -7,8 +7,9 @@
 // MODELS entry that picks a family and passes measured positions. A model string the
 // catalogue doesn't know is first normalised (case, T/P/MP suffix, -AFI/-DC style trailers)
 // and, failing that, drawn generically from the interface names it actually reports, so a
-// new SKU still gets a usable panel instead of nothing. Modular chassis (EX9200, QFX10000,
-// MX) have vertical line cards and no meaningful 1U front - they render a one-line note.
+// new SKU still gets a usable panel instead of nothing. Modular chassis (EX8200/9200, EX6200,
+// QFX10000, MX, PTX, 4-digit SRX) have vertical line cards and no meaningful 1U front - they
+// render a one-line note.
 //
 // Dual-mode like graph-layout.js: node:test imports the pure string builders through
 // module.exports; the browser loads it as a classic <script> and gets window.Chassis plus the
@@ -78,8 +79,9 @@ function dot(cx, cy, r, key, role, state) {
         '<circle class="light-core" cx="0" cy="0" r="' + f(r * .55) + '"></circle></g>';
 }
 // Port groups carry data-port (the bare Junos interface name) for click selection, plus a
-// <title> tooltip when the unit knows the interface; ports the artwork has but the device
-// didn't report get .port-absent so they read as physically present but not in the data.
+// data-tip detail string (see portTitle below) when the unit knows the interface; ports the
+// artwork has but the device didn't report get .port-absent so they read as physically
+// present but not in the data.
 function portBind(unit, key, kind) {
     if (!key) return '';
     var known = unit && unit.hasPort ? unit.hasPort(key) : true;
@@ -234,7 +236,7 @@ var RIGHT = {
     /* EX4400 / EX4300-MP: sub-panel with model text, RUNNING JUNOS, console (USB-C or mini),
        2x4 LED cluster, mode button, uplink-module bay drawn populated with a 4x SFP+ module. */
     ex4400: function (u, s) {
-        var panelX = s.panelX || 361, px = B + panelX, w = BODY_W - panelX - 2;   // lay out from the available width
+        var panelX = s.panelX || 361, px = B + panelX, w = BODY_W - panelX - 2;
         var bayX = px + 3, bayW = w - 6, pitch = (bayW - 12) / 4, cw = Math.min(10, pitch - 3.2);
         var cages = '';
         for (var i = 0; i < 4; i++) { var cx0 = bayX + 6 + i * pitch + (pitch - cw) / 2, key = u.key(pn('xe', u.fpc, 2, i)); cages += sfpCage(cx0, 23.5, cw, 9.4, key, u.id + '_u' + i, {}, u) + cageLabel(cx0 + cw / 2, 35.2, key, i); }
@@ -495,9 +497,9 @@ function parsePort(name) {
 
 // Fallback for a fixed-config model the catalogue doesn't know: infer the panel from the
 // interfaces this member actually reports. Copper (ge/mge) access on PIC 0 -> the 2x6 RJ45
-// rack family in 12-port blocks with the EX2300-style right section; fibre access -> plain
-// SFP columns. Returns a spec-bearing model like a catalogue entry, or null if nothing
-// parseable belongs to this FPC.
+// rack family in 12-port blocks, with the LCD-style right section if PIC 2 has uplinks or
+// the plain EX2300-style one otherwise; fibre access -> plain SFP columns. Returns a
+// spec-bearing model like a catalogue entry, or null if nothing parseable belongs to this FPC.
 function inferModel(modelStr, fpc, interfaces) {
     var access = [], uplinkPics = {};
     (interfaces || []).forEach(function (intf) {
@@ -559,8 +561,9 @@ function linkState(intf) {
     return String(intf.Link).toLowerCase() === 'up' ? 'green' : 'red';
 }
 
-// Builds the members of one device: [{fpc, model, key, role, master, unit, html|note}] in
-// FPC order. Pure - no DOM. `device` is a topology record (StackMembers, Interfaces).
+// Builds the members of one device: [{fpc, role, model, master, multi, catalogueKey,
+// inferred, label, html} | {..., note}] in FPC order. Pure - no DOM. `device` is a topology
+// record (StackMembers, Interfaces).
 function buildMembers(device) {
     var asArr = function (v) { return Array.isArray(v) ? v.filter(function (item) { return item !== null && item !== undefined; }) : (v === null || v === undefined ? [] : [v]); };
     var interfaces = asArr(device && device.Interfaces);

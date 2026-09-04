@@ -24,7 +24,7 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   if (visibleNodeIds.length === 0) return new Map();
 
   // Absolute deadline, computed from "now" rather than from whenever doLayout's yield below
-  // resolves, so it reflects the same budget the (now-vestigial, see below) race timer used.
+  // resolves, so it reflects the same budget the vestigial race timer below uses.
   const deadline = Date.now() + LAYOUT_TIMEOUT_MS;
 
   const doLayout = async () => {
