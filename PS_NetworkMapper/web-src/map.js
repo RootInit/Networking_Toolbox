@@ -687,7 +687,19 @@ window.saveConfiguration = async function() {
         return false;
     }
     if (!resp.ok) {
-        window.showMapStatus('Save failed: HTTP ' + resp.status);
+        // Prefer the server's specific error message (Send-WebJson in WebServer.ps1 returns
+        // a JSON {error: "..."} body, e.g. an invalid-username or validation failure) over a
+        // bare status code, so the operator sees WHAT was wrong rather than just that
+        // something failed. Falls back to the generic HTTP-code message if the body is
+        // missing, not JSON, or has no error text.
+        var serverMessage = null;
+        try {
+            var errBody = await resp.json();
+            if (errBody && typeof errBody.error === 'string' && errBody.error) {
+                serverMessage = errBody.error;
+            }
+        } catch (parseErr) {}
+        window.showMapStatus('Save failed: ' + (serverMessage || ('HTTP ' + resp.status)));
         return false;
     }
     mapConfigEntries = devices;
