@@ -158,13 +158,9 @@ for (const m of output.matchAll(LEFTOVER_LINK_RE)) {
         && !/^[a-z][a-z0-9+.-]*:\/\//i.test(href)) unresolved.push(m[0]);
 }
 
-mkdirSync(buildDir, { recursive: true });
-writeFileSync(outPath, output, 'utf8');
-
-console.log(`Inlined ${inlinedCount} file(s) into ${outPath}`);
-if (skipped.length > 0) {
-    console.log(`Skipped ${skipped.length} missing file(s) (tag dropped, same as a 404'd src/href today): ${skipped.join(', ')}`);
-}
+// Validate BEFORE writing anything: a failed build must leave whatever last-known-good
+// artifact is already at outPath untouched rather than clobbering it with a broken or
+// partial one (P8CI-001 / buildci-1).
 
 // vendor/oui-data.js is the one file this build tolerates being absent (see the comment in
 // inlineLocalFile above); any other missing referenced file means the build produced a
@@ -178,4 +174,12 @@ if (requiredSkipped.length > 0) {
 if (unresolved.length > 0) {
     console.error(`ERROR: ${unresolved.length} local script/stylesheet tag(s) survived inlining unresolved in ${outPath} (a pattern SCRIPT_TAG_RE/LINK_TAG_RE didn't recognize): ${unresolved.join(', ')}`);
     process.exit(1);
+}
+
+mkdirSync(buildDir, { recursive: true });
+writeFileSync(outPath, output, 'utf8');
+
+console.log(`Inlined ${inlinedCount} file(s) into ${outPath}`);
+if (skipped.length > 0) {
+    console.log(`Skipped ${skipped.length} missing file(s) (tag dropped, same as a 404'd src/href today): ${skipped.join(', ')}`);
 }
