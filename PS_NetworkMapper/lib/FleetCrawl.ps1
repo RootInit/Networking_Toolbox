@@ -615,7 +615,7 @@ function Invoke-FleetCrawl {
                 $PendingDisposal.Add([PSCustomObject]@{ PS = $LiveJob.PS; Async = $StopHandle })
             } catch { try { $LiveJob.PS.Dispose() } catch {} }
             # Same -2s margin as the step-3 cleanup above - see comment there.
-            Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime.AddSeconds(-2)
+            Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime.AddSeconds(-2) -DebugLogPath $DebugLogPath
         }
         $Jobs.Clear()
 
