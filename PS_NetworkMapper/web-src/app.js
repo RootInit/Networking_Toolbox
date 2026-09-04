@@ -283,7 +283,7 @@ window.addEventListener('resize', function() {
     }, 150);
 });
 
-// Tool tabs at the top of the right panel (Load File / Search / Settings). Panes stay in the DOM when hidden (display:none, not removed), so
+// Tool tabs at the top of the left-docked side panel (Load File / Search / Settings). Panes stay in the DOM when hidden (display:none, not removed), so
 // getElementById-based reads elsewhere (getClusterThreshold, getLayoutSettings) work
 // regardless of which tab is active. (The Analysis Dashboard is a centre view, not a
 // sidebar tab - see map.js's switchCenterView.)
