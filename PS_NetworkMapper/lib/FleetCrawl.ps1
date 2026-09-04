@@ -33,7 +33,7 @@ function Invoke-FleetCrawl {
     param(
         [Parameter(Mandatory=$true)][string]$StartIP,
         [Parameter(Mandatory=$true)][string[]]$AllowedScopes,
-        [Parameter(Mandatory=$true)][int]$MaxConcurrent,
+        [Parameter(Mandatory=$true)][ValidateRange(1, 64)][int]$MaxConcurrent,
         [Parameter(Mandatory=$true)][string]$WorkerPath,
         [Parameter(Mandatory=$true)][string]$Username,
         [Parameter(Mandatory=$true)][string]$Password,
@@ -586,6 +586,22 @@ function Invoke-FleetCrawl {
         throw
     }
     finally {
+        # An interrupted crawl (Ctrl+C, or any other exit that skips the normal loop-end and
+        # circuit-breaker cleanup above) can reach here with jobs still in $Jobs that were
+        # never touched by step 3 (completed/timed-out only) or the circuit breaker's own
+        # in-flight sweep. Stop + reap them here the same way, so an interrupted run cleans up
+        # its in-flight worker jobs (and their ssh.exe children) identically to every other
+        # exit path instead of leaking them.
+        foreach ($LiveJob in $Jobs) {
+            try {
+                $StopHandle = $LiveJob.PS.BeginStop($null, $null)
+                $PendingDisposal.Add([PSCustomObject]@{ PS = $LiveJob.PS; Async = $StopHandle })
+            } catch { try { $LiveJob.PS.Dispose() } catch {} }
+            # Same -2s margin as the step-3 cleanup above - see comment there.
+            Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime.AddSeconds(-2)
+        }
+        $Jobs.Clear()
+
         # Belt-and-suspenders: the normal-exit path already drains this before returning, but
         # an unhandled throw from the `catch` block above (re-thrown, so it skips that drain)
         # would otherwise leak whatever's still pending here.
