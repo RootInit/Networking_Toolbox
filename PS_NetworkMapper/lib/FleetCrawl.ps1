@@ -29,6 +29,55 @@ function Test-IpInAllowedScopes {
     return $false
 }
 
+# Every worker's ssh.exe is launched (inside Get-JunosNodeData.ps1) as `cmd.exe /c ssh.exe
+# ...` from THIS process's runspace pool, so both cmd.exe and its ssh.exe grandchild are
+# OS-level descendants of the current PID - not of any handle FleetCrawl.ps1 holds.
+# $PS.Stop()/.Dispose() only tear down the managed PowerShell pipeline; they have no idea a
+# native grandchild process exists, so abandoning a hung job leaks a live ssh.exe with its
+# TCP session to the switch still open. Since many jobs share this one parent PID
+# concurrently, match candidates on command line (the target IP is always the last ssh.exe
+# argument, "$Username@$TargetIP") plus creation time (>= this job's start), not just name.
+#
+# Top-level (not nested in Invoke-FleetCrawl) so WebServer.ps1's /api/rescan path - which
+# spawns the exact same cmd.exe/ssh.exe grandchild via Get-JunosNodeData.ps1 - can call it
+# too (leak-1). -DebugLogPath is an explicit parameter, not a fall-through to
+# Invoke-FleetCrawl's own $DebugLogPath/Write-DebugLogLocal, because PowerShell resolves
+# unscoped names via the *call stack*, not lexical nesting: called from WebServer.ps1,
+# Write-DebugLogLocal wouldn't resolve at all, and the resulting error would be silently
+# swallowed by this function's own try/catch - orphans never killed, nothing logged, no sign
+# anything went wrong. Write-OrphanCleanupLogLocal below is deliberately its own local helper
+# (not reusing the name Write-DebugLogLocal) so both callers must pass their own log path
+# explicitly.
+function Stop-JunosOrphanProcessesLocal {
+    param([Parameter(Mandatory=$true)][string]$TargetIP, [Parameter(Mandatory=$true)][datetime]$SinceTime, [string]$DebugLogPath)
+    function Write-OrphanCleanupLogLocal {
+        param([string]$Message)
+        if ($DebugLogPath) {
+            try { "[$(Get-Date -Format 'HH:mm:ss')] $Message" | Out-File -FilePath $DebugLogPath -Append -Encoding utf8 } catch {}
+        }
+    }
+    try {
+        # Anchored on the literal "$Username@$TargetIP" token Get-JunosSshArgs always
+        # appends last (see SshHelpers.ps1). A bare "*$TargetIP*" wildcard would also match
+        # e.g. 10.1.1.5 against a concurrently-running job for 10.1.1.50-59, killing a
+        # healthy in-flight scan instead of only the abandoned one.
+        $Candidates = Get-CimInstance Win32_Process -Filter "Name='ssh.exe' OR Name='cmd.exe'" -ErrorAction Stop |
+            Where-Object { $_.CommandLine -and $_.CommandLine -match "@$([regex]::Escape($TargetIP))(\s|$)" -and $_.CreationDate -ge $SinceTime }
+        # Kill ssh.exe before cmd.exe: once the cmd.exe parent is gone there's no longer a
+        # process-tree link to fall back on if a later scan's command-line match ever misses.
+        foreach ($Proc in ($Candidates | Sort-Object { if ($_.Name -eq 'ssh.exe') { 0 } else { 1 } })) {
+            try {
+                Stop-Process -Id $Proc.ProcessId -Force -ErrorAction Stop
+                Write-OrphanCleanupLogLocal "ORCHESTRATOR CLEANUP: killed orphaned $($Proc.Name) (PID $($Proc.ProcessId)) for $TargetIP"
+            } catch {
+                Write-OrphanCleanupLogLocal "ORCHESTRATOR CLEANUP: failed to kill orphan PID $($Proc.ProcessId) ($($Proc.Name)) for $($TargetIP): $_"
+            }
+        }
+    } catch {
+        Write-OrphanCleanupLogLocal "ORCHESTRATOR CLEANUP: Stop-JunosOrphanProcessesLocal failed for $($TargetIP): $_"
+    }
+}
+
 function Invoke-FleetCrawl {
     param(
         [Parameter(Mandatory=$true)][string]$StartIP,
@@ -116,38 +165,6 @@ function Invoke-FleetCrawl {
         Move-FileAtomic -SourcePath $SourcePath -DestinationPath $DestinationPath
         if (-not $Encrypted) {
             Protect-JunosSensitiveFileAcl -Path $DestinationPath
-        }
-    }
-
-    # Every worker's ssh.exe is launched (inside Get-JunosNodeData.ps1) as `cmd.exe /c ssh.exe
-    # ...` from THIS process's runspace pool, so both cmd.exe and its ssh.exe grandchild are
-    # OS-level descendants of the current PID - not of any handle FleetCrawl.ps1 holds.
-    # $PS.Stop()/.Dispose() only tear down the managed PowerShell pipeline; they have no idea a
-    # native grandchild process exists, so abandoning a hung job leaks a live ssh.exe with its
-    # TCP session to the switch still open. Since many jobs share this one parent PID
-    # concurrently, match candidates on command line (the target IP is always the last ssh.exe
-    # argument, "$Username@$TargetIP") plus creation time (>= this job's start), not just name.
-    function Stop-JunosOrphanProcessesLocal {
-        param([Parameter(Mandatory=$true)][string]$TargetIP, [Parameter(Mandatory=$true)][datetime]$SinceTime)
-        try {
-            # Anchored on the literal "$Username@$TargetIP" token Get-JunosSshArgs always
-            # appends last (see SshHelpers.ps1). A bare "*$TargetIP*" wildcard would also match
-            # e.g. 10.1.1.5 against a concurrently-running job for 10.1.1.50-59, killing a
-            # healthy in-flight scan instead of only the abandoned one.
-            $Candidates = Get-CimInstance Win32_Process -Filter "Name='ssh.exe' OR Name='cmd.exe'" -ErrorAction Stop |
-                Where-Object { $_.CommandLine -and $_.CommandLine -match "@$([regex]::Escape($TargetIP))(\s|$)" -and $_.CreationDate -ge $SinceTime }
-            # Kill ssh.exe before cmd.exe: once the cmd.exe parent is gone there's no longer a
-            # process-tree link to fall back on if a later scan's command-line match ever misses.
-            foreach ($Proc in ($Candidates | Sort-Object { if ($_.Name -eq 'ssh.exe') { 0 } else { 1 } })) {
-                try {
-                    Stop-Process -Id $Proc.ProcessId -Force -ErrorAction Stop
-                    Write-DebugLogLocal "ORCHESTRATOR CLEANUP: killed orphaned $($Proc.Name) (PID $($Proc.ProcessId)) for $TargetIP"
-                } catch {
-                    Write-DebugLogLocal "ORCHESTRATOR CLEANUP: failed to kill orphan PID $($Proc.ProcessId) ($($Proc.Name)) for $($TargetIP): $_"
-                }
-            }
-        } catch {
-            Write-DebugLogLocal "ORCHESTRATOR CLEANUP: Stop-JunosOrphanProcessesLocal failed for $($TargetIP): $_"
         }
     }
 
@@ -479,7 +496,7 @@ function Invoke-FleetCrawl {
                 # it captured before BeginInvoke(). $Visited means this IP is never scanned
                 # twice in one crawl, so a wider window here can't ever reach a different job's
                 # process for the same IP.
-                Stop-JunosOrphanProcessesLocal -TargetIP $DeadJob.IP -SinceTime $DeadJob.StartTime.AddSeconds(-2)
+                Stop-JunosOrphanProcessesLocal -TargetIP $DeadJob.IP -SinceTime $DeadJob.StartTime.AddSeconds(-2) -DebugLogPath $DebugLogPath
 
                 $Jobs.Remove($DeadJob) | Out-Null
             }
@@ -505,7 +522,7 @@ function Invoke-FleetCrawl {
                         $PendingDisposal.Add([PSCustomObject]@{ PS = $LiveJob.PS; Async = $StopHandle })
                     } catch { try { $LiveJob.PS.Dispose() } catch {} }
                     # Same -2s margin as the step-3 cleanup above - see comment there.
-                    Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime.AddSeconds(-2)
+                    Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime.AddSeconds(-2) -DebugLogPath $DebugLogPath
                 }
                 $Jobs.Clear()
                 break
