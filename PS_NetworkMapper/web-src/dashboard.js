@@ -942,6 +942,11 @@ window.renderReliabilityHeatmap = function() {
 // full underlying list for that stat via search.js's results-list UI.
 window.drillDownStat = function(kind) {
     window.switchSidebarTab('sidebar-tab-search');
+    // revealDeviceInActiveView only knows how to target 'map' or the diagram canvas - the
+    // Analysis Dashboard (where this drill-down is triggered from) is neither, so a row
+    // clicked from here would silently reveal nothing. Switch to the diagram before the
+    // list is even populated so every row's onClick lands somewhere visible.
+    if (activeCenterView === 'analysis') window.switchCenterView('diagram');
     document.getElementById('globalSearch').value = '';
     searchHighlightQuery = '';
 
