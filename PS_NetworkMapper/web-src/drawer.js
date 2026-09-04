@@ -33,9 +33,12 @@ window.copyConnectCommand = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
     var btn = document.getElementById('copyConnectBtn');
+    // A launch is already in flight for this button - ignore a double-click/double-Enter
+    // rather than firing a second SSH session + credential temp file.
+    if (btn && btn.disabled) return;
     var original = btn ? btn.textContent : null;
     try {
-        if (btn) btn.textContent = 'Launching...';
+        if (btn) { btn.disabled = true; btn.textContent = 'Launching...'; }
         var resp = await fetch('/api/connect', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -47,7 +50,7 @@ window.copyConnectCommand = async function() {
     } catch (e) {
         window.setStatus("Could not launch SSH session: " + e.message, "red");
     } finally {
-        if (btn) setTimeout(() => { btn.textContent = original; }, 1500);
+        if (btn) setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
     }
 };
 
@@ -171,7 +174,7 @@ window.rescanDevice = async function() {
             return;
         }
         if (status.status === 'running') {
-            rescanPollTimer = setTimeout(poll, 2000);
+            rescanPollTimer = setTimeout(() => { poll().catch(e => finish("Rescan poll failed unexpectedly: " + e.message, "red")); }, 2000);
             return;
         }
         // status.status === 'complete'
@@ -179,14 +182,21 @@ window.rescanDevice = async function() {
             finish("Rescan failed: " + (status.reason || "unknown error") + " - existing data left unchanged.", "red");
             return;
         }
-        var merged = window.mergeRescannedDevice(status.node, targetSnapshot);
-        if (!merged) {
-            finish("Rescan of " + ip + " completed, but the snapshot it was scanned against is no longer loaded (a new file set was loaded while it was running) - the result was discarded.", "orange");
-        } else {
-            finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString() + ".", "green");
+        // Guarded: a throw anywhere in the merge/re-render (e.g. mergeRescannedDevice's own
+        // re-render of the drawer/graph/map) must still reach finish(), or #rescanBtn is left
+        // disabled/showing "Scanning..." forever with no way to recover but reloading the page.
+        try {
+            var merged = window.mergeRescannedDevice(status.node, targetSnapshot);
+            if (!merged) {
+                finish("Rescan of " + ip + " completed, but the snapshot it was scanned against is no longer loaded (a new file set was loaded while it was running) - the result was discarded.", "orange");
+            } else {
+                finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString() + ".", "green");
+            }
+        } catch (e) {
+            finish("Rescan of " + ip + " completed, but showing the result failed: " + e.message + " - the underlying data may still have been updated.", "red");
         }
     };
-    poll();
+    poll().catch(e => finish("Rescan poll failed unexpectedly: " + e.message, "red"));
 };
 
 // Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes.
@@ -504,6 +514,25 @@ window.openRightDrawer = function(ip) {
 
     if (!currentSelectedNodeData) {
         document.getElementById('summary-content').innerHTML = `<div style="color:red; padding:20px;">No diagnostic data found (Unscanned Node).</div>`;
+        // Wipe every other tab's content too - it otherwise still holds the PREVIOUSLY open
+        // device's chassis/hardware/neighbors/interfaces/config, now mislabeled as this one's.
+        var alarmsTbody = document.getElementById('alarms-tbody');
+        if (alarmsTbody) alarmsTbody.innerHTML = `<tr><td colspan="3" style="text-align:center;">No active alarms</td></tr>`;
+        var stackTbody = document.getElementById('stack-tbody');
+        if (stackTbody) stackTbody.innerHTML = `<tr><td colspan="4" style="text-align:center;">No hardware data</td></tr>`;
+        var neighborsTbody = document.getElementById('neighbors-tbody');
+        if (neighborsTbody) neighborsTbody.innerHTML = `<tr><td colspan="4" style="text-align:center;">No LLDP neighbors found</td></tr>`;
+        var interfacesTbody = document.getElementById('interfaces-tbody');
+        if (interfacesTbody) interfacesTbody.innerHTML = `<tr><td colspan="4" style="text-align:center;">No interface data</td></tr>`;
+        if (typeof window.renderChassisView === 'function') window.renderChassisView(null, null);
+        var configContent = document.getElementById('config-content');
+        if (configContent) configContent.textContent = 'No configuration backup available for this device.';
+        var compareContainer = document.getElementById('configCompareContainer');
+        if (compareContainer) compareContainer.style.display = 'none';
+        var configDiffContent = document.getElementById('config-diff-content');
+        if (configDiffContent) configDiffContent.style.display = 'none';
+        if (configContent) configContent.style.display = '';
+        configCompareTarget = null;
         panel.style.display = 'flex';
         emptyNote.style.display = 'none';
         return;
@@ -798,7 +827,7 @@ window.renderInterfaces = function() {
             var chain = daisyChains.get(window.normalizePort(intf.Port));
             var desc = (intf.Desc && intf.Desc !== 'Unknown') ? intf.Desc : '';
 
-            html += `<tr class="intf-row${selected ? ' selected' : ''}" data-port="${esc(portName)}" onclick="window.selectInterfacePort(this.dataset.port, {source:'table'})">
+            html += `<tr class="intf-row${selected ? ' selected' : ''}" data-port="${esc(portName)}" tabindex="0" role="button" aria-pressed="${selected}" onclick="window.selectInterfacePort(this.dataset.port, {source:'table'})" onkeydown="window.activateOnKey(event, () => window.selectInterfacePort(this.dataset.port, {source:'table'}))">
                 <td><span class="intf-chev">&#9656;</span><b>${esc(intf.Port)}</b></td>
                 <td class="intf-type"><span class="badge ${type.badge}">${type.label}</span>${type.detailHtml}${chain ? ' ' + window.renderDaisyChainBadge(chain) : ''}</td>
                 <td><span class="badge ${linkBadge}">${esc(intf.Admin)}/${esc(intf.Link)}</span></td>
