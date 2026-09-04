@@ -111,12 +111,16 @@ function rj45(x, y, g, key, id, opts, unit) {
 /* 2-row ganged RJ45 block, top row even / bottom row odd */
 function rj45Block(x, y, cols, pitch, firstN, unit, opts) {
     opts = opts || {};
-    var g = JACK, H = JACK_H, pic = opts.pic || 0, prefix = opts.prefix || 'ge';
+    var g = JACK, H = JACK_H, pic = opts.pic || 0;
+    // opts.prefix is usually a fixed string, but inferModel() passes a per-port function so a
+    // mixed mge/ge block (mgig ports that don't fall on a 12-port boundary) names each jack
+    // from its own actual interface, not the whole block's.
+    var prefixOf = typeof opts.prefix === 'function' ? opts.prefix : function () { return opts.prefix || 'ge'; };
     var out = '';
     for (var c = 0; c < cols; c++) {
         var jx = x + c * pitch, nT = firstN + 2 * c, nB = nT + 1;
-        out += rj45(jx, y, g, unit.key(pn(prefix, unit.fpc, pic, nT)), unit.id + '_' + pic + '_' + nT, {}, unit)
-            + rj45(jx, y + H + ROWBAR, g, unit.key(pn(prefix, unit.fpc, pic, nB)), unit.id + '_' + pic + '_' + nB, { flip: true }, unit);
+        out += rj45(jx, y, g, unit.key(pn(prefixOf(nT), unit.fpc, pic, nT)), unit.id + '_' + pic + '_' + nT, {}, unit)
+            + rj45(jx, y + H + ROWBAR, g, unit.key(pn(prefixOf(nB), unit.fpc, pic, nB)), unit.id + '_' + pic + '_' + nB, { flip: true }, unit);
         if (opts.labelsY) out += '<text class="port-num" x="' + f(jx + g.w / 2 - 1.2) + '" y="' + f(opts.labelsY) + '" text-anchor="end">' + nT + '</text><text class="port-num odd" x="' + f(jx + g.w / 2 + .3) + '" y="' + f(opts.labelsY + .5) + '">' + nB + '</text>';
     }
     var x1 = x + (cols - 1) * pitch + g.w;
@@ -159,13 +163,15 @@ var label = function (x, y, text, anchor) { return '<text class="tiny-label" x="
 var menuButton = function (cx, cy, r) { return '<circle class="btn" cx="' + f(cx) + '" cy="' + f(cy) + '" r="' + f(r) + '"></circle><path class="btn-glyph" d="M' + f(cx + r + 1.2) + ',' + f(cy - 1) + ' h3 M' + f(cx + r + 1.2) + ',' + f(cy) + ' h3 M' + f(cx + r + 1.2) + ',' + f(cy + 1) + ' h3"></path>'; };
 var esdMark = function (x, y) { return '<path class="corner-mark" d="M' + f(x) + ',' + f(y + 4.4) + ' l2.6,-4.4 l2.6,4.4 z M' + f(x + 2.6) + ',' + f(y) + ' v-1.6"></path>'; };
 var warnTri = function (x, y) { return '<path class="warn" d="M' + f(x) + ',' + f(y + 5) + ' l3,-5.2 l3,5.2 z M' + f(x + 3) + ',' + f(y + 1.6) + ' v2 M' + f(x + 3) + ',' + f(y + 4.3) + ' v.5"></path>'; };
+// ALM is the one LED here that means trouble when lit, not normal operation - red, not green.
+var ledColor = function (label) { return label === 'ALM' ? 'red' : 'green'; };
 function statusCluster(x, y, rows, lit, rowPitch, opts) {
     opts = opts || {};
     var s = '';
     rows.forEach(function (r, i) {
         var cy = y + i * rowPitch;
-        if (r[0]) s += dot(x, cy, .95, null, null, lit[r[0]] ? 'green' : null) + label(x - 1.8, cy + .6, r[0], 'end');
-        if (r[1]) s += dot(x + 6.5, cy, .95, null, null, lit[r[1]] ? 'green' : null) + label(x + 8.3, cy + .6, r[1]);
+        if (r[0]) s += dot(x, cy, .95, null, null, lit[r[0]] ? ledColor(r[0]) : null) + label(x - 1.8, cy + .6, r[0], 'end');
+        if (r[1]) s += dot(x + 6.5, cy, .95, null, null, lit[r[1]] ? ledColor(r[1]) : null) + label(x + 8.3, cy + .6, r[1]);
     });
     if (opts.bracket) s += '<path class="bracket" d="M' + f(x + 3.2) + ',' + f(y - 2.6) + ' h1.4 v' + f((rows.length - 1) * rowPitch + 5) + ' h-1.4"></path>';
     return s;
@@ -197,7 +203,7 @@ var RIGHT = {
             ventHex(u.id, ux - 1, 18, 55, 6) +
             '<text class="model-text big" x="' + f(B + 367.6) + '" y="5.4">' + escHtml(s.modelText) + '</text>' +
             '<text class="tiny-label" x="' + f(B + 394.5) + '" y="5.2">RUNNING JUNOS</text>' +
-            statusCluster(B + 427, 6.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe }, 4.6, { bracket: true }) +
+            statusCluster(B + 427, 6.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 4.6, { bracket: true }) +
             menuButton(B + 434.5, 33, 1.9) + usbSmall(B + 426.5, 37.8, 6.5, 3.2) + label(B + 434.4, 40.6, 'CON') + sfps;
     },
     /* EX4200/EX4300: mini-USB CON, model text, LCD + menu/enter, SYS/ALM/MST, SFP+ uplink module. */
@@ -213,7 +219,7 @@ var RIGHT = {
             '<circle class="btn" cx="' + f(B + 428) + '" cy="12.6" r="2.5"></circle><path class="btn-glyph" d="M' + f(B + 426.5) + ',11.6 h3 M' + f(B + 426.5) + ',12.6 h3 M' + f(B + 426.5) + ',13.6 h3"></path>' +
             '<circle class="btn" cx="' + f(B + 428) + '" cy="20.2" r="2.5"></circle><path class="btn-glyph" d="M' + f(B + 429.4) + ',19 v1.4 h-2.6 m.9,-.9 l-.9,.9 l.9,.9"></path>' +
             dot(B + 435.5, 11.6, .9, null, null, 'green') + label(B + 437.2, 12.2, 'SYS') +
-            dot(B + 435.5, 16.0, .9) + label(B + 437.2, 16.6, 'ALM') +
+            dot(B + 435.5, 16.0, .9, null, null, u.alarm ? 'red' : null) + label(B + 437.2, 16.6, 'ALM') +
             dot(B + 435.5, 20.4, .9, null, null, u.master ? 'green' : null) + label(B + 437.2, 21.0, 'MST') +
             '<rect class="sfp-frame" x="' + f(mx) + '" y="' + f(my) + '" width="' + f(mw) + '" height="' + f(mh) + '" rx=".8"></rect>' +
             '<rect class="sfp-latch" x="' + f(mx + .6) + '" y="30" width="4.6" height="9.8" rx=".8"></rect><rect class="sfp-latch" x="' + f(mx + mw - 5.2) + '" y="30" width="4.6" height="9.8" rx=".8"></rect>' +
@@ -231,7 +237,7 @@ var RIGHT = {
         return '<rect class="subpanel" x="' + f(px) + '" y="1.6" width="' + f(w) + '" height="41.2" rx=".5"></rect>' +
             '<text class="model-text' + (wide ? ' big' : '') + '" x="' + f(px + 3) + '" y="5.6">' + escHtml(s.modelText) + '</text> ' + junosMark(px + 4, 12.4) +
             (s.console === 'mini' ? usbSmall(px + w - 42, 5.4, 6.5, 3.2) : usbSmall(px + w - 42, 5.2, 7, 3.4)) +
-            statusCluster(px + w - 25, 4.6, s.leds || [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe }, 2.9) +
+            statusCluster(px + w - 25, 4.6, s.leds || [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 2.9) +
             (wide ? '<circle class="btn" cx="' + f(px + w - 5) + '" cy="9" r="1.4"></circle>' : '') + bay;
     },
     /* EX4100-48: 2x2 SFP+ uplinks (PIC 2) + 2x2 SFP28 VC ports, sub-panel with 8 LEDs, button, USB-C. */
@@ -245,7 +251,7 @@ var RIGHT = {
             '<rect class="block-frame" x="' + f(gx[1] - 1.3) + '" y="11.5" width="' + f(2 * cw + 1.2 + 2.6) + '" height="23" rx=".6"></rect> ' + out +
             '<path class="bracket" d="M' + f(gx[0] + 1) + ',38.2 v.8 h9 m9,0 h9 v-.8"></path>' + label(gx[0] + cw + .6, 40.2, 'UPLINK', 'middle') + label(gx[1] + cw + .6, 40.2, 'VC', 'middle') +
             '<rect class="subpanel" x="' + f(px) + '" y="1.6" width="' + f(BODY_W - 421.6 - 2) + '" height="41.2" rx=".5"></rect>' +
-            statusCluster(px + 7.2, 12.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe }, 4.55) +
+            statusCluster(px + 7.2, 12.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 4.55) +
             menuButton(px + 8.1, 32.9, 2.6) + usbSmall(px + 4.5, 37.7, 7.6, 3.1) + label(px + 13.5, 40.4, 'CON');
     },
     /* EX4000-48: 2x2 SFP+ uplinks, SYS/MST/CLD pill top-right, USB, reset. */
@@ -352,7 +358,7 @@ function compact(u) {
            menu button, USB-C CON, warning triangle, green base stripe (drawn as a thick lip). */
         for (var i = 0; i < 4; i++) { var x = R + 180 + i * 15, key = u.key(pn('xe', u.fpc, 1, i)); sfps += sfpCage(x, 23.3, 13.8, 10.5, key, uid + '_u' + i, {}, u) + cageLabel(x + 6.9, 35.2, key, i); }
         sfps += '<rect class="block-frame" x="' + f(R + 179) + '" y="22.3" width="' + f(3 * 15 + 13.8 + 2) + '" height="12.5" rx=".5"></rect>';
-        right = statusCluster(R + 248, 7.5, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe }, 5.0)
+        right = statusCluster(R + 248, 7.5, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 5.0)
             + menuButton(R + 253, 29, 2.2) + usbSmall(R + 249.5, 35.6, 7, 3.2) + label(R + 258, 38.4, 'CON') + warnTri(R + 206, 8)
             + esdMark(R + 6, 27) + '<circle class="btn" cx="' + f(R + 8) + '" cy="21" r="1.1"></circle>' + cornerMarks(R + 17, 20, 16.5, 15)
             + '<line class="lip thick" x1="' + f(R + .3) + '" y1="39.6" x2="' + f(R + W - .3) + '" y2="39.6"></line>';
@@ -368,7 +374,7 @@ function compact(u) {
             + rj45(R + 212.4, 7.9, GM, null, uid + '_mgmt', { static: true }) + label(R + 227.5, 6.6, 'MGMT') + rj45(R + 212.4, 21.6, GM, null, uid + '_con', { static: true, flip: true })
             + usbSmall(R + 232, 28.6, 9, 3.8) + '<path class="bracket" d="M' + f(R + 213) + ',34.6 v.8 h11 m5,0 h11 v-.8"></path>' + label(R + 237, 35.9, 'CON', 'end')
             + '<text class="tiny-label" x="' + f(R + 253) + '" y="9.4" text-anchor="middle">RUNNING JUNOS</text>'
-            + statusCluster(sx, 14.3, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['PoE', '']], { SYS: true, MST: u.master, PoE: u.poe }, 5.0)
+            + statusCluster(sx, 14.3, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['PoE', '']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 5.0)
             + '<path class="bracket" d="M' + f(sx + 7) + ',22.2 h5.2 v9.6 h-5.2"></path><rect class="btn" x="' + f(sx + 8.9) + '" y="25.4" width="3.6" height="3.4" rx=".5"></rect><path class="btn-glyph" d="M' + f(sx + 9.6) + ',26.3 h2.2 M' + f(sx + 9.6) + ',27.1 h2.2 M' + f(sx + 9.6) + ',27.9 h2.2"></path>'
             + esdMark(R + 6.5, 22.8) + screw(R + 10.6, 32.4, .9) + cornerMarks(R + 121.8, 7, 27.2, 8);
     }
@@ -499,10 +505,16 @@ function inferModel(modelStr, fpc, interfaces) {
     var text = String(modelStr || '').toUpperCase() || 'JUNIPER';
     if (copper) {
         var nBlocks = Math.min(4, Math.max(1, Math.ceil((maxN + 1) / 12)));
-        var mgigFrom = access.filter(function (p) { return p.prefix === 'mge'; }).reduce(function (a, p) { return Math.min(a, p.n); }, Infinity);
+        // Per-port, not per-block: a device can report mge ports that don't align to a
+        // 12-port block boundary, and flagging the whole block would mislabel the ge ports
+        // sharing it (or hide a live mge port outside the flagged block).
+        var mgigPorts = {};
+        access.forEach(function (p) { if (p.prefix === 'mge') mgigPorts[p.n] = true; });
+        var prefixOf = function (n) { return mgigPorts[n] ? 'mge' : 'ge'; };
         var blocks = FAMILY_BLOCKS.slice(4 - nBlocks).map(function (b, i) {
-            var first = 12 * i;
-            return first >= mgigFrom ? Object.assign({}, b, { mgig: true, prefix: 'mge' }) : b;
+            var first = 12 * i, hasMgig = false;
+            for (var k = 0; k < 12; k++) if (mgigPorts[first + k]) { hasMgig = true; break; }
+            return hasMgig ? Object.assign({}, b, { mgig: true, prefix: prefixOf }) : b;
         });
         var right = uplinkPics[2] ? 'lcd' : 'ex2300';
         return { style: 'rj45', label: 'inferred from interface list', inferred: true, poe: false,
@@ -517,18 +529,28 @@ function inferModel(modelStr, fpc, interfaces) {
 // Activity lens: green = carrying traffic now or flapped within 72 h, amber = last change
 // between 72 h and 6 months ago, 'off' = older than that, never, or unknown (null
 // LastFlappedSeconds - pre-dates the field, or Junos reported "Never").
+// LastFlappedSeconds is captured once, as of the snapshot's own scan (drawer.js's CSV export
+// notes the same thing) - it does not keep counting up while the snapshot sits loaded. A port
+// that flapped 70h before an since-then-2-months-old scan is not "recently active" now; ageSec
+// (seconds elapsed since that scan, 0 for a live/unknown snapshot) is added before thresholding
+// so a stale snapshot ages out of 'green' the same way live data would.
 var H72_S = 72 * 3600, H6MO_S = 182 * 24 * 3600;
-function activityState(intf) {
+function activityState(intf, ageSec) {
     if (!intf) return 'off';
     if (String(intf.Link).toLowerCase() === 'up') return 'green';
     var s = intf.LastFlappedSeconds;
     if (s === null || s === undefined || !isFinite(s)) return 'off';
-    if (s <= H72_S) return 'green';
-    if (s <= H6MO_S) return 'amber';
+    var elapsed = s + (ageSec > 0 ? ageSec : 0);
+    if (elapsed <= H72_S) return 'green';
+    if (elapsed <= H6MO_S) return 'amber';
     return 'off';
 }
+// 'red' mirrors the down badge the Interfaces table shows for this same intf.Link check
+// (drawer.js renderInterfaces); 'off' stays reserved for a port the artwork has but the
+// device didn't report at all (no intf, so lightStates() never calls this for it).
 function linkState(intf) {
-    return intf && String(intf.Link).toLowerCase() === 'up' ? 'green' : 'off';
+    if (!intf) return 'off';
+    return String(intf.Link).toLowerCase() === 'up' ? 'green' : 'red';
 }
 
 // Builds the members of one device: [{fpc, model, key, role, master, unit, html|note}] in
@@ -536,6 +558,9 @@ function linkState(intf) {
 function buildMembers(device) {
     var asArr = function (v) { return Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]); };
     var interfaces = asArr(device && device.Interfaces);
+    // Chassis Alarms are device-wide (drawer.js's Summary/Alarms tabs use this same truthy
+    // check), not per stack member - every member's ALM LED reflects the same device state.
+    var hasAlarm = asArr(device && device.Alarms).length > 0;
     var byPort = new Map();
     interfaces.forEach(function (intf) { if (intf && intf.Port) byPort.set(String(intf.Port), intf); });
     var members = asArr(device && device.StackMembers).map(function (sm) {
@@ -560,7 +585,7 @@ function buildMembers(device) {
         var reported = interfaces.filter(function (intf) { var p = parsePort(intf && intf.Port); return p && p.fpc === m.fpc; }).map(function (intf) { return String(intf.Port); });
         var bound = {};
         var makeUnit = function (mdl) { return {
-            id: 'fpc' + m.fpc, fpc: m.fpc, model: out.model, master: out.master, poe: mdl.poe, spec: mdl.spec,
+            id: 'fpc' + m.fpc, fpc: m.fpc, model: out.model, master: out.master, poe: mdl.poe, alarm: hasAlarm, spec: mdl.spec,
             key: function (ifname) { bound[ifname] = true; return ifname; },
             hasPort: function (ifname) { return byPort.has(ifname); },
             // Detail line only - the tooltip prints the interface name itself from data-port.
@@ -593,12 +618,12 @@ function buildMembers(device) {
 }
 
 // Which lenses light, keyed by interface name: { 'ge-0/0/1': {link:'green', act:'amber'}, ... }
-function lightStates(device) {
+function lightStates(device, ageSec) {
     var asArr = function (v) { return Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]); };
     var out = {};
     asArr(device && device.Interfaces).forEach(function (intf) {
         if (!intf || !intf.Port || String(intf.Port).indexOf('.') !== -1) return;
-        out[String(intf.Port)] = { link: linkState(intf), act: activityState(intf) };
+        out[String(intf.Port)] = { link: linkState(intf), act: activityState(intf, ageSec) };
     });
     return out;
 }
@@ -617,6 +642,20 @@ if (typeof module !== 'undefined' && module.exports) {
     // ---- DOM side (browser only) ----
     var renderedFor = null;   // the device object the current SVGs were built from
     var zoomed = false;       // double-width panels in a sideways-scrolling strip (session only)
+
+    // Seconds elapsed since the LastFlappedSeconds fields on `device` were captured. A live
+    // rescan (drawer.js mergeRescanResult) stamps device.RescannedAt with a fresh timestamp
+    // without touching the loaded snapshot's own scanTimestamp, so that per-device stamp wins
+    // when present; otherwise fall back to the active snapshot's capture time. app.js/drawer.js
+    // load after chassis.js, so these globals only need to exist by the time this actually
+    // runs (a user interaction), not at script-load time.
+    function snapshotAgeSeconds(device) {
+        try {
+            var ts = (device && device.RescannedAt) || (window.loadedSnapshots && window.loadedSnapshots[window.activeSnapshotIndex] && window.loadedSnapshots[window.activeSnapshotIndex].scanTimestamp);
+            var ms = window.parseTimestampMs ? window.parseTimestampMs(ts) : null;
+            return ms === null ? 0 : Math.max(0, (Date.now() - ms) / 1000);
+        } catch (e) { return 0; }
+    }
 
     window.toggleChassisZoom = function () {
         zoomed = !zoomed;
@@ -648,6 +687,7 @@ if (typeof module !== 'undefined' && module.exports) {
                 ? '<div class="chassis-stack">' + html + '</div>' +
                   '<div class="chassis-legend">' +
                   '<span><i class="lens-sample green"></i>left lens: link up</span>' +
+                  '<span><i class="lens-sample red"></i>left lens: link down</span>' +
                   '<span><i class="lens-sample green"></i>right lens: active within 72 h</span>' +
                   '<span><i class="lens-sample amber"></i>72 h to 6 months</span>' +
                   '<span><i class="lens-sample"></i>longer / never / unknown</span>' +
@@ -657,10 +697,10 @@ if (typeof module !== 'undefined' && module.exports) {
             renderedFor = device;
         }
         root.classList.toggle('zoomed', zoomed);
-        var states = lightStates(device);
+        var states = lightStates(device, snapshotAgeSeconds(device));
         root.querySelectorAll('[data-lightfor]').forEach(function (el) {
             var st = states[el.getAttribute('data-lightfor')];
-            el.classList.remove('green', 'amber');
+            el.classList.remove('green', 'amber', 'red');
             if (!st) return;
             var v = el.getAttribute('data-role') === 'link' ? st.link : st.act;
             if (v !== 'off') el.classList.add(v);

@@ -495,7 +495,8 @@
            inverts with the theme; only the lit lenses carry colour. */
         #chassis-view { padding: 10px 15px 8px; border-bottom: 1px solid var(--border); background: var(--panel-bg);
             --chassis-bg: var(--panel-bg); --chassis-fg: var(--text);
-            --led-green: #27d66f; --led-green-core: #b6ffcc; --led-amber: #ff9a1f; --led-amber-core: #ffd9a3; }
+            --led-green: #27d66f; --led-green-core: #b6ffcc; --led-amber: #ff9a1f; --led-amber-core: #ffd9a3;
+            --led-red: #e74c3c; --led-red-core: #ffc9c2; }
         #chassis-view:empty { display: none; }
         .chassis-member + .chassis-member { margin-top: 6px; }
         .chassis-member-label { display: flex; align-items: baseline; gap: 8px; font-size: 0.72rem; margin-bottom: 2px; }
@@ -517,6 +518,7 @@
         .lens-sample { display: inline-block; width: 9px; height: 7px; border: 1px solid var(--text-muted); border-radius: 1px; background: var(--panel-bg); }
         .lens-sample.green { background: var(--led-green); border-color: var(--led-green); box-shadow: 0 0 4px var(--led-green); }
         .lens-sample.amber { background: var(--led-amber); border-color: var(--led-amber); box-shadow: 0 0 4px var(--led-amber); }
+        .lens-sample.red { background: var(--led-red); border-color: var(--led-red); box-shadow: 0 0 4px var(--led-red); }
 
         svg.chassis-svg .chassis-body { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .5; }
         svg.chassis-svg .chassis-ear { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .4; stroke-opacity: .7; }
@@ -570,6 +572,8 @@
         svg.chassis-svg .light-glyph.green .light-core { fill: var(--led-green-core); opacity: 1; }
         svg.chassis-svg .light-glyph.amber .light-glow { fill: var(--led-amber); opacity: .75; }
         svg.chassis-svg .light-glyph.amber .light-core { fill: var(--led-amber-core); opacity: 1; }
+        svg.chassis-svg .light-glyph.red .light-glow { fill: var(--led-red); opacity: .75; }
+        svg.chassis-svg .light-glyph.red .light-core { fill: var(--led-red-core); opacity: 1; }
         svg.chassis-svg .lcd-screen { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .35; }
         svg.chassis-svg .lcd-text { fill: var(--chassis-fg); font-size: 1.7px; font-family: monospace; }
         svg.chassis-svg .btn { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .35; }

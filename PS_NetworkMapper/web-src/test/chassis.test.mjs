@@ -41,7 +41,27 @@ test('every real model seen in the fixture snapshot resolves to a catalogue entr
 test('activityState: link up is green regardless of flap age', () => {
   assert.equal(activityState({ Link: 'up', LastFlappedSeconds: 10 * H6MO_S }), 'green');
   assert.equal(linkState({ Link: 'up' }), 'green');
-  assert.equal(linkState({ Link: 'down' }), 'off');
+});
+
+// consistency-1: a down port shows the same "down" state chassis-side as the red badge the
+// Interfaces table shows for it (drawer.js renderInterfaces) - 'off' is reserved for a port
+// the artwork has but the device didn't report at all (linkState never even gets called for
+// those - lightStates only iterates device.Interfaces).
+test('linkState: down is red (matches the table\'s down badge), no interface data is off', () => {
+  assert.equal(linkState({ Link: 'down' }), 'red');
+  assert.equal(linkState({ Link: 'Unknown' }), 'red');
+  assert.equal(linkState(null), 'off');
+});
+
+// timeclock-1: LastFlappedSeconds is captured once, as of the snapshot's own scan - a stale
+// snapshot must not read as "recently active" just because its age isn't accounted for.
+test('activityState: an ageSec offset (time since the snapshot was captured) ages out a stale-but-recent flap', () => {
+  assert.equal(activityState({ Link: 'down', LastFlappedSeconds: H72_S - 1 }, 0), 'green');
+  assert.equal(activityState({ Link: 'down', LastFlappedSeconds: H72_S - 1 }, 2), 'amber');
+  assert.equal(activityState({ Link: 'down', LastFlappedSeconds: H72_S }, H6MO_S), 'off');
+  // link up still short-circuits to green regardless of snapshot age - only the
+  // LastFlappedSeconds comparison is age-adjusted.
+  assert.equal(activityState({ Link: 'up', LastFlappedSeconds: 0 }, H6MO_S), 'green');
 });
 
 test('activityState: down ports grade by LastFlappedSeconds - green <=72h, amber <=6mo, off beyond', () => {
@@ -109,9 +129,14 @@ test('lightStates maps each physical interface to lens colours and skips logical
   const st = lightStates(vcDevice());
   assert.equal(st['ge-0/0/1.0'], undefined);
   assert.deepEqual(st['ge-0/0/1'], { link: 'green', act: 'green' });           // up
-  assert.deepEqual(st['ge-0/0/0'], { link: 'off', act: 'green' });             // down, flapped 0h ago
-  assert.deepEqual(st['ge-0/0/46'], { link: 'off', act: 'green' });            // 46h ago
-  assert.deepEqual(st['ge-1/0/0'], { link: 'off', act: 'green' });
+  assert.deepEqual(st['ge-0/0/0'], { link: 'red', act: 'green' });             // down, flapped 0h ago
+  assert.deepEqual(st['ge-0/0/46'], { link: 'red', act: 'green' });            // 46h ago
+  assert.deepEqual(st['ge-1/0/0'], { link: 'red', act: 'green' });
+});
+
+test('lightStates accepts an ageSec offset and applies it to every port\'s activity lens', () => {
+  const st = lightStates(vcDevice(), H6MO_S + 1);
+  assert.equal(st['ge-0/0/0'].act, 'off');   // 0h flap + 6mo-plus snapshot age is past the amber cutoff
 });
 
 test('buildMembers handles a single-element StackMembers object (PowerShell ConvertTo-Json quirk)', () => {
@@ -119,6 +144,24 @@ test('buildMembers handles a single-element StackMembers object (PowerShell Conv
   assert.equal(members.length, 1);
   assert.equal(members[0].master, true);
   assert.ok(members[0].html.includes('data-port="ge-0/0/11"'));
+});
+
+// operatorux-1: the ALM LED must reflect device.Alarms, both for the statusCluster-drawn
+// families (EX2300 right section) and RIGHT.lcd, which draws its ALM dot directly.
+test('buildMembers wires the ALM LED to device.Alarms', () => {
+  const withAlarm = vcDevice();
+  withAlarm.Alarms = [{ Class: 'Major', Time: 'now', Description: 'psu' }];
+  const [lit] = buildMembers(withAlarm);
+  assert.ok(lit.html.includes('class="light-glyph red"'), 'ALM LED lit red when Alarms is non-empty');
+
+  const [unlit] = buildMembers(vcDevice());
+  assert.ok(!unlit.html.includes('class="light-glyph red"'), 'ALM LED unlit with no Alarms');
+});
+
+test('buildMembers wires ALM on the LCD family too (RIGHT.lcd draws its LEDs outside statusCluster)', () => {
+  const device = { StackMembers: [{ FPC: '0', Model: 'ex4300-48p', Role: 'Standalone' }], Interfaces: [], Alarms: [{ Class: 'Major' }] };
+  const [m] = buildMembers(device);
+  assert.ok(m.html.includes('class="light-glyph red"'));
 });
 
 test('buildMembers: modular chassis gets a note, not artwork', () => {
@@ -151,6 +194,23 @@ test('buildMembers falls back to the inferred layout when catalogue art covers u
   const good = Array.from({ length: 48 }, (_, n) => ({ Port: `ge-0/0/${n}`, Link: 'up' }));
   const [g] = buildMembers({ StackMembers: [{ FPC: '0', Model: 'ex4300-48p', Role: 'Master' }], Interfaces: good });
   assert.equal(g.catalogueKey, 'EX4300-48P');
+});
+
+// parsing-1: inferModel used to flag an entire 12-port block as mgig once any mge port fell
+// in it, which renamed/mislabeled the ge ports sharing that block. mge ports here (14, 15)
+// don't align to the 12-port boundary (block 2 starts at port 12).
+test('inferModel flags mgig per port, not per 12-port block', () => {
+  const ifs = [];
+  for (let n = 0; n < 14; n++) ifs.push({ Port: `ge-0/0/${n}` });
+  ifs.push({ Port: 'mge-0/0/14' }, { Port: 'mge-0/0/15' });
+  const [m] = buildMembers({ StackMembers: [{ FPC: '0', Model: 'EX7777-24P', Role: 'Standalone' }], Interfaces: ifs });
+  assert.equal(m.inferred, true);
+  // ports 12/13 share a block with the mge ports but are still named/bound as ge
+  assert.ok(m.html.includes('data-port="ge-0/0/12"'));
+  assert.ok(m.html.includes('data-port="ge-0/0/13"'));
+  // the actual mge ports are named/bound as mge, not folded into the block's "ge" naming
+  assert.ok(m.html.includes('data-port="mge-0/0/14"'));
+  assert.ok(m.html.includes('data-port="mge-0/0/15"'));
 });
 
 test('inferModel picks the SFP family for fibre access ports and null when the FPC has none', () => {
