@@ -102,20 +102,12 @@ window.buildSwitchMap = async function() {
     allNodeMeta.clear();
     allEdges = window.TopologyGraph.computeNeighborEdges(globalTopologyData);
 
-    var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
-    var deviceByIpLocal = new Map(globalTopologyData.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
-    var vlanCacheByIp = window.TopologyGraph.computeVlanCache(globalTopologyData);
-
-    classification.forEach(function (meta, ip) {
-        var device = deviceByIpLocal.get(ip);
-        var stackIcon = meta.isStack ? `\n[VC: ${device.StackMembers.length} Node]` : "";
-        allNodeMeta.set(ip, {
-            label: meta.scanned
-                ? `Switch\n${ip}\n(${meta.hostname})${stackIcon}`
-                : `Switch\n${ip}\n(${meta.hostname})`,
-            shape: meta.isStack ? 'database' : 'box', isStack: meta.isStack, scanned: meta.scanned,
-            vlanCache: vlanCacheByIp.get(ip) || [],
-        });
+    // Node label/shape/vlanCache construction lives in topology-graph.js (buildSwitchMapNodeMeta)
+    // so it's shared with, and exercised directly by, that file's regression test - rather than
+    // being reimplemented here with no real coverage. Copy into allNodeMeta in place; other code
+    // in this file holds a reference to this same Map instance.
+    window.TopologyGraph.buildSwitchMapNodeMeta(globalTopologyData).forEach(function (meta, ip) {
+        allNodeMeta.set(ip, meta);
     });
 
     var nodeIds = Array.from(allNodeMeta.keys());
