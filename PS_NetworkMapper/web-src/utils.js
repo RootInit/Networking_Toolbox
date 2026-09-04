@@ -14,7 +14,7 @@ window.esc = function(val) {
 // not a 1-element array - so a field with exactly one entry (one alarm, one stack
 // member) arrives as {..} instead of [{..}]. Normalize before using .length/.forEach.
 window.asArray = function(val) {
-    if (Array.isArray(val)) return val;
+    if (Array.isArray(val)) return val.filter(item => item !== null && item !== undefined);
     if (val === null || val === undefined) return [];
     return [val];
 };

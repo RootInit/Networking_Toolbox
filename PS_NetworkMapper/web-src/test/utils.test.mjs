@@ -14,6 +14,32 @@ await import('../utils.js');
 
 const parseTimestampMs = global.window.parseTimestampMs;
 const esc = global.window.esc;
+const asArray = global.window.asArray;
+
+// Contract (see utils.js's own comment above the definition): normalizes PowerShell's
+// ConvertTo-Json single-element-array-as-bare-object quirk - null/undefined becomes [],
+// a bare (non-null, non-array) value becomes a 1-element array, an actual array passes
+// through - and, per nullopt-1, strips any null/undefined elements an array itself
+// contains (e.g. from a hand-edited or corrupted uploaded topology file), since callers
+// dereference elements unguarded.
+
+test('asArray passes an array through unchanged when it has no null/undefined elements', () => {
+  var input = [{ a: 1 }, { a: 2 }];
+  assert.deepEqual(asArray(input), input);
+});
+
+test('asArray wraps a bare non-null value in a 1-element array', () => {
+  assert.deepEqual(asArray({ a: 1 }), [{ a: 1 }]);
+});
+
+test('asArray returns [] for null/undefined', () => {
+  assert.deepEqual(asArray(null), []);
+  assert.deepEqual(asArray(undefined), []);
+});
+
+test('asArray filters out null/undefined elements from within an array', () => {
+  assert.deepEqual(asArray([{ a: 1 }, null, { a: 2 }, undefined]), [{ a: 1 }, { a: 2 }]);
+});
 
 // Contract (see utils.js's own comment above the definition): returns a finite epoch-ms
 // number for anything Date can parse, or null for anything falsy/unparseable. Never
