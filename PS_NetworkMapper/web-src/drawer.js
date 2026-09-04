@@ -4,10 +4,11 @@
 // Reads currentSelectedNodeData/deviceByIp/loadedSnapshots/activeSnapshotIndex/
 // searchHighlightQuery from app.js.
 
+// The right panel itself stays (it also hosts the Load File / Search / Settings tabs); only
+// the device section under them is shown/hidden.
 window.closeDrawer = function() {
-    document.getElementById('right-panel').style.display = 'none';
-    var handle = document.getElementById('right-panel-handle');
-    if (handle) handle.style.display = 'none';
+    document.getElementById('device-drawer').style.display = 'none';
+    document.getElementById('device-empty').style.display = '';
     currentSelectedNodeData = null;
     if (network) network.unselectAll();
 };
@@ -444,7 +445,7 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
     // Node" placeholder case, currentSelectedNodeData is null, so checking it would skip
     // the re-render on exactly the case this feature is for.
     var drawerIp = document.getElementById('drawer-title').innerText;
-    var drawerOpen = document.getElementById('right-panel').style.display !== 'none';
+    var drawerOpen = document.getElementById('device-drawer').style.display !== 'none';
     if (drawerOpen && drawerIp === ip) {
         isMergeRerender = true;
         try {
@@ -465,15 +466,20 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
 
     // Analysis Dashboard also renders this same topology separately (Fleet Health, New
     // Devices, Trend Chart, etc. - see dashboard.js) - only refresh here if Analysis is the
-    // tab actually showing. Mirrors setActiveSnapshot's identical guard/call in app.js.
-    if (activeSidebarTab === 'sidebar-tab-analysis') window.refreshAnalysisDashboard();
+    // centre view actually showing. Mirrors setActiveSnapshot's identical guard/call in app.js.
+    if (activeCenterView === 'analysis') window.refreshAnalysisDashboard();
 
     return true;
 };
 
 window.openRightDrawer = function(ip) {
+    var previous = currentSelectedNodeData;
     currentSelectedNodeData = deviceByIp.get(String(ip));
-    var panel = document.getElementById('right-panel');
+    // A port selection belongs to one device - drop it when a different one opens (a
+    // same-device reopen after its own rescan keeps it, so the highlight survives the merge).
+    if (!previous || String(previous.DeviceIP) !== String(ip)) selectedInterfacePort = null;
+    var panel = document.getElementById('device-drawer');
+    var emptyNote = document.getElementById('device-empty');
     document.getElementById('drawer-title').innerText = ip;
     // Clear any stale "Reachable"/"No response" left from the previously open device.
     var pingResultEl = document.getElementById('pingResult');
@@ -496,12 +502,10 @@ window.openRightDrawer = function(ip) {
         if (pingBtn) { pingBtn.disabled = false; pingBtn.textContent = 'Ping'; }
     }
 
-    var handle = document.getElementById('right-panel-handle');
-
     if (!currentSelectedNodeData) {
         document.getElementById('summary-content').innerHTML = `<div style="color:red; padding:20px;">No diagnostic data found (Unscanned Node).</div>`;
         panel.style.display = 'flex';
-        if (handle) handle.style.display = 'block';
+        emptyNote.style.display = 'none';
         return;
     }
 
@@ -512,7 +516,7 @@ window.openRightDrawer = function(ip) {
     window.renderConfig();
 
     panel.style.display = 'flex';
-    if (handle) handle.style.display = 'block';
+    emptyNote.style.display = 'none';
 };
 
 window.renderSummary = function() {
@@ -610,6 +614,9 @@ var interfaceSortState = { column: null, dir: 1 };
 // is currently active.
 var INTERFACE_SORT_COMPARATORS = {
     port: (a, b) => String(a.Port || '').localeCompare(String(b.Port || ''), undefined, { numeric: true, sensitivity: 'base' }),
+    // Third argument is renderInterfaces' per-row classification map (trunk < access with
+    // clients < idle access < shutdown), falling back to port order within a rank.
+    type: (a, b, typeOf) => ((typeOf && typeOf.get(a) ? typeOf.get(a).order : 9) - (typeOf && typeOf.get(b) ? typeOf.get(b).order : 9)) || INTERFACE_SORT_COMPARATORS.port(a, b),
     state: (a, b) => `${a.Admin}/${a.Link}`.localeCompare(`${b.Admin}/${b.Link}`, undefined, { sensitivity: 'base' }),
     stp: (a, b) => String(a.STP || '').localeCompare(String(b.STP || ''), undefined, { sensitivity: 'base' }),
     poe: (a, b) => String(a.PoE || '').localeCompare(String(b.PoE || ''), undefined, { numeric: true, sensitivity: 'base' }),
@@ -643,11 +650,91 @@ function updateInterfaceSortArrows() {
     });
 }
 
-// Interfaces + their edge clients, combined into one table (formerly two separate tabs) - a
-// client only ever belongs to exactly one port, so nesting it under that port's row reads
-// naturally and avoids cross-referencing two lists by hand. Clients still honor the VLAN
-// Highlight Layer filter (#vlanFilter, shared with graph.js's applyVlanFilter) the old
-// standalone Clients tab used.
+// Bare interface name ("ge-0/0/5") of the port highlighted in both the front-panel drawing
+// (#chassis-view, chassis.js) and the interfaces table, or null. One selection per open device.
+var selectedInterfacePort = null;
+
+// Toggles the selected port. From a chassis click on a down port while "Hide Inactive Ports"
+// is on, the filter is switched off first so the row it points at can actually appear -
+// otherwise the jack would light up with nothing to show for it. Table clicks never scroll
+// (the row is already under the pointer); chassis clicks bring the row into view.
+window.selectInterfacePort = function(port, opts) {
+    opts = opts || {};
+    // A search/drill-down navigation sets the selection outright; clicks toggle it.
+    var fromNav = opts.source === 'search';
+    selectedInterfacePort = (!fromNav && selectedInterfacePort === port) ? null : port;
+    if (selectedInterfacePort && (opts.source === 'chassis' || fromNav)) {
+        var hideDownEl = document.getElementById('hideDownPorts');
+        var intf = window.asArray(currentSelectedNodeData && currentSelectedNodeData.Interfaces)
+            .find(i => i && String(i.Port) === selectedInterfacePort);
+        if (hideDownEl && hideDownEl.checked && intf && String(intf.Link).toLowerCase() !== "up") hideDownEl.checked = false;
+    }
+    window.renderInterfaces();
+    if (selectedInterfacePort && (opts.source === 'chassis' || fromNav)) {
+        var row = document.querySelector('#interfaces-tbody tr.intf-row.selected');
+        if (row) row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+};
+
+// Port modes from the captured config, when there is one: "set interfaces ge-0/0/0 unit 0
+// family ethernet-switching interface-mode trunk" (port-mode on older Junos). Map of bare
+// port -> 'trunk'|'access'. Memoised per device object - the config is a large string.
+var portModeCache = new WeakMap();
+function buildPortModes(device) {
+    if (!device) return new Map();
+    if (portModeCache.has(device)) return portModeCache.get(device);
+    var modes = new Map();
+    var re = /^set interfaces (\S+) unit \d+ family ethernet-switching (?:interface-mode|port-mode) (trunk|access)\b/gm;
+    var m, cfg = String(device.Configuration || '');
+    while ((m = re.exec(cfg)) !== null) modes.set(window.normalizePort(m[1]), m[2]);
+    portModeCache.set(device, modes);
+    return modes;
+}
+
+// What a port IS, in one word, for the collapsed interfaces list. Precedence: shut down
+// beats everything; a switch on the other end (LLDP) or a configured trunk is a Trunk; the
+// rest are Access, with the learned MACs as the detail (or "no clients" / "no link").
+// `order` is the sort rank for the Type column: trunks, access with clients, idle access,
+// shutdown.
+function classifyInterface(intf, ctx) {
+    var port = window.normalizePort(intf.Port);
+    var adminUp = String(intf.Admin).toLowerCase() === "up", linkUp = String(intf.Link).toLowerCase() === "up";
+    var neighbor = ctx.neighborsByPort.get(port);
+    var clients = ctx.clientsByPort.get(port) || [];
+    if (!adminUp) return { kind: 'shutdown', label: 'Shutdown', badge: 'gray', detailHtml: '<span class="intf-type-detail">admin down</span>', order: 3 };
+    if (neighbor || ctx.modeByPort.get(port) === 'trunk') {
+        var who = neighbor ? esc(neighbor.Hostname && neighbor.Hostname !== 'Unknown' ? neighbor.Hostname : neighbor.ManagementIP) + (neighbor.RemotePort && neighbor.RemotePort !== 'Unknown' ? ' <span class="intf-remote">' + esc(neighbor.RemotePort) + '</span>' : '') : 'no LLDP neighbor';
+        return { kind: 'trunk', label: neighbor ? 'Trunk' : 'Trunk (config)', badge: 'accent', detailHtml: '<span class="intf-type-detail">' + who + '</span>', order: 0 };
+    }
+    if (clients.length) {
+        var macs = clients.map(c => String(c.MAC || '').toUpperCase()).filter(Boolean);
+        var shown = macs.slice(0, 2).map(mac => `<span class="intf-mac">${esc(mac)}</span>`).join('');
+        var more = macs.length > 2 ? `<span class="intf-more">+${macs.length - 2}</span>` : '';
+        return { kind: 'access', label: 'Access', badge: 'green', detailHtml: shown + more, order: 1 };
+    }
+    return { kind: 'access-idle', label: 'Access', badge: linkUp ? 'green' : 'gray', detailHtml: `<span class="intf-type-detail">${linkUp ? 'no clients learned' : 'no link'}</span>`, order: 2 };
+}
+
+// Resolves a search/drill-down target to the bare port it lives on: `{port}` directly, or
+// `{client}` matched (case-insensitively) against client IPs, MACs and 802.1X usernames.
+// null when nothing on this device matches.
+window.focusPortFor = function(device, focus) {
+    if (!device || !focus) return null;
+    if (focus.port) return window.normalizePort(focus.port);
+    if (focus.client) {
+        var q = String(focus.client).toLowerCase();
+        var hit = window.asArray(device.TrueClients).find(c => c && [c.IP, c.MAC, c.Dot1x_User].some(v => v && String(v).toLowerCase() === q));
+        if (!hit) hit = window.asArray(device.TrueClients).find(c => c && [c.IP, c.MAC, c.Dot1x_User].some(v => v && String(v).toLowerCase().includes(q)));
+        return hit ? window.normalizePort(hit.Port) : null;
+    }
+    return null;
+};
+
+// Interfaces + their edge clients in one table. Rows are collapsed to what identifies a
+// port at a glance - name, type, status, description - and the selected row (click, chassis
+// jack, or search/drill-down navigation) expands into a detail strip (STP, PoE, inactivity,
+// neighbour) followed by its client rows. One port is expanded at a time. Clients still
+// honor the VLAN Highlight Layer filter (#vlanFilter, shared with graph.js's applyVlanFilter).
 window.renderInterfaces = function() {
     var tbody = document.getElementById('interfaces-tbody');
     var hideDown = document.getElementById('hideDownPorts').checked;
@@ -671,6 +758,9 @@ window.renderInterfaces = function() {
         if (!clientsByPort.has(key)) clientsByPort.set(key, []);
         clientsByPort.get(key).push(c);
     });
+    var neighborsByPort = new Map();
+    window.asArray(currentSelectedNodeData.Neighbors).forEach(n => { if (n && n.LocalPort && n.LocalPort !== 'Unknown') neighborsByPort.set(window.normalizePort(n.LocalPort), n); });
+    var ctx = { clientsByPort: clientsByPort, neighborsByPort: neighborsByPort, modeByPort: buildPortModes(currentSelectedNodeData) };
 
     if (currentSelectedNodeData.Interfaces) {
         var rows = window.asArray(currentSelectedNodeData.Interfaces).filter(intf => {
@@ -678,10 +768,11 @@ window.renderInterfaces = function() {
             if (hideDown && String(intf.Link).toLowerCase() !== "up") return false;
             return true;
         });
+        var typeOf = new Map(rows.map(intf => [intf, classifyInterface(intf, ctx)]));
 
         if (interfaceSortState.column && INTERFACE_SORT_COMPARATORS[interfaceSortState.column]) {
             var cmp = INTERFACE_SORT_COMPARATORS[interfaceSortState.column];
-            rows.sort((a, b) => interfaceSortState.dir * cmp(a, b));
+            rows.sort((a, b) => interfaceSortState.dir * cmp(a, b, typeOf));
         } else {
             // Default: down ports first, longest-inactive first (unknown duration last among
             // downs) - same tiebreak the old fleet-wide Inactive Ports dashboard tab used, so
@@ -700,36 +791,44 @@ window.renderInterfaces = function() {
         }
 
         rows.forEach(intf => {
+            var portName = String(intf.Port);
+            var selected = portName === selectedInterfacePort;
+            var type = typeOf.get(intf);
             var linkBadge = String(intf.Link).toLowerCase() === "up" ? "green" : "red";
+            var chain = daisyChains.get(window.normalizePort(intf.Port));
+            var desc = (intf.Desc && intf.Desc !== 'Unknown') ? intf.Desc : '';
+
+            html += `<tr class="intf-row${selected ? ' selected' : ''}" data-port="${esc(portName)}" onclick="window.selectInterfacePort(this.dataset.port, {source:'table'})">
+                <td><span class="intf-chev">&#9656;</span><b>${esc(intf.Port)}</b></td>
+                <td class="intf-type"><span class="badge ${type.badge}">${type.label}</span>${type.detailHtml}${chain ? ' ' + window.renderDaisyChainBadge(chain) : ''}</td>
+                <td><span class="badge ${linkBadge}">${esc(intf.Admin)}/${esc(intf.Link)}</span></td>
+                <td class="intf-desc" title="${esc(desc)}">${esc(desc)}</td>
+            </tr>`;
+
+            if (!selected) return;
+
             var stpBadge = String(intf.STP) === "FWD" ? "green" : (String(intf.STP) === "BLK" ? "red" : "gray");
             var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
-
-            var chain = daisyChains.get(window.normalizePort(intf.Port));
-            var daisyStr = chain
-                ? `<br>${window.renderDaisyChainBadge(chain)}`
-                : "";
-
             var secs = intf.LastFlappedSeconds;
             var inactiveFor = String(intf.Link).toLowerCase() === "up" ? "-"
                 : ((secs === null || secs === undefined) ? "Unknown" : window.formatAge(secs * 1000));
-
-            html += `<tr>
-                <td><b>${esc(intf.Port)}</b>${daisyStr}</td>
-                <td><span class="badge ${linkBadge}">${esc(intf.Admin)}/${esc(intf.Link)}</span></td>
-                <td><span class="badge ${stpBadge}">${esc(intf.STP) || "?"}</span></td>
-                <td>${esc(poeTxt)}</td>
-                <td style="font-style:italic; color:var(--text-muted);">${esc(intf.Desc)}</td>
-                <td>${esc(inactiveFor)}</td>
-            </tr>`;
-
+            var neighbor = neighborsByPort.get(window.normalizePort(intf.Port));
             var portClients = clientsByPort.get(window.normalizePort(intf.Port)) || [];
-            portClients.forEach(c => {
-                html += renderClientSubRow(c, daisyChains);
-            });
+            html += `<tr class="intf-detail"><td colspan="4"><div class="intf-detail-grid">
+                <div><label>STP</label><span class="badge ${stpBadge}">${esc(intf.STP) || "?"}</span></div>
+                <div><label>PoE</label>${esc(poeTxt)}</div>
+                <div><label>Inactive for</label>${esc(inactiveFor)}</div>
+                <div><label>Port mode</label>${esc(ctx.modeByPort.get(window.normalizePort(intf.Port)) || (neighbor ? 'trunk (LLDP)' : 'unknown'))}</div>
+                ${neighbor ? `<div><label>LLDP neighbour</label>${esc(neighbor.Hostname || 'Unknown')} <span class="intf-remote">${esc(neighbor.ManagementIP || '')} ${esc(neighbor.RemotePort || '')}</span></div>` : ''}
+                <div class="intf-detail-wide"><label>Description</label>${desc ? esc(desc) : '<span class="intf-type-detail">none configured</span>'}</div>
+                <div class="intf-detail-wide"><label>Clients</label>${portClients.length ? portClients.length + ' learned on this port' + (vlanFilter !== "ALL" ? ' (VLAN filter applied)' : '') : '<span class="intf-type-detail">none learned</span>'}</div>
+            </div></td></tr>`;
+            portClients.forEach(c => { html += renderClientSubRow(c, daisyChains); });
         });
     }
-    tbody.innerHTML = html || `<tr><td colspan="6" style="text-align:center;">No interface data</td></tr>`;
+    tbody.innerHTML = html || `<tr><td colspan="4" style="text-align:center;">No interface data</td></tr>`;
     updateInterfaceSortArrows();
+    if (typeof window.renderChassisView === 'function') window.renderChassisView(currentSelectedNodeData, selectedInterfacePort);
 
     // Skipped on a merge-triggered re-render (background rescan completing) - only scroll on
     // an actual drawer-open/tab-switch/search-navigation render, so a background merge can't
@@ -759,7 +858,7 @@ function renderClientSubRow(c, daisyChains) {
     var chain = daisyChains.get(window.normalizePort(c.Port));
     var daisyStr = chain ? window.renderDaisyChainBadge(chain) : "";
 
-    return `<tr class="${rowClass}"><td colspan="6"><div class="client-subrow-inner">
+    return `<tr class="${rowClass}"><td colspan="4"><div class="client-subrow-inner">
         <span class="csr-identity">${esc(c.IP)}</span>
         <span class="csr-mac">${esc(String(c.MAC).toUpperCase())}</span>
         ${vendorStr}

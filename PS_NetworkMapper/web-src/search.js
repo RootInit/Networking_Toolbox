@@ -100,7 +100,8 @@ window.performGlobalSearch = function() {
         return {
             line1Html: `${esc(m.deviceIp)}${hostname}${snapshotTag}`,
             line2Html: `${esc(SEARCH_FIELD_LABELS[m.field])}: <b>${esc(m.value)}</b>`,
-            onClick: () => window.goToSearchResult(m.deviceIp, SEARCH_FIELD_TABS[m.field], m.snapshotIndex),
+            onClick: () => window.goToSearchResult(m.deviceIp, SEARCH_FIELD_TABS[m.field], m.snapshotIndex,
+                SEARCH_FIELD_TABS[m.field] === 'tab-interfaces' ? { client: m.value } : null),
         };
     });
 
@@ -169,7 +170,10 @@ window.revealDeviceInActiveView = function(ip) {
     }
 };
 
-window.goToSearchResult = function(targetIp, tab, snapshotIndex) {
+// `focus` (optional) names the port the result is about - `{port: 'ge-0/0/5'}` or
+// `{client: '<ip|mac|user>'}` - so the drawer expands that row and lights its jack on the
+// front panel (drawer.js's focusPortFor / selectInterfacePort).
+window.goToSearchResult = function(targetIp, tab, snapshotIndex, focus) {
     var myGeneration = ++goToSearchResultGeneration;
     (async () => {
         if (typeof snapshotIndex === 'number' && snapshotIndex !== activeSnapshotIndex) {
@@ -181,6 +185,10 @@ window.goToSearchResult = function(targetIp, tab, snapshotIndex) {
         // wants is available immediately without waiting on it.
         window.openRightDrawer(targetIp);
         if (tab) window.switchTab(tab);
+        if (focus && currentSelectedNodeData) {
+            var port = window.focusPortFor(currentSelectedNodeData, focus);
+            if (port) window.selectInterfacePort(port, { source: 'search' });
+        }
         window.GraphLayout.expandAncestors(primaryTree.parentOf, primaryTree.childrenOf, targetIp, expandedNodes, getClusterThreshold());
         await window.renderVisibleGraph();
         if (myGeneration !== goToSearchResultGeneration) return;

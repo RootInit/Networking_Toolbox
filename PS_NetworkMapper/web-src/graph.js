@@ -138,8 +138,12 @@ window.buildSwitchMap = async function() {
         // default to binding on window, not the graph container, so typing "-" in any text
         // field elsewhere on the page (an IP, a note, a search box) got eaten as a zoom-out
         // instead of typing a dash. Scoped to the container, they only fire while it has focus.
-        interaction: { navigationButtons: true, keyboard: { bindToWindow: false }, hover: true, dragNodes: true },
+        // navigationButtons: false - vis-network's own green corner buttons are replaced by
+        // #diagram-nav (window.buildDiagramNav below), which adds rotation and stays inside
+        // the canvas instead of clipping at its bottom edge.
+        interaction: { navigationButtons: false, keyboard: { bindToWindow: false }, hover: true, dragNodes: true },
     });
+    window.buildDiagramNav();
     // vis-network still fires "click" for a blank click (unlike "selectNode"), so close
     // the drawer instead of leaving it pointing at a stale selection.
     network.on("click", function (params) {
@@ -429,3 +433,96 @@ window.resizeDiagram = function() {
         diagramSizedWhileHidden = false;
     }
 };
+
+// ---- Diagram navigation widget (#diagram-nav) ----
+// A ring of eight segments around a centre button, replacing vis-network's built-in
+// navigation buttons: pan (N/E/S/W), zoom (+/-), rotate the whole layout (left/right), and
+// "fit to view" in the middle. Pan and zoom repeat while the pointer is held; rotation steps
+// 15 degrees per click. Drawn once as SVG; the same element survives graph rebuilds because
+// it lives in #center-panel, not inside #mynetwork.
+var DIAGRAM_NAV_STEP_PX = 120;      // pan distance per tick, in screen pixels
+var DIAGRAM_NAV_ZOOM = 1.18;        // zoom factor per tick
+var DIAGRAM_NAV_ROTATE_DEG = 15;
+
+window.buildDiagramNav = function() {
+    var host = document.getElementById('diagram-nav');
+    if (!host || host.dataset.built) return;
+    host.dataset.built = '1';
+    var C = 75, R = 72, r = 32;   // centre, outer radius, inner (button) radius
+    // Segment order clockwise from the top: up, rotate-right, right, zoom-in, down, zoom-out, left, rotate-left.
+    var segs = [
+        { a: 'up',      glyph: 'M-6,3 L0,-3 L6,3' },
+        { a: 'rotcw',   glyph: 'M-5,4 A7,7 0 1 1 5,-2 M5,-2 L5,-7 M5,-2 L0,-2' },
+        { a: 'right',   glyph: 'M-3,-6 L3,0 L-3,6' },
+        { a: 'zoomin',  glyph: 'M0,-6 V6 M-6,0 H6 M0,0 m-9,0 a9,9 0 1 0 18,0 a9,9 0 1 0 -18,0' },
+        { a: 'down',    glyph: 'M-6,-3 L0,3 L6,-3' },
+        { a: 'zoomout', glyph: 'M-6,0 H6 M0,0 m-9,0 a9,9 0 1 0 18,0 a9,9 0 1 0 -18,0' },
+        { a: 'left',    glyph: 'M3,-6 L-3,0 L3,6' },
+        { a: 'rotccw',  glyph: 'M5,4 A7,7 0 1 0 -5,-2 M-5,-2 L-5,-7 M-5,-2 L0,-2' },
+    ];
+    var titles = { up: 'Pan up', down: 'Pan down', left: 'Pan left', right: 'Pan right', zoomin: 'Zoom in', zoomout: 'Zoom out', rotcw: 'Rotate clockwise', rotccw: 'Rotate counter-clockwise' };
+    var polar = function (rad, deg) { var t = (deg - 90) * Math.PI / 180; return [C + rad * Math.cos(t), C + rad * Math.sin(t)]; };
+    var f = function (v) { return v.toFixed(2); };
+    var html = '<svg viewBox="0 0 150 150" xmlns="http://www.w3.org/2000/svg">';
+    segs.forEach(function (s, i) {
+        var a0 = i * 45 - 22.5, a1 = a0 + 45, mid = a0 + 22.5;
+        var o0 = polar(R, a0), o1 = polar(R, a1), i0 = polar(r + 2, a0), i1 = polar(r + 2, a1);
+        var d = 'M' + f(o0[0]) + ',' + f(o0[1]) + ' A' + R + ',' + R + ' 0 0 1 ' + f(o1[0]) + ',' + f(o1[1]) +
+                ' L' + f(i1[0]) + ',' + f(i1[1]) + ' A' + (r + 2) + ',' + (r + 2) + ' 0 0 0 ' + f(i0[0]) + ',' + f(i0[1]) + ' Z';
+        var g = polar((R + r + 2) / 2, mid);
+        html += '<path class="nav-seg" data-action="' + s.a + '" d="' + d + '"><title>' + titles[s.a] + '</title></path>' +
+                '<path class="nav-glyph" transform="translate(' + f(g[0]) + ',' + f(g[1]) + ')" d="' + s.glyph + '"></path>';
+    });
+    html += '<circle class="nav-center" data-action="fit" cx="' + C + '" cy="' + C + '" r="' + r + '"><title>Fit whole diagram</title></circle>' +
+            '<path class="nav-glyph" transform="translate(' + C + ',' + C + ')" d="M-9,-3 V-9 H-3 M3,-9 H9 V-3 M9,3 V9 H3 M-3,9 H-9 V3"></path>' +
+            '<circle class="nav-ring" cx="' + C + '" cy="' + C + '" r="' + R + '"></circle></svg>';
+    host.innerHTML = html;
+
+    // Press-and-hold repeat for pan/zoom; single step for rotate and fit.
+    var holdTimer = null, heldEl = null;
+    var stop = function () { if (holdTimer) { clearInterval(holdTimer); holdTimer = null; } if (heldEl) { heldEl.classList.remove('held'); heldEl = null; } };
+    host.addEventListener('mousedown', function (ev) {
+        var el = ev.target.closest('[data-action]');
+        if (!el || !network) return;
+        ev.preventDefault();
+        var action = el.dataset.action;
+        window.diagramNavAction(action);
+        if (action === 'fit' || action === 'rotcw' || action === 'rotccw') return;
+        heldEl = el; el.classList.add('held');
+        holdTimer = setInterval(function () { window.diagramNavAction(action); }, 140);
+    });
+    document.addEventListener('mouseup', stop);
+    host.addEventListener('mouseleave', stop);
+};
+
+window.diagramNavAction = function(action) {
+    if (!network) return;
+    var scale = network.getScale();
+    var view = network.getViewPosition();
+    var anim = { duration: 120, easingFunction: 'linear' };
+    switch (action) {
+        case 'up':    network.moveTo({ position: { x: view.x, y: view.y - DIAGRAM_NAV_STEP_PX / scale }, animation: anim }); break;
+        case 'down':  network.moveTo({ position: { x: view.x, y: view.y + DIAGRAM_NAV_STEP_PX / scale }, animation: anim }); break;
+        case 'left':  network.moveTo({ position: { x: view.x - DIAGRAM_NAV_STEP_PX / scale, y: view.y }, animation: anim }); break;
+        case 'right': network.moveTo({ position: { x: view.x + DIAGRAM_NAV_STEP_PX / scale, y: view.y }, animation: anim }); break;
+        case 'zoomin':  network.moveTo({ scale: scale * DIAGRAM_NAV_ZOOM, animation: anim }); break;
+        case 'zoomout': network.moveTo({ scale: scale / DIAGRAM_NAV_ZOOM, animation: anim }); break;
+        case 'fit': network.fit({ animation: { duration: 400, easingFunction: 'easeInOutQuad' } }); break;
+        case 'rotcw':  rotateDiagram(DIAGRAM_NAV_ROTATE_DEG); break;
+        case 'rotccw': rotateDiagram(-DIAGRAM_NAV_ROTATE_DEG); break;
+    }
+};
+
+// vis-network has no camera rotation, so rotate the layout itself: every node (clusters
+// included - they are ordinary nodes in nodesDataset) swings around the current view
+// centre. Physics is off and positions are fixed, so the new coordinates simply stick;
+// a re-layout (renderVisibleGraph) recomputes positions from scratch and resets the angle.
+function rotateDiagram(deg) {
+    var rad = deg * Math.PI / 180, cos = Math.cos(rad), sin = Math.sin(rad);
+    var centre = network.getViewPosition();
+    var positions = network.getPositions();
+    Object.keys(positions).forEach(function (id) {
+        var p = positions[id], dx = p.x - centre.x, dy = p.y - centre.y;
+        network.moveNode(id, centre.x + dx * cos - dy * sin, centre.y + dx * sin + dy * cos);
+    });
+}

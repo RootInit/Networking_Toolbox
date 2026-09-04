@@ -18,6 +18,8 @@ var configLoadPromise = null;
 // rescan/snapshot switch would reset the user's pan/zoom.
 var hasFitBoundsOnce = false;
 
+// Centre column views: 'diagram' (vis-network), 'map' (Leaflet), 'analysis' (dashboard.js's
+// Analysis Dashboard - tables/charts that need this column's width, not the sidebar's).
 window.switchCenterView = function(view) {
     activeCenterView = view;
     // #mapStatusNote is a sibling of #mapview, not a child, so it isn't covered by the
@@ -26,15 +28,26 @@ window.switchCenterView = function(view) {
     document.getElementById('mynetwork').style.display = (view === 'diagram') ? 'block' : 'none';
     document.getElementById('mapview').style.display = (view === 'map') ? 'block' : 'none';
     document.getElementById('mapUnplacedPanel').style.display = (view === 'map') ? 'block' : 'none';
-    document.getElementById('btn-center-view-diagram').classList.toggle('active', view === 'diagram');
-    document.getElementById('btn-center-view-map').classList.toggle('active', view === 'map');
-    document.getElementById('btn-center-view-diagram').setAttribute('aria-pressed', String(view === 'diagram'));
-    document.getElementById('btn-center-view-map').setAttribute('aria-pressed', String(view === 'map'));
+    document.getElementById('analysisview').style.display = (view === 'analysis') ? 'block' : 'none';
+    // Gates the diagram-only overlays (#legend-group, #diagram-nav) via CSS.
+    document.getElementById('center-panel').classList.toggle('view-diagram', view === 'diagram');
+    ['diagram', 'map', 'analysis'].forEach(function (v) {
+        var btn = document.getElementById('btn-center-view-' + v);
+        btn.classList.toggle('active', view === v);
+        btn.setAttribute('aria-pressed', String(view === v));
+    });
     // Same leak class as #mapStatusNote above: the floating Save button is also a sibling
     // of #mapview, so hide (not remove) it here to preserve its pending-edit count.
     var saveBtn = document.getElementById('mapSaveConfigBtn');
     if (saveBtn) saveBtn.style.display = (view === 'map') ? '' : 'none';
 
+    if (view === 'analysis') {
+        // Its render functions read the live topology, so a hidden dashboard is never
+        // stale for long: refresh on every activation (setActiveSnapshot / rescan merges
+        // refresh it too, but only while it's the view showing).
+        window.refreshAnalysisDashboard();
+        return;
+    }
     if (view !== 'map') {
         // buildSwitchMap may have (re)created the vis.Network instance while #mynetwork was
         // hidden, sizing its canvas against a bogus 0x0 - force a re-measure now it's visible.

@@ -79,52 +79,47 @@
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; display: flex; height: 100vh; width: 100vw; overflow: clip; background-color: var(--bg); color: var(--text); }
         
         /* Layout Panels */
-        #left-panel { width: 400px; min-width: 400px; padding: 0; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: row; box-sizing: border-box; position: relative; transition: width 0.15s ease, min-width 0.15s ease; }
-        /* Analysis Dashboard tab needs real width for its tables/charts - widened only
-           while that tab is active. Declared here (before the .collapsed rule below, same
-           specificity) so collapsing the panel while Analysis is active still wins out to
-           the handle-only width instead of the two rules racing on source order. */
-        #left-panel.wide-panel { width: 780px; min-width: 780px; }
         #center-panel { flex-grow: 1; height: 100%; position: relative; }
-
-        /* The handle: a slim, textured strip docked to the panel's edge, present in both
-           the expanded and collapsed states (not a corner button that only exists while
-           open, and not the whole collapsed panel acting as one giant click target) - see
-           window.toggleLeftPanel in app.js. The repeating-linear-gradient is a plain CSS
-           "grip" texture (short ticks), not an image asset. Sits on the RIGHT of the tab
-           strip/content when expanded (bordering the graph canvas it show/hides, not the
-           outer window edge) - when collapsed it's the only thing left, so it's still what
-           renders at the panel's edge either way. */
-        #panel-handle { flex: 0 0 18px; width: 18px; display: flex; align-items: center; justify-content: center; cursor: pointer; background-color: var(--hover-accent-bg); background-image: repeating-linear-gradient(180deg, rgba(44,62,80,0.16) 0px, rgba(44,62,80,0.16) 2px, transparent 2px, transparent 7px); border-left: 1px solid var(--border); box-sizing: border-box; }
-        #panel-handle:hover { background-color: var(--hover-neutral-bg); }
-        /* The grip texture's tick color is a literal rgba (not a var - it's a translucent
-           overlay, not a flat fill), so it needs its own dark-mode swap: navy ticks at 16%
-           opacity are barely visible against an already-dark handle background. */
-        :root[data-theme="dark"] #panel-handle { background-image: repeating-linear-gradient(180deg, rgba(220,228,240,0.14) 0px, rgba(220,228,240,0.14) 2px, transparent 2px, transparent 7px); }
-        #panelToggleIcon { transition: transform 0.15s ease; color: var(--heading); pointer-events: none; }
-        #left-panel.collapsed #panelToggleIcon { transform: rotate(180deg); }
-
-        /* Collapsed left panel: only the handle remains, at its own slim width. */
-        #left-panel.collapsed { width: 18px; min-width: 18px; }
-        #left-panel.collapsed #left-panel-body { display: none; }
-
-        /* Everything right of the handle: the vertical tab strip plus the scrollable
-           content pane for whichever tab is active. Its own row so the tab strip and
-           content sit side by side. */
-        #left-panel-body { flex: 1 1 auto; display: flex; flex-direction: row; min-width: 0; overflow: hidden; }
+        /* Right panel: tool tabs (Load File / Search / Settings) on top, device drawer under them. Always
+           visible - it is the only sidebar - and drag-resizable via #side-panel-handle. */
         
         /* RIGHT PANEL IS BACK */
-        #right-panel { width: 500px; min-width: 280px; max-width: 90vw; background: var(--panel-bg); box-shadow: -2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: none; flex-direction: column; box-sizing: border-box; border-left: 1px solid var(--border); }
+        #side-panel { width: 520px; min-width: 320px; max-width: 90vw; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: column; box-sizing: border-box; border-right: 1px solid var(--border); }
+        /* Divider between the tool pane and the device area (window.startToolPanelResize, app.js) */
+        #tool-divider { flex: 0 0 7px; cursor: row-resize; background: var(--subtle-bg); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); position: relative; }
+        #tool-divider::after { content: ""; position: absolute; left: 50%; top: 2px; width: 34px; height: 1px; margin-left: -17px; border-top: 1px solid var(--text-dim); border-bottom: 1px solid var(--text-dim); height: 3px; opacity: .6; }
+        #tool-divider:hover, #tool-divider.dragging { background: var(--accent); }
+        #tool-divider:hover::after, #tool-divider.dragging::after { border-color: white; }
+        body.resizing-tool-panel { cursor: row-resize; user-select: none; }
+        /* Once dragged, the pane takes the dragged height instead of fitting its content */
+        #tool-panel.sized { flex: 0 0 auto; max-height: none; }
 
-        /* Drag-resize handle for #right-panel - a thin strip on its left edge, dragged via
-           window.startRightPanelResize (app.js), which tracks the pointer continuously
-           rather than toggling between two fixed states like #panel-handle does for the
-           left panel. display is toggled in lockstep with #right-panel itself (see
-           window.openRightDrawer/closeDrawer in drawer.js) - `display:none` here is just
-           the default before the drawer has ever opened. */
-        #right-panel-handle { flex: 0 0 6px; width: 6px; cursor: col-resize; background: transparent; z-index: 11; display: none; }
-        #right-panel-handle:hover, #right-panel-handle.dragging { background: var(--accent); opacity: 0.4; }
-        body.resizing-right-panel { cursor: col-resize; user-select: none; }
+        /* Diagram-only overlays: node legend (bottom-right) and navigation widget (bottom-left).
+           Both hide with the Diagram view - the Map has its own zoom control and its own
+           unplaced-devices panel in the same corners. */
+        .diagram-overlay { position: absolute; z-index: 900; }
+        #center-panel:not(.view-diagram) .diagram-overlay { display: none !important; }
+        #legend-group { right: 16px; bottom: 16px; background: var(--panel-bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 14px 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.18); }
+        #legend-group h2 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-dim); margin: 0 0 8px; }
+        #diagram-nav { left: 16px; bottom: 16px; width: 150px; height: 150px; }
+        #diagram-nav svg { width: 100%; height: 100%; display: block; overflow: visible; }
+        #diagram-nav .nav-seg { fill: var(--panel-bg); stroke: var(--border); stroke-width: 1; cursor: pointer; transition: fill 0.12s; }
+        #diagram-nav .nav-seg:hover { fill: var(--hover-accent-bg); }
+        #diagram-nav .nav-seg:active, #diagram-nav .nav-seg.held { fill: var(--accent); }
+        #diagram-nav .nav-glyph { fill: none; stroke: var(--text-muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; pointer-events: none; }
+        #diagram-nav .nav-seg:hover + .nav-glyph { stroke: var(--text); }
+        #diagram-nav .nav-seg:active + .nav-glyph, #diagram-nav .nav-seg.held + .nav-glyph { stroke: white; }
+        #diagram-nav .nav-center { fill: var(--subtle-bg); stroke: var(--border); stroke-width: 1; cursor: pointer; }
+        #diagram-nav .nav-center:hover { fill: var(--hover-accent-bg); }
+        #diagram-nav .nav-center:active { fill: var(--accent); }
+        #diagram-nav .nav-ring { fill: none; stroke: var(--border); stroke-width: 1; pointer-events: none; }
+        #diagram-nav svg { filter: drop-shadow(0 2px 6px rgba(0,0,0,0.25)); }
+
+        /* Drag-resize handle for #side-panel - a thin strip on its left edge, dragged via
+           window.startSidePanelResize (app.js), which tracks the pointer continuously. */
+        #side-panel-handle { flex: 0 0 6px; width: 6px; cursor: col-resize; background: transparent; z-index: 11; }
+        #side-panel-handle:hover, #side-panel-handle.dragging { background: var(--accent); opacity: 0.4; }
+        body.resizing-side-panel { cursor: col-resize; user-select: none; }
         
         #mynetwork { width: 100%; height: 100%; background: var(--panel-bg); }
 
@@ -212,7 +207,90 @@
         .analysis-tab-content.active { display: block; }
         .analysis-trend-controls { display: flex; gap: 16px; margin-bottom: 14px; align-items: center; font-size: 0.85rem; }
         .analysis-trend-controls select { width: auto; margin: 0; }
-        #trendCanvas { width: 100%; max-width: 100%; border: 1px solid var(--border); border-radius: 4px; }
+        /* Severity tiers shared by every dashboard bar/band/label (dashboard.js severityTier) */
+        .tier-ok { --tier: #27ae60; } .tier-warn { --tier: #d68910; } .tier-crit { --tier: #e74c3c; } .tier-neutral { --tier: var(--accent); }
+        .fleet-hint { font-size: 0.78rem; color: var(--text-dim); margin: -10px 0 18px; }
+
+        /* Inline bar: track + fill + label, used in Fleet Health lists and the IP Space table */
+        .inline-bar { display: inline-flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
+        .inline-bar-track { flex: 1 1 auto; height: 8px; background: var(--hover-neutral-bg); border-radius: 4px; overflow: hidden; }
+        .inline-bar-fill { display: block; height: 100%; background: var(--tier); border-radius: 4px; }
+        .inline-bar-label { flex: 0 0 auto; font-size: 0.75rem; font-weight: bold; color: var(--tier); min-width: 92px; text-align: right; font-variant-numeric: tabular-nums; }
+        .fleet-bar-row { display: flex; align-items: center; gap: 14px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.83rem; }
+        .fleet-bar-row:last-child { border-bottom: none; }
+        .fleet-bar-name { flex: 0 0 42%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        /* Sparkline under a stat card's number */
+        .fleet-stat-card .sparkline { display: block; margin: 8px auto 0; max-width: 100%; }
+        .sparkline .spark-line { fill: none; stroke: var(--accent); stroke-width: 1.5; }
+        .sparkline .spark-area { fill: var(--accent); opacity: .12; }
+        .sparkline .spark-end { fill: var(--accent); }
+        .fleet-stat-card.critical .sparkline .spark-line, .fleet-stat-card.critical .sparkline .spark-end { stroke: var(--danger-text); fill: var(--danger-text); }
+        .fleet-stat-card.critical .sparkline .spark-line { fill: none; }
+        .fleet-stat-card.critical .sparkline .spark-area { fill: var(--danger-text); }
+        .fleet-stat-card.warn .sparkline .spark-line, .fleet-stat-card.warn .sparkline .spark-end { stroke: var(--warn-text); fill: var(--warn-text); }
+        .fleet-stat-card.warn .sparkline .spark-line { fill: none; }
+        .fleet-stat-card.warn .sparkline .spark-area { fill: var(--warn-text); }
+
+        /* Client category share as one stacked bar */
+        .fleet-stack { display: flex; height: 16px; border-radius: 4px; overflow: hidden; background: var(--hover-neutral-bg); margin: 4px 0 10px; }
+        .fleet-stack-seg.vendor-tag { display: block; margin: 0; padding: 0; border-radius: 0; height: 100%; min-width: 2px; border: none; cursor: default; }
+        .fleet-stack-legend { display: flex; flex-wrap: wrap; gap: 6px 22px; font-size: 0.8rem; }
+        .fleet-stack-legend .vendor-tag { margin: 0 4px 0 0; cursor: default; }
+        .fleet-pct { color: var(--text-dim); }
+
+        /* Trends: SVG charts (dashboard.js trendChartSvg) - small multiples grid or one big chart */
+        .trend-panel-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-bottom: 6px; font-size: 0.8rem; }
+        .trend-title { font-weight: bold; color: var(--heading); }
+        .trend-legend { color: var(--text-dim); font-size: 0.72rem; display: inline-flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+        .trend-legend .swatch { display: inline-block; width: 14px; height: 3px; margin-left: 10px; background: var(--accent); vertical-align: middle; }
+        .trend-legend .swatch.median { background: repeating-linear-gradient(90deg, var(--text-muted) 0 4px, transparent 4px 7px); }
+        .trend-legend .swatch.band { height: 10px; background: linear-gradient(90deg, rgba(214,137,16,.25), rgba(231,76,60,.25)); }
+        .trend-legend .swatch.reboot { background: repeating-linear-gradient(90deg, var(--danger-text) 0 3px, transparent 3px 5px); }
+        .trend-multiples { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 14px; }
+        .trend-panel { background: var(--subtle-bg); border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px 6px; }
+        .trend-multiples .trend-panel { cursor: pointer; transition: 0.15s; }
+        .trend-multiples .trend-panel:hover { border-color: var(--accent); background: var(--hover-accent-bg); }
+        .trend-panel.big { padding: 14px 18px 10px; }
+        .trend-name { font-size: 0.78rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+        .trend-last { font-weight: bold; font-variant-numeric: tabular-nums; color: var(--tier); font-size: 0.85rem; }
+        .trend-svg { display: block; width: 100%; }
+        .trend-svg .trend-grid { stroke: var(--border); stroke-width: 1; }
+        .trend-svg .trend-tick { fill: var(--text-dim); font-size: 10px; }
+        .trend-svg.big .trend-tick { font-size: 11px; }
+        .trend-svg .trend-band.warn { fill: #d68910; opacity: .12; }
+        .trend-svg .trend-band.crit { fill: #e74c3c; opacity: .14; }
+        .trend-svg .trend-line { fill: none; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+        .trend-svg .trend-line.subject { stroke: var(--accent); stroke-width: 2; }
+        .trend-svg .trend-line.median { stroke: var(--text-muted); stroke-dasharray: 4 3; }
+        .trend-svg .trend-dot { fill: var(--accent); }
+        .trend-svg .trend-reboot { stroke: var(--danger-text); stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+        .trend-svg .trend-reboot-label { fill: var(--danger-text); font-size: 10px; font-weight: bold; }
+        .trend-rank .fleet-bar-name { flex-basis: 34%; }
+
+        /* IP Space utilisation bars */
+        .ipspace-util .inline-bar { min-width: 200px; }
+        .ipspace-note { color: var(--text-dim); font-style: italic; font-size: 0.78rem; }
+        tr.ipspace-unknown td { color: var(--text-muted); }
+
+        /* Reliability: fleet strip - CSS grid, one row per device, one column per crawled
+           day (dashboard.js renderReliabilityHeatmap sets the column template inline). */
+        .rel-summary { font-size: 0.8rem; color: var(--text-muted); margin-bottom: 10px; }
+        .rel-grid { display: grid; gap: 2px; align-items: stretch; font-size: 0.72rem; }
+        .rel-corner, .rel-col-head { position: sticky; top: 0; background: var(--panel-bg); z-index: 1; }
+        .rel-col-head { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; color: var(--text-dim); line-height: 1.1; padding-bottom: 3px; overflow: hidden; white-space: nowrap; }
+        .rel-col-head .rel-month { font-weight: bold; color: var(--text-muted); }
+        .rel-total-head { align-items: flex-end; text-align: right; font-size: 0.62rem; white-space: normal; }
+        .rel-row-label { display: flex; flex-direction: column; justify-content: center; min-width: 0; padding-right: 10px; line-height: 1.15; }
+        .rel-row-label .rel-ip { font-family: monospace; font-size: 0.72rem; }
+        .rel-row-label .rel-host { color: var(--text-dim); font-size: 0.68rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .rel-cell { min-height: 18px; max-height: 22px; border-radius: 2px; cursor: pointer; }
+        .rel-cell.heatmap-cell { width: auto; height: auto; }
+        .rel-cell.none, .heatmap-cell.none { background: transparent; border: 1px dashed var(--border); cursor: default; }
+        .rel-cell.heatmap-cell:hover { outline: 2px solid var(--accent); outline-offset: -1px; }
+        .rel-row-total { display: flex; align-items: center; justify-content: flex-end; font-variant-numeric: tabular-nums; color: var(--text-muted); }
+        .rel-row-total .rel-sep { color: var(--text-dim); margin: 0 3px; }
+        .rel-hint { margin-left: auto; color: var(--text-dim); }
         #new-devices-table td, #new-devices-table th { font-size: 0.8rem; }
 
         /* Fleet Health Dashboard (see window.renderFleetDashboard) */
@@ -224,7 +302,7 @@
         .fleet-stat-card .stat-label { font-size: 0.7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; margin-top: 4px; }
         .fleet-stat-card.critical .stat-value { color: var(--danger-text); }
         .fleet-stat-card.warn .stat-value { color: var(--warn-text); }
-        .fleet-dashboard-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 0 32px; }
+        .fleet-dashboard-columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 0 32px; }
         .fleet-section { margin-bottom: 22px; }
         .fleet-section h3 { font-size: 0.85rem; margin: 0 0 8px; color: var(--heading); text-transform: uppercase; letter-spacing: 0.02em; }
         .fleet-list-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 0.83rem; }
@@ -257,14 +335,15 @@
            edge of the panel body rather than as a row above the content - writing-mode
            rotates the label text; the extra rotate(180deg) makes it read bottom-to-top,
            the usual convention for a left-docked vertical tab strip. */
-        .sidebar-tabs { flex: 0 0 34px; width: 34px; display: flex; flex-direction: column; border-right: 1px solid var(--border); box-sizing: border-box; }
-        .sidebar-tab { flex: 1 1 auto; display: flex; align-items: center; justify-content: center; padding: 10px 4px; cursor: pointer; font-size: 0.68rem; font-weight: bold; color: var(--text-muted); border-right: 3px solid transparent; transition: 0.2s; writing-mode: vertical-rl; transform: rotate(180deg); text-align: center; box-sizing: border-box; }
-        .sidebar-tab:hover { background: var(--hover-accent-bg); }
-        .sidebar-tab.active { color: var(--accent); border-right: 3px solid var(--accent); background: var(--subtle-bg); }
-        #left-panel-content { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow-y: auto; padding: 18px; box-sizing: border-box; }
-        .sidebar-tab-content { display: none; flex-direction: column; min-height: 0; overflow-y: auto; }
+        #tool-tabs .tab { flex: 1 1 auto; }
+        /* The tool pane takes what its content needs, up to a share of the panel, and scrolls
+           inside itself; the device drawer below gets the rest. */
+        #tool-panel { flex: 0 1 auto; max-height: 42vh; min-height: 0; overflow-y: auto; padding: 16px 18px; box-sizing: border-box; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; }
+        #tool-panel > * { flex: 0 0 auto; }   /* panes keep their natural height; the panel scrolls, panes never squash */
+        #device-empty { padding: 22px 18px; font-size: 0.82rem; color: var(--text-dim); font-style: italic; }
+        #device-drawer { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
+        .sidebar-tab-content { display: none; flex-direction: column; min-height: 0; }
         .sidebar-tab-content.active { display: flex; }
-        #sidebar-tab-analysis.active { flex-grow: 1; }
 
         /* Right Panel Drawer Header
            Two stacked rows: title+close on top (the dismiss affordance stays where
@@ -342,7 +421,7 @@
         :root[data-theme="dark"] .heatmap-cell.lvl3 { background: #3fae6f; }
         :root[data-theme="dark"] .heatmap-cell.lvl4 { background: #6fdb9c; }
         :root[data-theme="dark"] .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #e8796c inset; }
-        .heatmap-legend { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-dim); margin-top: 10px; }
+        .heatmap-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-dim); margin-top: 10px; }
         .heatmap-legend .heatmap-cell { cursor: default; }
 
         /* Tabs */
@@ -355,7 +434,7 @@
         .tab:hover, .analysis-tab:hover { background: var(--hover-neutral-bg); }
         .tab.active, .analysis-tab.active { color: var(--accent); border-bottom: 3px solid var(--accent); background: var(--panel-bg); }
 
-        .tab-content { display: none; flex-grow: 1; overflow-y: auto; padding: 0; background: var(--panel-bg); height: calc(100vh - 110px); }
+        .tab-content { display: none; flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0; background: var(--panel-bg); }
         .tab-content.active { display: block; }
         
         /* Data Tables */
@@ -407,6 +486,130 @@
         .summary-item { background: var(--subtle-bg); padding: 15px; border: 1px solid var(--border); border-radius: 5px; }
         .summary-item label { display: block; font-size: 0.75rem; color: var(--text-dim); text-transform: uppercase; margin-bottom: 5px; }
         .summary-item div { font-size: 1.1rem; font-weight: bold; color: var(--text); }
+
+        /* Front-panel drawing above the Interfaces table (chassis.js, window.renderChassisView).
+           1 SVG unit = 1 mm; every rack unit shares a 482.6 mm viewBox (19" incl. ears) and
+           sets its own width as a % of that, so a compact desktop unit draws narrower than a
+           1U member above it and stacked members line up flush like a real rack. Two-tone
+           line art: --chassis-bg/--chassis-fg ride on the panel/text tokens so the drawing
+           inverts with the theme; only the lit lenses carry colour. */
+        #chassis-view { padding: 10px 15px 8px; border-bottom: 1px solid var(--border); background: var(--panel-bg);
+            --chassis-bg: var(--panel-bg); --chassis-fg: var(--text);
+            --led-green: #27d66f; --led-green-core: #b6ffcc; --led-amber: #ff9a1f; --led-amber-core: #ffd9a3; }
+        #chassis-view:empty { display: none; }
+        .chassis-member + .chassis-member { margin-top: 6px; }
+        .chassis-member-label { display: flex; align-items: baseline; gap: 8px; font-size: 0.72rem; margin-bottom: 2px; }
+        .chassis-member-label .chassis-model { font-weight: bold; color: var(--heading); text-transform: uppercase; }
+        .chassis-member-label .chassis-member { color: var(--text-muted); font-family: monospace; font-size: 0.68rem; }
+        .chassis-tag { font-size: 0.62rem; color: var(--warn-text); background: var(--warn-bg); border-radius: 8px; padding: 0 6px; }
+        .chassis-note { font-size: 0.78rem; color: var(--text-dim); font-style: italic; padding: 4px 0; }
+        .chassis-art { line-height: 0; }
+        svg.chassis-svg { display: block; height: auto; }
+        /* Zoom (window.toggleChassisZoom): the stack scrolls sideways, each member drawn at
+           double width; a compact unit's own % width still scales against the same strip. */
+        .chassis-stack { overflow-x: auto; }
+        #chassis-view.zoomed .chassis-art { width: 220%; }
+        #chassis-view.zoomed .chassis-member-label { position: sticky; left: 0; }
+        .chassis-zoom-btn { width: auto; margin: 0 0 0 auto; padding: 1px 8px; font-size: 0.66rem; font-weight: normal; background: var(--hover-neutral-bg); color: var(--text); border: 1px solid var(--border); }
+        .chassis-zoom-btn:hover { background: var(--border); }
+        .chassis-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; font-size: 0.68rem; color: var(--text-dim); }
+        .chassis-legend span { display: inline-flex; align-items: center; gap: 5px; }
+        .lens-sample { display: inline-block; width: 9px; height: 7px; border: 1px solid var(--text-muted); border-radius: 1px; background: var(--panel-bg); }
+        .lens-sample.green { background: var(--led-green); border-color: var(--led-green); box-shadow: 0 0 4px var(--led-green); }
+        .lens-sample.amber { background: var(--led-amber); border-color: var(--led-amber); box-shadow: 0 0 4px var(--led-amber); }
+
+        svg.chassis-svg .chassis-body { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .5; }
+        svg.chassis-svg .chassis-ear { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .4; stroke-opacity: .7; }
+        /* decorative sheet-metal detail (vents, mounting slots, latches, screws) stays
+           low-contrast so the ports and lenses carry the picture */
+        svg.chassis-svg .ear-slot { fill: var(--chassis-fg); fill-opacity: .28; }
+        svg.chassis-svg .bumper { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .4; }
+        svg.chassis-svg .bumper-fin { stroke: var(--chassis-fg); stroke-width: .35; stroke-opacity: .35; }
+        svg.chassis-svg .vent-hex { fill: var(--chassis-fg); fill-opacity: .18; }
+        svg.chassis-svg .vent-slot { fill: var(--chassis-fg); fill-opacity: .22; }
+        svg.chassis-svg .vent-hole { fill: var(--chassis-fg); fill-opacity: .18; }
+        svg.chassis-svg .solid { fill: var(--chassis-bg); }
+        svg.chassis-svg .lip { stroke: var(--chassis-fg); stroke-width: .3; stroke-opacity: .5; }
+        svg.chassis-svg .lip.thick { stroke-width: 1.2; stroke-opacity: .35; }
+        svg.chassis-svg .screw { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .3; stroke-opacity: .5; }
+        svg.chassis-svg .screw-x { stroke: var(--chassis-fg); stroke-width: .3; stroke-opacity: .5; }
+        svg.chassis-svg .subpanel { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .3; stroke-opacity: .6; }
+        svg.chassis-svg .bay { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .4; stroke-opacity: .6; }
+        svg.chassis-svg .handle { fill: var(--chassis-fg); fill-opacity: .3; }
+        svg.chassis-svg .brand .wordmark { fill: var(--chassis-fg); font-size: 5.2px; font-weight: 700; letter-spacing: -.02em; }
+        svg.chassis-svg .brand .wordmark-sub { fill: var(--chassis-fg); font-size: 1.35px; letter-spacing: .14em; font-weight: 500; }
+        svg.chassis-svg .junos-text { fill: var(--chassis-fg); font-size: 2.6px; font-weight: 600; letter-spacing: .02em; }
+        svg.chassis-svg .junos-sub { fill: var(--chassis-fg); font-size: 1.1px; letter-spacing: .08em; }
+        svg.chassis-svg .model-text { fill: var(--chassis-fg); font-size: 2.6px; font-weight: 600; }
+        svg.chassis-svg .model-text.big { font-size: 3.1px; }
+        svg.chassis-svg .tiny-label { fill: var(--chassis-fg); font-size: 1.6px; letter-spacing: .02em; }
+        svg.chassis-svg .port-num { fill: var(--chassis-fg); font-size: 1.7px; font-family: monospace; }
+        svg.chassis-svg .port-num.odd { font-size: 1.4px; }
+        svg.chassis-svg .corner-mark { fill: none; stroke: var(--chassis-fg); stroke-width: .3; stroke-opacity: .55; }
+        svg.chassis-svg .warn { fill: none; stroke: var(--chassis-fg); stroke-width: .35; stroke-opacity: .55; }
+        svg.chassis-svg .bracket { fill: none; stroke: var(--chassis-fg); stroke-width: .25; stroke-opacity: .55; }
+        svg.chassis-svg .block-frame { fill: none; stroke: var(--chassis-fg); stroke-width: .3; }
+        svg.chassis-svg .block-frame.solid { fill: var(--chassis-bg); }
+        svg.chassis-svg .block-frame.mgig { stroke-width: .9; }
+        svg.chassis-svg .port-body { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .32; cursor: pointer; }
+        svg.chassis-svg .port-el:hover .port-body, svg.chassis-svg .port-el:hover .uplink-body { stroke-width: .7; }
+        svg.chassis-svg .port-body.selected, svg.chassis-svg .uplink-body.selected { stroke: var(--accent); stroke-width: .9; fill: var(--accent); fill-opacity: .22; }
+        svg.chassis-svg .port-el.port-absent { cursor: default; opacity: .4; }
+        svg.chassis-svg .port-contacts { stroke: var(--chassis-fg); stroke-width: .22; pointer-events: none; }
+        svg.chassis-svg .port-static { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .32; }
+        svg.chassis-svg .uplink-body { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .32; cursor: pointer; }
+        svg.chassis-svg .uplink-inner { fill: none; stroke: var(--chassis-fg); stroke-width: .22; pointer-events: none; }
+        svg.chassis-svg .uplink-bail { fill: var(--chassis-fg); pointer-events: none; }
+        svg.chassis-svg .uplink-static { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .32; }
+        svg.chassis-svg .sfp-frame { fill: none; stroke: var(--chassis-fg); stroke-width: .35; }
+        svg.chassis-svg .sfp-latch { fill: var(--chassis-fg); fill-opacity: .3; }
+        /* LED lens: LEFT = link (green when up), RIGHT = activity (green <=72 h, amber <=6 mo, unlit). Static, no blinking. */
+        svg.chassis-svg .light-base { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .22; pointer-events: none; }
+        svg.chassis-svg .light-glow, svg.chassis-svg .light-core { opacity: 0; pointer-events: none; }
+        svg.chassis-svg .light-glyph.green .light-glow { fill: var(--led-green); opacity: .75; }
+        svg.chassis-svg .light-glyph.green .light-core { fill: var(--led-green-core); opacity: 1; }
+        svg.chassis-svg .light-glyph.amber .light-glow { fill: var(--led-amber); opacity: .75; }
+        svg.chassis-svg .light-glyph.amber .light-core { fill: var(--led-amber-core); opacity: 1; }
+        svg.chassis-svg .lcd-screen { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .35; }
+        svg.chassis-svg .lcd-text { fill: var(--chassis-fg); font-size: 1.7px; font-family: monospace; }
+        svg.chassis-svg .btn { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .35; }
+        svg.chassis-svg .btn-glyph { stroke: var(--chassis-fg); stroke-width: .35; fill: none; }
+        svg.chassis-svg .usb-port { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .3; }
+        svg.chassis-svg .usb-inner { fill: var(--chassis-fg); }
+        svg.chassis-svg .coax { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .35; }
+
+        /* Hover tooltip for chassis jacks (chassis.js) - interface name first, state/description under */
+        .chassis-tooltip { position: fixed; z-index: 10000; pointer-events: none; background: var(--primary); color: white; padding: 5px 9px; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.3); font-size: 0.74rem; line-height: 1.35; white-space: nowrap; display: flex; flex-direction: column; }
+        /* display:flex above would otherwise beat the browser's [hidden]{display:none} and leave
+           an empty pill parked at the page origin whenever no jack is hovered. */
+        .chassis-tooltip[hidden] { display: none; }
+        .chassis-tooltip b { font-family: monospace; font-size: 0.86rem; }
+        .chassis-tooltip span { opacity: .85; }
+
+        /* Port row <-> chassis jack selection (window.selectInterfacePort, drawer.js) */
+        #interfaces-table tr.intf-row { cursor: pointer; }
+        #interfaces-table tr.intf-row:hover td { background: var(--subtle-bg); }
+        #interfaces-table tr.intf-row.selected td { background: var(--hover-accent-bg); }
+        #interfaces-table tr.intf-row.selected td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+        #interfaces-table td { vertical-align: middle; }
+        #interfaces-table tr.intf-row td:first-child, #interfaces-table tr.intf-row .badge { white-space: nowrap; }
+        /* .highlight (search match) paints the <tr>, but client-subrow cells carry their own
+           background - repeat the highlight on the cells so the forced dark text stays legible. */
+        #interfaces-table tr.client-subrow.highlight td { background: #ffff99 !important; }
+        .intf-chev { display: inline-block; width: 12px; color: var(--text-dim); font-size: 0.7rem; transition: transform 0.15s; }
+        tr.intf-row.selected .intf-chev { transform: rotate(90deg); color: var(--accent); }
+        .intf-type { white-space: nowrap; }
+        .intf-type .badge { margin-right: 6px; }
+        .intf-type-detail { color: var(--text-dim); font-size: 0.75rem; }
+        .intf-remote { font-family: monospace; color: var(--text-dim); font-size: 0.72rem; }
+        .intf-mac { font-family: monospace; font-size: 0.74rem; color: var(--text-muted); margin-right: 6px; }
+        .intf-more { font-size: 0.7rem; color: var(--accent); }
+        .intf-desc { font-style: italic; color: var(--text-muted); max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        /* Expanded detail strip under the selected port row */
+        tr.intf-detail td { padding: 8px 12px 10px 28px; background: var(--hover-accent-bg); border-left: 3px solid var(--accent); border-bottom: 1px solid var(--border); }
+        .intf-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px 18px; font-size: 0.8rem; }
+        .intf-detail-grid label { display: block; font-size: 0.64rem; text-transform: uppercase; letter-spacing: 0.03em; color: var(--text-dim); margin-bottom: 2px; }
+        .intf-detail-wide { grid-column: 1 / -1; }
 
         .toggle-container { padding: 10px 15px; background: var(--subtle-bg); border-bottom: 1px solid var(--border); font-size: 0.85rem; display: flex; align-items: center; }
         .toggle-container input { width: auto; margin: 0 10px 0 0; }
@@ -514,17 +717,17 @@
     </div>
 
     <!-- LEFT PANEL: Controls -->
-    <div id="left-panel">
-        <div id="left-panel-body">
-        <div class="sidebar-tabs">
-            <div class="sidebar-tab active" id="btn-sidebar-tab-load" tabindex="0" role="tab" aria-selected="true" onclick="window.switchSidebarTab('sidebar-tab-load')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-load'))">Load File</div>
-            <!-- aria-selected toggled by window.switchSidebarTab (app.js) -->
-            <div class="sidebar-tab" id="btn-sidebar-tab-search" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-search')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-search'))">Search</div>
-            <div class="sidebar-tab" id="btn-sidebar-tab-settings" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-settings')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-settings'))">Settings</div>
-            <div class="sidebar-tab" id="btn-sidebar-tab-analysis" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-analysis')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-analysis'))">Analysis Dashboard</div>
+    <!-- SIDE PANEL (left): tool tabs on top, device drawer below; drag #side-panel-handle to resize -->
+    <div id="side-panel">
+        <!-- Tool tabs (formerly the left sidebar's vertical tabs): Load File / Search / Settings.
+             window.switchSidebarTab (app.js) toggles .active on these and on the panes below;
+             the ids are unchanged so every caller and localStorage key still lines up. -->
+        <div class="tabs" id="tool-tabs">
+            <div class="tab active" id="btn-sidebar-tab-load" tabindex="0" role="tab" aria-selected="true" onclick="window.switchSidebarTab('sidebar-tab-load')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-load'))">Load File</div>
+            <div class="tab" id="btn-sidebar-tab-search" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-search')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-search'))">Search</div>
+            <div class="tab" id="btn-sidebar-tab-settings" tabindex="0" role="tab" aria-selected="false" onclick="window.switchSidebarTab('sidebar-tab-settings')" onkeydown="window.activateOnKey(event, () => window.switchSidebarTab('sidebar-tab-settings'))">Settings</div>
         </div>
-
-        <div id="left-panel-content">
+        <div id="tool-panel">
         <div id="sidebar-tab-load" class="sidebar-tab-content active">
             <input type="file" id="jsonUpload" accept=".json,.enc,.json.enc" multiple>
             <button id="loadBtn" onclick="window.forceLoadFile()">Render Topology</button>
@@ -620,154 +823,13 @@
                 <button type="button" id="settings-save-btn" onclick="window.saveSettingsPanel()">Save</button>
             </div>
         </div>
-
-        <div id="sidebar-tab-analysis" class="sidebar-tab-content">
-            <div class="tabs wrap">
-                <div class="analysis-tab active" onclick="window.switchAnalysisTab('analysis-tab-fleethealth')" id="btn-analysis-tab-fleethealth">Fleet Health</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-newdevices')" id="btn-analysis-tab-newdevices">New Devices</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-trends')" id="btn-analysis-tab-trends">Trends</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-accounts')" id="btn-analysis-tab-accounts">Local Accounts</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" id="btn-analysis-tab-topodiff">Topology Diff</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-ipspace')" id="btn-analysis-tab-ipspace">IP Space</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-reliability')" id="btn-analysis-tab-reliability">Reliability</div>
-            </div>
-            <div id="analysis-tab-fleethealth" class="analysis-tab-content active">
-                <div id="fleet-health-content"></div>
-            </div>
-            <div id="analysis-tab-newdevices" class="analysis-tab-content">
-                <table id="new-devices-table">
-                    <thead><tr><th>First Seen</th><th>MAC</th><th>Vendor</th><th>Last IP</th><th>Last Switch / Port</th><th>Last Seen</th></tr></thead>
-                    <tbody id="new-devices-tbody"></tbody>
-                </table>
-            </div>
-            <div id="analysis-tab-trends" class="analysis-tab-content">
-                <div class="analysis-trend-controls">
-                    <label>Metric:
-                        <select id="trendMetricSelect" onchange="window.renderTrendChart()">
-                            <option value="cpu">RE CPU %</option>
-                            <option value="mem">RE Memory %</option>
-                            <option value="alarms">Alarm Count</option>
-                            <option value="clients">Client Count</option>
-                        </select>
-                    </label>
-                    <label>Device:
-                        <select id="trendDeviceSelect" onchange="window.renderTrendChart()"></select>
-                    </label>
-                </div>
-                <canvas id="trendCanvas" width="1000" height="420"></canvas>
-            </div>
-
-            <div id="analysis-tab-accounts" class="analysis-tab-content">
-                <div class="fleet-stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 16px;">
-                    <div class="fleet-stat-card drillable warn" onclick="window.drillDownStat('noauth')"><div class="stat-value" id="accounts-noauth-count">0</div><div class="stat-label">No Centralized Auth</div></div>
-                    <div class="fleet-stat-card"><div class="stat-value" id="accounts-total-count">0</div><div class="stat-label">Local Accounts (Fleet)</div></div>
-                </div>
-                <p style="font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px;">Every local account found in captured configs, for human review - usernames are never auto-flagged as suspicious. The one objective check made here is whether centralized RADIUS/TACACS+ authentication is configured at all.</p>
-                <table id="accounts-table">
-                    <thead><tr><th>Username</th><th>Class</th><th>Centralized Auth</th><th>Switches</th></tr></thead>
-                    <tbody id="accounts-tbody"></tbody>
-                </table>
-            </div>
-
-            <div id="analysis-tab-topodiff" class="analysis-tab-content">
-                <div class="analysis-trend-controls">
-                    <label>From: <select id="topoDiffFromSelect" onchange="window.renderTopologyDiff()"></select></label>
-                    <label>To: <select id="topoDiffToSelect" onchange="window.renderTopologyDiff()"></select></label>
-                </div>
-                <div id="topodiff-content"></div>
-            </div>
-
-            <div id="analysis-tab-ipspace" class="analysis-tab-content">
-                <p style="font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px;">Subnet boundaries are read opportunistically from captured configs (IRB/L3-gateway lines) - only reliable if a device with that VLAN's L3 gateway was actually crawled. VLANs with no discovered boundary still show a live IP count with no fabricated percentage.</p>
-                <table id="ipspace-table">
-                    <thead><tr><th>VLAN</th><th>Subnet</th><th>Used / Usable</th><th>Utilization</th></tr></thead>
-                    <tbody id="ipspace-tbody"></tbody>
-                </table>
-            </div>
-
-            <div id="analysis-tab-reliability" class="analysis-tab-content">
-                <div class="analysis-trend-controls">
-                    <label>Device: <select id="reliabilityDeviceSelect" onchange="window.renderReliabilityHeatmap()"></select></label>
-                </div>
-                <div id="reliability-heatmap"></div>
-            </div>
         </div>
 
-        <div class="control-group" id="legend-group" style="display:none; border-bottom: none; margin-bottom: 0; padding-top: 6px; border-top: 1px solid var(--border);">
-            <h2>Legend</h2>
-            <div class="legend-item"><span class="legend-swatch" style="background:#97C2FC; border-color:#2B7CE9;"></span> Scanned switch</div>
-            <div class="legend-item"><span class="legend-swatch" style="background:#D2E5FF; border-color:#2B7CE9; border-radius:50%;"></span> Scanned virtual chassis / stack</div>
-            <div class="legend-item"><span class="legend-swatch" style="background:#E8E8E8; border-color:#B0B0B0;"></span> Unscanned neighbor</div>
-            <div class="legend-item"><span class="legend-swatch" style="background:#fdf6e3; border-color:#d9b34e; border-style:dashed;"></span> Collapsed group (click to expand)</div>
-        </div>
-        </div>
-        </div>
-        <div id="panel-handle" onclick="window.toggleLeftPanel(event)" title="Collapse/expand panel" aria-label="Collapse/expand panel">
-            <svg id="panelToggleIcon" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <polyline points="10,2 4,8 10,14"></polyline>
-            </svg>
-        </div>
-    </div>
 
-    <!-- CENTER PANEL: Diagram / Map -->
-    <div id="center-panel">
-        <div id="center-view-toggle" class="tabs" style="flex:0 0 auto;">
-            <div class="tab active" id="btn-center-view-diagram" tabindex="0" role="button" aria-pressed="true" onclick="window.switchCenterView('diagram')" onkeydown="window.activateOnKey(event, () => window.switchCenterView('diagram'))">Diagram</div>
-            <div class="tab" id="btn-center-view-map" tabindex="0" role="button" aria-pressed="false" onclick="window.switchCenterView('map')" onkeydown="window.activateOnKey(event, () => window.switchCenterView('map'))">Map</div>
-        </div>
-        <div id="loadingBar">
-            <div class="progress-border"><div id="progress-fill" class="progress-fill"></div></div>
-            <div id="progress-text" style="margin-top: 10px; font-weight: bold; color: var(--text);">Initializing Engine...</div>
-        </div>
-        <div id="mynetwork"></div>
-        <div id="mapview" style="display:none; position:absolute; inset:0; top:40px;"></div>
-        <!-- Deliberately NOT theme-var'd (background/border/text all pinned light literals,
-             like .map-marker-label) - this panel floats over the Map view's tiles, which stay
-             light in both themes (see map.js's header comment), so it must too or a dark
-             panel would clash with the light map underneath it. -->
-        <div id="mapUnplacedPanel" style="display:none; position:absolute; top:50px; left:10px; z-index:1001; background:white; color:#333; border:1px solid #e0e0e0; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.15); max-width:320px; max-height:60vh; overflow-y:auto;">
-            <div style="padding:8px 12px; font-weight:bold; font-size:0.85rem; border-bottom:1px solid #e0e0e0; display:flex; justify-content:space-between; align-items:center; gap:8px; cursor:pointer;" onclick="window.toggleUnplacedPanel()">
-                <span id="mapUnplacedCount">0 devices with no location set</span>
-                <button type="button" id="mapUnplacedExportBtn" style="display:none; width:auto; margin:0; padding:3px 8px; font-size:0.68rem; font-weight:normal;" title="Export this list (hostname, serial, model, etc.) as a CSV" onclick="event.stopPropagation(); window.exportUnplacedDevicesCsv();">Export CSV</button>
-                <span id="mapUnplacedToggleIcon">&#9660;</span>
-            </div>
-            <div id="mapUnplacedList" style="padding:4px 0;"></div>
-        </div>
-        <div id="mapStatusNote" style="display:none; position:absolute; bottom:16px; left:16px; z-index:900; background:rgba(20,22,26,0.9); color:white; padding:8px 14px; border-radius:6px; font-size:0.82rem;"></div>
-    </div>
-
-    <!-- Location Editor (map view - see window.openLocationEditor) -->
-    <div id="location-editor-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.12); z-index:9999; justify-content:center; align-items:center; pointer-events:none;">
-        <div style="background:var(--panel-bg); width:360px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); overflow:hidden; pointer-events:auto;">
-            <div class="drawer-header"><h2 id="editorDeviceLabel">Set Location</h2></div>
-            <div style="padding:18px;">
-                <p style="font-size:0.82rem; color:var(--text-muted); margin:0 0 12px;">Click a spot on the map to place this device, or type coordinates directly below, then fill in the details.</p>
-                <!-- type="text", no inputmode, not type="number": longitude can be negative,
-                     but type="number" and inputmode="decimal" virtual keypads both omit the
-                     minus key (the HTML spec defines "decimal" as non-negative). Plain text
-                     is the only reliable option. `pattern` is just a hint; real validation is
-                     commitLocationEdit's parseFloat/isFinite check. -->
-                <label style="font-size:0.8rem; font-weight:bold;">Latitude</label>
-                <input type="text" pattern="-?\d*\.?\d*" id="editorLat" placeholder="e.g. 47.653500">
-                <label style="font-size:0.8rem; font-weight:bold;">Longitude</label>
-                <input type="text" pattern="-?\d*\.?\d*" id="editorLng" placeholder="e.g. -122.306800">
-                <label style="font-size:0.8rem; font-weight:bold;">Building</label>
-                <input type="text" id="editorBuilding" placeholder="Building name">
-                <label style="font-size:0.8rem; font-weight:bold;">Room</label>
-                <input type="text" id="editorRoom" placeholder="Room / closet">
-                <label style="font-size:0.8rem; font-weight:bold;">Notes</label>
-                <input type="text" id="editorNotes" placeholder="Notes">
-                <div style="display:flex; gap:10px; margin-top:4px;">
-                    <button type="button" id="editorCancelBtn" style="background:var(--hover-neutral-bg); color:var(--text);" onclick="window.closeLocationEditor()">Cancel</button>
-                    <button type="button" id="editorSaveBtn" onclick="window.commitLocationEdit()">Set Pin</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- RIGHT PANEL: Data Sidebar -->
-    <div id="right-panel-handle" onmousedown="window.startRightPanelResize(event)" title="Drag to resize"></div>
-    <div id="right-panel">
+        <div id="tool-divider" onmousedown="window.startToolPanelResize(event)" title="Drag to resize"></div>
+        <!-- Device drawer: hidden until a node is opened (window.openRightDrawer / closeDrawer). -->
+        <div id="device-empty">Click a device on the diagram or map, or pick a search result, to see its details here.</div>
+        <div id="device-drawer" style="display:none;">
         <div class="drawer-header">
             <div class="drawer-header-top">
                 <h2 id="drawer-title">Switch Details</h2>
@@ -822,6 +884,9 @@
         </div>
 
         <div id="tab-interfaces" class="tab-content">
+            <!-- Front panel(s) of this device's stack members, filled by window.renderChassisView
+                 (chassis.js) from renderInterfaces. Click a jack to select its row below. -->
+            <div id="chassis-view"></div>
             <div class="toggle-container">
                 <input type="checkbox" id="hideDownPorts" checked onchange="window.renderInterfaces()">
                 <label for="hideDownPorts" style="cursor: pointer; font-weight: bold; flex-grow:1;">Hide Inactive Ports (Link Down)</label>
@@ -832,12 +897,12 @@
                 <!-- data-sort-key matches a field window.sortInterfacesBy/window.INTERFACE_SORT_COMPARATORS
                      (drawer.js) knows how to compare; clicking toggles asc/desc, see window.sortInterfacesBy -->
                 <thead><tr>
+                    <!-- Collapsed columns only; STP / PoE / inactivity / neighbour live in the
+                         expanded detail strip of the selected row (renderInterfaces). -->
                     <th class="sortable" data-sort-key="port" onclick="window.sortInterfacesBy('port')">Port<span class="sort-arrow" id="sort-arrow-port"></span></th>
-                    <th class="sortable" data-sort-key="state" onclick="window.sortInterfacesBy('state')">State<span class="sort-arrow" id="sort-arrow-state"></span></th>
-                    <th class="sortable" data-sort-key="stp" onclick="window.sortInterfacesBy('stp')">STP<span class="sort-arrow" id="sort-arrow-stp"></span></th>
-                    <th class="sortable" data-sort-key="poe" onclick="window.sortInterfacesBy('poe')">PoE<span class="sort-arrow" id="sort-arrow-poe"></span></th>
+                    <th class="sortable" data-sort-key="type" onclick="window.sortInterfacesBy('type')">Type<span class="sort-arrow" id="sort-arrow-type"></span></th>
+                    <th class="sortable" data-sort-key="state" onclick="window.sortInterfacesBy('state')">Status<span class="sort-arrow" id="sort-arrow-state"></span></th>
                     <th class="sortable" data-sort-key="description" onclick="window.sortInterfacesBy('description')">Description<span class="sort-arrow" id="sort-arrow-description"></span></th>
-                    <th class="sortable" data-sort-key="inactiveFor" onclick="window.sortInterfacesBy('inactiveFor')">Inactive For<span class="sort-arrow" id="sort-arrow-inactiveFor"></span></th>
                 </tr></thead>
                 <tbody id="interfaces-tbody"></tbody>
             </table>
@@ -861,6 +926,158 @@
             <div id="config-diff-content" style="display:none;"></div>
             <pre id="config-content" style="margin:0; padding:15px 20px; font-family:monospace; font-size:0.78rem; white-space:pre-wrap; word-break:break-word;"></pre>
         </div>
+        </div>
+    </div>
+
+    <div id="side-panel-handle" onmousedown="window.startSidePanelResize(event)" title="Drag to resize"></div>
+
+    <!-- CENTER PANEL: Diagram / Map -->
+    <div id="center-panel" class="view-diagram">
+        <div id="center-view-toggle" class="tabs" style="flex:0 0 auto;">
+            <div class="tab active" id="btn-center-view-diagram" tabindex="0" role="button" aria-pressed="true" onclick="window.switchCenterView('diagram')" onkeydown="window.activateOnKey(event, () => window.switchCenterView('diagram'))">Diagram</div>
+            <div class="tab" id="btn-center-view-map" tabindex="0" role="button" aria-pressed="false" onclick="window.switchCenterView('map')" onkeydown="window.activateOnKey(event, () => window.switchCenterView('map'))">Map</div>
+            <div class="tab" id="btn-center-view-analysis" tabindex="0" role="button" aria-pressed="false" onclick="window.switchCenterView('analysis')" onkeydown="window.activateOnKey(event, () => window.switchCenterView('analysis'))">Analysis Dashboard</div>
+        </div>
+        <div id="loadingBar">
+            <div class="progress-border"><div id="progress-fill" class="progress-fill"></div></div>
+            <div id="progress-text" style="margin-top: 10px; font-weight: bold; color: var(--text);">Initializing Engine...</div>
+        </div>
+        <div id="mynetwork"></div>
+        <div id="mapview" style="display:none; position:absolute; inset:0; top:40px;"></div>
+        <!-- Analysis Dashboard - the third centre view beside Diagram/Map (window.switchCenterView, map.js),
+             refreshed by dashboard.js's refreshAnalysisDashboard on activation and on snapshot switch. It
+             lived in the left sidebar before; its tables and charts need the centre column's width. -->
+        <div id="analysisview" style="display:none;">
+            <div class="tabs wrap">
+                <div class="analysis-tab active" onclick="window.switchAnalysisTab('analysis-tab-fleethealth')" id="btn-analysis-tab-fleethealth">Fleet Health</div>
+                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-newdevices')" id="btn-analysis-tab-newdevices">New Devices</div>
+                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-trends')" id="btn-analysis-tab-trends">Trends</div>
+                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-accounts')" id="btn-analysis-tab-accounts">Local Accounts</div>
+                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" id="btn-analysis-tab-topodiff">Topology Diff</div>
+                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-ipspace')" id="btn-analysis-tab-ipspace">IP Space</div>
+                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-reliability')" id="btn-analysis-tab-reliability">Reliability</div>
+            </div>
+            <div id="analysis-tab-fleethealth" class="analysis-tab-content active">
+                <div id="fleet-health-content"></div>
+            </div>
+            <div id="analysis-tab-newdevices" class="analysis-tab-content">
+                <table id="new-devices-table">
+                    <thead><tr><th>First Seen</th><th>MAC</th><th>Vendor</th><th>Last IP</th><th>Last Switch / Port</th><th>Last Seen</th></tr></thead>
+                    <tbody id="new-devices-tbody"></tbody>
+                </table>
+            </div>
+            <div id="analysis-tab-trends" class="analysis-tab-content">
+                <div class="analysis-trend-controls">
+                    <label>Metric:
+                        <select id="trendMetricSelect" onchange="window.renderTrendChart()">
+                            <option value="cpu">RE CPU %</option>
+                            <option value="mem">RE Memory %</option>
+                            <option value="alarms">Alarm Count</option>
+                            <option value="clients">Client Count</option>
+                        </select>
+                    </label>
+                    <label>Show:
+                        <select id="trendModeSelect" onchange="window.renderTrendChart()">
+                            <option value="top">8 devices with the highest peak</option>
+                            <option value="single">One device</option>
+                        </select>
+                    </label>
+                    <label>Device:
+                        <select id="trendDeviceSelect" onchange="window.renderTrendChart()"></select>
+                    </label>
+                </div>
+                <!-- SVG charts written by window.renderTrendChart (dashboard.js): small multiples
+                     against the fleet median, or one large chart with reboot markers -->
+                <div id="trendChart"></div>
+            </div>
+
+            <div id="analysis-tab-accounts" class="analysis-tab-content">
+                <div class="fleet-stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); margin-bottom: 16px;">
+                    <div class="fleet-stat-card drillable warn" onclick="window.drillDownStat('noauth')"><div class="stat-value" id="accounts-noauth-count">0</div><div class="stat-label">No Centralized Auth</div></div>
+                    <div class="fleet-stat-card"><div class="stat-value" id="accounts-total-count">0</div><div class="stat-label">Local Accounts (Fleet)</div></div>
+                </div>
+                <p style="font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px;">Every local account found in captured configs, for human review - usernames are never auto-flagged as suspicious. The one objective check made here is whether centralized RADIUS/TACACS+ authentication is configured at all.</p>
+                <table id="accounts-table">
+                    <thead><tr><th>Username</th><th>Class</th><th>Centralized Auth</th><th>Switches</th></tr></thead>
+                    <tbody id="accounts-tbody"></tbody>
+                </table>
+            </div>
+
+            <div id="analysis-tab-topodiff" class="analysis-tab-content">
+                <div class="analysis-trend-controls">
+                    <label>From: <select id="topoDiffFromSelect" onchange="window.renderTopologyDiff()"></select></label>
+                    <label>To: <select id="topoDiffToSelect" onchange="window.renderTopologyDiff()"></select></label>
+                </div>
+                <div id="topodiff-content"></div>
+            </div>
+
+            <div id="analysis-tab-ipspace" class="analysis-tab-content">
+                <p style="font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px;">Subnet boundaries are read opportunistically from captured configs (IRB/L3-gateway lines) - only reliable if a device with that VLAN's L3 gateway was actually crawled. VLANs with no discovered boundary still show a live IP count with no fabricated percentage.</p>
+                <table id="ipspace-table">
+                    <thead><tr><th>VLAN</th><th>Subnet</th><th>Used / Usable</th><th>Utilization</th></tr></thead>
+                    <tbody id="ipspace-tbody"></tbody>
+                </table>
+            </div>
+
+            <div id="analysis-tab-reliability" class="analysis-tab-content">
+                <div class="analysis-trend-controls">
+                    <label style="display:inline-flex; align-items:center; gap:6px; cursor:pointer;"><input type="checkbox" id="reliabilityShowQuiet" style="width:auto; margin:0;" onchange="window.renderReliabilityHeatmap()"> Show devices with no alarms or reboots</label>
+                </div>
+                <div id="reliability-heatmap"></div>
+            </div>
+        </div>
+        <!-- Deliberately NOT theme-var'd (background/border/text all pinned light literals,
+             like .map-marker-label) - this panel floats over the Map view's tiles, which stay
+             light in both themes (see map.js's header comment), so it must too or a dark
+             panel would clash with the light map underneath it. -->
+        <div id="mapUnplacedPanel" style="display:none; position:absolute; top:50px; left:10px; z-index:1001; background:white; color:#333; border:1px solid #e0e0e0; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.15); max-width:320px; max-height:60vh; overflow-y:auto;">
+            <div style="padding:8px 12px; font-weight:bold; font-size:0.85rem; border-bottom:1px solid #e0e0e0; display:flex; justify-content:space-between; align-items:center; gap:8px; cursor:pointer;" onclick="window.toggleUnplacedPanel()">
+                <span id="mapUnplacedCount">0 devices with no location set</span>
+                <button type="button" id="mapUnplacedExportBtn" style="display:none; width:auto; margin:0; padding:3px 8px; font-size:0.68rem; font-weight:normal;" title="Export this list (hostname, serial, model, etc.) as a CSV" onclick="event.stopPropagation(); window.exportUnplacedDevicesCsv();">Export CSV</button>
+                <span id="mapUnplacedToggleIcon">&#9660;</span>
+            </div>
+            <div id="mapUnplacedList" style="padding:4px 0;"></div>
+        </div>
+        <!-- Diagram-only overlays (hidden unless #center-panel has .view-diagram, see switchCenterView):
+             node legend (shown by app.js once a topology is loaded) and the pan/zoom/rotate widget. -->
+        <div id="legend-group" class="diagram-overlay" style="display:none;">
+            <h2>Legend</h2>
+            <div class="legend-item"><span class="legend-swatch" style="background:#97C2FC; border-color:#2B7CE9;"></span> Scanned switch</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#D2E5FF; border-color:#2B7CE9; border-radius:50%;"></span> Scanned virtual chassis / stack</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#E8E8E8; border-color:#B0B0B0;"></span> Unscanned neighbor</div>
+            <div class="legend-item"><span class="legend-swatch" style="background:#fdf6e3; border-color:#d9b34e; border-style:dashed;"></span> Collapsed group (click to expand)</div>
+        </div>
+        <div id="diagram-nav" class="diagram-overlay" aria-label="Diagram navigation"></div>
+        <div id="mapStatusNote" style="display:none; position:absolute; bottom:16px; left:16px; z-index:900; background:rgba(20,22,26,0.9); color:white; padding:8px 14px; border-radius:6px; font-size:0.82rem;"></div>
+    </div>
+
+    <!-- Location Editor (map view - see window.openLocationEditor) -->
+    <div id="location-editor-modal" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.12); z-index:9999; justify-content:center; align-items:center; pointer-events:none;">
+        <div style="background:var(--panel-bg); width:360px; border-radius:8px; box-shadow:0 4px 20px rgba(0,0,0,0.3); overflow:hidden; pointer-events:auto;">
+            <div class="drawer-header"><h2 id="editorDeviceLabel">Set Location</h2></div>
+            <div style="padding:18px;">
+                <p style="font-size:0.82rem; color:var(--text-muted); margin:0 0 12px;">Click a spot on the map to place this device, or type coordinates directly below, then fill in the details.</p>
+                <!-- type="text", no inputmode, not type="number": longitude can be negative,
+                     but type="number" and inputmode="decimal" virtual keypads both omit the
+                     minus key (the HTML spec defines "decimal" as non-negative). Plain text
+                     is the only reliable option. `pattern` is just a hint; real validation is
+                     commitLocationEdit's parseFloat/isFinite check. -->
+                <label style="font-size:0.8rem; font-weight:bold;">Latitude</label>
+                <input type="text" pattern="-?\d*\.?\d*" id="editorLat" placeholder="e.g. 47.653500">
+                <label style="font-size:0.8rem; font-weight:bold;">Longitude</label>
+                <input type="text" pattern="-?\d*\.?\d*" id="editorLng" placeholder="e.g. -122.306800">
+                <label style="font-size:0.8rem; font-weight:bold;">Building</label>
+                <input type="text" id="editorBuilding" placeholder="Building name">
+                <label style="font-size:0.8rem; font-weight:bold;">Room</label>
+                <input type="text" id="editorRoom" placeholder="Room / closet">
+                <label style="font-size:0.8rem; font-weight:bold;">Notes</label>
+                <input type="text" id="editorNotes" placeholder="Notes">
+                <div style="display:flex; gap:10px; margin-top:4px;">
+                    <button type="button" id="editorCancelBtn" style="background:var(--hover-neutral-bg); color:var(--text);" onclick="window.closeLocationEditor()">Cancel</button>
+                    <button type="button" id="editorSaveBtn" onclick="window.commitLocationEdit()">Set Pin</button>
+                </div>
+            </div>
+        </div>
     </div>
 
     <!-- Application logic, split into feature files (was one 2500-line app.js). All classic
@@ -876,6 +1093,7 @@
     <script src="graph.js"></script>
     <script src="dashboard.js"></script>
     <script src="search.js"></script>
+    <script src="chassis.js"></script>
     <script src="drawer.js"></script>
     <script src="scan-network.js"></script>
     <script src="vendor/leaflet/leaflet.js"></script>

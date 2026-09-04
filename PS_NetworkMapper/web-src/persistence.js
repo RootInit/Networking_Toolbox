@@ -146,7 +146,7 @@ window.resetSettingsPanel = function() {
     if (typeof window.renderVisibleGraph === 'function' && network) window.renderVisibleGraph();
 };
 
-// --- Multi-Snapshot Analysis: New Devices + Trends (see #sidebar-tab-analysis) ---
+// --- Multi-Snapshot Analysis: New Devices + Trends (see #analysisview / dashboard.js) ---
 
 var DEVICE_HISTORY_STORAGE_KEY = 'ps_networkmapper_device_history_v1';
 

@@ -92,12 +92,12 @@ window.setActiveSnapshot = async function(index) {
 
     // Analysis Dashboard also renders this same topology separately (Fleet Health, New
     // Devices, Trend Chart, etc. - see dashboard.js). Its container elements exist in the
-    // DOM regardless of which sidebar tab is active (index.html just toggles a CSS class),
-    // so the guards inside those render functions don't skip real work when the tab is
-    // hidden - only refresh here if Analysis is the tab actually showing. switchSidebarTab
-    // (below) already refreshes on activation, so a hidden dashboard is still fresh the
-    // instant the user opens it.
-    if (activeSidebarTab === 'sidebar-tab-analysis') window.refreshAnalysisDashboard();
+    // DOM regardless of which centre view is showing (map.js's switchCenterView just toggles
+    // display), so the guards inside those render functions don't skip real work when it's
+    // hidden - only refresh here if Analysis is the view actually showing. switchCenterView
+    // already refreshes on activation, so a hidden dashboard is still fresh the instant the
+    // user opens it.
+    if (activeCenterView === 'analysis') window.refreshAnalysisDashboard();
 };
 
 // Shows the snapshot picker only when more than one snapshot is loaded.
@@ -183,30 +183,25 @@ window.getSessionEncryptionPassword = function() {
     return sessionPasswordPromise;
 };
 
-window.toggleLeftPanel = function(e) {
-    if (e) e.stopPropagation();
-    document.getElementById('left-panel').classList.toggle('collapsed');
-};
 
-// Drag-resize for #right-panel. vis-network picks up the resulting #center-panel resize
+// Drag-resize for #side-panel. vis-network picks up the resulting #center-panel resize
 // on its own, but Leaflet does not self-observe its container, so Map view needs an
 // explicit invalidateSize() call while dragging or its tiles freeze at the pre-drag size.
-window.startRightPanelResize = function(e) {
+window.startSidePanelResize = function(e) {
     e.preventDefault();
-    var panel = document.getElementById('right-panel');
-    var handle = document.getElementById('right-panel-handle');
+    var panel = document.getElementById('side-panel');
+    var handle = document.getElementById('side-panel-handle');
     var startX = e.clientX;
     var startWidth = panel.getBoundingClientRect().width;
-    document.body.classList.add('resizing-right-panel');
+    document.body.classList.add('resizing-side-panel');
     handle.classList.add('dragging');
 
     function onMove(moveEvent) {
-        // Dragging the left edge of a right-docked panel: leftward movement grows it,
-        // hence the negation.
+        // Dragging the right edge of a left-docked panel: rightward movement grows it.
         var dx = moveEvent.clientX - startX;
-        var newWidth = startWidth - dx;
+        var newWidth = startWidth + dx;
         var maxWidth = window.innerWidth * 0.9;
-        newWidth = Math.max(280, Math.min(maxWidth, newWidth));
+        newWidth = Math.max(320, Math.min(maxWidth, newWidth));
         panel.style.width = newWidth + 'px';
 
         if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
@@ -215,11 +210,11 @@ window.startRightPanelResize = function(e) {
     function onUp() {
         document.removeEventListener('mousemove', onMove);
         document.removeEventListener('mouseup', onUp);
-        document.body.classList.remove('resizing-right-panel');
+        document.body.classList.remove('resizing-side-panel');
         handle.classList.remove('dragging');
         if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
         if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
-        try { localStorage.setItem('rightPanelWidth', String(panel.getBoundingClientRect().width)); } catch (err) {}
+        try { localStorage.setItem('sidePanelWidth', String(panel.getBoundingClientRect().width)); } catch (err) {}
     }
 
     document.addEventListener('mousemove', onMove);
@@ -228,11 +223,51 @@ window.startRightPanelResize = function(e) {
 
 // Restores a previously dragged width on load - a display preference, not part of
 // Configuration.json's saved state, so a plain localStorage read.
-(function restoreRightPanelWidth() {
+// Drag the divider between the tool pane (Load File / Search / Settings) and the device
+// area. Until dragged, the pane sizes to its content (capped by CSS); after the first drag it
+// holds the dragged height (#tool-panel.sized) and remembers it across reloads.
+window.startToolPanelResize = function(e) {
+    e.preventDefault();
+    var pane = document.getElementById('tool-panel');
+    var divider = document.getElementById('tool-divider');
+    var startY = e.clientY;
+    var startHeight = pane.getBoundingClientRect().height;
+    document.body.classList.add('resizing-tool-panel');
+    divider.classList.add('dragging');
+
+    function onMove(moveEvent) {
+        var panelHeight = document.getElementById('side-panel').getBoundingClientRect().height;
+        var newHeight = Math.max(0, Math.min(panelHeight - 160, startHeight + (moveEvent.clientY - startY)));
+        pane.classList.add('sized');
+        pane.style.height = newHeight + 'px';
+    }
+    function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.classList.remove('resizing-tool-panel');
+        divider.classList.remove('dragging');
+        try { localStorage.setItem('toolPanelHeight', String(pane.getBoundingClientRect().height)); } catch (err) {}
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+};
+
+(function restoreToolPanelHeight() {
     try {
-        var saved = parseFloat(localStorage.getItem('rightPanelWidth'));
+        var saved = parseFloat(localStorage.getItem('toolPanelHeight'));
+        if (Number.isFinite(saved) && saved >= 0) {
+            var pane = document.getElementById('tool-panel');
+            pane.classList.add('sized');
+            pane.style.height = Math.min(saved, window.innerHeight - 160) + 'px';
+        }
+    } catch (err) {}
+})();
+
+(function restoreSidePanelWidth() {
+    try {
+        var saved = parseFloat(localStorage.getItem('sidePanelWidth'));
         if (Number.isFinite(saved) && saved >= 280) {
-            document.getElementById('right-panel').style.width = saved + 'px';
+            document.getElementById('side-panel').style.width = saved + 'px';
         }
     } catch (err) {}
 })();
@@ -248,17 +283,16 @@ window.addEventListener('resize', function() {
     }, 150);
 });
 
-// Sidebar tabs. Panes stay in the DOM when hidden (display:none, not removed), so
+// Tool tabs at the top of the right panel (Load File / Search / Settings). Panes stay in the DOM when hidden (display:none, not removed), so
 // getElementById-based reads elsewhere (getClusterThreshold, getLayoutSettings) work
-// regardless of which tab is active. Analysis Dashboard widens the panel since its
-// tables/charts don't fit the 320px other tabs use.
+// regardless of which tab is active. (The Analysis Dashboard is a centre view, not a
+// sidebar tab - see map.js's switchCenterView.)
 window.switchSidebarTab = async function(tabId) {
     document.querySelectorAll('.sidebar-tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.sidebar-tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
+    document.querySelectorAll('#tool-tabs .tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
     document.getElementById(tabId).classList.add('active');
     document.getElementById('btn-' + tabId).classList.add('active');
     document.getElementById('btn-' + tabId).setAttribute('aria-selected', 'true');
-    document.getElementById('left-panel').classList.toggle('wide-panel', tabId === 'sidebar-tab-analysis');
     activeSidebarTab = tabId;
 
     if (tabId === 'sidebar-tab-settings') {
@@ -269,7 +303,6 @@ window.switchSidebarTab = async function(tabId) {
         await window.ensureConfigLoaded();
         window.populateSettingsInputs();
     }
-    if (tabId === 'sidebar-tab-analysis') window.refreshAnalysisDashboard();
 };
 
 // 1. File Loading & Parsing

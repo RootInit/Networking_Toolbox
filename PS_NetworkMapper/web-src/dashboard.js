@@ -1,4 +1,5 @@
-// Analysis Dashboard (#sidebar-tab-analysis): Fleet Health, New Devices, Trends, Local
+// Analysis Dashboard (#analysisview, the third centre view beside Diagram/Map - see map.js's
+// switchCenterView): Fleet Health, New Devices, Trends, Local
 // Accounts, Topology Diff, IP Space, Reliability - plus stat-card drill-down into a
 // search.js results list. Depends on globals from app.js/persistence.js/utils.js/search.js.
 
@@ -13,7 +14,6 @@ window.refreshAnalysisDashboard = function() {
     window.populateTopologyDiffSelects();
     window.renderTopologyDiff();
     window.renderIpSpaceUtilization();
-    window.populateReliabilityDeviceSelect();
     window.renderReliabilityHeatmap();
 };
 
@@ -29,6 +29,74 @@ window.switchAnalysisTab = function(tabId) {
     if (tabId === 'analysis-tab-ipspace') window.renderIpSpaceUtilization();
     if (tabId === 'analysis-tab-reliability') window.renderReliabilityHeatmap();
 };
+
+
+// --- Shared inline graphics for the dashboard (plain SVG/HTML strings, no library) ---
+
+// Severity tier for a value against warn/critical thresholds - one vocabulary for every
+// bar, band and badge on the dashboard: 'ok' | 'warn' | 'crit'.
+function severityTier(value, warn, critical) {
+    return value >= critical ? 'crit' : (value >= warn ? 'warn' : 'ok');
+}
+var SEVERITY_WORD = { ok: 'ok', warn: 'warning', crit: 'critical' };
+
+// Horizontal bar with the value printed beside it. `pct` is the fill (0-100); `label` is the
+// text shown; `tier` picks the fill colour. Used by the Fleet Health top-N lists and the
+// IP Space table so "how full" reads at a glance instead of from a number.
+function inlineBar(pct, label, tier, title) {
+    var clamped = Math.max(0, Math.min(100, pct || 0));
+    return `<span class="inline-bar" title="${esc(title || label)}"><span class="inline-bar-track"><span class="inline-bar-fill tier-${tier}" style="width:${clamped}%"></span></span><span class="inline-bar-label tier-${tier}">${esc(label)}</span></span>`;
+}
+
+// Tiny line chart of a fleet metric across the loaded snapshots (oldest left). Draws
+// nothing for fewer than two points - a one-point sparkline would just be a dot. The last
+// point is emphasised so the eye lands on "now"; warn/crit bands are shaded if given.
+function sparklineSvg(values, opts) {
+    opts = opts || {};
+    var pts = values.filter(v => typeof v === 'number' && isFinite(v));
+    if (pts.length < 2) return '';
+    var w = opts.w || 110, h = opts.h || 26, pad = 2;
+    var min = Math.min(0, ...pts), max = Math.max(...pts, opts.crit || 0);
+    if (max === min) max = min + 1;
+    var x = i => pad + (i / (pts.length - 1)) * (w - 2 * pad);
+    var y = v => pad + (1 - (v - min) / (max - min)) * (h - 2 * pad);
+    var d = pts.map((v, i) => (i ? 'L' : 'M') + x(i).toFixed(1) + ',' + y(v).toFixed(1)).join(' ');
+    var area = d + ` L${x(pts.length - 1).toFixed(1)},${(h - pad).toFixed(1)} L${x(0).toFixed(1)},${(h - pad).toFixed(1)} Z`;
+    var bands = '';
+    if (opts.warn != null) bands += `<rect class="spark-band warn" x="0" y="${y(Math.min(max, opts.crit != null ? opts.crit : max)).toFixed(1)}" width="${w}" height="${Math.max(0, y(opts.warn) - y(Math.min(max, opts.crit != null ? opts.crit : max))).toFixed(1)}"></rect>`;
+    if (opts.crit != null && opts.crit <= max) bands += `<rect class="spark-band crit" x="0" y="${pad}" width="${w}" height="${Math.max(0, y(opts.crit) - pad).toFixed(1)}"></rect>`;
+    var last = pts[pts.length - 1];
+    return `<svg class="sparkline" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true">${bands}<path class="spark-area" d="${area}"></path><path class="spark-line" d="${d}"></path><circle class="spark-end" cx="${x(pts.length - 1).toFixed(1)}" cy="${y(last).toFixed(1)}" r="2.2"></circle></svg>`;
+}
+
+// Loaded snapshots with a parseable timestamp, oldest first - the x-axis every trend shares.
+function datedSnapshotsAsc() {
+    return loadedSnapshots
+        .map(s => ({ s: s, ts: window.parseTimestampMs(s.scanTimestamp) }))
+        .filter(x => x.ts !== null)
+        .sort((a, b) => a.ts - b.ts);
+}
+
+// Fleet-wide counts per snapshot for the Fleet Health cards' sparklines. Memoised per
+// snapshot object - detectDaisyChains over every device isn't free and the dashboard
+// re-renders on every activation.
+var fleetTotalsCache = new WeakMap();
+function fleetTotalsFor(snapshot) {
+    if (fleetTotalsCache.has(snapshot)) return fleetTotalsCache.get(snapshot);
+    var t = { devices: 0, unreachable: 0, clients: 0, alarms: 0, dot1x: 0, daisy: 0 };
+    (snapshot.topology || []).forEach(d => {
+        if (!d) return;
+        t.devices++;
+        if (d.ScanStatus && d.ScanStatus !== "Ok") t.unreachable++;
+        var clients = d.TrueClients || [];
+        t.clients += clients.length;
+        t.alarms += window.asArray(d.Alarms).length;
+        clients.forEach(c => { if (c.Dot1x_State && c.Dot1x_State !== "Unknown" && c.Dot1x_State !== "Authenticated") t.dot1x++; });
+        t.daisy += window.detectDaisyChains(d).size;
+    });
+    fleetTotalsCache.set(snapshot, t);
+    return t;
+}
 
 // Aggregates the ACTIVE snapshot only - merging snapshots from different times would
 // double-count devices and mix states never simultaneously true.
@@ -141,17 +209,6 @@ window.renderFleetDashboard = function() {
     var worstCpu = worstBy('MasterCpuUtilization');
     var worstMem = worstBy('MasterMemoryUtilization');
 
-    function thresholdClass(value, warn, critical) {
-        return value >= critical ? 'red' : (value >= warn ? 'warn-badge' : 'green');
-    }
-
-    // Severity as a word, not just a color - mirrors drawer.js's STP/Link badges, which
-    // always pair color with a real status word (e.g. "FWD"/"BLK") rather than relying on
-    // color alone.
-    function thresholdLabel(value, warn, critical) {
-        return value >= critical ? 'critical' : (value >= warn ? 'warning' : 'ok');
-    }
-
     // --- Recently rebooted (elapsed since boot, measured from this snapshot's capture
     // time, not wall-clock "now") ---
     var recentlyRebooted = [];
@@ -223,43 +280,62 @@ window.renderFleetDashboard = function() {
 
     // --- Render ---
     // Cards below drill down (window.drillDownStat) into a search-style device/client list;
-    // "New This Snapshot" stays a plain count - it has no single natural list target.
+    // "New This Snapshot" stays a plain count - it has no single natural list target. Each
+    // card carries a sparkline of its metric across the loaded snapshots (nothing drawn with
+    // a single snapshot), so a count reads as rising or falling rather than as a bare number.
+    var series = datedSnapshotsAsc().map(x => fleetTotalsFor(x.s));
+    var spark = key => sparklineSvg(series.map(t => t[key]));
+    function card(opts) {
+        var cls = 'fleet-stat-card' + (opts.onclick ? ' drillable' : '') + (opts.tier ? ' ' + opts.tier : '');
+        var attrs = (opts.onclick ? ` onclick="${opts.onclick}"` : '') + (opts.title ? ` title="${esc(opts.title)}"` : '');
+        return `<div class="${cls}"${attrs}><div class="stat-value">${opts.value}</div><div class="stat-label">${opts.label}</div>${opts.spark || ''}</div>`;
+    }
     var html = `<div class="fleet-stats-grid">
-        <div class="fleet-stat-card drillable" onclick="window.drillDownStat('devices')"><div class="stat-value">${devices.length}</div><div class="stat-label">Devices</div></div>
-        <div class="fleet-stat-card drillable ${unreachableDevices.length > 0 ? 'critical' : ''}" onclick="window.drillDownStat('unreachable')"><div class="stat-value">${unreachableDevices.length}</div><div class="stat-label">Unreachable / Failed</div></div>
-        <div class="fleet-stat-card drillable" onclick="window.drillDownStat('clients')"><div class="stat-value">${totalClients}</div><div class="stat-label">Clients</div></div>
-        <div class="fleet-stat-card drillable ${totalAlarms > 0 ? 'critical' : ''}" onclick="window.drillDownStat('alarms')"><div class="stat-value">${totalAlarms}</div><div class="stat-label">Active Alarms</div></div>
-        <div class="fleet-stat-card drillable ${dot1xViolations.length > 0 ? 'warn' : ''}" onclick="window.drillDownStat('dot1x')"><div class="stat-value">${dot1xViolations.length}</div><div class="stat-label">Dot1x Violations</div></div>
-        <div class="fleet-stat-card drillable" onclick="window.drillDownStat('daisychains')"><div class="stat-value">${daisyChainCount}</div><div class="stat-label">Daisy-Chained Ports</div></div>
-        <div class="fleet-stat-card drillable ${configChanges.length > 0 ? 'warn' : ''}" onclick="window.drillDownStat('configchanged')"><div class="stat-value">${configChanges.length}</div><div class="stat-label">Config Changed</div></div>
-        <div class="fleet-stat-card"${newInThisSnapshot === null ? ' title="Unable to determine (no scan timestamp on this snapshot)"' : ''}><div class="stat-value">${newInThisSnapshot === null ? 'N/A' : newInThisSnapshot}</div><div class="stat-label">New This Snapshot</div></div>
+        ${card({ value: devices.length, label: 'Devices', onclick: "window.drillDownStat('devices')", spark: spark('devices') })}
+        ${card({ value: unreachableDevices.length, label: 'Unreachable / Failed', tier: unreachableDevices.length > 0 ? 'critical' : '', onclick: "window.drillDownStat('unreachable')", spark: spark('unreachable') })}
+        ${card({ value: totalClients, label: 'Clients', onclick: "window.drillDownStat('clients')", spark: spark('clients') })}
+        ${card({ value: totalAlarms, label: 'Active Alarms', tier: totalAlarms > 0 ? 'critical' : '', onclick: "window.drillDownStat('alarms')", spark: spark('alarms') })}
+        ${card({ value: dot1xViolations.length, label: 'Dot1x Violations', tier: dot1xViolations.length > 0 ? 'warn' : '', onclick: "window.drillDownStat('dot1x')", spark: spark('dot1x') })}
+        ${card({ value: daisyChainCount, label: 'Daisy-Chained Ports', onclick: "window.drillDownStat('daisychains')", spark: spark('daisy') })}
+        ${card({ value: configChanges.length, label: 'Config Changed', tier: configChanges.length > 0 ? 'warn' : '', onclick: "window.drillDownStat('configchanged')" })}
+        ${card({ value: newInThisSnapshot === null ? 'N/A' : newInThisSnapshot, label: 'New This Snapshot', title: newInThisSnapshot === null ? 'Unable to determine (no scan timestamp on this snapshot)' : '' })}
     </div>`;
+    if (series.length < 2) html += '<p class="fleet-hint">Load a folder of snapshots to see how these counts move over time.</p>';
+
+    // Top-N lists as bars: the bar is the value against 100%, coloured by the same
+    // warn/critical thresholds the Settings tab exposes, with the word beside it.
+    function barList(rows, warn, critical, unit) {
+        return rows.map(x => {
+            var tier = severityTier(x.value, warn, critical);
+            return `<div class="fleet-bar-row"><span class="fleet-bar-name" title="${esc(x.device.DeviceIP)}">${esc(x.device.Hostname || x.device.DeviceIP)}</span>${inlineBar(x.value, `${x.value}${unit} ${SEVERITY_WORD[tier]}`, tier)}</div>`;
+        }).join('');
+    }
 
     html += '<div class="fleet-dashboard-columns">';
-
-    html += '<div><div class="fleet-section"><h3>Highest RE CPU</h3>' + (worstCpu.length === 0
+    html += '<div class="fleet-section"><h3>Highest RE CPU</h3>' + (worstCpu.length === 0
         ? '<p class="fleet-list-empty">No CPU data available.</p>'
-        : worstCpu.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)}" title="${thresholdLabel(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)}">${x.value}% (${thresholdLabel(x.value, settings.cpuWarnPct, settings.cpuCriticalPct)})</span></div>`).join('')
-    ) + '</div>';
-
+        : barList(worstCpu, settings.cpuWarnPct, settings.cpuCriticalPct, '%')) + '</div>';
     html += '<div class="fleet-section"><h3>Highest RE Memory</h3>' + (worstMem.length === 0
         ? '<p class="fleet-list-empty">No memory data available.</p>'
-        : worstMem.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge ${thresholdClass(x.value, settings.memWarnPct, settings.memCriticalPct)}" title="${thresholdLabel(x.value, settings.memWarnPct, settings.memCriticalPct)}">${x.value}% (${thresholdLabel(x.value, settings.memWarnPct, settings.memCriticalPct)})</span></div>`).join('')
-    ) + '</div></div>';
-
-    html += '<div><div class="fleet-section"><h3>Recently Rebooted (&lt; ' + settings.recentRebootMin + ' min)</h3>' + (!rebootCheckPossible
+        : barList(worstMem, settings.memWarnPct, settings.memCriticalPct, '%')) + '</div>';
+    html += '<div class="fleet-section"><h3>Recently Rebooted (&lt; ' + settings.recentRebootMin + ' min)</h3>' + (!rebootCheckPossible
         ? '<p class="fleet-list-empty">Unable to determine (no scan timestamp on this snapshot).</p>'
         : (!anyUptimeUsable && devices.length > 0)
         ? '<p class="fleet-list-empty">Unable to determine (no devices reported usable uptime data).</p>'
         : recentlyRebooted.length === 0
         ? '<p class="fleet-list-empty">None.</p>'
-        : recentlyRebooted.map(x => `<div class="fleet-list-row"><span>${esc(x.device.Hostname || x.device.DeviceIP)}</span><span class="badge accent">${Math.round(x.elapsedMin)} min ago</span></div>`).join('')
-    ) + '</div></div></div>';
+        : recentlyRebooted.sort((a, b) => a.elapsedMin - b.elapsedMin).map(x => `<div class="fleet-bar-row"><span class="fleet-bar-name">${esc(x.device.Hostname || x.device.DeviceIP)}</span>${inlineBar(100 - (x.elapsedMin / settings.recentRebootMin) * 100, `${Math.round(x.elapsedMin)} min ago`, 'warn', 'Booted ' + Math.round(x.elapsedMin) + ' minutes before this scan')}</div>`).join('')
+    ) + '</div>';
+    html += '</div>';
 
-    html += '<div class="fleet-section"><h3>Client Vendor/Category Breakdown</h3>' +
-        Object.keys(categoryCounts).sort((a, b) => categoryCounts[b] - categoryCounts[a]).map(cat =>
-            `<div class="fleet-list-row"><span class="vendor-tag vendor-${cat.toLowerCase().replace('/', '-')}">${esc(cat)}</span><span>${categoryCounts[cat]}</span></div>`
-        ).join('') + '</div>';
+    // Vendor/category breakdown as one proportional bar - share of clients per category is
+    // the question, and a stacked bar answers it without reading three numbers.
+    var cats = Object.keys(categoryCounts).sort((a, b) => categoryCounts[b] - categoryCounts[a]);
+    var vendorCls = cat => 'vendor-' + cat.toLowerCase().replace('/', '-');
+    html += '<div class="fleet-section"><h3>Client Vendor/Category Breakdown</h3>' + (totalClients === 0
+        ? '<p class="fleet-list-empty">No clients.</p>'
+        : `<div class="fleet-stack">${cats.map(cat => `<span class="fleet-stack-seg vendor-tag ${vendorCls(cat)}" style="width:${(categoryCounts[cat] / totalClients * 100).toFixed(2)}%" title="${esc(cat)}: ${categoryCounts[cat]} (${Math.round(categoryCounts[cat] / totalClients * 100)}%)"></span>`).join('')}</div>
+           <div class="fleet-stack-legend">${cats.map(cat => `<span><span class="vendor-tag ${vendorCls(cat)}">${esc(cat)}</span> ${categoryCounts[cat]} <span class="fleet-pct">${Math.round(categoryCounts[cat] / totalClients * 100)}%</span></span>`).join('')}</div>`) + '</div>';
 
     container.innerHTML = html;
 };
@@ -335,140 +411,150 @@ function trendMetricValue(device, metric) {
     return NaN;
 }
 
-// Plain <canvas> line chart - no vendored charting library.
+// Threshold bands for the per-device metrics, from the same Settings the Fleet Health
+// lists use; counts (alarms/clients) have no fixed bands.
+function trendThresholds(metric, settings) {
+    if (metric === 'cpu') return { warn: settings.cpuWarnPct, crit: settings.cpuCriticalPct };
+    if (metric === 'mem') return { warn: settings.memWarnPct, crit: settings.memCriticalPct };
+    return null;
+}
+
+// Per-device series for one metric across the dated snapshots: Map identity -> {label,
+// points:[{t, v}|null per snapshot], last, peak, rebootsAt:[t]}. Identity (not IP) so a
+// renumbered device stays one line. A snapshot the device is missing from is a gap.
+function trendSeries(metric) {
+    var snaps = datedSnapshotsAsc();
+    var byId = new Map();
+    snaps.forEach((x, i) => {
+        (x.s.topology || []).forEach(d => {
+            if (!d || !d.DeviceIP) return;
+            var id = window.resolveDeviceIdentity(d);
+            var e = byId.get(id);
+            if (!e) { e = { id: id, label: '', points: new Array(snaps.length).fill(null), uptimes: new Array(snaps.length).fill(null) }; byId.set(id, e); }
+            e.label = `${d.DeviceIP} (${d.Hostname || 'Unknown'})`;
+            var v = trendMetricValue(d, metric);
+            e.points[i] = (v === null || isNaN(v)) ? null : { t: x.ts, v: v };
+            e.uptimes[i] = (d.Uptime && d.Uptime !== "Unknown") ? d.Uptime : null;
+        });
+    });
+    byId.forEach(e => {
+        var vals = e.points.filter(Boolean).map(p => p.v);
+        e.last = vals.length ? vals[vals.length - 1] : NaN;
+        e.peak = vals.length ? Math.max(...vals) : NaN;
+        e.count = vals.length;
+        // A different Uptime string between consecutive sightings means it rebooted in between.
+        e.rebootsAt = [];
+        var prev = null;
+        e.uptimes.forEach((u, i) => { if (u && prev && u !== prev) e.rebootsAt.push(snaps[i].ts); if (u) prev = u; });
+    });
+    return { snaps: snaps, byId: byId };
+}
+
+// One SVG line chart. `series` is [{points, cls}], all sharing the snapshot x-axis; the
+// first is the subject (drawn heavy), the rest context (fleet median, dashed). Threshold
+// bands are shaded behind the lines; reboot markers are dashed verticals. Everything takes
+// its colour from CSS classes so it follows the theme like the rest of the page.
+function trendChartSvg(series, opts) {
+    var w = opts.w, h = opts.h, big = !!opts.big;
+    var pad = big ? { l: 46, r: 16, t: 26, b: 34 } : { l: 30, r: 8, t: 8, b: 18 };
+    var iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+    var all = [];
+    series.forEach(s => s.points.forEach(p => { if (p) all.push(p); }));
+    if (!all.length) return '';
+    var minT = opts.minT, maxT = opts.maxT;
+    var maxV = Math.max(...all.map(p => p.v), opts.thresholds ? opts.thresholds.crit : 0, opts.maxV || 0) * 1.1 || 1;
+    var x = t => pad.l + (maxT === minT ? iw / 2 : (t - minT) / (maxT - minT) * iw);
+    var y = v => pad.t + ih - (v / maxV) * ih;
+    var out = `<svg class="trend-svg${big ? ' big' : ''}" viewBox="0 0 ${w} ${h}" width="100%" height="${h}" preserveAspectRatio="none">`;
+    if (opts.thresholds) {
+        var th = opts.thresholds;
+        if (th.crit <= maxV) out += `<rect class="trend-band crit" x="${pad.l}" y="${y(maxV)}" width="${iw}" height="${(y(th.crit) - y(maxV)).toFixed(1)}"></rect>`;
+        if (th.warn <= maxV) out += `<rect class="trend-band warn" x="${pad.l}" y="${y(Math.min(th.crit, maxV))}" width="${iw}" height="${(y(th.warn) - y(Math.min(th.crit, maxV))).toFixed(1)}"></rect>`;
+    }
+    var steps = big ? 5 : 2;
+    for (var i = 0; i <= steps; i++) {
+        var v = maxV * i / steps, yy = y(v).toFixed(1);
+        out += `<line class="trend-grid" x1="${pad.l}" y1="${yy}" x2="${pad.l + iw}" y2="${yy}"></line><text class="trend-tick" x="${pad.l - 6}" y="${(+yy + 3.5).toFixed(1)}" text-anchor="end">${Math.round(v)}</text>`;
+    }
+    (opts.rebootsAt || []).forEach(t => { if (t >= minT && t <= maxT) out += `<line class="trend-reboot" x1="${x(t).toFixed(1)}" y1="${pad.t}" x2="${x(t).toFixed(1)}" y2="${pad.t + ih}"></line>${big ? `<text class="trend-reboot-label" x="${x(t).toFixed(1)}" y="${pad.t - 8}" text-anchor="middle">reboot</text>` : ''}`; });
+    series.slice().reverse().forEach(s => {
+        var d = '', pen = false;
+        s.points.forEach(p => { if (!p) { pen = false; return; } d += (pen ? 'L' : 'M') + x(p.t).toFixed(1) + ',' + y(p.v).toFixed(1) + ' '; pen = true; });
+        out += `<path class="trend-line ${s.cls}" d="${d.trim()}"></path>`;
+        if (s.cls === 'subject') s.points.forEach(p => { if (p) out += `<circle class="trend-dot" cx="${x(p.t).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="${big ? 3.5 : 2}"></circle>`; });
+    });
+    if (opts.xLabels) {
+        var labelTs = opts.snaps.length <= 3 ? opts.snaps : [opts.snaps[0], opts.snaps[Math.floor(opts.snaps.length / 2)], opts.snaps[opts.snaps.length - 1]];
+        // First/last labels anchor inward so neither runs off the drawing.
+        labelTs.forEach((ts, i) => {
+            var anchor = i === 0 ? 'start' : (i === labelTs.length - 1 ? 'end' : 'middle');
+            out += `<text class="trend-tick" x="${x(ts).toFixed(1)}" y="${h - 10}" text-anchor="${anchor}">${new Date(ts).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</text>`;
+        });
+    }
+    return out + '</svg>';
+}
+
+// Trends tab. Two modes (see #trendModeSelect): "top" draws small multiples - one panel per
+// device with the highest peak of the chosen metric, each against the dashed fleet median -
+// so the eight devices worth looking at are on screen together; "single" draws one large
+// chart for the picked device with reboot markers. With one dated snapshot there is no trend
+// to draw, so the current values are ranked as bars instead of an empty axis.
 window.renderTrendChart = function() {
-    var canvas = document.getElementById('trendCanvas');
-    var ctx = canvas.getContext('2d');
+    var container = document.getElementById('trendChart');
+    if (!container) return;
     var metric = document.getElementById('trendMetricSelect').value;
-    // Despite the name, this is a resolveDeviceIdentity key, not a literal IP.
-    var deviceIdentity = document.getElementById('trendDeviceSelect').value;
+    var mode = document.getElementById('trendModeSelect').value;
+    var deviceSel = document.getElementById('trendDeviceSelect');
+    deviceSel.style.display = mode === 'single' ? '' : 'none';
+    var deviceLabelEl = deviceSel.closest('label'); if (deviceLabelEl) deviceLabelEl.style.display = mode === 'single' ? '' : 'none';
+    var settings = window.loadSettings();
+    var th = trendThresholds(metric, settings);
+    var unit = (metric === 'cpu' || metric === 'mem') ? '%' : '';
+    var data = trendSeries(metric);
+    var entries = Array.from(data.byId.values()).filter(e => e.count > 0);
 
-    // Canvas 2D draws are invisible to CSS - reading the live custom properties (rather than
-    // duplicating a light/dark palette here) keeps this chart in sync with the CSS theme
-    // with one source of truth, and picks up a live toggle without a page reload.
-    var rootStyle = getComputedStyle(document.documentElement);
-    var cssVar = function(name) { return rootStyle.getPropertyValue(name).trim(); };
-    var gridColor = cssVar('--border'), dimColor = cssVar('--text-dim'), mutedColor = cssVar('--text-muted');
-    var headingColor = cssVar('--heading'), dangerColor = cssVar('--danger-text'), accentColor = cssVar('--accent');
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.font = '13px sans-serif';
-
-    function centeredMessage(msg) {
-        ctx.fillStyle = dimColor;
-        ctx.font = '14px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(msg, canvas.width / 2, canvas.height / 2);
+    if (data.snaps.length === 0 || entries.length === 0) {
+        container.innerHTML = '<p class="fleet-list-empty">No dated snapshots loaded.</p>';
+        return;
+    }
+    if (data.snaps.length < 2) {
+        var ranked = entries.slice().sort((a, b) => b.last - a.last).slice(0, 12);
+        var maxLast = Math.max(...ranked.map(e => e.last), th ? th.crit : 0, 1);
+        container.innerHTML = `<p class="fleet-hint">One dated snapshot is loaded, so there is no trend to draw yet - load a folder of snapshots to see ${TREND_METRIC_LABELS[metric]} over time. Current values, highest first:</p>
+            <div class="trend-rank">${ranked.map(e => {
+                var tier = th ? severityTier(e.last, th.warn, th.crit) : 'neutral';
+                return `<div class="fleet-bar-row"><span class="fleet-bar-name">${esc(e.label)}</span>${inlineBar(e.last / maxLast * 100, `${e.last}${unit}${th ? ' ' + SEVERITY_WORD[tier] : ''}`, tier)}</div>`;
+            }).join('')}</div>`;
+        return;
     }
 
-    if (!deviceIdentity) { centeredMessage('No devices available - load 2+ snapshots first.'); return; }
+    var minT = data.snaps[0].ts, maxT = data.snaps[data.snaps.length - 1].ts;
+    var snapTs = data.snaps.map(s => s.ts);
+    // Fleet median per snapshot - the reference line every panel shares.
+    var median = data.snaps.map((s, i) => {
+        var vals = entries.map(e => e.points[i]).filter(Boolean).map(p => p.v).sort((a, b) => a - b);
+        if (!vals.length) return null;
+        var mid = Math.floor(vals.length / 2);
+        return { t: s.ts, v: vals.length % 2 ? vals[mid] : (vals[mid - 1] + vals[mid]) / 2 };
+    });
+    var common = { minT: minT, maxT: maxT, thresholds: th, snaps: snapTs };
 
-    var points = loadedSnapshots
-        .map(s => ({ s: s, ts: window.parseTimestampMs(s.scanTimestamp) }))
-        .filter(x => x.ts !== null)
-        .sort((a, b) => a.ts - b.ts)
-        .map(x => {
-            var device = x.s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity);
-            if (!device) return null;
-            var v = trendMetricValue(device, metric);
-            return (v === null || isNaN(v)) ? null : { t: new Date(x.ts), v: v };
-        })
-        .filter(Boolean);
-
-    if (points.length === 0) { centeredMessage(`No "${TREND_METRIC_LABELS[metric]}" data points for this device.`); return; }
-
-    var pad = { left: 55, right: 30, top: 30, bottom: 50 };
-    var w = canvas.width - pad.left - pad.right;
-    var h = canvas.height - pad.top - pad.bottom;
-
-    var minT = points[0].t.getTime(), maxT = points[points.length - 1].t.getTime();
-    var minV = Math.min(0, ...points.map(p => p.v));
-    var maxV = Math.max(...points.map(p => p.v)) * 1.15 || 1;
-
-    function x(t) { return pad.left + (maxT === minT ? w / 2 : (t - minT) / (maxT - minT) * w); }
-    function y(v) { return pad.top + h - ((v - minV) / (maxV - minV || 1)) * h; }
-
-    // Gridlines + Y-axis labels
-    ctx.strokeStyle = gridColor;
-    ctx.fillStyle = dimColor;
-    ctx.font = '11px sans-serif';
-    ctx.textAlign = 'right';
-    var ySteps = 5;
-    for (var i = 0; i <= ySteps; i++) {
-        var v = minV + (maxV - minV) * (i / ySteps);
-        var yy = y(v);
-        ctx.beginPath(); ctx.moveTo(pad.left, yy); ctx.lineTo(pad.left + w, yy); ctx.stroke();
-        ctx.fillText(Math.round(v), pad.left - 8, yy + 4);
+    if (mode === 'single') {
+        var e = data.byId.get(deviceSel.value) || entries[0];
+        container.innerHTML = `<div class="trend-panel big"><div class="trend-panel-head"><span class="trend-title">${TREND_METRIC_LABELS[metric]} - ${esc(e.label)}</span><span class="trend-legend"><i class="swatch subject"></i>device <i class="swatch median"></i>fleet median${th ? ' <i class="swatch band"></i>warning / critical' : ''}</span></div>
+            ${trendChartSvg([{ points: e.points, cls: 'subject' }, { points: median, cls: 'median' }], Object.assign({ w: 1000, h: 380, big: true, xLabels: true, rebootsAt: e.rebootsAt }, common))}</div>`;
+        return;
     }
 
-    // Axes
-    ctx.strokeStyle = mutedColor;
-    ctx.beginPath();
-    ctx.moveTo(pad.left, pad.top);
-    ctx.lineTo(pad.left, pad.top + h);
-    ctx.lineTo(pad.left + w, pad.top + h);
-    ctx.stroke();
-
-    // X-axis labels (first, middle, last point - avoids overlap from labeling every point)
-    ctx.fillStyle = dimColor;
-    ctx.textAlign = 'center';
-    var xLabelPoints = points.length <= 2 ? points : [points[0], points[Math.floor(points.length / 2)], points[points.length - 1]];
-    xLabelPoints.forEach(p => {
-        ctx.fillText(p.t.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }), x(p.t.getTime()), pad.top + h + 20);
-    });
-
-    // Reboot markers: Uptime jumping to a new value between consecutive snapshots means a
-    // reboot happened in between. Drawn on every metric's chart from an independent pass
-    // over all snapshots (not the metric-filtered `points`), since a reboot is a fact about
-    // the device regardless of whether this metric had a value then.
-    var deviceSnapshotsSorted = loadedSnapshots
-        .map(s => ({ s: s, ts: window.parseTimestampMs(s.scanTimestamp) }))
-        .filter(x => x.ts !== null)
-        .sort((a, b) => a.ts - b.ts)
-        .map(x => ({ t: new Date(x.ts), device: x.s.topology.find(d => d && d.DeviceIP && window.resolveDeviceIdentity(d) === deviceIdentity) }))
-        .filter(entry => entry.device);
-
-    ctx.strokeStyle = dangerColor;
-    ctx.setLineDash([4, 3]);
-    ctx.fillStyle = dangerColor;
-    ctx.font = 'bold 10px sans-serif';
-    ctx.textAlign = 'center';
-    for (var di = 1; di < deviceSnapshotsSorted.length; di++) {
-        var prevUptime = deviceSnapshotsSorted[di - 1].device.Uptime;
-        var currUptime = deviceSnapshotsSorted[di].device.Uptime;
-        var rebootTime = deviceSnapshotsSorted[di].t.getTime();
-        if (!prevUptime || !currUptime || prevUptime === "Unknown" || currUptime === "Unknown" || prevUptime === currUptime) continue;
-        if (rebootTime < minT || rebootTime > maxT) continue; // outside this metric's plotted range - skip rather than draw off-axis
-        var rx = x(rebootTime);
-        ctx.beginPath(); ctx.moveTo(rx, pad.top); ctx.lineTo(rx, pad.top + h); ctx.stroke();
-        ctx.fillText('reboot', rx, pad.top - 6);
-    }
-    ctx.setLineDash([]);
-
-    // Line
-    ctx.strokeStyle = accentColor;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    points.forEach((p, i) => {
-        var px = x(p.t.getTime()), py = y(p.v);
-        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
-    });
-    ctx.stroke();
-
-    // Points
-    ctx.fillStyle = accentColor;
-    points.forEach(p => {
-        ctx.beginPath();
-        ctx.arc(x(p.t.getTime()), y(p.v), 3.5, 0, Math.PI * 2);
-        ctx.fill();
-    });
-
-    // Title uses the selected <option>'s text, not deviceIdentity (an opaque "serial:..." key).
-    var selectedOption = document.getElementById('trendDeviceSelect').selectedOptions[0];
-    ctx.fillStyle = headingColor;
-    ctx.font = 'bold 13px sans-serif';
-    ctx.textAlign = 'left';
-    ctx.fillText(`${TREND_METRIC_LABELS[metric]} — ${selectedOption ? selectedOption.textContent : deviceIdentity}`, pad.left, 18);
+    var top = entries.slice().sort((a, b) => b.peak - a.peak).slice(0, 8);
+    var sharedMax = Math.max(...top.map(e => e.peak));   // one y-scale across panels so heights compare
+    container.innerHTML = `<div class="trend-panel-head"><span class="trend-title">${TREND_METRIC_LABELS[metric]} - ${top.length} devices with the highest peak, ${data.snaps.length} snapshots</span><span class="trend-legend"><i class="swatch subject"></i>device <i class="swatch median"></i>fleet median${th ? ' <i class="swatch band"></i>warning / critical' : ''} <i class="swatch reboot"></i>reboot</span></div>
+        <div class="trend-multiples">${top.map(e => {
+            var tier = th ? severityTier(e.last, th.warn, th.crit) : 'neutral';
+            return `<div class="trend-panel" onclick="document.getElementById('trendModeSelect').value='single'; document.getElementById('trendDeviceSelect').value=${JSON.stringify(e.id).replace(/"/g, '&quot;')}; window.renderTrendChart();" title="Open this device's full chart">
+                <div class="trend-panel-head"><span class="trend-name">${esc(e.label)}</span><span class="trend-last tier-${tier}">${e.last}${unit}</span></div>
+                ${trendChartSvg([{ points: e.points, cls: 'subject' }, { points: median, cls: 'median' }], Object.assign({ w: 300, h: 110, maxV: sharedMax, rebootsAt: e.rebootsAt }, common))}</div>`;
+        }).join('')}</div>`;
 };
 
 // --- Local Account Audit (see #analysis-tab-accounts) ---
@@ -747,108 +833,108 @@ window.renderIpSpaceUtilization = function() {
         return;
     }
 
-    tbody.innerHTML = Array.from(vlanNames).sort().map(vlanName => {
+    // Rows with a known boundary first, fullest first - the subnets that need growing are
+    // the reason to open this tab; unknown-boundary rows trail alphabetically.
+    var rows = Array.from(vlanNames).map(vlanName => {
         var ips = vlanIps.get(vlanName) || new Set();
         var subnet = vlanToSubnet.get(vlanName);
-
-        if (!subnet) {
-            return `<tr>
-                <td>${esc(vlanName)}</td>
-                <td style="color:#888; font-style:italic;">Boundary not found in captured config</td>
-                <td>${ips.size} live IP${ips.size === 1 ? '' : 's'}</td>
-                <td>-</td>
-            </tr>`;
-        }
-        if (subnet.prefix >= 31) {
-            return `<tr>
-                <td>${esc(vlanName)}</td>
-                <td style="font-family:monospace;">${esc(subnet.ip)}/${subnet.prefix}</td>
-                <td>${ips.size} / N/A</td>
-                <td>N/A (/${subnet.prefix})</td>
-            </tr>`;
-        }
-
+        if (!subnet) return { vlanName, ips, subnet: null, pct: -1 };
+        if (subnet.prefix >= 31) return { vlanName, ips, subnet, pct: -1, pointToPoint: true };
         var base = networkBase(ipToInt(subnet.ip), subnet.prefix);
         var usable = Math.pow(2, 32 - subnet.prefix) - 2;
         // Require actual CIDR membership, not just a VLAN name match.
         var inSubnet = Array.from(ips).filter(ip => { var n = ipToInt(ip); return n !== null && networkBase(n, subnet.prefix) === base; });
         var pct = usable > 0 ? Math.round((inSubnet.length / usable) * 100) : 0;
-        var pctClass = pct >= 90 ? 'red' : (pct >= 75 ? 'warn-badge' : 'green');
-        var pctLabel = pct >= 90 ? 'critical' : (pct >= 75 ? 'warning' : 'ok');
+        return { vlanName, ips, subnet, usable, used: inSubnet.length, pct };
+    }).sort((a, b) => (b.pct - a.pct) || a.vlanName.localeCompare(b.vlanName, undefined, { numeric: true }));
+
+    tbody.innerHTML = rows.map(r => {
+        if (!r.subnet) {
+            return `<tr class="ipspace-unknown">
+                <td>${esc(r.vlanName)}</td>
+                <td class="ipspace-note">Boundary not found in captured config</td>
+                <td>${r.ips.size} live IP${r.ips.size === 1 ? '' : 's'}</td>
+                <td><span class="ipspace-note">no boundary</span></td>
+            </tr>`;
+        }
+        if (r.pointToPoint) {
+            return `<tr>
+                <td>${esc(r.vlanName)}</td>
+                <td style="font-family:monospace;">${esc(r.subnet.ip)}/${r.subnet.prefix}</td>
+                <td>${r.ips.size} / N/A</td>
+                <td><span class="ipspace-note">point-to-point /${r.subnet.prefix}</span></td>
+            </tr>`;
+        }
+        var tier = severityTier(r.pct, 75, 90);
         return `<tr>
-            <td>${esc(vlanName)}</td>
-            <td style="font-family:monospace;">${esc(subnet.ip)}/${subnet.prefix}</td>
-            <td>${inSubnet.length} / ${usable}</td>
-            <td><span class="badge ${pctClass}" title="${pctLabel}">${pct}% (${pctLabel})</span></td>
+            <td>${esc(r.vlanName)}</td>
+            <td style="font-family:monospace;">${esc(r.subnet.ip)}/${r.subnet.prefix}</td>
+            <td style="font-variant-numeric:tabular-nums;">${r.used} / ${r.usable}</td>
+            <td class="ipspace-util">${inlineBar(r.pct, `${r.pct}% ${SEVERITY_WORD[tier]}`, tier, `${r.used} of ${r.usable} usable addresses seen as live clients`)}</td>
         </tr>`;
     }).join('');
 };
 
-window.populateReliabilityDeviceSelect = function() {
-    var select = document.getElementById('reliabilityDeviceSelect');
-    if (!select) return;
-    // Keyed by window.resolveDeviceIdentity (matching window.updateAlarmHistory), so a
-    // renumbered device stays one dropdown entry instead of splitting its history.
-    var deviceMap = new Map(); // identity -> {hostname, ip}
-    loadedSnapshots.slice()
-        .sort((a, b) => (window.parseTimestampMs(a.scanTimestamp) ?? 0) - (window.parseTimestampMs(b.scanTimestamp) ?? 0))
-        .forEach(s => s.topology.forEach(d => {
-            if (!d || !d.DeviceIP) return;
-            deviceMap.set(window.resolveDeviceIdentity(d), { hostname: d.Hostname || 'Unknown', ip: String(d.DeviceIP) });
-        }));
-
-    var identities = Array.from(deviceMap.keys()).sort((a, b) => window.GraphLayout.compareIpIds(deviceMap.get(a).ip, deviceMap.get(b).ip));
-    var prevValue = select.value;
-    select.innerHTML = identities.map(id => `<option value="${esc(id)}">${esc(deviceMap.get(id).ip)} (${esc(deviceMap.get(id).hostname)})</option>`).join('');
-    if (identities.includes(prevValue)) select.value = prevValue;
-};
-
+// Reliability tab: one row per device, one column per crawled day, every device on screen
+// at once (previously one device at a time from a dropdown). Cell colour is that day's peak
+// alarm count, a red ring marks a reboot. Rows are ranked by total alarms then reboots, so
+// the flappy devices are at the top; devices with nothing recorded are hidden unless
+// #reliabilityShowQuiet is ticked. Cells stretch to the column width (CSS), so more days
+// means smaller cells rather than a sideways scroll until they hit the 8px floor.
 window.renderReliabilityHeatmap = function() {
     var container = document.getElementById('reliability-heatmap');
-    var select = document.getElementById('reliabilityDeviceSelect');
-    if (!container || !select) return;
-
+    if (!container) return;
+    var showQuiet = !!(document.getElementById('reliabilityShowQuiet') || {}).checked;
     var history = window.updateAlarmHistory();
-    var entry = select.value && history[select.value];
-    var days = entry ? entry.days : {};
-    var dates = Object.keys(days).sort();
 
+    // `days` keys are plain YYYY-MM-DD strings (see updateAlarmHistory); union across devices
+    // gives the column set. Only crawled days become columns - gaps between crawls carry no
+    // information, and spacing them to scale would leave most of the strip empty.
+    var dateSet = new Set();
+    var rows = Object.keys(history).map(id => {
+        var e = history[id], alarms = 0, reboots = 0;
+        Object.keys(e.days || {}).forEach(d => { dateSet.add(d); alarms += e.days[d].alarmCount; if (e.days[d].rebooted) reboots++; });
+        return { id: id, label: (e.lastIp || '') + (e.lastHostname ? ' (' + e.lastHostname + ')' : ''), ip: e.lastIp || '', days: e.days || {}, alarms: alarms, reboots: reboots };
+    });
+    var dates = Array.from(dateSet).sort();
     if (dates.length === 0) {
-        container.innerHTML = '<p class="fleet-list-empty">No dated snapshots recorded yet for this device - load snapshots with a ScanTimestamp spanning multiple days to build history.</p>';
+        container.innerHTML = '<p class="fleet-list-empty">No dated snapshots recorded yet - load snapshots with a ScanTimestamp spanning multiple days to build history.</p>';
         return;
     }
+    var active = rows.filter(r => r.alarms > 0 || r.reboots > 0);
+    var shown = (showQuiet ? rows : active).sort((a, b) => (b.alarms - a.alarms) || (b.reboots - a.reboots) || window.GraphLayout.compareIpIds(a.ip, b.ip));
 
-    // `dates` are plain YYYY-MM-DD keys sliced from a UTC ISO ScanTimestamp. Everything below
-    // must stay in UTC terms (the 'Z' suffix, getUTC*/setUTC*) to keep `iso` matching those
-    // keys - parsing as local time shifts the date for any positive UTC-offset timezone and
-    // silently breaks every `days[iso]` lookup.
-    var minDate = new Date(dates[0] + 'T00:00:00Z');
-    var maxDate = new Date(dates[dates.length - 1] + 'T00:00:00Z');
-    // Start the grid on the Sunday on/before minDate so day-of-week rows line up.
-    var gridStart = new Date(minDate);
-    gridStart.setUTCDate(gridStart.getUTCDate() - gridStart.getUTCDay());
+    var level = count => count === 0 ? '' : (count === 1 ? 'lvl1' : (count <= 3 ? 'lvl2' : (count <= 6 ? 'lvl3' : 'lvl4')));
+    // Column headers: month name where the month changes (and on the first column), day
+    // number under every column when there are few enough to read.
+    var showDays = dates.length <= 40;
+    var header = dates.map((d, i) => {
+        var monthChanged = i === 0 || d.slice(0, 7) !== dates[i - 1].slice(0, 7);
+        var month = monthChanged ? new Date(d + 'T00:00:00Z').toLocaleString(undefined, { month: 'short', timeZone: 'UTC' }) : '';
+        return `<div class="rel-col-head" title="${esc(d)}"><span class="rel-month">${month}</span><span class="rel-day">${showDays ? +d.slice(8, 10) : ''}</span></div>`;
+    }).join('');
 
-    var cells = [];
-    var cursor = new Date(gridStart);
-    while (cursor <= maxDate) {
-        var iso = cursor.toISOString().slice(0, 10);
-        var dow = cursor.getUTCDay();
-        var week = Math.floor((cursor - gridStart) / (7 * 86400000));
-        var d = days[iso];
-        var count = d ? d.alarmCount : 0;
-        var lvl = count === 0 ? '' : (count === 1 ? 'lvl1' : (count <= 3 ? 'lvl2' : (count <= 6 ? 'lvl3' : 'lvl4')));
-        var rebootedCls = d && d.rebooted ? 'rebooted' : '';
-        var title = `${iso}: ${count} alarm${count === 1 ? '' : 's'}${d && d.rebooted ? ' - rebooted' : ''}`;
-        cells.push(`<div class="heatmap-cell ${lvl} ${rebootedCls}" style="grid-row:${dow + 1}; grid-column:${week + 1};" title="${esc(title)}"></div>`);
-        cursor.setUTCDate(cursor.getUTCDate() + 1);
-    }
+    var body = shown.map(r => `<div class="rel-row-label" title="${esc(r.label)}"><span class="rel-ip">${esc(r.ip)}</span><span class="rel-host">${esc(r.label.replace(r.ip, '').replace(/^\s*\((.*)\)\s*$/, '$1'))}</span></div>` +
+        dates.map(d => {
+            var day = r.days[d];
+            if (!day) return '<div class="rel-cell none" title="' + esc(d + ': not crawled') + '"></div>';
+            var title = `${d}: ${day.alarmCount} alarm${day.alarmCount === 1 ? '' : 's'}${day.rebooted ? ' - rebooted' : ''}`;
+            return `<div class="rel-cell heatmap-cell ${level(day.alarmCount)}${day.rebooted ? ' rebooted' : ''}" title="${esc(title)}" onclick="window.goToSearchResult(${JSON.stringify(r.ip).replace(/"/g, '&quot;')}, 'tab-alarms')"></div>`;
+        }).join('') +
+        `<div class="rel-row-total" title="alarm-days / reboots">${r.alarms}<span class="rel-sep">/</span>${r.reboots}</div>`).join('');
 
-    container.innerHTML = `<div class="heatmap-grid">${cells.join('')}</div>
+    container.innerHTML = `<div class="rel-summary">${active.length} of ${rows.length} devices recorded an alarm or reboot across ${dates.length} crawled day${dates.length === 1 ? '' : 's'}${showQuiet ? '' : (rows.length > active.length ? ` - ${rows.length - active.length} quiet device${rows.length - active.length === 1 ? '' : 's'} hidden` : '')}.</div>
+        <div class="rel-grid" style="grid-template-columns: 220px repeat(${dates.length}, minmax(8px, 28px)) 96px;">
+            <div class="rel-corner"></div>${header}<div class="rel-col-head rel-total-head">alarms / reboots</div>
+            ${body || '<div class="fleet-list-empty" style="grid-column: 1 / -1;">Nothing to show.</div>'}
+        </div>
         <div class="heatmap-legend">
             <span>Less</span>
             <div class="heatmap-cell"></div><div class="heatmap-cell lvl1"></div><div class="heatmap-cell lvl2"></div><div class="heatmap-cell lvl3"></div><div class="heatmap-cell lvl4"></div>
             <span>More alarms</span>
             <span style="margin-left:14px; display:inline-flex; align-items:center; gap:4px;"><span class="heatmap-cell rebooted"></span> rebooted that day</span>
+            <span style="margin-left:14px; display:inline-flex; align-items:center; gap:4px;"><span class="heatmap-cell none"></span> not crawled</span>
+            <span class="rel-hint">Click a cell to open that device's alarms.</span>
         </div>`;
 };
 
@@ -883,7 +969,7 @@ window.drillDownStat = function(kind) {
             rows.push({
                 line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">/ ${esc(c.Port || '')}</span>`,
                 line2Html: `Client: <b>${esc(c.IP || c.MAC || 'Unknown')}</b>${c.MAC ? ` (${esc(c.MAC)})` : ''}`,
-                onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex),
+                onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex, { port: c.Port }),
             });
         }));
         headerText = `All ${rows.length} Clients`;
@@ -902,7 +988,7 @@ window.drillDownStat = function(kind) {
                 rows.push({
                     line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">/ ${esc(c.Port || '')}</span>`,
                     line2Html: `<b style="color:#c0392b;">${esc(c.Dot1x_State)}</b>${c.MAC ? ` — ${esc(c.MAC)}` : ''}`,
-                    onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex),
+                    onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex, { port: c.Port }),
                 });
             }
         }));
@@ -913,7 +999,7 @@ window.drillDownStat = function(kind) {
                 rows.push({
                     line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">/ ${esc(port)}</span>`,
                     line2Html: chain.confidence === 'confirmed' ? 'Phone + PC (confirmed)' : `${chain.clients.length} devices (${chain.confidence} daisy-chain)`,
-                    onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex),
+                    onClick: () => window.goToSearchResult(String(d.DeviceIP), 'tab-interfaces', activeSnapshotIndex, { port: port }),
                 });
             });
         });
