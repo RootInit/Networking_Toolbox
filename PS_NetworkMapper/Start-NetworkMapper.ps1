@@ -5,6 +5,7 @@ param (
 
     [string[]]$AllowedScopes = @("131.30."),
 
+    [ValidateRange(1, 64)]
     [int]$MaxConcurrent = 10,
     [switch]$Log,
     # Encryption is on by default. Disables it entirely: topology written as plain .json,
