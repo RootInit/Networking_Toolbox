@@ -899,10 +899,10 @@
                 <thead><tr>
                     <!-- Collapsed columns only; STP / PoE / inactivity / neighbour live in the
                          expanded detail strip of the selected row (renderInterfaces). -->
-                    <th class="sortable" data-sort-key="port" onclick="window.sortInterfacesBy('port')">Port<span class="sort-arrow" id="sort-arrow-port"></span></th>
-                    <th class="sortable" data-sort-key="type" onclick="window.sortInterfacesBy('type')">Type<span class="sort-arrow" id="sort-arrow-type"></span></th>
-                    <th class="sortable" data-sort-key="state" onclick="window.sortInterfacesBy('state')">Status<span class="sort-arrow" id="sort-arrow-state"></span></th>
-                    <th class="sortable" data-sort-key="description" onclick="window.sortInterfacesBy('description')">Description<span class="sort-arrow" id="sort-arrow-description"></span></th>
+                    <th class="sortable" data-sort-key="port" tabindex="0" role="button" onclick="window.sortInterfacesBy('port')" onkeydown="window.activateOnKey(event, () => window.sortInterfacesBy('port'))">Port<span class="sort-arrow" id="sort-arrow-port"></span></th>
+                    <th class="sortable" data-sort-key="type" tabindex="0" role="button" onclick="window.sortInterfacesBy('type')" onkeydown="window.activateOnKey(event, () => window.sortInterfacesBy('type'))">Type<span class="sort-arrow" id="sort-arrow-type"></span></th>
+                    <th class="sortable" data-sort-key="state" tabindex="0" role="button" onclick="window.sortInterfacesBy('state')" onkeydown="window.activateOnKey(event, () => window.sortInterfacesBy('state'))">Status<span class="sort-arrow" id="sort-arrow-state"></span></th>
+                    <th class="sortable" data-sort-key="description" tabindex="0" role="button" onclick="window.sortInterfacesBy('description')" onkeydown="window.activateOnKey(event, () => window.sortInterfacesBy('description'))">Description<span class="sort-arrow" id="sort-arrow-description"></span></th>
                 </tr></thead>
                 <tbody id="interfaces-tbody"></tbody>
             </table>
