@@ -339,10 +339,16 @@ function Invoke-RescanAction {
         return
     }
 
-    # Never -HumanReadable (ends in `exit`, killing this runspace) and never -Log (no
-    # reason for an ad-hoc rescan to write RawDumps/).
+    # Never -HumanReadable (ends in `exit`, killing this runspace) and never -Log (no reason
+    # for a clean ad-hoc rescan to write RawDumps/ on success) - but -DebugLogPath IS passed,
+    # so a failed login/scan lands in Mapper_Debug.log even if the browser never polls the
+    # result (drawer closed, page reload) rather than existing only in the transient HTTP
+    # response. A failed/timed-out rescan can still write to RawDumps/ despite -Log being
+    # absent - Get-JunosNodeData.ps1's failure paths dump unconditionally, since that's the
+    # data that's actually useful for debugging why it failed.
     $JobId = [guid]::NewGuid().ToString()
     $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $TargetIP).AddParameter("Username", $JunosUsername).AddParameter("Password", $JunosPassword)
+    if ($script:DebugLogPath) { $PS.AddParameter("DebugLogPath", $script:DebugLogPath) | Out-Null }
     $PS.RunspacePool = $script:RescanPool
     # $PS isn't reachable from $script:PendingScan until BeginInvoke succeeds below - if it
     # throws, dispose it here or it leaks (nothing else references it to clean up later).
@@ -597,6 +603,10 @@ function Invoke-RescanStatusAction {
                 foreach ($LogLine in $Logs) { if ($LogLine -match 'CRITICAL') { $HasCritical = $true; break } }
 
                 if (-not $Result -or -not $Result.Node -or $HasCritical) {
+                    # The worker (Get-JunosNodeData.ps1) was given -DebugLogPath above and
+                    # already wrote $Logs straight to Mapper_Debug.log as they happened - not
+                    # replayed here, so a closed drawer or page reload doesn't lose the only
+                    # copy the way it would if these lines existed solely in this HTTP response.
                     $Job.Outcome = @{
                         status = "complete"; ok = $false; ip = $Job.IP
                         reason = "Switch returned empty payload or scan failed - see logs"; logs = $Logs
@@ -606,6 +616,7 @@ function Invoke-RescanStatusAction {
                 }
             } catch {
                 $Job.Outcome = @{ status = "complete"; ok = $false; ip = $Job.IP; reason = "Scan failed: $_" }
+                Write-MapperDebugLog "RESCAN [$($Job.IP)] Scan failed: $_"
             }
             try { $Job.PS.Dispose() } catch {}
             # Get-JunosNodeData.ps1 spawns ssh.exe via cmd.exe from this process - PS.Dispose()

@@ -292,6 +292,11 @@ function Invoke-FleetCrawl {
                 try {
                     $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $NextIP).AddParameter("Username", $Username).AddParameter("Password", $Password)
                     if ($Log) { $PS.AddParameter("Log") | Out-Null }
+                    # Lets the worker write failures straight to disk as they happen, instead of
+                    # only buffering into $Result.Logs for the replay below - a job abandoned as
+                    # hung (the 65s timeout branch above) never reaches EndInvoke, so without this
+                    # its failure would otherwise never make it to the debug log at all.
+                    if ($DebugLogPath) { $PS.AddParameter("DebugLogPath", $DebugLogPath) | Out-Null }
 
                     $PS.RunspacePool = $RunspacePool
                     # Captured BEFORE BeginInvoke() (not after): BeginInvoke() can start
@@ -378,7 +383,12 @@ function Invoke-FleetCrawl {
 
                         if ($Result -and $Result.Node) {
                             $Node = $Result.Node
-                            if ($Result.Logs) { foreach ($LogLine in $Result.Logs) { Write-DebugLogLocal $LogLine } }
+                            # Only a fallback for a crawl run without $DebugLogPath (worker has
+                            # nowhere of its own to write) - when it's set, the worker already
+                            # wrote these lines to disk itself as they happened (see the
+                            # AddParameter("DebugLogPath", ...) above), so replaying them here too
+                            # would duplicate every line.
+                            if (-not $DebugLogPath -and $Result.Logs) { foreach ($LogLine in $Result.Logs) { Write-DebugLogLocal $LogLine } }
 
                             Write-Host "`n[+] Finished $($Job.IP) ($($Node.Hostname)) - $($Node.Neighbors.Count) Neighbors, $($Node.Clients.Count) Clients" -ForegroundColor Green
 

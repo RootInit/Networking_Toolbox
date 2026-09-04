@@ -12,7 +12,13 @@ param (
     [switch]$HumanReadable,
 
     # Only write raw payload text files if this flag is present.
-    [switch]$Log
+    [switch]$Log,
+
+    # When set, failures are written straight to this file as they happen, not just
+    # buffered into $Logs for the caller to replay after EndInvoke - a job the orchestrator
+    # abandons as hung (FleetCrawl.ps1's 65s thread-abandon path) never calls EndInvoke, so
+    # $Logs would otherwise never reach disk at all.
+    [string]$DebugLogPath
 )
 
 $WorkerScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
@@ -27,8 +33,72 @@ try {
 
 $AskPass = New-JunosAskPass -Password $Password
 
+# Config backup contains secrets (SNMP communities, RADIUS/TACACS+ shared secrets, etc) and
+# is stored verbatim/unparsed, so redact it here: keep the command echo line, replace only the
+# config command's OWN output section - bounded to the next command's echoed prompt line (or
+# end-of-string if config is genuinely last), the same bounded-capture approach used for
+# $DataDict["CONFIG"] below (via $Sections / the "stop at the next prompt line" pattern).
+# Deliberately does NOT assume "config is written last" (it currently is not - see
+# Invoke-InteractiveBatch's comment; "show interfaces extensive" runs after it) and
+# deliberately uses a non-greedy `.*?` prefix (matching the FIRST/real echoed config command)
+# rather than a greedy one, so this can't be fooled into anchoring on a LATER, coincidentally
+# prompt-shaped line inside some other command's output (e.g. an operator-set interface
+# Description containing text like "> show configuration | display set") - a greedy prefix
+# would shift the redaction boundary to that later false match and leave the real config
+# secrets, earlier in the stream, completely unredacted.
+#
+# Shared by both the -Log success-path dump and the failure-path dumps below it, so a raw
+# payload written anywhere always goes through this same redaction - never inline the regex
+# again elsewhere, or a second copy could drift and leak secrets that this one catches.
+function Save-RawDump {
+    param([string]$RawOutput)
+    # $PWD is only reliably the repo root for the original CLI -Log caller (invoked from
+    # there). The web paths that now also reach here run this script inside a runspace pool
+    # whose working directory isn't guaranteed to be anything in particular - anchor next to
+    # $DebugLogPath (a path the caller already resolved deliberately, e.g. next to
+    # Mapper_Debug.log/ScanNetwork_Debug.log) whenever it's available, falling back to the
+    # old $PWD-relative behavior only when it isn't.
+    $DumpDir = if ($DebugLogPath) { Join-Path (Split-Path -Parent $DebugLogPath) "RawDumps" } else { Join-Path $PWD "RawDumps" }
+    if (-not (Test-Path $DumpDir)) { New-Item -ItemType Directory -Path $DumpDir -Force | Out-Null }
+    $RawLogPath = Join-Path $DumpDir "Raw_$TargetIP.txt"
+    $RedactedOutput = $RawOutput -replace '(?ms)(^.*?>\s*show\s+configuration\s*\|\s*display\s+set[^\r\n]*[\r\n]+).*?(?=[\r\n]+(?:\{[^}]+\}[\r\n]+)?\S+@\S+[>#]|\z)', '$1[CONFIGURATION REDACTED - not written to RawDumps by design; see the Configuration field in NetworkMap output]'
+    $RedactedOutput | Out-File $RawLogPath -Force -Encoding utf8
+    return $RawLogPath
+}
+
 $Logs = [System.Collections.Generic.List[string]]::new()
-function Write-LogMsg { param([string]$msg) $Logs.Add("[$TargetIP] $msg") }
+function Write-LogMsg {
+    param([string]$msg)
+    $Line = "[$TargetIP] $msg"
+    $Logs.Add($Line)
+    if ($DebugLogPath) {
+        # A fleet crawl runs many of these workers concurrently, all appending to the same
+        # shared $DebugLogPath - Out-File -Append takes an exclusive handle, so a same-instant
+        # write from another worker (or the orchestrator's own Write-DebugLogLocal) throws
+        # IOException and silently drops the failure line this whole feature exists to
+        # capture (measured empirically: under 8-way concurrent appends, a bare try/catch with
+        # retries still lost over half the lines). A named mutex - unique per log file path, so
+        # unrelated scans/log files don't serialize against each other - makes the append
+        # atomic instead of racing for the handle.
+        $MutexName = "Global\JunosMapperLog_" + [System.BitConverter]::ToString(
+            [System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($DebugLogPath))
+        ).Replace("-", "")
+        $Mutex = New-Object System.Threading.Mutex($false, $MutexName)
+        $Acquired = $false
+        try {
+            # An AbandonedMutexException means a previous holder died mid-write without
+            # releasing - the mutex is still granted to us despite the exception, and Out-File
+            # itself is never left half-written (its own file write completes or doesn't), so
+            # it's safe to treat like a normal acquire and proceed.
+            try { $Acquired = $Mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $Acquired = $true }
+            "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Line" | Out-File -FilePath $DebugLogPath -Append -Encoding utf8
+        } catch {
+        } finally {
+            if ($Acquired) { try { $Mutex.ReleaseMutex() } catch {} }
+            $Mutex.Dispose()
+        }
+    }
+}
 
 function Invoke-InteractiveBatch {
     $TempOut = Join-Path $env:TEMP "ssh_out_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
@@ -47,7 +117,7 @@ function Invoke-InteractiveBatch {
     # If ssh.exe exits immediately (bad host, refused connection, askpass rejected) the pipe
     # breaks and a WriteLine throws. Temp-file reads/cleanup stay inside this try so a throw
     # still reaches the finally below - otherwise $TempOut/$TempErr leak across the crawl.
-    $Output = ""; $ErrText = ""
+    $Output = ""; $ErrText = ""; $TimedOut = $false
     try {
         $Process = [System.Diagnostics.Process]::Start($ProcInfo)
 
@@ -84,7 +154,7 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.Close()
 
         $Process.WaitForExit(50000) | Out-Null
-        if (-not $Process.HasExited) { $Process.Kill(); Write-LogMsg "TIMEOUT on interactive batch." }
+        if (-not $Process.HasExited) { $Process.Kill(); $TimedOut = $true; Write-LogMsg "TIMEOUT on interactive batch." }
 
         # -Encoding UTF8 explicit: Junos emits UTF-8 for non-ASCII text, but Get-Content's
         # no-BOM default is the system ANSI codepage, which mangles multi-byte sequences.
@@ -97,7 +167,7 @@ function Invoke-InteractiveBatch {
         if (Test-Path $TempErr) { Remove-Item $TempErr -Force -ErrorAction SilentlyContinue }
     }
 
-    return @{ Output = $Output; Error = $ErrText }
+    return @{ Output = $Output; Error = $ErrText; TimedOut = $TimedOut }
 }
 
 $NodeData = @{
@@ -126,35 +196,24 @@ try {
 
     # --- CONDITIONAL RAW LOG DUMP (config output redacted) ---
     if ($Log -and -not [string]::IsNullOrWhiteSpace($RawOutput)) {
-        $DumpDir = Join-Path $PWD "RawDumps"
-        if (-not (Test-Path $DumpDir)) { New-Item -ItemType Directory -Path $DumpDir -Force | Out-Null }
-        $RawLogPath = Join-Path $DumpDir "Raw_$TargetIP.txt"
-
-        # Config backup contains secrets (SNMP communities, RADIUS/TACACS+ shared secrets, etc)
-        # and is stored verbatim/unparsed, so redact it here: keep the command echo line,
-        # replace only the config command's OWN output section - bounded to the next command's
-        # echoed prompt line (or end-of-string if config is genuinely last), the same
-        # bounded-capture approach used for $DataDict["CONFIG"] below (via $Sections /
-        # the "stop at the next prompt line" pattern). Deliberately does NOT assume "config is
-        # written last" (it currently is not - see Invoke-InteractiveBatch's comment; "show
-        # interfaces extensive" runs after it) and deliberately uses a non-greedy `.*?` prefix
-        # (matching the FIRST/real echoed config command) rather than a greedy one, so this
-        # can't be fooled into anchoring on a LATER, coincidentally prompt-shaped line inside
-        # some other command's output (e.g. an operator-set interface Description containing
-        # text like "> show configuration | display set") - a greedy prefix would shift the
-        # redaction boundary to that later false match and leave the real config secrets,
-        # earlier in the stream, completely unredacted.
-        $RedactedOutput = $RawOutput -replace '(?ms)(^.*?>\s*show\s+configuration\s*\|\s*display\s+set[^\r\n]*[\r\n]+).*?(?=[\r\n]+(?:\{[^}]+\}[\r\n]+)?\S+@\S+[>#]|\z)', '$1[CONFIGURATION REDACTED - not written to RawDumps by design; see the Configuration field in NetworkMap output]'
-        $RedactedOutput | Out-File $RawLogPath -Force -Encoding utf8
+        $RawLogPath = Save-RawDump -RawOutput $RawOutput
         Write-LogMsg "Raw payload saved to $RawLogPath (configuration output redacted)"
+    } elseif ($Result.TimedOut -and -not [string]::IsNullOrWhiteSpace($RawOutput)) {
+        # A timeout is a scan failure too (the batch got killed mid-session) - whatever
+        # partial output it produced is exactly what's needed to see how far it got, so dump
+        # it unconditionally here rather than only under -Log.
+        $RawLogPath = Save-RawDump -RawOutput $RawOutput
+        Write-LogMsg "Partial payload (session timed out) saved to $RawLogPath (configuration output redacted)"
     }
 
     if ([string]::IsNullOrWhiteSpace($RawOutput)) {
-        # ssh's stderr says WHY (timed out, permission denied, host key failure, etc).
-        # Truncated so a pathological stderr dump can't blow up the log.
+        # ssh's stderr says WHY (timed out, permission denied, host key failure, etc). Capped
+        # (not the raw output itself, which -log dumps in full above) so a pathological stderr
+        # dump can't blow up the debug log - stderr from ssh is normally a handful of lines
+        # (auth/host-key/connect errors), so this cap is generous, not a tight truncation.
         $ErrSummary = if (-not [string]::IsNullOrWhiteSpace($Result.Error)) {
             $Trimmed = $Result.Error.Trim()
-            if ($Trimmed.Length -gt 500) { $Trimmed.Substring(0, 500) + "...(truncated)" } else { $Trimmed }
+            if ($Trimmed.Length -gt 4000) { $Trimmed.Substring(0, 4000) + "...(truncated)" } else { $Trimmed }
         } else { "(no stderr output captured)" }
         if ($HumanReadable) { Write-Host "  [!] CRITICAL ERROR: Switch returned empty payload. ssh said: $ErrSummary" -ForegroundColor Red }
         Write-LogMsg "CRITICAL: Switch returned empty payload. ssh stderr: $ErrSummary"
@@ -605,6 +664,18 @@ try {
 
 } catch {
     Write-LogMsg "CRITICAL EXCEPTION: $_"
+    Write-LogMsg "Stack trace: $($_.ScriptStackTrace)"
+    # Reached only after a successful SSH session produced output (ssh's own connect/auth
+    # failures are handled above, before parsing starts), so $RawOutput is exactly the
+    # payload that broke the parser - the most useful thing to have on hand for debugging,
+    # so dump it unconditionally here rather than only when -Log was passed (RawOutput can
+    # be $null if Invoke-InteractiveBatch itself threw before assigning it).
+    if (-not [string]::IsNullOrWhiteSpace($RawOutput)) {
+        try {
+            $RawLogPath = Save-RawDump -RawOutput $RawOutput
+            Write-LogMsg "Raw payload that caused this exception saved to $RawLogPath (configuration output redacted)"
+        } catch { Write-LogMsg "Failed to save raw payload dump: $_" }
+    }
     if ($HumanReadable) { Write-Host "`n[!] SCRIPT EXCEPTION: $_" -ForegroundColor Red }
     # Reached only after a successful SSH session (ssh's own connect/auth failures are
     # handled above, before parsing starts) - so any exception here is a parsing/script
