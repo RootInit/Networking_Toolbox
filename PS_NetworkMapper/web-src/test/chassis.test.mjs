@@ -139,6 +139,17 @@ test('lightStates accepts an ageSec offset and applies it to every port\'s activ
   assert.equal(st['ge-0/0/0'].act, 'off');   // 0h flap + 6mo-plus snapshot age is past the amber cutoff
 });
 
+test('buildMembers tolerates a null/undefined element in StackMembers (malformed scan data)', () => {
+  const members = buildMembers({ StackMembers: [null, { FPC: '0', Model: 'EX2300-C-12P', Serial: 'X', Role: 'Standalone' }, undefined], Interfaces: [] });
+  assert.equal(members.length, 1);
+  assert.equal(members[0].master, true);
+});
+
+test('lightStates tolerates a null/undefined element in Interfaces (malformed scan data)', () => {
+  const st = lightStates({ Interfaces: [null, { Port: 'ge-0/0/1', Link: 'up' }, undefined] });
+  assert.deepEqual(st['ge-0/0/1'], { link: 'green', act: 'green' });
+});
+
 test('buildMembers handles a single-element StackMembers object (PowerShell ConvertTo-Json quirk)', () => {
   const members = buildMembers({ StackMembers: { FPC: '0', Model: 'EX2300-C-12P', Serial: 'X', Role: 'Standalone' }, Interfaces: [] });
   assert.equal(members.length, 1);

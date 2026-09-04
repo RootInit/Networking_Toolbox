@@ -562,7 +562,7 @@ function linkState(intf) {
 // Builds the members of one device: [{fpc, model, key, role, master, unit, html|note}] in
 // FPC order. Pure - no DOM. `device` is a topology record (StackMembers, Interfaces).
 function buildMembers(device) {
-    var asArr = function (v) { return Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]); };
+    var asArr = function (v) { return Array.isArray(v) ? v.filter(function (item) { return item !== null && item !== undefined; }) : (v === null || v === undefined ? [] : [v]); };
     var interfaces = asArr(device && device.Interfaces);
     // Chassis Alarms are device-wide (drawer.js's Summary/Alarms tabs use this same truthy
     // check), not per stack member - every member's ALM LED reflects the same device state.
@@ -625,7 +625,7 @@ function buildMembers(device) {
 
 // Which lenses light, keyed by interface name: { 'ge-0/0/1': {link:'green', act:'amber'}, ... }
 function lightStates(device, ageSec) {
-    var asArr = function (v) { return Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]); };
+    var asArr = function (v) { return Array.isArray(v) ? v.filter(function (item) { return item !== null && item !== undefined; }) : (v === null || v === undefined ? [] : [v]); };
     var out = {};
     asArr(device && device.Interfaces).forEach(function (intf) {
         if (!intf || !intf.Port || String(intf.Port).indexOf('.') !== -1) return;

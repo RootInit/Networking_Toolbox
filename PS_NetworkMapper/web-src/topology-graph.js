@@ -6,7 +6,7 @@
 // serializes a single-element array as a bare object, so device.Neighbors/TrueClients with
 // exactly one entry arrive as {..} instead of [{..}] and must be normalized before .forEach/.map.
 function asArray(val) {
-  if (Array.isArray(val)) return val;
+  if (Array.isArray(val)) return val.filter(function (item) { return item !== null && item !== undefined; });
   if (val === null || val === undefined) return [];
   return [val];
 }

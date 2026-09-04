@@ -27,6 +27,12 @@ test('computeDeviceClassification adds an unscanned placeholder for an LLDP neig
   assert.deepEqual(result.get('10.0.0.2'), { scanned: false, isStack: false, hostname: 'sw2' });
 });
 
+test('computeDeviceClassification tolerates a null/undefined element in Neighbors (malformed scan data)', () => {
+  const device = { DeviceIP: '10.0.0.10', Hostname: 'sw10', StackMembers: [], Neighbors: [null, { ManagementIP: '10.0.0.11', Hostname: 'sw11' }, undefined] };
+  const result = computeDeviceClassification([device]);
+  assert.deepEqual(result.get('10.0.0.11'), { scanned: false, isStack: false, hostname: 'sw11' });
+});
+
 test('computeDeviceClassification skips a neighbor with no usable ManagementIP', () => {
   const device = { DeviceIP: '10.0.0.9', Neighbors: [{ ManagementIP: 'Unknown' }, { ManagementIP: '0.0.0.0' }] };
   const result = computeDeviceClassification([device]);
