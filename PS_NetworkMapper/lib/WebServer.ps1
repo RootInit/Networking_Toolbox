@@ -55,14 +55,27 @@ function Send-WebJson {
     Send-WebResponse -Response $Response -StatusCode $StatusCode -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Json)) -ContentType "application/json; charset=utf-8"
 }
 
+# Simple size cap (logging-1) - this is a long-running server process with no other rotation,
+# so an unbounded log otherwise grows forever. Not a full rotation scheme (no .1/.2 history) -
+# a single local analyst just needs it not to grow without bound.
+$script:DebugLogMaxBytes = 10MB
+
 # Mapper_Debug.log - the same file Invoke-FleetCrawl's Write-DebugLogLocal writes crawl
 # activity to (set once via $script:DebugLogPath in Start-MapperWebServer).
 function Write-MapperDebugLog {
     param([string]$Message)
     if (-not $script:DebugLogPath) { return }
     # Best-effort: a full disk or locked log file must not take down the request logging to it.
-    # -Encoding utf8 explicit, or a mixed-encoding file causes CJK mojibake in text editors.
-    try { "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" | Out-File -FilePath $script:DebugLogPath -Append -Encoding utf8 } catch {}
+    # -Encoding utf8 explicit, or a mixed-encoding file causes CJK mojibake in text editors. The
+    # size check below shares this same try/catch for the same reason - a failed Get-Item (e.g.
+    # a concurrent Invoke-FleetCrawl -Force truncation racing this) must not block the append.
+    try {
+        $ExistingFile = Get-Item -LiteralPath $script:DebugLogPath -ErrorAction SilentlyContinue
+        if ($ExistingFile -and $ExistingFile.Length -gt $script:DebugLogMaxBytes) {
+            "=== Mapper_Debug.log truncated at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (exceeded $($script:DebugLogMaxBytes) bytes) ===" | Out-File -FilePath $script:DebugLogPath -Encoding utf8
+        }
+        "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" | Out-File -FilePath $script:DebugLogPath -Append -Encoding utf8
+    } catch {}
 }
 
 # Max length (chars) accepted per client-error field before truncation (P7LOG-02) - mirrors
@@ -70,6 +83,17 @@ function Write-MapperDebugLog {
 # unbounded attacker/bug-controlled text hit the log" reason, just larger since a JS stack
 # trace legitimately runs longer than an ssh stderr dump.
 $script:ClientErrorFieldMaxLength = 4000
+
+# Server-side throttle (logging-1) for /api/client-error - utils.js's reportedClientErrors
+# Set only dedupes on the CLIENT, so a modified/malicious client (or a bug bypassing that Set)
+# can still POST here without limit and flood Mapper_Debug.log. This listener is
+# localhost-only/single-analyst (see the file header), so one global counter/window is enough -
+# no per-client-IP bucketing needed. Generous limits: normal usage is a handful of distinct
+# errors per page load, not a sustained stream.
+$script:ClientErrorRateLimitMax = 50
+$script:ClientErrorRateLimitWindowSeconds = 60
+$script:ClientErrorRateLimitCount = 0
+$script:ClientErrorRateLimitWindowStart = Get-Date
 
 # Neutralizes a client-supplied log field: replaces embedded CR/LF with visible escape
 # sequences (so multi-line content stays visible but can't fabricate a second, realistic-
@@ -88,6 +112,26 @@ function ConvertTo-SafeLogField {
 # Tolerant of a malformed/missing body - a logging endpoint must not itself throw.
 function Invoke-ClientErrorAction {
     param($Response, [string]$Body)
+
+    # Rate-limit enforcement lives here (server-side), not in utils.js's Set, so a client that
+    # skips/clears that Set can't use this endpoint to flood the log. Responds 200 either way -
+    # this is a fire-and-forget logging sink from the browser's perspective (see utils.js), so a
+    # throttled request shouldn't surface as a visible failure there.
+    $Now = Get-Date
+    if (($Now - $script:ClientErrorRateLimitWindowStart).TotalSeconds -ge $script:ClientErrorRateLimitWindowSeconds) {
+        $script:ClientErrorRateLimitWindowStart = $Now
+        $script:ClientErrorRateLimitCount = 0
+    }
+    $script:ClientErrorRateLimitCount++
+    if ($script:ClientErrorRateLimitCount -gt $script:ClientErrorRateLimitMax) {
+        # Log the throttle engaging exactly once per window, not on every dropped request -
+        # otherwise the throttle notice itself becomes the flood it's meant to prevent.
+        if ($script:ClientErrorRateLimitCount -eq $script:ClientErrorRateLimitMax + 1) {
+            Write-MapperDebugLog "CLIENT ERROR RATE LIMIT: exceeded $script:ClientErrorRateLimitMax reports in $($script:ClientErrorRateLimitWindowSeconds)s - dropping further reports until the window resets."
+        }
+        Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "logged" }
+        return
+    }
 
     $Parsed = $null
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
@@ -257,7 +301,13 @@ function Invoke-RescanAction {
             } catch {
                 Write-MapperDebugLog "RESCAN ORPHAN [$($Orphan.IP)] Job completed after client timeout but failed: $_"
             }
-            $Orphan.PS.Dispose()
+            # Unguarded Dispose() here would skip RemoveAt below on throw, wedging this slot
+            # until process restart - same reasoning as the sibling abandoned-poll block below.
+            try { $Orphan.PS.Dispose() } catch {}
+            # Get-JunosNodeData.ps1 (this job's $WorkerPath) spawns ssh.exe via cmd.exe from
+            # this process - PS.Dispose() above doesn't touch that OS-level grandchild (see
+            # Stop-JunosOrphanProcessesLocal in FleetCrawl.ps1 for why).
+            Stop-JunosOrphanProcessesLocal -TargetIP $Orphan.IP -SinceTime $Orphan.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
             $script:OrphanedScans.RemoveAt($i)
         }
     }
@@ -277,6 +327,7 @@ function Invoke-RescanAction {
                 Write-MapperDebugLog "RESCAN ORPHAN [$($Finished.IP)] Job completed after client abandoned poll but failed: $_"
             }
             try { $Finished.PS.Dispose() } catch {}
+            Stop-JunosOrphanProcessesLocal -TargetIP $Finished.IP -SinceTime $Finished.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
         }
         $script:PendingScan = $null
     }
@@ -340,7 +391,9 @@ function Invoke-PingAction {
             } catch {
                 Write-MapperDebugLog "PING ORPHAN [$($Orphan.IP)] Job completed after client timeout but failed: $_"
             }
-            $Orphan.PS.Dispose()
+            # Unguarded Dispose() here would skip RemoveAt below on throw, wedging this slot
+            # until process restart - same reasoning as the sibling abandoned-poll block below.
+            try { $Orphan.PS.Dispose() } catch {}
             $script:OrphanedPings.RemoveAt($i)
         }
     }
@@ -555,6 +608,11 @@ function Invoke-RescanStatusAction {
                 $Job.Outcome = @{ status = "complete"; ok = $false; ip = $Job.IP; reason = "Scan failed: $_" }
             }
             try { $Job.PS.Dispose() } catch {}
+            # Get-JunosNodeData.ps1 spawns ssh.exe via cmd.exe from this process - PS.Dispose()
+            # above doesn't touch that OS-level grandchild even on a clean completion (see
+            # Stop-JunosOrphanProcessesLocal in FleetCrawl.ps1), so mirror FleetCrawl's own
+            # "call it after every job removal" pattern here too, not just the orphan paths.
+            Stop-JunosOrphanProcessesLocal -TargetIP $Job.IP -SinceTime $Job.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
             $Job.Collected = $true
         }
 
@@ -909,6 +967,12 @@ function Invoke-SaveConfigAction {
             # leave Configuration.json truncated - it's the operator's only copy of their
             # saved device list and credentials.
             Set-FileContentAtomic -DestinationPath $ConfigPath -Content ($Parsed | ConvertTo-Json -Depth 10) -Encoding utf8
+            # Configuration.json holds the operator's plaintext Junos credentials under
+            # -NoEncryption. Set-FileContentAtomic's rename-into-place (FileHelpers.ps1's
+            # Move-FileAtomic) leaves $ConfigPath with a freshly-created file's default ACL on
+            # every save, same as FleetCrawl.ps1's $OutputFile - harden it post-write the same
+            # way Move-TopologyOutputAtomicLocal does there (P8SEC-03).
+            Protect-JunosSensitiveFileAcl -Path $ConfigPath
         } else {
             $SaltBytes = [byte[]]::new(16)
             $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
@@ -1223,22 +1287,45 @@ function Start-MapperWebServer {
             }
         }
     } finally {
-        $Listener.Stop()
-        $Listener.Close()
-        if ($script:PendingScan) { try { $script:PendingScan.PS.Stop() } catch {}; $script:PendingScan.PS.Dispose() }
-        foreach ($Orphan in $script:OrphanedScans) { try { $Orphan.PS.Stop() } catch {}; $Orphan.PS.Dispose() }
-        # .Collected means Invoke-ScanNetworkStatusAction already disposed this job -
-        # avoid double-disposing PS/Runspace.
-        if ($script:PendingScanNetwork -and -not $script:PendingScanNetwork.Collected) {
-            try { $script:PendingScanNetwork.PS.Stop() } catch {}
-            try { $script:PendingScanNetwork.PS.Dispose() } catch {}
-            try { $script:PendingScanNetwork.Runspace.Dispose() } catch {}
-        }
-        $script:RescanPool.Close()
-        $script:RescanPool.Dispose()
-        if ($script:PendingPing) { try { $script:PendingPing.PS.Stop() } catch {}; $script:PendingPing.PS.Dispose() }
-        foreach ($Orphan in $script:OrphanedPings) { try { $Orphan.PS.Stop() } catch {}; $Orphan.PS.Dispose() }
-        $script:PingPool.Close()
-        $script:PingPool.Dispose()
+        # Each step below is independently try/catch'd (recovery-1) - these all run once, at
+        # process shutdown, and are otherwise unrelated resources; one throwing (e.g. a runspace
+        # pool already in a bad state) must not abort the remaining steps and leak whatever
+        # comes after it. Failures are logged, not rethrown - there's no caller left to handle
+        # them and the process is exiting regardless.
+        try { $Listener.Stop() } catch { Write-MapperDebugLog "SHUTDOWN ERROR [Listener.Stop] $_" }
+        try { $Listener.Close() } catch { Write-MapperDebugLog "SHUTDOWN ERROR [Listener.Close] $_" }
+        try {
+            if ($script:PendingScan) {
+                try { $script:PendingScan.PS.Stop() } catch {}
+                $script:PendingScan.PS.Dispose()
+                # Same ssh.exe/cmd.exe grandchild leak as the other rescan job cleanup points
+                # in this file - see Stop-JunosOrphanProcessesLocal in FleetCrawl.ps1.
+                Stop-JunosOrphanProcessesLocal -TargetIP $script:PendingScan.IP -SinceTime $script:PendingScan.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
+            }
+        } catch { Write-MapperDebugLog "SHUTDOWN ERROR [PendingScan cleanup] $_" }
+        try {
+            foreach ($Orphan in $script:OrphanedScans) {
+                try { $Orphan.PS.Stop() } catch {}
+                $Orphan.PS.Dispose()
+                Stop-JunosOrphanProcessesLocal -TargetIP $Orphan.IP -SinceTime $Orphan.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
+            }
+        } catch { Write-MapperDebugLog "SHUTDOWN ERROR [OrphanedScans cleanup] $_" }
+        try {
+            # .Collected means Invoke-ScanNetworkStatusAction already disposed this job -
+            # avoid double-disposing PS/Runspace.
+            if ($script:PendingScanNetwork -and -not $script:PendingScanNetwork.Collected) {
+                try { $script:PendingScanNetwork.PS.Stop() } catch {}
+                try { $script:PendingScanNetwork.PS.Dispose() } catch {}
+                try { $script:PendingScanNetwork.Runspace.Dispose() } catch {}
+            }
+        } catch { Write-MapperDebugLog "SHUTDOWN ERROR [PendingScanNetwork cleanup] $_" }
+        try { $script:RescanPool.Close(); $script:RescanPool.Dispose() } catch { Write-MapperDebugLog "SHUTDOWN ERROR [RescanPool cleanup] $_" }
+        try {
+            if ($script:PendingPing) { try { $script:PendingPing.PS.Stop() } catch {}; $script:PendingPing.PS.Dispose() }
+        } catch { Write-MapperDebugLog "SHUTDOWN ERROR [PendingPing cleanup] $_" }
+        try {
+            foreach ($Orphan in $script:OrphanedPings) { try { $Orphan.PS.Stop() } catch {}; $Orphan.PS.Dispose() }
+        } catch { Write-MapperDebugLog "SHUTDOWN ERROR [OrphanedPings cleanup] $_" }
+        try { $script:PingPool.Close(); $script:PingPool.Dispose() } catch { Write-MapperDebugLog "SHUTDOWN ERROR [PingPool cleanup] $_" }
     }
 }
