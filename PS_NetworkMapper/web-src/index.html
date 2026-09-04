@@ -405,22 +405,30 @@
            style calendar: columns are weeks, rows are Sun-Sat, each cell is one crawled day
            placed by explicit grid-row/grid-column (not auto-flow, since loaded snapshots
            usually have gaps between days rather than a contiguous run). The empty-cell gray
-           and the 4 green intensity levels are given explicit dark-mode values (not the
-           generic --subtle-bg/--success-* vars) so the level progression stays visually
-           distinct as a heat scale rather than collapsing toward one flat dark-mode green. */
+           and the 4 red intensity levels are given explicit dark-mode values (not the
+           generic --subtle-bg/--danger-* vars) so the level progression stays visually
+           distinct as a heat scale rather than collapsing toward one flat dark-mode red. Red
+           (not green) so more alarms reads as worse, matching the red=bad convention used
+           everywhere else (--danger-text, .tier-crit, etc). Each cell's own alarm count is
+           also printed as text (see window.renderReliabilityHeatmap) so severity doesn't rely
+           on colour alone, and is focusable so the same detail as the hover title reaches
+           keyboard users. */
         .heatmap-grid { display: grid; grid-template-rows: repeat(7, 11px); grid-auto-flow: column; grid-auto-columns: 11px; gap: 2px; overflow-x: auto; padding-bottom: 8px; }
-        .heatmap-cell { width: 11px; height: 11px; border-radius: 2px; background: #ebedf0; cursor: default; }
-        .heatmap-cell.lvl1 { background: #c6e6d0; }
-        .heatmap-cell.lvl2 { background: #7bc79e; }
-        .heatmap-cell.lvl3 { background: #2f9e5c; }
-        .heatmap-cell.lvl4 { background: #1e7a45; }
-        .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #c0392b inset; }
-        :root[data-theme="dark"] .heatmap-cell { background: #262b35; }
-        :root[data-theme="dark"] .heatmap-cell.lvl1 { background: #234a30; }
-        :root[data-theme="dark"] .heatmap-cell.lvl2 { background: #2d7a4c; }
-        :root[data-theme="dark"] .heatmap-cell.lvl3 { background: #3fae6f; }
-        :root[data-theme="dark"] .heatmap-cell.lvl4 { background: #6fdb9c; }
-        :root[data-theme="dark"] .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #e8796c inset; }
+        .heatmap-cell { width: 11px; height: 11px; border-radius: 2px; background: #ebedf0; cursor: default; display: flex; align-items: center; justify-content: center; font-size: 7px; line-height: 1; color: rgba(0,0,0,0.65); overflow: hidden; }
+        .heatmap-cell.lvl1 { background: #f7d3ce; }
+        .heatmap-cell.lvl2 { background: #ef9a8d; }
+        .heatmap-cell.lvl3 { background: #e0604c; }
+        .heatmap-cell.lvl4 { background: #c0392b; color: #fff; }
+        /* Reboot ring stays in the warn hue (not red) precisely so it never has to compete
+           with the alarm-severity red scale above for contrast against any of its 5 levels. */
+        .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #d68910 inset; }
+        .heatmap-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+        :root[data-theme="dark"] .heatmap-cell { background: #262b35; color: rgba(255,255,255,0.55); }
+        :root[data-theme="dark"] .heatmap-cell.lvl1 { background: #4a2723; color: rgba(255,255,255,0.75); }
+        :root[data-theme="dark"] .heatmap-cell.lvl2 { background: #7a352c; color: #fff; }
+        :root[data-theme="dark"] .heatmap-cell.lvl3 { background: #a8483a; color: #fff; }
+        :root[data-theme="dark"] .heatmap-cell.lvl4 { background: #e8796c; color: #2a0d08; }
+        :root[data-theme="dark"] .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #f0c33c inset; }
         .heatmap-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-dim); margin-top: 10px; }
         .heatmap-legend .heatmap-cell { cursor: default; }
 

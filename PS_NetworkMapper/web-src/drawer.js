@@ -414,6 +414,12 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
         topology[index] = freshDevice;
     }
 
+    // fleetTotalsFor (dashboard.js) memoises per-snapshot totals keyed on this same
+    // targetSnapshot object - it must be invalidated here, at the point the underlying
+    // topology actually changes, or the Fleet Health sparklines keep showing pre-rescan
+    // numbers next to stat values that recompute live from `devices` on every render.
+    if (window.invalidateFleetTotalsCache) window.invalidateFleetTotalsCache(targetSnapshot);
+
     correlateClientIps(topology);
 
     // buildSearchIndex() spans every loaded snapshot and replaces each snapshot.deviceByIp
