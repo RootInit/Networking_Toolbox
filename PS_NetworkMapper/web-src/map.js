@@ -517,6 +517,15 @@ var editorTargetIp = null;
 // diagnostics.
 var pendingConfigEdits = new Map();
 
+// Staged edits (drags, location-editor commits) live only in pendingConfigEdits above until
+// Save Configuration is clicked - a reload/close before that silently discards them despite
+// the "N unsaved changes" status text. Warn via the browser's native confirmation.
+window.addEventListener('beforeunload', function (e) {
+    if (pendingConfigEdits.size === 0) return;
+    e.preventDefault();
+    e.returnValue = '';
+});
+
 // Named (not inline) so closeLocationEditor can `off` it - without a name, repeated
 // open/cancel of the editor stacks up stale once-listeners that could still overwrite
 // #editorLat/#editorLng on an unrelated later map click.
@@ -749,7 +758,8 @@ window.exportUnplacedDevicesCsv = function() {
     unplacedDevicesForExport.forEach(function (row) {
         var device = row.device;
         var keys = device ? window.ConfigResolve.extractDeviceKeys(device) : null;
-        var model = (device && device.StackMembers && device.StackMembers[0]) ? device.StackMembers[0].Model : '';
+        var stackMember0 = device ? window.asArray(device.StackMembers)[0] : null;
+        var model = stackMember0 ? stackMember0.Model : '';
         rows.push([
             row.meta.hostname !== 'Unknown' ? row.meta.hostname : '',
             row.ip,
