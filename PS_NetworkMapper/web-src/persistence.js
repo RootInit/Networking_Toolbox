@@ -149,6 +149,21 @@ window.resetSettingsPanel = function() {
 // --- Multi-Snapshot Analysis: New Devices + Trends (see #analysisview / dashboard.js) ---
 
 var DEVICE_HISTORY_STORAGE_KEY = 'ps_networkmapper_device_history_v1';
+// Hard cap on distinct MACs tracked - without one this grows forever (one entry per MAC ever
+// seen, never removed). Trimmed by oldest lastSeen first whenever a merge pushes past the cap.
+var MAX_DEVICE_HISTORY_ENTRIES = 5000;
+
+function trimDeviceHistory(history) {
+    var keys = Object.keys(history);
+    if (keys.length <= MAX_DEVICE_HISTORY_ENTRIES) return history;
+    keys.sort(function (a, b) {
+        var am = window.parseTimestampMs(history[a].lastSeen);
+        var bm = window.parseTimestampMs(history[b].lastSeen);
+        return (bm === null ? -Infinity : bm) - (am === null ? -Infinity : am);
+    });
+    keys.slice(MAX_DEVICE_HISTORY_ENTRIES).forEach(function (k) { delete history[k]; });
+    return history;
+}
 
 function loadDeviceHistory() {
     try {
@@ -207,6 +222,7 @@ window.updateDeviceHistory = function() {
         });
     });
 
+    trimDeviceHistory(history);
     saveDeviceHistory(history);
     return history;
 };
@@ -216,6 +232,22 @@ window.updateDeviceHistory = function() {
 // MAC), same recompute-and-merge pattern as window.updateDeviceHistory. Storage key bumped
 // to _v2 (was DeviceIP-keyed) so old entries are abandoned rather than mixed under new keys.
 var ALARM_HISTORY_STORAGE_KEY = 'ps_networkmapper_alarm_history_v2';
+// Hard cap on per-device heatmap days - without one entry.days grows one key per calendar day
+// forever. yyyy-MM-dd keys sort lexicographically = chronologically, so a plain string sort
+// finds the oldest. ~1.5yr of daily columns, comfortably past what the heatmap UI displays.
+var MAX_ALARM_HISTORY_DAYS = 550;
+
+function trimAlarmHistoryDays(history) {
+    Object.keys(history).forEach(function (identity) {
+        var days = history[identity] && history[identity].days;
+        if (!days) return;
+        var dates = Object.keys(days);
+        if (dates.length <= MAX_ALARM_HISTORY_DAYS) return;
+        dates.sort();
+        dates.slice(0, dates.length - MAX_ALARM_HISTORY_DAYS).forEach(function (d) { delete days[d]; });
+    });
+    return history;
+}
 
 function loadAlarmHistory() {
     try {
@@ -279,6 +311,7 @@ window.updateAlarmHistory = function() {
             });
         });
 
+    trimAlarmHistoryDays(history);
     saveAlarmHistory(history);
     return history;
 };
