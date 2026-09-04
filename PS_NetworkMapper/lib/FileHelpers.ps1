@@ -8,21 +8,24 @@
 # $DestinationPath truncated or half-written (the operator's topology/config data is either
 # the old file intact or the new one, never a corrupt in-between - INV-DATA).
 #
-# [System.IO.File]::Move($src, $dst, overwrite:$true) - the 3-arg overload - was confirmed
-# via strace against the real pwsh 7.6.2 binary on this Linux dev/test environment to issue
-# exactly one rename() syscall regardless of whether $dst already exists, so it's atomic in
-# both cases there. This codebase's deployment target is Windows, where the same .NET call
-# goes through MoveFileExW rather than POSIX rename(2) - that path has not been independently
-# strace-verified here (no Windows test environment is available), but NTFS's MoveFileEx
-# rename-replace is documented by Microsoft as atomic, so the same single-syscall-atomicity
-# conclusion is expected to hold on the deployed runtime as well. This replaces the
-# previous pattern of [System.IO.File]::Replace() when the destination exists, falling back
-# to Move-Item -Force when it doesn't - correct, but two code paths, independently
-# reimplemented in multiple files, one of which carried a [NullString]::Value gotcha
-# ($null coerces to an empty string across the PowerShell/.NET boundary, which .Replace()
-# then rejects).
+# [System.IO.File]::Replace($src, $dst, $null) is used rather than the 3-arg
+# [System.IO.File]::Move($src, $dst, overwrite:$true) overload: that Move overload was only
+# added in .NET Core 3.0/.NET 5+ and does not exist on .NET Framework, which Windows
+# PowerShell 5.1 (a real deployment target for this tool) runs on - PowerShell can't resolve
+# that overload at all there, so every save through this helper would throw on PS 5.1.
+# File.Replace(), by contrast, has existed on both .NET Framework and .NET Core/5+ since
+# early versions, giving one code path that works unchanged on PS 5.1 and PS 7. Its one
+# quirk is that it requires $dst to already exist (it's designed to atomically swap one
+# existing file for another, unlike Move, which is happy with a brand-new destination) - so
+# an empty placeholder is created first when $dst doesn't exist yet. [NullString]::Value is
+# passed for the backup-path argument (no backup of the replaced file is kept) rather than a
+# plain $null literal - confirmed empirically on pwsh 7.6.2 here that a bare $null coerces to
+# an empty string across the PowerShell/.NET boundary, which .Replace() then rejects with
+# "The value cannot be an empty string. (Parameter 'path')"; [NullString]::Value is the
+# documented way to pass a true null string argument to a .NET method from PowerShell, and
+# does not hit that coercion.
 #
-# [System.IO.File]::Move is a raw .NET static call - it resolves a relative path against
+# [System.IO.File]::Replace, like any raw .NET static call, resolves a relative path against
 # [Environment]::CurrentDirectory, NOT PowerShell's $PWD (which Set-Location doesn't keep in
 # sync) - unlike Move-Item/Test-Path. Convert-Path -LiteralPath resolves the source (which
 # must already exist - the caller just wrote it) to a full path against $PWD first, so this
@@ -42,7 +45,10 @@ function Move-FileAtomic {
     $ResolvedDestDir = if ([string]::IsNullOrEmpty($DestDir)) { Convert-Path -LiteralPath '.' } else { Convert-Path -LiteralPath $DestDir }
     $ResolvedDestination = Join-Path $ResolvedDestDir $DestLeaf
 
-    [System.IO.File]::Move($ResolvedSource, $ResolvedDestination, $true)
+    if (-not (Test-Path -LiteralPath $ResolvedDestination)) {
+        New-Item -ItemType File -Path $ResolvedDestination -Force | Out-Null
+    }
+    [System.IO.File]::Replace($ResolvedSource, $ResolvedDestination, [NullString]::Value)
 }
 
 # Convenience wrapper for the common "write $Content to $DestinationPath without ever
