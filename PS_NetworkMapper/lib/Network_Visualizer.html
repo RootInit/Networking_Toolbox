@@ -1445,10 +1445,11 @@ svg.leaflet-image-layer.leaflet-interactive path {
            visible - it is the only sidebar - and drag-resizable via #side-panel-handle. */
         
         /* RIGHT PANEL IS BACK */
-        #side-panel { width: 520px; min-width: 320px; max-width: 90vw; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: column; box-sizing: border-box; border-right: 1px solid var(--border); }
-        /* Divider between the tool pane and the device area (window.startToolPanelResize, app.js) */
-        #tool-divider { flex: 0 0 7px; cursor: row-resize; background: var(--subtle-bg); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); position: relative; }
-        #tool-divider::after { content: ""; position: absolute; left: 50%; top: 2px; width: 34px; height: 1px; margin-left: -17px; border-top: 1px solid var(--text-dim); border-bottom: 1px solid var(--text-dim); height: 3px; opacity: .6; }
+        #side-panel { width: 520px; min-width: min(320px, 90vw); max-width: 90vw; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: column; box-sizing: border-box; border-right: 1px solid var(--border); }
+        /* Divider between the tool pane and the device area (window.startToolPanelResize, app.js).
+           Sized to a 24px hit area (touch-target minimum); the visible grip line stays centered via ::after. */
+        #tool-divider { flex: 0 0 24px; cursor: row-resize; background: var(--subtle-bg); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); position: relative; touch-action: none; }
+        #tool-divider::after { content: ""; position: absolute; left: 50%; top: 50%; width: 34px; margin-left: -17px; margin-top: -1.5px; border-top: 1px solid var(--text-dim); border-bottom: 1px solid var(--text-dim); height: 3px; opacity: .6; }
         #tool-divider:hover, #tool-divider.dragging { background: var(--accent); }
         #tool-divider:hover::after, #tool-divider.dragging::after { border-color: white; }
         body.resizing-tool-panel { cursor: row-resize; user-select: none; }
@@ -1476,9 +1477,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
         #diagram-nav .nav-ring { fill: none; stroke: var(--border); stroke-width: 1; pointer-events: none; }
         #diagram-nav svg { filter: drop-shadow(0 2px 6px rgba(0,0,0,0.25)); }
 
-        /* Drag-resize handle for #side-panel - a thin strip on its left edge, dragged via
-           window.startSidePanelResize (app.js), which tracks the pointer continuously. */
-        #side-panel-handle { flex: 0 0 6px; width: 6px; cursor: col-resize; background: transparent; z-index: 11; }
+        /* Drag-resize handle for #side-panel - dragged via window.startSidePanelResize (app.js),
+           which tracks the pointer continuously. Sized to a 24px hit area (touch-target minimum);
+           stays visually transparent except while hovered/dragging, same as before. */
+        #side-panel-handle { flex: 0 0 24px; width: 24px; cursor: col-resize; background: transparent; z-index: 11; touch-action: none; }
         #side-panel-handle:hover, #side-panel-handle.dragging { background: var(--accent); opacity: 0.4; }
         body.resizing-side-panel { cursor: col-resize; user-select: none; }
         
@@ -1563,7 +1565,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         #password-cancel-btn:hover { background: var(--border); }
 
         /* Multi-Snapshot Analysis (New Devices / Trends - see window.refreshAnalysisDashboard).
-           Lives inline in the Analysis Dashboard sidebar tab, not an overlay. */
+           Lives inline in the Analysis Dashboard centre view, not an overlay. */
         .analysis-tab-content { display: none; flex-grow: 1; overflow-y: auto; padding: 16px 4px; }
         .analysis-tab-content.active { display: block; }
         .analysis-trend-controls { display: flex; gap: 16px; margin-bottom: 14px; align-items: center; font-size: 0.85rem; }
@@ -1692,10 +1694,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         /* Sidebar tabs (Load File / Search / Settings / Analysis Dashboard) - a third,
            distinct tab pair alongside .tab (device drawer) and .analysis-tab (Analysis
            Dashboard's own sub-tabs), same reasoning as that pair: querySelectorAll('.tab')
-           must not collide across independent tab groups. Runs sideways along the left
-           edge of the panel body rather than as a row above the content - writing-mode
-           rotates the label text; the extra rotate(180deg) makes it read bottom-to-top,
-           the usual convention for a left-docked vertical tab strip. */
+           must not collide across independent tab groups. */
         #tool-tabs .tab { flex: 1 1 auto; }
         /* The tool pane takes what its content needs, up to a share of the panel, and scrolls
            inside itself; the device drawer below gets the rest. */
@@ -1766,22 +1765,30 @@ svg.leaflet-image-layer.leaflet-interactive path {
            style calendar: columns are weeks, rows are Sun-Sat, each cell is one crawled day
            placed by explicit grid-row/grid-column (not auto-flow, since loaded snapshots
            usually have gaps between days rather than a contiguous run). The empty-cell gray
-           and the 4 green intensity levels are given explicit dark-mode values (not the
-           generic --subtle-bg/--success-* vars) so the level progression stays visually
-           distinct as a heat scale rather than collapsing toward one flat dark-mode green. */
+           and the 4 red intensity levels are given explicit dark-mode values (not the
+           generic --subtle-bg/--danger-* vars) so the level progression stays visually
+           distinct as a heat scale rather than collapsing toward one flat dark-mode red. Red
+           (not green) so more alarms reads as worse, matching the red=bad convention used
+           everywhere else (--danger-text, .tier-crit, etc). Each cell's own alarm count is
+           also printed as text (see window.renderReliabilityHeatmap) so severity doesn't rely
+           on colour alone, and is focusable so the same detail as the hover title reaches
+           keyboard users. */
         .heatmap-grid { display: grid; grid-template-rows: repeat(7, 11px); grid-auto-flow: column; grid-auto-columns: 11px; gap: 2px; overflow-x: auto; padding-bottom: 8px; }
-        .heatmap-cell { width: 11px; height: 11px; border-radius: 2px; background: #ebedf0; cursor: default; }
-        .heatmap-cell.lvl1 { background: #c6e6d0; }
-        .heatmap-cell.lvl2 { background: #7bc79e; }
-        .heatmap-cell.lvl3 { background: #2f9e5c; }
-        .heatmap-cell.lvl4 { background: #1e7a45; }
-        .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #c0392b inset; }
-        :root[data-theme="dark"] .heatmap-cell { background: #262b35; }
-        :root[data-theme="dark"] .heatmap-cell.lvl1 { background: #234a30; }
-        :root[data-theme="dark"] .heatmap-cell.lvl2 { background: #2d7a4c; }
-        :root[data-theme="dark"] .heatmap-cell.lvl3 { background: #3fae6f; }
-        :root[data-theme="dark"] .heatmap-cell.lvl4 { background: #6fdb9c; }
-        :root[data-theme="dark"] .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #e8796c inset; }
+        .heatmap-cell { width: 11px; height: 11px; border-radius: 2px; background: #ebedf0; cursor: default; display: flex; align-items: center; justify-content: center; font-size: 7px; line-height: 1; color: rgba(0,0,0,0.65); overflow: hidden; }
+        .heatmap-cell.lvl1 { background: #f7d3ce; }
+        .heatmap-cell.lvl2 { background: #ef9a8d; }
+        .heatmap-cell.lvl3 { background: #e0604c; }
+        .heatmap-cell.lvl4 { background: #c0392b; color: #fff; }
+        /* Reboot ring stays in the warn hue (not red) precisely so it never has to compete
+           with the alarm-severity red scale above for contrast against any of its 5 levels. */
+        .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #d68910 inset; }
+        .heatmap-cell:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+        :root[data-theme="dark"] .heatmap-cell { background: #262b35; color: rgba(255,255,255,0.55); }
+        :root[data-theme="dark"] .heatmap-cell.lvl1 { background: #4a2723; color: rgba(255,255,255,0.75); }
+        :root[data-theme="dark"] .heatmap-cell.lvl2 { background: #7a352c; color: #fff; }
+        :root[data-theme="dark"] .heatmap-cell.lvl3 { background: #a8483a; color: #fff; }
+        :root[data-theme="dark"] .heatmap-cell.lvl4 { background: #e8796c; color: #2a0d08; }
+        :root[data-theme="dark"] .heatmap-cell.rebooted { box-shadow: 0 0 0 2px #f0c33c inset; }
         .heatmap-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--text-dim); margin-top: 10px; }
         .heatmap-legend .heatmap-cell { cursor: default; }
 
@@ -1856,7 +1863,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
            inverts with the theme; only the lit lenses carry colour. */
         #chassis-view { padding: 10px 15px 8px; border-bottom: 1px solid var(--border); background: var(--panel-bg);
             --chassis-bg: var(--panel-bg); --chassis-fg: var(--text);
-            --led-green: #27d66f; --led-green-core: #b6ffcc; --led-amber: #ff9a1f; --led-amber-core: #ffd9a3; }
+            --led-green: #27d66f; --led-green-core: #b6ffcc; --led-amber: #ff9a1f; --led-amber-core: #ffd9a3;
+            --led-red: #e74c3c; --led-red-core: #ffc9c2; }
         #chassis-view:empty { display: none; }
         .chassis-member + .chassis-member { margin-top: 6px; }
         .chassis-member-label { display: flex; align-items: baseline; gap: 8px; font-size: 0.72rem; margin-bottom: 2px; }
@@ -1878,6 +1886,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         .lens-sample { display: inline-block; width: 9px; height: 7px; border: 1px solid var(--text-muted); border-radius: 1px; background: var(--panel-bg); }
         .lens-sample.green { background: var(--led-green); border-color: var(--led-green); box-shadow: 0 0 4px var(--led-green); }
         .lens-sample.amber { background: var(--led-amber); border-color: var(--led-amber); box-shadow: 0 0 4px var(--led-amber); }
+        .lens-sample.red { background: var(--led-red); border-color: var(--led-red); box-shadow: 0 0 4px var(--led-red); }
 
         svg.chassis-svg .chassis-body { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .5; }
         svg.chassis-svg .chassis-ear { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .4; stroke-opacity: .7; }
@@ -1931,6 +1940,8 @@ svg.leaflet-image-layer.leaflet-interactive path {
         svg.chassis-svg .light-glyph.green .light-core { fill: var(--led-green-core); opacity: 1; }
         svg.chassis-svg .light-glyph.amber .light-glow { fill: var(--led-amber); opacity: .75; }
         svg.chassis-svg .light-glyph.amber .light-core { fill: var(--led-amber-core); opacity: 1; }
+        svg.chassis-svg .light-glyph.red .light-glow { fill: var(--led-red); opacity: .75; }
+        svg.chassis-svg .light-glyph.red .light-core { fill: var(--led-red-core); opacity: 1; }
         svg.chassis-svg .lcd-screen { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .35; }
         svg.chassis-svg .lcd-text { fill: var(--chassis-fg); font-size: 1.7px; font-family: monospace; }
         svg.chassis-svg .btn { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .35; }
@@ -2187,7 +2198,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         </div>
 
 
-        <div id="tool-divider" onmousedown="window.startToolPanelResize(event)" title="Drag to resize"></div>
+        <div id="tool-divider" onpointerdown="window.startToolPanelResize(event)" title="Drag to resize" tabindex="0" role="separator" aria-orientation="horizontal" aria-label="Resize tool panel" onkeydown="window.toolDividerKeydown(event)"></div>
         <!-- Device drawer: hidden until a node is opened (window.openRightDrawer / closeDrawer). -->
         <div id="device-empty">Click a device on the diagram or map, or pick a search result, to see its details here.</div>
         <div id="device-drawer" style="display:none;">
@@ -2260,10 +2271,10 @@ svg.leaflet-image-layer.leaflet-interactive path {
                 <thead><tr>
                     <!-- Collapsed columns only; STP / PoE / inactivity / neighbour live in the
                          expanded detail strip of the selected row (renderInterfaces). -->
-                    <th class="sortable" data-sort-key="port" onclick="window.sortInterfacesBy('port')">Port<span class="sort-arrow" id="sort-arrow-port"></span></th>
-                    <th class="sortable" data-sort-key="type" onclick="window.sortInterfacesBy('type')">Type<span class="sort-arrow" id="sort-arrow-type"></span></th>
-                    <th class="sortable" data-sort-key="state" onclick="window.sortInterfacesBy('state')">Status<span class="sort-arrow" id="sort-arrow-state"></span></th>
-                    <th class="sortable" data-sort-key="description" onclick="window.sortInterfacesBy('description')">Description<span class="sort-arrow" id="sort-arrow-description"></span></th>
+                    <th class="sortable" data-sort-key="port" tabindex="0" role="button" onclick="window.sortInterfacesBy('port')" onkeydown="window.activateOnKey(event, () => window.sortInterfacesBy('port'))">Port<span class="sort-arrow" id="sort-arrow-port"></span></th>
+                    <th class="sortable" data-sort-key="type" tabindex="0" role="button" onclick="window.sortInterfacesBy('type')" onkeydown="window.activateOnKey(event, () => window.sortInterfacesBy('type'))">Type<span class="sort-arrow" id="sort-arrow-type"></span></th>
+                    <th class="sortable" data-sort-key="state" tabindex="0" role="button" onclick="window.sortInterfacesBy('state')" onkeydown="window.activateOnKey(event, () => window.sortInterfacesBy('state'))">Status<span class="sort-arrow" id="sort-arrow-state"></span></th>
+                    <th class="sortable" data-sort-key="description" tabindex="0" role="button" onclick="window.sortInterfacesBy('description')" onkeydown="window.activateOnKey(event, () => window.sortInterfacesBy('description'))">Description<span class="sort-arrow" id="sort-arrow-description"></span></th>
                 </tr></thead>
                 <tbody id="interfaces-tbody"></tbody>
             </table>
@@ -2290,7 +2301,7 @@ svg.leaflet-image-layer.leaflet-interactive path {
         </div>
     </div>
 
-    <div id="side-panel-handle" onmousedown="window.startSidePanelResize(event)" title="Drag to resize"></div>
+    <div id="side-panel-handle" onpointerdown="window.startSidePanelResize(event)" title="Drag to resize" tabindex="0" role="separator" aria-orientation="vertical" aria-label="Resize side panel" onkeydown="window.sidePanelHandleKeydown(event)"></div>
 
     <!-- CENTER PANEL: Diagram / Map -->
     <div id="center-panel" class="view-diagram">
@@ -2310,13 +2321,13 @@ svg.leaflet-image-layer.leaflet-interactive path {
              lived in the left sidebar before; its tables and charts need the centre column's width. -->
         <div id="analysisview" style="display:none;">
             <div class="tabs wrap">
-                <div class="analysis-tab active" onclick="window.switchAnalysisTab('analysis-tab-fleethealth')" id="btn-analysis-tab-fleethealth">Fleet Health</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-newdevices')" id="btn-analysis-tab-newdevices">New Devices</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-trends')" id="btn-analysis-tab-trends">Trends</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-accounts')" id="btn-analysis-tab-accounts">Local Accounts</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" id="btn-analysis-tab-topodiff">Topology Diff</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-ipspace')" id="btn-analysis-tab-ipspace">IP Space</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-reliability')" id="btn-analysis-tab-reliability">Reliability</div>
+                <div class="analysis-tab active" tabindex="0" role="tab" aria-selected="true" onclick="window.switchAnalysisTab('analysis-tab-fleethealth')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-fleethealth'))" id="btn-analysis-tab-fleethealth">Fleet Health</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-newdevices')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-newdevices'))" id="btn-analysis-tab-newdevices">New Devices</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-trends')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-trends'))" id="btn-analysis-tab-trends">Trends</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-accounts')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-accounts'))" id="btn-analysis-tab-accounts">Local Accounts</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-topodiff'))" id="btn-analysis-tab-topodiff">Topology Diff</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-ipspace')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-ipspace'))" id="btn-analysis-tab-ipspace">IP Space</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-reliability')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-reliability'))" id="btn-analysis-tab-reliability">Reliability</div>
             </div>
             <div id="analysis-tab-fleethealth" class="analysis-tab-content active">
                 <div id="fleet-health-content"></div>
@@ -2463,7 +2474,7 @@ window.esc = function(val) {
 // not a 1-element array - so a field with exactly one entry (one alarm, one stack
 // member) arrives as {..} instead of [{..}]. Normalize before using .length/.forEach.
 window.asArray = function(val) {
-    if (Array.isArray(val)) return val;
+    if (Array.isArray(val)) return val.filter(item => item !== null && item !== undefined);
     if (val === null || val === undefined) return [];
     return [val];
 };
@@ -2588,7 +2599,7 @@ window.renderCrawlAge = function(scanTimestampIso) {
         var ageMin = ageMs / 60000;
         var freshness = ageMin < settings.crawlAgeFreshMin ? 'fresh' : (ageMin < settings.crawlAgeStaleMin ? 'stale' : 'old');
         badge.className = 'crawl-age ' + freshness;
-        badge.textContent = `Captured ${scanDate.toLocaleString()} (${window.formatAge(ageMs)})`;
+        badge.textContent = `Captured ${scanDate.toLocaleString('en-US')} (${window.formatAge(ageMs)})`;
         badge.style.display = 'block';
     }
     update();
@@ -2978,6 +2989,21 @@ window.resetSettingsPanel = function() {
 // --- Multi-Snapshot Analysis: New Devices + Trends (see #analysisview / dashboard.js) ---
 
 var DEVICE_HISTORY_STORAGE_KEY = 'ps_networkmapper_device_history_v1';
+// Hard cap on distinct MACs tracked - without one this grows forever (one entry per MAC ever
+// seen, never removed). Trimmed by oldest lastSeen first whenever a merge pushes past the cap.
+var MAX_DEVICE_HISTORY_ENTRIES = 5000;
+
+function trimDeviceHistory(history) {
+    var keys = Object.keys(history);
+    if (keys.length <= MAX_DEVICE_HISTORY_ENTRIES) return history;
+    keys.sort(function (a, b) {
+        var am = window.parseTimestampMs(history[a].lastSeen);
+        var bm = window.parseTimestampMs(history[b].lastSeen);
+        return (bm === null ? -Infinity : bm) - (am === null ? -Infinity : am);
+    });
+    keys.slice(MAX_DEVICE_HISTORY_ENTRIES).forEach(function (k) { delete history[k]; });
+    return history;
+}
 
 function loadDeviceHistory() {
     try {
@@ -3036,6 +3062,7 @@ window.updateDeviceHistory = function() {
         });
     });
 
+    trimDeviceHistory(history);
     saveDeviceHistory(history);
     return history;
 };
@@ -3045,6 +3072,22 @@ window.updateDeviceHistory = function() {
 // MAC), same recompute-and-merge pattern as window.updateDeviceHistory. Storage key bumped
 // to _v2 (was DeviceIP-keyed) so old entries are abandoned rather than mixed under new keys.
 var ALARM_HISTORY_STORAGE_KEY = 'ps_networkmapper_alarm_history_v2';
+// Hard cap on per-device heatmap days - without one entry.days grows one key per calendar day
+// forever. yyyy-MM-dd keys sort lexicographically = chronologically, so a plain string sort
+// finds the oldest. ~1.5yr of daily columns, comfortably past what the heatmap UI displays.
+var MAX_ALARM_HISTORY_DAYS = 550;
+
+function trimAlarmHistoryDays(history) {
+    Object.keys(history).forEach(function (identity) {
+        var days = history[identity] && history[identity].days;
+        if (!days) return;
+        var dates = Object.keys(days);
+        if (dates.length <= MAX_ALARM_HISTORY_DAYS) return;
+        dates.sort();
+        dates.slice(0, dates.length - MAX_ALARM_HISTORY_DAYS).forEach(function (d) { delete days[d]; });
+    });
+    return history;
+}
 
 function loadAlarmHistory() {
     try {
@@ -3108,6 +3151,7 @@ window.updateAlarmHistory = function() {
             });
         });
 
+    trimAlarmHistoryDays(history);
     saveAlarmHistory(history);
     return history;
 };
@@ -3185,11 +3229,37 @@ function computeNeighborEdges(topology) {
   return edges;
 }
 
+// Topology -> per-node {label, shape, isStack, scanned, vlanCache} metadata for the switch
+// diagram, keyed by IP. Extracted from graph.js's buildSwitchMap so the node-construction
+// logic (classification + device lookup + VLAN cache -> label/shape) has exactly one
+// implementation, shared by the real caller and its regression test, instead of drifting
+// between graph.js and a hand-copied test double. buildSwitchMap itself stays in graph.js -
+// it owns the vis-network-specific pieces (dataset diffing, layout, DOM) this function
+// deliberately has no dependency on.
+function buildSwitchMapNodeMeta(topology) {
+  var allNodeMeta = new Map();
+  var classification = computeDeviceClassification(topology);
+  var deviceByIpLocal = new Map(topology.filter(function (d) { return d && d.DeviceIP; }).map(function (d) { return [String(d.DeviceIP), d]; }));
+  var vlanCacheByIp = computeVlanCache(topology);
+
+  classification.forEach(function (meta, ip) {
+    var device = deviceByIpLocal.get(ip);
+    var stackIcon = meta.isStack ? `\n[VC: ${device.StackMembers.length} Node]` : '';
+    allNodeMeta.set(ip, {
+      label: meta.scanned ? `Switch\n${ip}\n(${meta.hostname})${stackIcon}` : `Switch\n${ip}\n(${meta.hostname})`,
+      shape: meta.isStack ? 'database' : 'box', isStack: meta.isStack, scanned: meta.scanned,
+      vlanCache: vlanCacheByIp.get(ip) || [],
+    });
+  });
+
+  return allNodeMeta;
+}
+
 // Dual-mode export: node:test (CJS/ESM interop) vs. browser <script> (no `module`).
 if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache };
+    module.exports = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache, buildSwitchMapNodeMeta: buildSwitchMapNodeMeta };
 } else if (typeof window !== 'undefined') {
-    window.TopologyGraph = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache };
+    window.TopologyGraph = { computeDeviceClassification: computeDeviceClassification, computeNeighborEdges: computeNeighborEdges, computeVlanCache: computeVlanCache, buildSwitchMapNodeMeta: buildSwitchMapNodeMeta };
 }
 
 </script>
@@ -3356,20 +3426,12 @@ window.buildSwitchMap = async function() {
     allNodeMeta.clear();
     allEdges = window.TopologyGraph.computeNeighborEdges(globalTopologyData);
 
-    var classification = window.TopologyGraph.computeDeviceClassification(globalTopologyData);
-    var deviceByIpLocal = new Map(globalTopologyData.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
-    var vlanCacheByIp = window.TopologyGraph.computeVlanCache(globalTopologyData);
-
-    classification.forEach(function (meta, ip) {
-        var device = deviceByIpLocal.get(ip);
-        var stackIcon = meta.isStack ? `\n[VC: ${device.StackMembers.length} Node]` : "";
-        allNodeMeta.set(ip, {
-            label: meta.scanned
-                ? `Switch\n${ip}\n(${meta.hostname})${stackIcon}`
-                : `Switch\n${ip}\n(${meta.hostname})`,
-            shape: meta.isStack ? 'database' : 'box', isStack: meta.isStack, scanned: meta.scanned,
-            vlanCache: vlanCacheByIp.get(ip) || [],
-        });
+    // Node label/shape/vlanCache construction lives in topology-graph.js (buildSwitchMapNodeMeta)
+    // so it's shared with, and exercised directly by, that file's regression test - rather than
+    // being reimplemented here with no real coverage. Copy into allNodeMeta in place; other code
+    // in this file holds a reference to this same Map instance.
+    window.TopologyGraph.buildSwitchMapNodeMeta(globalTopologyData).forEach(function (meta, ip) {
+        allNodeMeta.set(ip, meta);
     });
 
     var nodeIds = Array.from(allNodeMeta.keys());
@@ -3804,9 +3866,10 @@ window.refreshAnalysisDashboard = function() {
 
 window.switchAnalysisTab = function(tabId) {
     document.querySelectorAll('.analysis-tab-content').forEach(el => el.classList.remove('active'));
-    document.querySelectorAll('.analysis-tab').forEach(el => el.classList.remove('active'));
+    document.querySelectorAll('.analysis-tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
     document.getElementById(tabId).classList.add('active');
     document.getElementById('btn-' + tabId).classList.add('active');
+    document.getElementById('btn-' + tabId).setAttribute('aria-selected', 'true');
     if (tabId === 'analysis-tab-trends') window.renderTrendChart();
     if (tabId === 'analysis-tab-fleethealth') window.renderFleetDashboard();
     if (tabId === 'analysis-tab-accounts') window.renderLocalAccountsAudit();
@@ -3866,6 +3929,10 @@ function datedSnapshotsAsc() {
 // snapshot object - detectDaisyChains over every device isn't free and the dashboard
 // re-renders on every activation.
 var fleetTotalsCache = new WeakMap();
+// Called wherever a snapshot's topology is mutated in place (see drawer.js's
+// mergeRescannedDevice) so a stale cached total can never be drawn next to a stat that
+// WAS recomputed live from the same mutated data.
+window.invalidateFleetTotalsCache = function(snapshot) { fleetTotalsCache.delete(snapshot); };
 function fleetTotalsFor(snapshot) {
     if (fleetTotalsCache.has(snapshot)) return fleetTotalsCache.get(snapshot);
     var t = { devices: 0, unreachable: 0, clients: 0, alarms: 0, dot1x: 0, daisy: 0 };
@@ -4092,7 +4159,9 @@ window.renderFleetDashboard = function() {
     function barList(rows, warn, critical, unit) {
         return rows.map(x => {
             var tier = severityTier(x.value, warn, critical);
-            return `<div class="fleet-bar-row"><span class="fleet-bar-name" title="${esc(x.device.DeviceIP)}">${esc(x.device.Hostname || x.device.DeviceIP)}</span>${inlineBar(x.value, `${x.value}${unit} ${SEVERITY_WORD[tier]}`, tier)}</div>`;
+            var name = x.device.Hostname || x.device.DeviceIP;
+            var tip = x.device.Hostname ? `${x.device.Hostname} (${x.device.DeviceIP})` : x.device.DeviceIP;
+            return `<div class="fleet-bar-row"><span class="fleet-bar-name" title="${esc(tip)}">${esc(name)}</span>${inlineBar(x.value, `${x.value}${unit} ${SEVERITY_WORD[tier]}`, tier)}</div>`;
         }).join('');
     }
 
@@ -4109,7 +4178,11 @@ window.renderFleetDashboard = function() {
         ? '<p class="fleet-list-empty">Unable to determine (no devices reported usable uptime data).</p>'
         : recentlyRebooted.length === 0
         ? '<p class="fleet-list-empty">None.</p>'
-        : recentlyRebooted.sort((a, b) => a.elapsedMin - b.elapsedMin).map(x => `<div class="fleet-bar-row"><span class="fleet-bar-name">${esc(x.device.Hostname || x.device.DeviceIP)}</span>${inlineBar(100 - (x.elapsedMin / settings.recentRebootMin) * 100, `${Math.round(x.elapsedMin)} min ago`, 'warn', 'Booted ' + Math.round(x.elapsedMin) + ' minutes before this scan')}</div>`).join('')
+        : recentlyRebooted.sort((a, b) => a.elapsedMin - b.elapsedMin).map(x => {
+            var name = x.device.Hostname || x.device.DeviceIP;
+            var tip = x.device.Hostname ? `${x.device.Hostname} (${x.device.DeviceIP})` : x.device.DeviceIP;
+            return `<div class="fleet-bar-row"><span class="fleet-bar-name" title="${esc(tip)}">${esc(name)}</span>${inlineBar(100 - (x.elapsedMin / settings.recentRebootMin) * 100, `${Math.round(x.elapsedMin)} min ago`, 'warn', 'Booted ' + Math.round(x.elapsedMin) + ' minutes before this scan')}</div>`;
+        }).join('')
     ) + '</div>';
     html += '</div>';
 
@@ -4308,7 +4381,7 @@ window.renderTrendChart = function() {
         container.innerHTML = `<p class="fleet-hint">One dated snapshot is loaded, so there is no trend to draw yet - load a folder of snapshots to see ${TREND_METRIC_LABELS[metric]} over time. Current values, highest first:</p>
             <div class="trend-rank">${ranked.map(e => {
                 var tier = th ? severityTier(e.last, th.warn, th.crit) : 'neutral';
-                return `<div class="fleet-bar-row"><span class="fleet-bar-name">${esc(e.label)}</span>${inlineBar(e.last / maxLast * 100, `${e.last}${unit}${th ? ' ' + SEVERITY_WORD[tier] : ''}`, tier)}</div>`;
+                return `<div class="fleet-bar-row"><span class="fleet-bar-name" title="${esc(e.label)}">${esc(e.label)}</span>${inlineBar(e.last / maxLast * 100, `${e.last}${unit}${th ? ' ' + SEVERITY_WORD[tier] : ''}`, tier)}</div>`;
             }).join('')}</div>`;
         return;
     }
@@ -4562,7 +4635,15 @@ function extractSubnetsFromConfigs(devices) {
         // between the two interface types.
         var irbToSubnet = new Map(); // "irb.N" or "vlan.N" -> {ip, prefix}, scoped to this device only
         var irbRe = /set interfaces (irb|vlan) unit (\d+)[^\r\n]*family inet address (\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})/g;
-        while ((m = irbRe.exec(text)) !== null) irbToSubnet.set(m[1] + '.' + m[2], { ip: m[3], prefix: parseInt(m[4], 10) });
+        while ((m = irbRe.exec(text)) !== null) {
+            var prefix = parseInt(m[4], 10);
+            // The regex's \d{1,2} matches 0-99, but a valid IPv4 prefix length is 0-32 - a
+            // malformed/truncated config line (or a typo upstream) could otherwise produce a
+            // negative or fractional "usable addresses" count below. Drop it here so the vlan
+            // falls into the existing "boundary not found" empty state instead.
+            if (prefix < 0 || prefix > 32) continue;
+            irbToSubnet.set(m[1] + '.' + m[2], { ip: m[3], prefix: prefix });
+        }
 
         var vlanRe = /set vlans (\S+) l3-interface ((?:irb|vlan)\.\d+)/g;
         while ((m = vlanRe.exec(text)) !== null) {
@@ -4704,7 +4785,16 @@ window.renderReliabilityHeatmap = function() {
             var day = r.days[d];
             if (!day) return '<div class="rel-cell none" title="' + esc(d + ': not crawled') + '"></div>';
             var title = `${d}: ${day.alarmCount} alarm${day.alarmCount === 1 ? '' : 's'}${day.rebooted ? ' - rebooted' : ''}`;
-            return `<div class="rel-cell heatmap-cell ${level(day.alarmCount)}${day.rebooted ? ' rebooted' : ''}" title="${esc(title)}" onclick="window.goToSearchResult(${JSON.stringify(r.ip).replace(/"/g, '&quot;')}, 'tab-alarms')"></div>`;
+            // Colour alone (WCAG 1.4.1) isn't enough to read severity here, and a title
+            // attribute alone is hover-only - unreachable by keyboard/screen-reader users. The
+            // alarm count is printed in the cell itself as a second, non-colour encoding, and
+            // tabindex/aria-label/onkeydown put the same detail behind focus, not just hover.
+            // showDays (dense-column check above) also gates the printed digit - a genuine
+            // count is only useful if the cell is wide enough to show it whole; below that
+            // width, a clipped "12" reading as "1" would be worse than no digit at all. Colour,
+            // title and aria-label still carry the full count either way.
+            var countText = (showDays && day.alarmCount > 0) ? day.alarmCount : '';
+            return `<div class="rel-cell heatmap-cell ${level(day.alarmCount)}${day.rebooted ? ' rebooted' : ''}" title="${esc(title)}" aria-label="${esc(title)}" tabindex="0" role="button" onclick="window.goToSearchResult(${JSON.stringify(r.ip).replace(/"/g, '&quot;')}, 'tab-alarms')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">${countText}</div>`;
         }).join('') +
         `<div class="rel-row-total" title="alarm-days / reboots">${r.alarms}<span class="rel-sep">/</span>${r.reboots}</div>`).join('');
 
@@ -4727,6 +4817,11 @@ window.renderReliabilityHeatmap = function() {
 // full underlying list for that stat via search.js's results-list UI.
 window.drillDownStat = function(kind) {
     window.switchSidebarTab('sidebar-tab-search');
+    // revealDeviceInActiveView only knows how to target 'map' or the diagram canvas - the
+    // Analysis Dashboard (where this drill-down is triggered from) is neither, so a row
+    // clicked from here would silently reveal nothing. Switch to the diagram before the
+    // list is even populated so every row's onClick lands somewhere visible.
+    if (activeCenterView === 'analysis') window.switchCenterView('diagram');
     document.getElementById('globalSearch').value = '';
     searchHighlightQuery = '';
 
@@ -4923,7 +5018,7 @@ window.performGlobalSearch = function() {
         // Only show which snapshot a match came from when more than one is loaded.
         var snapshotTs = snapshot ? window.parseTimestampMs(snapshot.scanTimestamp) : null;
         var snapshotTag = (loadedSnapshots.length > 1 && snapshot)
-            ? `<span class="sr-snapshot">${esc(snapshotTs !== null ? new Date(snapshotTs).toLocaleString() : snapshot.sourceFile)}</span>`
+            ? `<span class="sr-snapshot">${esc(snapshotTs !== null ? new Date(snapshotTs).toLocaleString('en-US') : snapshot.sourceFile)}</span>`
             : '';
         return {
             line1Html: `${esc(m.deviceIp)}${hostname}${snapshotTag}`,
@@ -5123,6 +5218,12 @@ function portTitle(unit, key) {
     var t = key && unit && unit.title ? unit.title(key) : '';
     return t ? ' data-tip="' + escHtml(t) + '"' : '';
 }
+// Keyboard/screen-reader access for the same jack a mouse can click - tabindex, a button role
+// and a name are all a non-native SVG element needs; activation is wired up on the delegated
+// keydown listener in window.renderChassisView, alongside the existing delegated click one.
+function portA11y(key) {
+    return key ? ' tabindex="0" role="button" aria-label="Port ' + escHtml(key) + '"' : '';
+}
 function rj45(x, y, g, key, id, opts, unit) {
     opts = opts || {};
     var w = g.w, s = g.strip, o = g.open, H = s + o, cx = w / 2, nO = g.nO / 2, nI = g.nI / 2, dO = g.dO;
@@ -5137,17 +5238,21 @@ function rj45(x, y, g, key, id, opts, unit) {
     }
     var xf = opts.flip ? 'translate(' + f(x) + ',' + f(y + H) + ') scale(1,-1)' : 'translate(' + f(x) + ',' + f(y) + ')';
     var bind = opts.static ? '' : ' id="port_' + id + '"' + portBind(unit, key, 'access');
-    return '<g' + bind + (opts.static ? '' : portTitle(unit, key)) + ' transform="' + xf + '"><path class="' + (opts.static ? 'port-static' : 'port-body') + '" d="' + hole + '"></path>' + contacts + lenses + '</g>';
+    return '<g' + bind + (opts.static ? '' : portTitle(unit, key) + portA11y(key)) + ' transform="' + xf + '"><path class="' + (opts.static ? 'port-static' : 'port-body') + '" d="' + hole + '"></path>' + contacts + lenses + '</g>';
 }
 /* 2-row ganged RJ45 block, top row even / bottom row odd */
 function rj45Block(x, y, cols, pitch, firstN, unit, opts) {
     opts = opts || {};
-    var g = JACK, H = JACK_H, pic = opts.pic || 0, prefix = opts.prefix || 'ge';
+    var g = JACK, H = JACK_H, pic = opts.pic || 0;
+    // opts.prefix is usually a fixed string, but inferModel() passes a per-port function so a
+    // mixed mge/ge block (mgig ports that don't fall on a 12-port boundary) names each jack
+    // from its own actual interface, not the whole block's.
+    var prefixOf = typeof opts.prefix === 'function' ? opts.prefix : function () { return opts.prefix || 'ge'; };
     var out = '';
     for (var c = 0; c < cols; c++) {
         var jx = x + c * pitch, nT = firstN + 2 * c, nB = nT + 1;
-        out += rj45(jx, y, g, unit.key(pn(prefix, unit.fpc, pic, nT)), unit.id + '_' + pic + '_' + nT, {}, unit)
-            + rj45(jx, y + H + ROWBAR, g, unit.key(pn(prefix, unit.fpc, pic, nB)), unit.id + '_' + pic + '_' + nB, { flip: true }, unit);
+        out += rj45(jx, y, g, unit.key(pn(prefixOf(nT), unit.fpc, pic, nT)), unit.id + '_' + pic + '_' + nT, {}, unit)
+            + rj45(jx, y + H + ROWBAR, g, unit.key(pn(prefixOf(nB), unit.fpc, pic, nB)), unit.id + '_' + pic + '_' + nB, { flip: true }, unit);
         if (opts.labelsY) out += '<text class="port-num" x="' + f(jx + g.w / 2 - 1.2) + '" y="' + f(opts.labelsY) + '" text-anchor="end">' + nT + '</text><text class="port-num odd" x="' + f(jx + g.w / 2 + .3) + '" y="' + f(opts.labelsY + .5) + '">' + nB + '</text>';
     }
     var x1 = x + (cols - 1) * pitch + g.w;
@@ -5158,7 +5263,7 @@ function sfpCage(x, y, w, h, key, id, opts, unit) {
     var bail = '<rect class="uplink-bail" x="' + f(w / 2 - 2.2) + '" y="' + f(opts.bailTop ? .35 : h - 1.4) + '" width="4.4" height="1.05" rx=".3"></rect>';
     var inner = '<rect class="uplink-inner" x="1.1" y="1.1" width="' + f(w - 2.2) + '" height="' + f(h - 2.2) + '" rx=".6"></rect>';
     if (!key) return '<g transform="translate(' + f(x) + ',' + f(y) + ')"><rect class="uplink-static" x="0" y="0" width="' + f(w) + '" height="' + f(h) + '" rx="1.2"></rect>' + inner + bail + '</g>';
-    return '<g id="uplink_' + id + '"' + portBind(unit, key, opts.kind || 'uplink') + portTitle(unit, key) + ' transform="translate(' + f(x) + ',' + f(y) + ')">' +
+    return '<g id="uplink_' + id + '"' + portBind(unit, key, opts.kind || 'uplink') + portTitle(unit, key) + portA11y(key) + ' transform="translate(' + f(x) + ',' + f(y) + ')">' +
         '<rect class="uplink-body" x="0" y="0" width="' + f(w) + '" height="' + f(h) + '" rx="1.2"></rect>' + inner + bail + '</g>';
 }
 /* lens pair + number under/over a cage: 'lens' = rectangular windows, 'dots' = round holes */
@@ -5190,13 +5295,15 @@ var label = function (x, y, text, anchor) { return '<text class="tiny-label" x="
 var menuButton = function (cx, cy, r) { return '<circle class="btn" cx="' + f(cx) + '" cy="' + f(cy) + '" r="' + f(r) + '"></circle><path class="btn-glyph" d="M' + f(cx + r + 1.2) + ',' + f(cy - 1) + ' h3 M' + f(cx + r + 1.2) + ',' + f(cy) + ' h3 M' + f(cx + r + 1.2) + ',' + f(cy + 1) + ' h3"></path>'; };
 var esdMark = function (x, y) { return '<path class="corner-mark" d="M' + f(x) + ',' + f(y + 4.4) + ' l2.6,-4.4 l2.6,4.4 z M' + f(x + 2.6) + ',' + f(y) + ' v-1.6"></path>'; };
 var warnTri = function (x, y) { return '<path class="warn" d="M' + f(x) + ',' + f(y + 5) + ' l3,-5.2 l3,5.2 z M' + f(x + 3) + ',' + f(y + 1.6) + ' v2 M' + f(x + 3) + ',' + f(y + 4.3) + ' v.5"></path>'; };
+// ALM is the one LED here that means trouble when lit, not normal operation - red, not green.
+var ledColor = function (label) { return label === 'ALM' ? 'red' : 'green'; };
 function statusCluster(x, y, rows, lit, rowPitch, opts) {
     opts = opts || {};
     var s = '';
     rows.forEach(function (r, i) {
         var cy = y + i * rowPitch;
-        if (r[0]) s += dot(x, cy, .95, null, null, lit[r[0]] ? 'green' : null) + label(x - 1.8, cy + .6, r[0], 'end');
-        if (r[1]) s += dot(x + 6.5, cy, .95, null, null, lit[r[1]] ? 'green' : null) + label(x + 8.3, cy + .6, r[1]);
+        if (r[0]) s += dot(x, cy, .95, null, null, lit[r[0]] ? ledColor(r[0]) : null) + label(x - 1.8, cy + .6, r[0], 'end');
+        if (r[1]) s += dot(x + 6.5, cy, .95, null, null, lit[r[1]] ? ledColor(r[1]) : null) + label(x + 8.3, cy + .6, r[1]);
     });
     if (opts.bracket) s += '<path class="bracket" d="M' + f(x + 3.2) + ',' + f(y - 2.6) + ' h1.4 v' + f((rows.length - 1) * rowPitch + 5) + ' h-1.4"></path>';
     return s;
@@ -5228,7 +5335,7 @@ var RIGHT = {
             ventHex(u.id, ux - 1, 18, 55, 6) +
             '<text class="model-text big" x="' + f(B + 367.6) + '" y="5.4">' + escHtml(s.modelText) + '</text>' +
             '<text class="tiny-label" x="' + f(B + 394.5) + '" y="5.2">RUNNING JUNOS</text>' +
-            statusCluster(B + 427, 6.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe }, 4.6, { bracket: true }) +
+            statusCluster(B + 427, 6.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 4.6, { bracket: true }) +
             menuButton(B + 434.5, 33, 1.9) + usbSmall(B + 426.5, 37.8, 6.5, 3.2) + label(B + 434.4, 40.6, 'CON') + sfps;
     },
     /* EX4200/EX4300: mini-USB CON, model text, LCD + menu/enter, SYS/ALM/MST, SFP+ uplink module. */
@@ -5244,7 +5351,7 @@ var RIGHT = {
             '<circle class="btn" cx="' + f(B + 428) + '" cy="12.6" r="2.5"></circle><path class="btn-glyph" d="M' + f(B + 426.5) + ',11.6 h3 M' + f(B + 426.5) + ',12.6 h3 M' + f(B + 426.5) + ',13.6 h3"></path>' +
             '<circle class="btn" cx="' + f(B + 428) + '" cy="20.2" r="2.5"></circle><path class="btn-glyph" d="M' + f(B + 429.4) + ',19 v1.4 h-2.6 m.9,-.9 l-.9,.9 l.9,.9"></path>' +
             dot(B + 435.5, 11.6, .9, null, null, 'green') + label(B + 437.2, 12.2, 'SYS') +
-            dot(B + 435.5, 16.0, .9) + label(B + 437.2, 16.6, 'ALM') +
+            dot(B + 435.5, 16.0, .9, null, null, u.alarm ? 'red' : null) + label(B + 437.2, 16.6, 'ALM') +
             dot(B + 435.5, 20.4, .9, null, null, u.master ? 'green' : null) + label(B + 437.2, 21.0, 'MST') +
             '<rect class="sfp-frame" x="' + f(mx) + '" y="' + f(my) + '" width="' + f(mw) + '" height="' + f(mh) + '" rx=".8"></rect>' +
             '<rect class="sfp-latch" x="' + f(mx + .6) + '" y="30" width="4.6" height="9.8" rx=".8"></rect><rect class="sfp-latch" x="' + f(mx + mw - 5.2) + '" y="30" width="4.6" height="9.8" rx=".8"></rect>' +
@@ -5262,7 +5369,7 @@ var RIGHT = {
         return '<rect class="subpanel" x="' + f(px) + '" y="1.6" width="' + f(w) + '" height="41.2" rx=".5"></rect>' +
             '<text class="model-text' + (wide ? ' big' : '') + '" x="' + f(px + 3) + '" y="5.6">' + escHtml(s.modelText) + '</text> ' + junosMark(px + 4, 12.4) +
             (s.console === 'mini' ? usbSmall(px + w - 42, 5.4, 6.5, 3.2) : usbSmall(px + w - 42, 5.2, 7, 3.4)) +
-            statusCluster(px + w - 25, 4.6, s.leds || [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe }, 2.9) +
+            statusCluster(px + w - 25, 4.6, s.leds || [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 2.9) +
             (wide ? '<circle class="btn" cx="' + f(px + w - 5) + '" cy="9" r="1.4"></circle>' : '') + bay;
     },
     /* EX4100-48: 2x2 SFP+ uplinks (PIC 2) + 2x2 SFP28 VC ports, sub-panel with 8 LEDs, button, USB-C. */
@@ -5276,7 +5383,7 @@ var RIGHT = {
             '<rect class="block-frame" x="' + f(gx[1] - 1.3) + '" y="11.5" width="' + f(2 * cw + 1.2 + 2.6) + '" height="23" rx=".6"></rect> ' + out +
             '<path class="bracket" d="M' + f(gx[0] + 1) + ',38.2 v.8 h9 m9,0 h9 v-.8"></path>' + label(gx[0] + cw + .6, 40.2, 'UPLINK', 'middle') + label(gx[1] + cw + .6, 40.2, 'VC', 'middle') +
             '<rect class="subpanel" x="' + f(px) + '" y="1.6" width="' + f(BODY_W - 421.6 - 2) + '" height="41.2" rx=".5"></rect>' +
-            statusCluster(px + 7.2, 12.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe }, 4.55) +
+            statusCluster(px + 7.2, 12.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 4.55) +
             menuButton(px + 8.1, 32.9, 2.6) + usbSmall(px + 4.5, 37.7, 7.6, 3.1) + label(px + 13.5, 40.4, 'CON');
     },
     /* EX4000-48: 2x2 SFP+ uplinks, SYS/MST/CLD pill top-right, USB, reset. */
@@ -5383,7 +5490,7 @@ function compact(u) {
            menu button, USB-C CON, warning triangle, green base stripe (drawn as a thick lip). */
         for (var i = 0; i < 4; i++) { var x = R + 180 + i * 15, key = u.key(pn('xe', u.fpc, 1, i)); sfps += sfpCage(x, 23.3, 13.8, 10.5, key, uid + '_u' + i, {}, u) + cageLabel(x + 6.9, 35.2, key, i); }
         sfps += '<rect class="block-frame" x="' + f(R + 179) + '" y="22.3" width="' + f(3 * 15 + 13.8 + 2) + '" height="12.5" rx=".5"></rect>';
-        right = statusCluster(R + 248, 7.5, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe }, 5.0)
+        right = statusCluster(R + 248, 7.5, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 5.0)
             + menuButton(R + 253, 29, 2.2) + usbSmall(R + 249.5, 35.6, 7, 3.2) + label(R + 258, 38.4, 'CON') + warnTri(R + 206, 8)
             + esdMark(R + 6, 27) + '<circle class="btn" cx="' + f(R + 8) + '" cy="21" r="1.1"></circle>' + cornerMarks(R + 17, 20, 16.5, 15)
             + '<line class="lip thick" x1="' + f(R + .3) + '" y1="39.6" x2="' + f(R + W - .3) + '" y2="39.6"></line>';
@@ -5399,7 +5506,7 @@ function compact(u) {
             + rj45(R + 212.4, 7.9, GM, null, uid + '_mgmt', { static: true }) + label(R + 227.5, 6.6, 'MGMT') + rj45(R + 212.4, 21.6, GM, null, uid + '_con', { static: true, flip: true })
             + usbSmall(R + 232, 28.6, 9, 3.8) + '<path class="bracket" d="M' + f(R + 213) + ',34.6 v.8 h11 m5,0 h11 v-.8"></path>' + label(R + 237, 35.9, 'CON', 'end')
             + '<text class="tiny-label" x="' + f(R + 253) + '" y="9.4" text-anchor="middle">RUNNING JUNOS</text>'
-            + statusCluster(sx, 14.3, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['PoE', '']], { SYS: true, MST: u.master, PoE: u.poe }, 5.0)
+            + statusCluster(sx, 14.3, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['PoE', '']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 5.0)
             + '<path class="bracket" d="M' + f(sx + 7) + ',22.2 h5.2 v9.6 h-5.2"></path><rect class="btn" x="' + f(sx + 8.9) + '" y="25.4" width="3.6" height="3.4" rx=".5"></rect><path class="btn-glyph" d="M' + f(sx + 9.6) + ',26.3 h2.2 M' + f(sx + 9.6) + ',27.1 h2.2 M' + f(sx + 9.6) + ',27.9 h2.2"></path>'
             + esdMark(R + 6.5, 22.8) + screw(R + 10.6, 32.4, .9) + cornerMarks(R + 121.8, 7, 27.2, 8);
     }
@@ -5530,10 +5637,16 @@ function inferModel(modelStr, fpc, interfaces) {
     var text = String(modelStr || '').toUpperCase() || 'JUNIPER';
     if (copper) {
         var nBlocks = Math.min(4, Math.max(1, Math.ceil((maxN + 1) / 12)));
-        var mgigFrom = access.filter(function (p) { return p.prefix === 'mge'; }).reduce(function (a, p) { return Math.min(a, p.n); }, Infinity);
+        // Per-port, not per-block: a device can report mge ports that don't align to a
+        // 12-port block boundary, and flagging the whole block would mislabel the ge ports
+        // sharing it (or hide a live mge port outside the flagged block).
+        var mgigPorts = {};
+        access.forEach(function (p) { if (p.prefix === 'mge') mgigPorts[p.n] = true; });
+        var prefixOf = function (n) { return mgigPorts[n] ? 'mge' : 'ge'; };
         var blocks = FAMILY_BLOCKS.slice(4 - nBlocks).map(function (b, i) {
-            var first = 12 * i;
-            return first >= mgigFrom ? Object.assign({}, b, { mgig: true, prefix: 'mge' }) : b;
+            var first = 12 * i, hasMgig = false;
+            for (var k = 0; k < 12; k++) if (mgigPorts[first + k]) { hasMgig = true; break; }
+            return hasMgig ? Object.assign({}, b, { mgig: true, prefix: prefixOf }) : b;
         });
         var right = uplinkPics[2] ? 'lcd' : 'ex2300';
         return { style: 'rj45', label: 'inferred from interface list', inferred: true, poe: false,
@@ -5548,18 +5661,28 @@ function inferModel(modelStr, fpc, interfaces) {
 // Activity lens: green = carrying traffic now or flapped within 72 h, amber = last change
 // between 72 h and 6 months ago, 'off' = older than that, never, or unknown (null
 // LastFlappedSeconds - pre-dates the field, or Junos reported "Never").
+// LastFlappedSeconds is captured once, as of the snapshot's own scan (drawer.js's CSV export
+// notes the same thing) - it does not keep counting up while the snapshot sits loaded. A port
+// that flapped 70h before an since-then-2-months-old scan is not "recently active" now; ageSec
+// (seconds elapsed since that scan, 0 for a live/unknown snapshot) is added before thresholding
+// so a stale snapshot ages out of 'green' the same way live data would.
 var H72_S = 72 * 3600, H6MO_S = 182 * 24 * 3600;
-function activityState(intf) {
+function activityState(intf, ageSec) {
     if (!intf) return 'off';
     if (String(intf.Link).toLowerCase() === 'up') return 'green';
     var s = intf.LastFlappedSeconds;
     if (s === null || s === undefined || !isFinite(s)) return 'off';
-    if (s <= H72_S) return 'green';
-    if (s <= H6MO_S) return 'amber';
+    var elapsed = s + (ageSec > 0 ? ageSec : 0);
+    if (elapsed <= H72_S) return 'green';
+    if (elapsed <= H6MO_S) return 'amber';
     return 'off';
 }
+// 'red' mirrors the down badge the Interfaces table shows for this same intf.Link check
+// (drawer.js renderInterfaces); 'off' stays reserved for a port the artwork has but the
+// device didn't report at all (no intf, so lightStates() never calls this for it).
 function linkState(intf) {
-    return intf && String(intf.Link).toLowerCase() === 'up' ? 'green' : 'off';
+    if (!intf) return 'off';
+    return String(intf.Link).toLowerCase() === 'up' ? 'green' : 'red';
 }
 
 // Builds the members of one device: [{fpc, model, key, role, master, unit, html|note}] in
@@ -5567,6 +5690,9 @@ function linkState(intf) {
 function buildMembers(device) {
     var asArr = function (v) { return Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]); };
     var interfaces = asArr(device && device.Interfaces);
+    // Chassis Alarms are device-wide (drawer.js's Summary/Alarms tabs use this same truthy
+    // check), not per stack member - every member's ALM LED reflects the same device state.
+    var hasAlarm = asArr(device && device.Alarms).length > 0;
     var byPort = new Map();
     interfaces.forEach(function (intf) { if (intf && intf.Port) byPort.set(String(intf.Port), intf); });
     var members = asArr(device && device.StackMembers).map(function (sm) {
@@ -5591,7 +5717,7 @@ function buildMembers(device) {
         var reported = interfaces.filter(function (intf) { var p = parsePort(intf && intf.Port); return p && p.fpc === m.fpc; }).map(function (intf) { return String(intf.Port); });
         var bound = {};
         var makeUnit = function (mdl) { return {
-            id: 'fpc' + m.fpc, fpc: m.fpc, model: out.model, master: out.master, poe: mdl.poe, spec: mdl.spec,
+            id: 'fpc' + m.fpc, fpc: m.fpc, model: out.model, master: out.master, poe: mdl.poe, alarm: hasAlarm, spec: mdl.spec,
             key: function (ifname) { bound[ifname] = true; return ifname; },
             hasPort: function (ifname) { return byPort.has(ifname); },
             // Detail line only - the tooltip prints the interface name itself from data-port.
@@ -5624,12 +5750,12 @@ function buildMembers(device) {
 }
 
 // Which lenses light, keyed by interface name: { 'ge-0/0/1': {link:'green', act:'amber'}, ... }
-function lightStates(device) {
+function lightStates(device, ageSec) {
     var asArr = function (v) { return Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]); };
     var out = {};
     asArr(device && device.Interfaces).forEach(function (intf) {
         if (!intf || !intf.Port || String(intf.Port).indexOf('.') !== -1) return;
-        out[String(intf.Port)] = { link: linkState(intf), act: activityState(intf) };
+        out[String(intf.Port)] = { link: linkState(intf), act: activityState(intf, ageSec) };
     });
     return out;
 }
@@ -5648,6 +5774,20 @@ if (typeof module !== 'undefined' && module.exports) {
     // ---- DOM side (browser only) ----
     var renderedFor = null;   // the device object the current SVGs were built from
     var zoomed = false;       // double-width panels in a sideways-scrolling strip (session only)
+
+    // Seconds elapsed since the LastFlappedSeconds fields on `device` were captured. A live
+    // rescan (drawer.js mergeRescanResult) stamps device.RescannedAt with a fresh timestamp
+    // without touching the loaded snapshot's own scanTimestamp, so that per-device stamp wins
+    // when present; otherwise fall back to the active snapshot's capture time. app.js/drawer.js
+    // load after chassis.js, so these globals only need to exist by the time this actually
+    // runs (a user interaction), not at script-load time.
+    function snapshotAgeSeconds(device) {
+        try {
+            var ts = (device && device.RescannedAt) || (window.loadedSnapshots && window.loadedSnapshots[window.activeSnapshotIndex] && window.loadedSnapshots[window.activeSnapshotIndex].scanTimestamp);
+            var ms = window.parseTimestampMs ? window.parseTimestampMs(ts) : null;
+            return ms === null ? 0 : Math.max(0, (Date.now() - ms) / 1000);
+        } catch (e) { return 0; }
+    }
 
     window.toggleChassisZoom = function () {
         zoomed = !zoomed;
@@ -5679,6 +5819,7 @@ if (typeof module !== 'undefined' && module.exports) {
                 ? '<div class="chassis-stack">' + html + '</div>' +
                   '<div class="chassis-legend">' +
                   '<span><i class="lens-sample green"></i>left lens: link up</span>' +
+                  '<span><i class="lens-sample red"></i>left lens: link down</span>' +
                   '<span><i class="lens-sample green"></i>right lens: active within 72 h</span>' +
                   '<span><i class="lens-sample amber"></i>72 h to 6 months</span>' +
                   '<span><i class="lens-sample"></i>longer / never / unknown</span>' +
@@ -5688,10 +5829,10 @@ if (typeof module !== 'undefined' && module.exports) {
             renderedFor = device;
         }
         root.classList.toggle('zoomed', zoomed);
-        var states = lightStates(device);
+        var states = lightStates(device, snapshotAgeSeconds(device));
         root.querySelectorAll('[data-lightfor]').forEach(function (el) {
             var st = states[el.getAttribute('data-lightfor')];
-            el.classList.remove('green', 'amber');
+            el.classList.remove('green', 'amber', 'red');
             if (!st) return;
             var v = el.getAttribute('data-role') === 'link' ? st.link : st.act;
             if (v !== 'off') el.classList.add(v);
@@ -5764,19 +5905,29 @@ if (typeof module !== 'undefined' && module.exports) {
             if (!g || g.classList.contains('port-absent')) return;
             if (typeof window.selectInterfacePort === 'function') window.selectInterfacePort(g.getAttribute('data-port'), { source: 'chassis' });
         });
+        // Same selection a click makes, from the keyboard - each jack carries tabindex="0" +
+        // role="button" (portA11y) so it's reachable by Tab; window.activateOnKey is the same
+        // Enter/Space activation helper index.html and drawer.js already use for this.
+        root.addEventListener('keydown', function (ev) {
+            var g = portOf(ev);
+            if (!g || g.classList.contains('port-absent')) return;
+            window.activateOnKey(ev, function () {
+                if (typeof window.selectInterfacePort === 'function') window.selectInterfacePort(g.getAttribute('data-port'), { source: 'chassis' });
+            });
+        });
     });
 }
 })();
 
 </script>
     <script>
-// Right-hand device detail drawer: tabs (Summary/Hardware/Alarms/Neighbors/Interfaces incl.
+// Left-docked device detail drawer: tabs (Summary/Hardware/Alarms/Neighbors/Interfaces incl.
 // nested edge clients/Config), CSV/config export, printable report, and drawer open/close/
 // tab-switch.
 // Reads currentSelectedNodeData/deviceByIp/loadedSnapshots/activeSnapshotIndex/
 // searchHighlightQuery from app.js.
 
-// The right panel itself stays (it also hosts the Load File / Search / Settings tabs); only
+// The side panel itself stays (it also hosts the Load File / Search / Settings tabs); only
 // the device section under them is shown/hidden.
 window.closeDrawer = function() {
     document.getElementById('device-drawer').style.display = 'none';
@@ -5805,9 +5956,12 @@ window.copyConnectCommand = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
     var btn = document.getElementById('copyConnectBtn');
+    // A launch is already in flight for this button - ignore a double-click/double-Enter
+    // rather than firing a second SSH session + credential temp file.
+    if (btn && btn.disabled) return;
     var original = btn ? btn.textContent : null;
     try {
-        if (btn) btn.textContent = 'Launching...';
+        if (btn) { btn.disabled = true; btn.textContent = 'Launching...'; }
         var resp = await fetch('/api/connect', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -5819,7 +5973,7 @@ window.copyConnectCommand = async function() {
     } catch (e) {
         window.setStatus("Could not launch SSH session: " + e.message, "red");
     } finally {
-        if (btn) setTimeout(() => { btn.textContent = original; }, 1500);
+        if (btn) setTimeout(() => { btn.textContent = original; btn.disabled = false; }, 1500);
     }
 };
 
@@ -5943,7 +6097,7 @@ window.rescanDevice = async function() {
             return;
         }
         if (status.status === 'running') {
-            rescanPollTimer = setTimeout(poll, 2000);
+            rescanPollTimer = setTimeout(() => { poll().catch(e => finish("Rescan poll failed unexpectedly: " + e.message, "red")); }, 2000);
             return;
         }
         // status.status === 'complete'
@@ -5951,14 +6105,21 @@ window.rescanDevice = async function() {
             finish("Rescan failed: " + (status.reason || "unknown error") + " - existing data left unchanged.", "red");
             return;
         }
-        var merged = window.mergeRescannedDevice(status.node, targetSnapshot);
-        if (!merged) {
-            finish("Rescan of " + ip + " completed, but the snapshot it was scanned against is no longer loaded (a new file set was loaded while it was running) - the result was discarded.", "orange");
-        } else {
-            finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString() + ".", "green");
+        // Guarded: a throw anywhere in the merge/re-render (e.g. mergeRescannedDevice's own
+        // re-render of the drawer/graph/map) must still reach finish(), or #rescanBtn is left
+        // disabled/showing "Scanning..." forever with no way to recover but reloading the page.
+        try {
+            var merged = window.mergeRescannedDevice(status.node, targetSnapshot);
+            if (!merged) {
+                finish("Rescan of " + ip + " completed, but the snapshot it was scanned against is no longer loaded (a new file set was loaded while it was running) - the result was discarded.", "orange");
+            } else {
+                finish("Rescanned " + ip + " at " + new Date().toLocaleTimeString('en-US') + ".", "green");
+            }
+        } catch (e) {
+            finish("Rescan of " + ip + " completed, but showing the result failed: " + e.message + " - the underlying data may still have been updated.", "red");
         }
     };
-    poll();
+    poll().catch(e => finish("Rescan poll failed unexpectedly: " + e.message, "red"));
 };
 
 // Quick reachability check via WebServer.ps1's /api/ping - a handful of ICMP echoes.
@@ -6176,6 +6337,12 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
         topology[index] = freshDevice;
     }
 
+    // fleetTotalsFor (dashboard.js) memoises per-snapshot totals keyed on this same
+    // targetSnapshot object - it must be invalidated here, at the point the underlying
+    // topology actually changes, or the Fleet Health sparklines keep showing pre-rescan
+    // numbers next to stat values that recompute live from `devices` on every render.
+    if (window.invalidateFleetTotalsCache) window.invalidateFleetTotalsCache(targetSnapshot);
+
     correlateClientIps(topology);
 
     // buildSearchIndex() spans every loaded snapshot and replaces each snapshot.deviceByIp
@@ -6276,6 +6443,25 @@ window.openRightDrawer = function(ip) {
 
     if (!currentSelectedNodeData) {
         document.getElementById('summary-content').innerHTML = `<div style="color:red; padding:20px;">No diagnostic data found (Unscanned Node).</div>`;
+        // Wipe every other tab's content too - it otherwise still holds the PREVIOUSLY open
+        // device's chassis/hardware/neighbors/interfaces/config, now mislabeled as this one's.
+        var alarmsTbody = document.getElementById('alarms-tbody');
+        if (alarmsTbody) alarmsTbody.innerHTML = `<tr><td colspan="3" style="text-align:center;">No active alarms</td></tr>`;
+        var stackTbody = document.getElementById('stack-tbody');
+        if (stackTbody) stackTbody.innerHTML = `<tr><td colspan="4" style="text-align:center;">No hardware data</td></tr>`;
+        var neighborsTbody = document.getElementById('neighbors-tbody');
+        if (neighborsTbody) neighborsTbody.innerHTML = `<tr><td colspan="4" style="text-align:center;">No LLDP neighbors found</td></tr>`;
+        var interfacesTbody = document.getElementById('interfaces-tbody');
+        if (interfacesTbody) interfacesTbody.innerHTML = `<tr><td colspan="4" style="text-align:center;">No interface data</td></tr>`;
+        if (typeof window.renderChassisView === 'function') window.renderChassisView(null, null);
+        var configContent = document.getElementById('config-content');
+        if (configContent) configContent.textContent = 'No configuration backup available for this device.';
+        var compareContainer = document.getElementById('configCompareContainer');
+        if (compareContainer) compareContainer.style.display = 'none';
+        var configDiffContent = document.getElementById('config-diff-content');
+        if (configDiffContent) configDiffContent.style.display = 'none';
+        if (configContent) configContent.style.display = '';
+        configCompareTarget = null;
         panel.style.display = 'flex';
         emptyNote.style.display = 'none';
         return;
@@ -6300,7 +6486,7 @@ window.renderSummary = function() {
 
     var rescannedHtml = d.RescannedAt
         ? `<div style="grid-column:1/-1; background:var(--warn-bg); color:var(--warn-text); padding:6px 12px; border-radius:4px; font-size:0.8rem; margin-bottom:4px;">
-             Live rescan at ${esc(new Date(d.RescannedAt).toLocaleTimeString())} - not saved to the snapshot file, this session only.
+             Live rescan at ${esc(new Date(d.RescannedAt).toLocaleTimeString('en-US'))} - not saved to the snapshot file, this session only.
            </div>`
         : '';
 
@@ -6390,18 +6576,7 @@ var INTERFACE_SORT_COMPARATORS = {
     // clients < idle access < shutdown), falling back to port order within a rank.
     type: (a, b, typeOf) => ((typeOf && typeOf.get(a) ? typeOf.get(a).order : 9) - (typeOf && typeOf.get(b) ? typeOf.get(b).order : 9)) || INTERFACE_SORT_COMPARATORS.port(a, b),
     state: (a, b) => `${a.Admin}/${a.Link}`.localeCompare(`${b.Admin}/${b.Link}`, undefined, { sensitivity: 'base' }),
-    stp: (a, b) => String(a.STP || '').localeCompare(String(b.STP || ''), undefined, { sensitivity: 'base' }),
-    poe: (a, b) => String(a.PoE || '').localeCompare(String(b.PoE || ''), undefined, { numeric: true, sensitivity: 'base' }),
     description: (a, b) => String(a.Desc || '').localeCompare(String(b.Desc || ''), undefined, { sensitivity: 'base' }),
-    // Nulls (never flapped / pre-dates this field) always sort after every known duration,
-    // regardless of interfaceSortState.dir - matches the default order's tiebreak, and avoids
-    // "Unknown" jumping to the very top of a descending sort just because null > any number.
-    inactiveFor: (a, b) => {
-        var av = a.LastFlappedSeconds, bv = b.LastFlappedSeconds;
-        if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
-        if (bv === null || bv === undefined) return -1;
-        return av - bv;
-    },
 };
 
 window.sortInterfacesBy = function(column) {
@@ -6570,7 +6745,7 @@ window.renderInterfaces = function() {
             var chain = daisyChains.get(window.normalizePort(intf.Port));
             var desc = (intf.Desc && intf.Desc !== 'Unknown') ? intf.Desc : '';
 
-            html += `<tr class="intf-row${selected ? ' selected' : ''}" data-port="${esc(portName)}" onclick="window.selectInterfacePort(this.dataset.port, {source:'table'})">
+            html += `<tr class="intf-row${selected ? ' selected' : ''}" data-port="${esc(portName)}" tabindex="0" role="button" aria-pressed="${selected}" onclick="window.selectInterfacePort(this.dataset.port, {source:'table'})" onkeydown="window.activateOnKey(event, () => window.selectInterfacePort(this.dataset.port, {source:'table'}))">
                 <td><span class="intf-chev">&#9656;</span><b>${esc(intf.Port)}</b></td>
                 <td class="intf-type"><span class="badge ${type.badge}">${type.label}</span>${type.detailHtml}${chain ? ' ' + window.renderDaisyChainBadge(chain) : ''}</td>
                 <td><span class="badge ${linkBadge}">${esc(intf.Admin)}/${esc(intf.Link)}</span></td>
@@ -6731,7 +6906,7 @@ window.populateConfigCompareSelect = function() {
             sameDeviceOptions.push({
                 idx: idx,
                 ts: snapTs !== null ? snapTs : 0,
-                label: snapTs !== null ? new Date(snapTs).toLocaleString() : snap.sourceFile,
+                label: snapTs !== null ? new Date(snapTs).toLocaleString('en-US') : snap.sourceFile,
             });
         }
     });
@@ -6812,7 +6987,7 @@ window.searchConfigCompareDevices = function() {
             matches.push({
                 idx: idx, ip: String(other.DeviceIP), hostname: hostname,
                 ts: snapTs !== null ? snapTs : 0,
-                snapLabel: snapTs !== null ? new Date(snapTs).toLocaleString() : snap.sourceFile,
+                snapLabel: snapTs !== null ? new Date(snapTs).toLocaleString('en-US') : snap.sourceFile,
             });
         });
     });
@@ -6967,7 +7142,7 @@ window.printDeviceReport = function() {
 </head><body>
 <div id="printBar"><button onclick="window.print()">Print / Save as PDF</button></div>
 <h1>${esc(d.Hostname || 'Unknown')}</h1>
-<div class="subtitle">${esc(d.DeviceIP)} &mdash; Junos ${esc(d.JunosVersion)} &mdash; report generated ${esc(new Date().toLocaleString())}</div>
+<div class="subtitle">${esc(d.DeviceIP)} &mdash; Junos ${esc(d.JunosVersion)} &mdash; report generated ${esc(new Date().toLocaleString('en-US'))}</div>
 
 <h2>Identity</h2>
 ${table(['Field', 'Value'], [
@@ -7860,6 +8035,15 @@ var editorTargetIp = null;
 // diagnostics.
 var pendingConfigEdits = new Map();
 
+// Staged edits (drags, location-editor commits) live only in pendingConfigEdits above until
+// Save Configuration is clicked - a reload/close before that silently discards them despite
+// the "N unsaved changes" status text. Warn via the browser's native confirmation.
+window.addEventListener('beforeunload', function (e) {
+    if (pendingConfigEdits.size === 0) return;
+    e.preventDefault();
+    e.returnValue = '';
+});
+
 // Named (not inline) so closeLocationEditor can `off` it - without a name, repeated
 // open/cancel of the editor stacks up stale once-listeners that could still overwrite
 // #editorLat/#editorLng on an unrelated later map click.
@@ -8021,7 +8205,19 @@ window.saveConfiguration = async function() {
         return false;
     }
     if (!resp.ok) {
-        window.showMapStatus('Save failed: HTTP ' + resp.status);
+        // Prefer the server's specific error message (Send-WebJson in WebServer.ps1 returns
+        // a JSON {error: "..."} body, e.g. an invalid-username or validation failure) over a
+        // bare status code, so the operator sees WHAT was wrong rather than just that
+        // something failed. Falls back to the generic HTTP-code message if the body is
+        // missing, not JSON, or has no error text.
+        var serverMessage = null;
+        try {
+            var errBody = await resp.json();
+            if (errBody && typeof errBody.error === 'string' && errBody.error) {
+                serverMessage = errBody.error;
+            }
+        } catch (parseErr) {}
+        window.showMapStatus('Save failed: ' + (serverMessage || ('HTTP ' + resp.status)));
         return false;
     }
     mapConfigEntries = devices;
@@ -8092,7 +8288,8 @@ window.exportUnplacedDevicesCsv = function() {
     unplacedDevicesForExport.forEach(function (row) {
         var device = row.device;
         var keys = device ? window.ConfigResolve.extractDeviceKeys(device) : null;
-        var model = (device && device.StackMembers && device.StackMembers[0]) ? device.StackMembers[0].Model : '';
+        var stackMember0 = device ? window.asArray(device.StackMembers)[0] : null;
+        var model = stackMember0 ? stackMember0.Model : '';
         rows.push([
             row.meta.hostname !== 'Unknown' ? row.meta.hostname : '',
             row.ip,
@@ -8222,7 +8419,7 @@ window.renderSnapshotSwitcher = function() {
 
     select.innerHTML = loadedSnapshots.map((s, idx) => {
         var tsMs = window.parseTimestampMs(s.scanTimestamp);
-        var label = tsMs !== null ? new Date(tsMs).toLocaleString() : `${s.sourceFile} (no timestamp)`;
+        var label = tsMs !== null ? new Date(tsMs).toLocaleString('en-US') : `${s.sourceFile} (no timestamp)`;
         return `<option value="${idx}">${esc(label)}</option>`;
     }).join('');
     container.style.display = 'block';
@@ -8296,7 +8493,16 @@ window.getSessionEncryptionPassword = function() {
 // Drag-resize for #side-panel. vis-network picks up the resulting #center-panel resize
 // on its own, but Leaflet does not self-observe its container, so Map view needs an
 // explicit invalidateSize() call while dragging or its tiles freeze at the pre-drag size.
+// Clamps a candidate side-panel width the same way for a live drag, a keyboard nudge, and
+// a restore-on-load - min never exceeds the viewport-relative max (responsive-1/3).
+function clampSidePanelWidth(width) {
+    var maxWidth = window.innerWidth * 0.9;
+    var minWidth = Math.min(320, maxWidth);
+    return Math.max(minWidth, Math.min(maxWidth, width));
+}
+
 window.startSidePanelResize = function(e) {
+    if (e.isPrimary === false) return; // ignore a second simultaneous touch
     e.preventDefault();
     var panel = document.getElementById('side-panel');
     var handle = document.getElementById('side-panel-handle');
@@ -8308,17 +8514,15 @@ window.startSidePanelResize = function(e) {
     function onMove(moveEvent) {
         // Dragging the right edge of a left-docked panel: rightward movement grows it.
         var dx = moveEvent.clientX - startX;
-        var newWidth = startWidth + dx;
-        var maxWidth = window.innerWidth * 0.9;
-        newWidth = Math.max(320, Math.min(maxWidth, newWidth));
-        panel.style.width = newWidth + 'px';
+        panel.style.width = clampSidePanelWidth(startWidth + dx) + 'px';
 
         if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
     }
 
     function onUp() {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        document.removeEventListener('pointercancel', onUp);
         document.body.classList.remove('resizing-side-panel');
         handle.classList.remove('dragging');
         if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
@@ -8326,8 +8530,22 @@ window.startSidePanelResize = function(e) {
         try { localStorage.setItem('sidePanelWidth', String(panel.getBoundingClientRect().width)); } catch (err) {}
     }
 
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+};
+
+// Arrow-key alternative to dragging #side-panel-handle (a11y-3) - same clamp as a drag.
+window.sidePanelHandleKeydown = function(e) {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    var panel = document.getElementById('side-panel');
+    var step = e.key === 'ArrowRight' ? 20 : -20;
+    var newWidth = clampSidePanelWidth(panel.getBoundingClientRect().width + step);
+    panel.style.width = newWidth + 'px';
+    if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
+    if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
+    try { localStorage.setItem('sidePanelWidth', String(newWidth)); } catch (err) {}
 };
 
 // Restores a previously dragged width on load - a display preference, not part of
@@ -8336,6 +8554,7 @@ window.startSidePanelResize = function(e) {
 // area. Until dragged, the pane sizes to its content (capped by CSS); after the first drag it
 // holds the dragged height (#tool-panel.sized) and remembers it across reloads.
 window.startToolPanelResize = function(e) {
+    if (e.isPrimary === false) return; // ignore a second simultaneous touch
     e.preventDefault();
     var pane = document.getElementById('tool-panel');
     var divider = document.getElementById('tool-divider');
@@ -8351,14 +8570,29 @@ window.startToolPanelResize = function(e) {
         pane.style.height = newHeight + 'px';
     }
     function onUp() {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        document.removeEventListener('pointercancel', onUp);
         document.body.classList.remove('resizing-tool-panel');
         divider.classList.remove('dragging');
         try { localStorage.setItem('toolPanelHeight', String(pane.getBoundingClientRect().height)); } catch (err) {}
     }
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+};
+
+// Arrow-key alternative to dragging #tool-divider (a11y-3) - same clamp as a drag.
+window.toolDividerKeydown = function(e) {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    var pane = document.getElementById('tool-panel');
+    var panelHeight = document.getElementById('side-panel').getBoundingClientRect().height;
+    var step = e.key === 'ArrowDown' ? 20 : -20;
+    var newHeight = Math.max(0, Math.min(panelHeight - 160, pane.getBoundingClientRect().height + step));
+    pane.classList.add('sized');
+    pane.style.height = newHeight + 'px';
+    try { localStorage.setItem('toolPanelHeight', String(newHeight)); } catch (err) {}
 };
 
 (function restoreToolPanelHeight() {
@@ -8376,7 +8610,7 @@ window.startToolPanelResize = function(e) {
     try {
         var saved = parseFloat(localStorage.getItem('sidePanelWidth'));
         if (Number.isFinite(saved) && saved >= 280) {
-            document.getElementById('side-panel').style.width = saved + 'px';
+            document.getElementById('side-panel').style.width = clampSidePanelWidth(saved) + 'px';
         }
     } catch (err) {}
 })();
@@ -8386,13 +8620,20 @@ window.startToolPanelResize = function(e) {
 // since 'resize' fires continuously during an active drag.
 var windowResizeDebounce = null;
 window.addEventListener('resize', function() {
+    // Re-clamp #side-panel immediately (not debounced) so a width saved on a wider
+    // viewport can't force overflow on a shrunk one (responsive-3).
+    var panel = document.getElementById('side-panel');
+    var currentWidth = panel.getBoundingClientRect().width;
+    var clamped = clampSidePanelWidth(currentWidth);
+    if (clamped !== currentWidth) panel.style.width = clamped + 'px';
+
     clearTimeout(windowResizeDebounce);
     windowResizeDebounce = setTimeout(function() {
         if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
     }, 150);
 });
 
-// Tool tabs at the top of the right panel (Load File / Search / Settings). Panes stay in the DOM when hidden (display:none, not removed), so
+// Tool tabs at the top of the left-docked side panel (Load File / Search / Settings). Panes stay in the DOM when hidden (display:none, not removed), so
 // getElementById-based reads elsewhere (getClusterThreshold, getLayoutSettings) work
 // regardless of which tab is active. (The Analysis Dashboard is a centre view, not a
 // sidebar tab - see map.js's switchCenterView.)
@@ -8669,7 +8910,7 @@ window.processSelectedFiles = async function(files) {
         var bestSnapTs = window.parseTimestampMs(loadedSnapshots[bestIndex].scanTimestamp);
         window.setStatus(
             loadedSnapshots.length > 1
-                ? `Success! Loaded ${loadedSnapshots.length} snapshots (${totalDevices} device-records total)${skippedNote}. Viewing: ${bestSnapTs !== null ? new Date(bestSnapTs).toLocaleString() : loadedSnapshots[bestIndex].sourceFile}.`
+                ? `Success! Loaded ${loadedSnapshots.length} snapshots (${totalDevices} device-records total)${skippedNote}. Viewing: ${bestSnapTs !== null ? new Date(bestSnapTs).toLocaleString('en-US') : loadedSnapshots[bestIndex].sourceFile}.`
                 : `Success! Mapped ${globalTopologyData.length} nodes.`,
             "green"
         );
