@@ -84,10 +84,11 @@
            visible - it is the only sidebar - and drag-resizable via #side-panel-handle. */
         
         /* RIGHT PANEL IS BACK */
-        #side-panel { width: 520px; min-width: 320px; max-width: 90vw; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: column; box-sizing: border-box; border-right: 1px solid var(--border); }
-        /* Divider between the tool pane and the device area (window.startToolPanelResize, app.js) */
-        #tool-divider { flex: 0 0 7px; cursor: row-resize; background: var(--subtle-bg); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); position: relative; }
-        #tool-divider::after { content: ""; position: absolute; left: 50%; top: 2px; width: 34px; height: 1px; margin-left: -17px; border-top: 1px solid var(--text-dim); border-bottom: 1px solid var(--text-dim); height: 3px; opacity: .6; }
+        #side-panel { width: 520px; min-width: min(320px, 90vw); max-width: 90vw; background: var(--panel-bg); box-shadow: 2px 0 5px rgba(0,0,0,0.05); z-index: 10; display: flex; flex-direction: column; box-sizing: border-box; border-right: 1px solid var(--border); }
+        /* Divider between the tool pane and the device area (window.startToolPanelResize, app.js).
+           Sized to a 24px hit area (touch-target minimum); the visible grip line stays centered via ::after. */
+        #tool-divider { flex: 0 0 24px; cursor: row-resize; background: var(--subtle-bg); border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); position: relative; touch-action: none; }
+        #tool-divider::after { content: ""; position: absolute; left: 50%; top: 50%; width: 34px; margin-left: -17px; margin-top: -1.5px; border-top: 1px solid var(--text-dim); border-bottom: 1px solid var(--text-dim); height: 3px; opacity: .6; }
         #tool-divider:hover, #tool-divider.dragging { background: var(--accent); }
         #tool-divider:hover::after, #tool-divider.dragging::after { border-color: white; }
         body.resizing-tool-panel { cursor: row-resize; user-select: none; }
@@ -115,9 +116,10 @@
         #diagram-nav .nav-ring { fill: none; stroke: var(--border); stroke-width: 1; pointer-events: none; }
         #diagram-nav svg { filter: drop-shadow(0 2px 6px rgba(0,0,0,0.25)); }
 
-        /* Drag-resize handle for #side-panel - a thin strip on its left edge, dragged via
-           window.startSidePanelResize (app.js), which tracks the pointer continuously. */
-        #side-panel-handle { flex: 0 0 6px; width: 6px; cursor: col-resize; background: transparent; z-index: 11; }
+        /* Drag-resize handle for #side-panel - dragged via window.startSidePanelResize (app.js),
+           which tracks the pointer continuously. Sized to a 24px hit area (touch-target minimum);
+           stays visually transparent except while hovered/dragging, same as before. */
+        #side-panel-handle { flex: 0 0 24px; width: 24px; cursor: col-resize; background: transparent; z-index: 11; touch-action: none; }
         #side-panel-handle:hover, #side-panel-handle.dragging { background: var(--accent); opacity: 0.4; }
         body.resizing-side-panel { cursor: col-resize; user-select: none; }
         
@@ -838,7 +840,7 @@
         </div>
 
 
-        <div id="tool-divider" onmousedown="window.startToolPanelResize(event)" title="Drag to resize"></div>
+        <div id="tool-divider" onpointerdown="window.startToolPanelResize(event)" title="Drag to resize" tabindex="0" role="separator" aria-orientation="horizontal" aria-label="Resize tool panel" onkeydown="window.toolDividerKeydown(event)"></div>
         <!-- Device drawer: hidden until a node is opened (window.openRightDrawer / closeDrawer). -->
         <div id="device-empty">Click a device on the diagram or map, or pick a search result, to see its details here.</div>
         <div id="device-drawer" style="display:none;">
@@ -941,7 +943,7 @@
         </div>
     </div>
 
-    <div id="side-panel-handle" onmousedown="window.startSidePanelResize(event)" title="Drag to resize"></div>
+    <div id="side-panel-handle" onpointerdown="window.startSidePanelResize(event)" title="Drag to resize" tabindex="0" role="separator" aria-orientation="vertical" aria-label="Resize side panel" onkeydown="window.sidePanelHandleKeydown(event)"></div>
 
     <!-- CENTER PANEL: Diagram / Map -->
     <div id="center-panel" class="view-diagram">
@@ -961,13 +963,13 @@
              lived in the left sidebar before; its tables and charts need the centre column's width. -->
         <div id="analysisview" style="display:none;">
             <div class="tabs wrap">
-                <div class="analysis-tab active" onclick="window.switchAnalysisTab('analysis-tab-fleethealth')" id="btn-analysis-tab-fleethealth">Fleet Health</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-newdevices')" id="btn-analysis-tab-newdevices">New Devices</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-trends')" id="btn-analysis-tab-trends">Trends</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-accounts')" id="btn-analysis-tab-accounts">Local Accounts</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" id="btn-analysis-tab-topodiff">Topology Diff</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-ipspace')" id="btn-analysis-tab-ipspace">IP Space</div>
-                <div class="analysis-tab" onclick="window.switchAnalysisTab('analysis-tab-reliability')" id="btn-analysis-tab-reliability">Reliability</div>
+                <div class="analysis-tab active" tabindex="0" role="tab" aria-selected="true" onclick="window.switchAnalysisTab('analysis-tab-fleethealth')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-fleethealth'))" id="btn-analysis-tab-fleethealth">Fleet Health</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-newdevices')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-newdevices'))" id="btn-analysis-tab-newdevices">New Devices</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-trends')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-trends'))" id="btn-analysis-tab-trends">Trends</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-accounts')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-accounts'))" id="btn-analysis-tab-accounts">Local Accounts</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-topodiff'))" id="btn-analysis-tab-topodiff">Topology Diff</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-ipspace')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-ipspace'))" id="btn-analysis-tab-ipspace">IP Space</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-reliability')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-reliability'))" id="btn-analysis-tab-reliability">Reliability</div>
             </div>
             <div id="analysis-tab-fleethealth" class="analysis-tab-content active">
                 <div id="fleet-health-content"></div>

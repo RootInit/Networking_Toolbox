@@ -187,7 +187,16 @@ window.getSessionEncryptionPassword = function() {
 // Drag-resize for #side-panel. vis-network picks up the resulting #center-panel resize
 // on its own, but Leaflet does not self-observe its container, so Map view needs an
 // explicit invalidateSize() call while dragging or its tiles freeze at the pre-drag size.
+// Clamps a candidate side-panel width the same way for a live drag, a keyboard nudge, and
+// a restore-on-load - min never exceeds the viewport-relative max (responsive-1/3).
+function clampSidePanelWidth(width) {
+    var maxWidth = window.innerWidth * 0.9;
+    var minWidth = Math.min(320, maxWidth);
+    return Math.max(minWidth, Math.min(maxWidth, width));
+}
+
 window.startSidePanelResize = function(e) {
+    if (e.isPrimary === false) return; // ignore a second simultaneous touch
     e.preventDefault();
     var panel = document.getElementById('side-panel');
     var handle = document.getElementById('side-panel-handle');
@@ -199,17 +208,15 @@ window.startSidePanelResize = function(e) {
     function onMove(moveEvent) {
         // Dragging the right edge of a left-docked panel: rightward movement grows it.
         var dx = moveEvent.clientX - startX;
-        var newWidth = startWidth + dx;
-        var maxWidth = window.innerWidth * 0.9;
-        newWidth = Math.max(320, Math.min(maxWidth, newWidth));
-        panel.style.width = newWidth + 'px';
+        panel.style.width = clampSidePanelWidth(startWidth + dx) + 'px';
 
         if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
     }
 
     function onUp() {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        document.removeEventListener('pointercancel', onUp);
         document.body.classList.remove('resizing-side-panel');
         handle.classList.remove('dragging');
         if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
@@ -217,8 +224,22 @@ window.startSidePanelResize = function(e) {
         try { localStorage.setItem('sidePanelWidth', String(panel.getBoundingClientRect().width)); } catch (err) {}
     }
 
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+};
+
+// Arrow-key alternative to dragging #side-panel-handle (a11y-3) - same clamp as a drag.
+window.sidePanelHandleKeydown = function(e) {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    e.preventDefault();
+    var panel = document.getElementById('side-panel');
+    var step = e.key === 'ArrowRight' ? 20 : -20;
+    var newWidth = clampSidePanelWidth(panel.getBoundingClientRect().width + step);
+    panel.style.width = newWidth + 'px';
+    if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
+    if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
+    try { localStorage.setItem('sidePanelWidth', String(newWidth)); } catch (err) {}
 };
 
 // Restores a previously dragged width on load - a display preference, not part of
@@ -227,6 +248,7 @@ window.startSidePanelResize = function(e) {
 // area. Until dragged, the pane sizes to its content (capped by CSS); after the first drag it
 // holds the dragged height (#tool-panel.sized) and remembers it across reloads.
 window.startToolPanelResize = function(e) {
+    if (e.isPrimary === false) return; // ignore a second simultaneous touch
     e.preventDefault();
     var pane = document.getElementById('tool-panel');
     var divider = document.getElementById('tool-divider');
@@ -242,14 +264,29 @@ window.startToolPanelResize = function(e) {
         pane.style.height = newHeight + 'px';
     }
     function onUp() {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
+        document.removeEventListener('pointermove', onMove);
+        document.removeEventListener('pointerup', onUp);
+        document.removeEventListener('pointercancel', onUp);
         document.body.classList.remove('resizing-tool-panel');
         divider.classList.remove('dragging');
         try { localStorage.setItem('toolPanelHeight', String(pane.getBoundingClientRect().height)); } catch (err) {}
     }
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onUp);
+};
+
+// Arrow-key alternative to dragging #tool-divider (a11y-3) - same clamp as a drag.
+window.toolDividerKeydown = function(e) {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+    e.preventDefault();
+    var pane = document.getElementById('tool-panel');
+    var panelHeight = document.getElementById('side-panel').getBoundingClientRect().height;
+    var step = e.key === 'ArrowDown' ? 20 : -20;
+    var newHeight = Math.max(0, Math.min(panelHeight - 160, pane.getBoundingClientRect().height + step));
+    pane.classList.add('sized');
+    pane.style.height = newHeight + 'px';
+    try { localStorage.setItem('toolPanelHeight', String(newHeight)); } catch (err) {}
 };
 
 (function restoreToolPanelHeight() {
@@ -267,7 +304,7 @@ window.startToolPanelResize = function(e) {
     try {
         var saved = parseFloat(localStorage.getItem('sidePanelWidth'));
         if (Number.isFinite(saved) && saved >= 280) {
-            document.getElementById('side-panel').style.width = saved + 'px';
+            document.getElementById('side-panel').style.width = clampSidePanelWidth(saved) + 'px';
         }
     } catch (err) {}
 })();
@@ -277,6 +314,13 @@ window.startToolPanelResize = function(e) {
 // since 'resize' fires continuously during an active drag.
 var windowResizeDebounce = null;
 window.addEventListener('resize', function() {
+    // Re-clamp #side-panel immediately (not debounced) so a width saved on a wider
+    // viewport can't force overflow on a shrunk one (responsive-3).
+    var panel = document.getElementById('side-panel');
+    var currentWidth = panel.getBoundingClientRect().width;
+    var clamped = clampSidePanelWidth(currentWidth);
+    if (clamped !== currentWidth) panel.style.width = clamped + 'px';
+
     clearTimeout(windowResizeDebounce);
     windowResizeDebounce = setTimeout(function() {
         if (activeCenterView === 'map' && window.leafletMap) window.leafletMap.invalidateSize();
