@@ -202,7 +202,7 @@
         #password-cancel-btn:hover { background: var(--border); }
 
         /* Multi-Snapshot Analysis (New Devices / Trends - see window.refreshAnalysisDashboard).
-           Lives inline in the Analysis Dashboard sidebar tab, not an overlay. */
+           Lives inline in the Analysis Dashboard centre view, not an overlay. */
         .analysis-tab-content { display: none; flex-grow: 1; overflow-y: auto; padding: 16px 4px; }
         .analysis-tab-content.active { display: block; }
         .analysis-trend-controls { display: flex; gap: 16px; margin-bottom: 14px; align-items: center; font-size: 0.85rem; }
@@ -331,10 +331,7 @@
         /* Sidebar tabs (Load File / Search / Settings / Analysis Dashboard) - a third,
            distinct tab pair alongside .tab (device drawer) and .analysis-tab (Analysis
            Dashboard's own sub-tabs), same reasoning as that pair: querySelectorAll('.tab')
-           must not collide across independent tab groups. Runs sideways along the left
-           edge of the panel body rather than as a row above the content - writing-mode
-           rotates the label text; the extra rotate(180deg) makes it read bottom-to-top,
-           the usual convention for a left-docked vertical tab strip. */
+           must not collide across independent tab groups. */
         #tool-tabs .tab { flex: 1 1 auto; }
         /* The tool pane takes what its content needs, up to a share of the panel, and scrolls
            inside itself; the device drawer below gets the rest. */

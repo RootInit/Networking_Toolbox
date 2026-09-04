@@ -1,10 +1,10 @@
-// Right-hand device detail drawer: tabs (Summary/Hardware/Alarms/Neighbors/Interfaces incl.
+// Left-docked device detail drawer: tabs (Summary/Hardware/Alarms/Neighbors/Interfaces incl.
 // nested edge clients/Config), CSV/config export, printable report, and drawer open/close/
 // tab-switch.
 // Reads currentSelectedNodeData/deviceByIp/loadedSnapshots/activeSnapshotIndex/
 // searchHighlightQuery from app.js.
 
-// The right panel itself stays (it also hosts the Load File / Search / Settings tabs); only
+// The side panel itself stays (it also hosts the Load File / Search / Settings tabs); only
 // the device section under them is shown/hidden.
 window.closeDrawer = function() {
     document.getElementById('device-drawer').style.display = 'none';
@@ -653,18 +653,7 @@ var INTERFACE_SORT_COMPARATORS = {
     // clients < idle access < shutdown), falling back to port order within a rank.
     type: (a, b, typeOf) => ((typeOf && typeOf.get(a) ? typeOf.get(a).order : 9) - (typeOf && typeOf.get(b) ? typeOf.get(b).order : 9)) || INTERFACE_SORT_COMPARATORS.port(a, b),
     state: (a, b) => `${a.Admin}/${a.Link}`.localeCompare(`${b.Admin}/${b.Link}`, undefined, { sensitivity: 'base' }),
-    stp: (a, b) => String(a.STP || '').localeCompare(String(b.STP || ''), undefined, { sensitivity: 'base' }),
-    poe: (a, b) => String(a.PoE || '').localeCompare(String(b.PoE || ''), undefined, { numeric: true, sensitivity: 'base' }),
     description: (a, b) => String(a.Desc || '').localeCompare(String(b.Desc || ''), undefined, { sensitivity: 'base' }),
-    // Nulls (never flapped / pre-dates this field) always sort after every known duration,
-    // regardless of interfaceSortState.dir - matches the default order's tiebreak, and avoids
-    // "Unknown" jumping to the very top of a descending sort just because null > any number.
-    inactiveFor: (a, b) => {
-        var av = a.LastFlappedSeconds, bv = b.LastFlappedSeconds;
-        if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
-        if (bv === null || bv === undefined) return -1;
-        return av - bv;
-    },
 };
 
 window.sortInterfacesBy = function(column) {
