@@ -92,6 +92,12 @@ function portTitle(unit, key) {
     var t = key && unit && unit.title ? unit.title(key) : '';
     return t ? ' data-tip="' + escHtml(t) + '"' : '';
 }
+// Keyboard/screen-reader access for the same jack a mouse can click - tabindex, a button role
+// and a name are all a non-native SVG element needs; activation is wired up on the delegated
+// keydown listener in window.renderChassisView, alongside the existing delegated click one.
+function portA11y(key) {
+    return key ? ' tabindex="0" role="button" aria-label="Port ' + escHtml(key) + '"' : '';
+}
 function rj45(x, y, g, key, id, opts, unit) {
     opts = opts || {};
     var w = g.w, s = g.strip, o = g.open, H = s + o, cx = w / 2, nO = g.nO / 2, nI = g.nI / 2, dO = g.dO;
@@ -106,7 +112,7 @@ function rj45(x, y, g, key, id, opts, unit) {
     }
     var xf = opts.flip ? 'translate(' + f(x) + ',' + f(y + H) + ') scale(1,-1)' : 'translate(' + f(x) + ',' + f(y) + ')';
     var bind = opts.static ? '' : ' id="port_' + id + '"' + portBind(unit, key, 'access');
-    return '<g' + bind + (opts.static ? '' : portTitle(unit, key)) + ' transform="' + xf + '"><path class="' + (opts.static ? 'port-static' : 'port-body') + '" d="' + hole + '"></path>' + contacts + lenses + '</g>';
+    return '<g' + bind + (opts.static ? '' : portTitle(unit, key) + portA11y(key)) + ' transform="' + xf + '"><path class="' + (opts.static ? 'port-static' : 'port-body') + '" d="' + hole + '"></path>' + contacts + lenses + '</g>';
 }
 /* 2-row ganged RJ45 block, top row even / bottom row odd */
 function rj45Block(x, y, cols, pitch, firstN, unit, opts) {
@@ -131,7 +137,7 @@ function sfpCage(x, y, w, h, key, id, opts, unit) {
     var bail = '<rect class="uplink-bail" x="' + f(w / 2 - 2.2) + '" y="' + f(opts.bailTop ? .35 : h - 1.4) + '" width="4.4" height="1.05" rx=".3"></rect>';
     var inner = '<rect class="uplink-inner" x="1.1" y="1.1" width="' + f(w - 2.2) + '" height="' + f(h - 2.2) + '" rx=".6"></rect>';
     if (!key) return '<g transform="translate(' + f(x) + ',' + f(y) + ')"><rect class="uplink-static" x="0" y="0" width="' + f(w) + '" height="' + f(h) + '" rx="1.2"></rect>' + inner + bail + '</g>';
-    return '<g id="uplink_' + id + '"' + portBind(unit, key, opts.kind || 'uplink') + portTitle(unit, key) + ' transform="translate(' + f(x) + ',' + f(y) + ')">' +
+    return '<g id="uplink_' + id + '"' + portBind(unit, key, opts.kind || 'uplink') + portTitle(unit, key) + portA11y(key) + ' transform="translate(' + f(x) + ',' + f(y) + ')">' +
         '<rect class="uplink-body" x="0" y="0" width="' + f(w) + '" height="' + f(h) + '" rx="1.2"></rect>' + inner + bail + '</g>';
 }
 /* lens pair + number under/over a cage: 'lens' = rectangular windows, 'dots' = round holes */
@@ -772,6 +778,16 @@ if (typeof module !== 'undefined' && module.exports) {
             var g = portOf(ev);
             if (!g || g.classList.contains('port-absent')) return;
             if (typeof window.selectInterfacePort === 'function') window.selectInterfacePort(g.getAttribute('data-port'), { source: 'chassis' });
+        });
+        // Same selection a click makes, from the keyboard - each jack carries tabindex="0" +
+        // role="button" (portA11y) so it's reachable by Tab; window.activateOnKey is the same
+        // Enter/Space activation helper index.html and drawer.js already use for this.
+        root.addEventListener('keydown', function (ev) {
+            var g = portOf(ev);
+            if (!g || g.classList.contains('port-absent')) return;
+            window.activateOnKey(ev, function () {
+                if (typeof window.selectInterfacePort === 'function') window.selectInterfacePort(g.getAttribute('data-port'), { source: 'chassis' });
+            });
         });
     });
 }
