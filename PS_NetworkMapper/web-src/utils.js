@@ -29,6 +29,38 @@ window.activateOnKey = function(event, fn) {
     }
 };
 
+// True when this page was opened straight off disk (double-clicked Network_Visualizer.html)
+// rather than served by Start-NetworkMapper.ps1. The bundle is deliberately standalone-
+// openable for viewing an exported snapshot, but every fetch('/api/...') then resolves
+// against file:// and rejects - so this distinguishes "no server in the first place" from
+// "the server was there and went away", which are otherwise the identical TypeError.
+window.isFileOrigin = (window.location.protocol === 'file:');
+
+// Turns a rejected fetch() into something that names the likely cause. A bare
+// "Failed to fetch" is a network-layer TypeError with no detail attached - it covers the
+// server not running, the tab being on a different port than the listener, and file://
+// alike, and the message the browser gives is the same in all three.
+window.describeServerError = function(err) {
+    if (window.isFileOrigin) {
+        return "This page was opened directly from disk, so it has no server to talk to. " +
+               "Scanning, rescans and saved settings need Start-NetworkMapper.ps1 running - " +
+               "start it and use the http://localhost:<port>/ address it prints.";
+    }
+    // Set by callers that timed the failed attempt (see scan-network.js): the request waited
+    // a long time and then failed, meaning the connection WAS accepted and simply never
+    // answered. That is a busy/blocked server, not an absent one, and pointing the user at
+    // "is it running?" would send them the wrong way entirely.
+    if (err && err.serverUnresponsive) {
+        return "The local server accepted the connection but never answered. It is still " +
+               "running, but blocked serving another request - check Mapper_Debug.log for a " +
+               "SLOW REQUEST line naming what held it up, then try again.";
+    }
+    var detail = (err && err.message) ? err.message : String(err);
+    return "Could not reach the local server at " + window.location.origin + " (" + detail + "). " +
+           "Check that the Start-NetworkMapper.ps1 window is still running and that its " +
+           "\"Web UI listening on\" address matches this tab's.";
+};
+
 // Mirrors a client-side error into the server's log (Mapper_Debug.log - see WebServer.ps1's
 // Write-MapperDebugLog/Invoke-ClientErrorAction) since the browser console alone is easy
 // to lose after the fact. Fire-and-forget: failed POSTs are swallowed so error reporting

@@ -166,7 +166,7 @@ if (-not (Test-IpInAllowedScopes -IP $SwitchIP -AllowedScopes $AllowedScopes)) {
     exit 1
 }
 
-if (-not (Test-Path $WorkerPath)) { Write-Host "Worker script missing at $WorkerPath!" -ForegroundColor Red; exit }
+if (-not (Test-Path $WorkerPath)) { Write-Host "Worker script missing at $WorkerPath!" -ForegroundColor Red; exit 1 }
 
 $CrawlProgress = @{}  # unused by the CLI path - passed only because Invoke-FleetCrawl requires it
 $CrawlResult = Invoke-FleetCrawl -StartIP $SwitchIP -AllowedScopes $AllowedScopes -MaxConcurrent $MaxConcurrent `

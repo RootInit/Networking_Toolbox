@@ -246,11 +246,40 @@ window.startNetworkScan = async function() {
         if (btn) { btn.disabled = true; btn.textContent = 'Starting scan...'; }
         if (loadBtn) loadBtn.disabled = true;
         if (loadFolderBtn) loadFolderBtn.disabled = true;
-        var resp = await fetch('/api/scan-network', {
+        var scanRequest = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ startIp: startIp }),
-        });
+        };
+        // When fetch rejects outright (a network-layer TypeError - no response at all, as
+        // opposed to any HTTP status, which is handled below), HOW LONG it took separates two
+        // very different causes, and only one of them is worth retrying:
+        //
+        //   fast (< SERVER_UNRESPONSIVE_MS) - the connection was refused or a pooled socket
+        //     the server had already closed failed on use. This POST is uniquely exposed to
+        //     the latter, since startNetworkScan awaits the start-IP modal first and the
+        //     connection sits idle for as long as the user takes to type. A retry on a fresh
+        //     connection costs one round trip and usually succeeds. Safe to repeat despite
+        //     being a POST: if the first attempt did reach the server and start a crawl, the
+        //     retry gets a 409, which the branch below already treats as "reattach" rather
+        //     than starting a second scan.
+        //
+        //   slow - the server accepted the connection and never answered, i.e. its
+        //     single-threaded accept loop is blocked in another handler and the request sat
+        //     in the HTTP.sys queue until it was dropped. Retrying just waits out a second
+        //     full queue timeout and doubles the time to an error, so don't.
+        var SERVER_UNRESPONSIVE_MS = 5000;
+        var resp;
+        var attemptStartedAt = Date.now();
+        try {
+            resp = await fetch('/api/scan-network', scanRequest);
+        } catch (firstErr) {
+            if (Date.now() - attemptStartedAt >= SERVER_UNRESPONSIVE_MS) {
+                firstErr.serverUnresponsive = true;
+                throw firstErr;
+            }
+            resp = await fetch('/api/scan-network', scanRequest);
+        }
         var result = await resp.json();
         if (!resp.ok) {
             if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
@@ -271,7 +300,7 @@ window.startNetworkScan = async function() {
         if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
         if (loadBtn) loadBtn.disabled = false;
         if (loadFolderBtn) loadFolderBtn.disabled = false;
-        window.setStatus("Could not start scan: " + e.message, "red");
+        window.setStatus("Could not start scan. " + window.describeServerError(e), "red");
         return;
     }
 

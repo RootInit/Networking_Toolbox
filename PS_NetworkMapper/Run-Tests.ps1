@@ -160,6 +160,28 @@ Write-Host "`n--- 2. Get-JunosSshArgs injection guard (SshHelpers.ps1) ---" -For
 Test-Case "valid username + valid IP is accepted" {
     (Get-JunosSshArgs -Username "admin" -TargetIP "10.1.2.3") -join ' ' -match '10\.1\.2\.3'
 }
+
+# Regression guard. ServerAliveInterval x ServerAliveCountMax was once 10x3=30s, SHORTER than
+# Get-JunosNodeData.ps1's 50s per-batch Process.WaitForExit - so ssh tore down healthy sessions
+# to switches whose RE stalled past 30s mid-batch, giving an empty payload on those switches
+# only. Confirmed in the field. Assert the budget still exceeds the batch timeout so a future
+# tweak to either number can't silently reintroduce it.
+Test-Case "ssh keepalive budget stays longer than the worker's per-batch timeout" {
+    $SshArgs = Get-JunosSshArgs -Username "admin" -TargetIP "10.1.2.3"
+    $Interval = [int](($SshArgs | Where-Object { $_ -like 'ServerAliveInterval=*' }) -replace '\D')
+    $CountMax = [int](($SshArgs | Where-Object { $_ -like 'ServerAliveCountMax=*' }) -replace '\D')
+
+    # Read the worker's real timeout rather than hardcoding it, so the two stay coupled.
+    $WorkerSrc = Get-Content -LiteralPath (Join-Path $LibDir 'Get-JunosNodeData.ps1') -Raw
+    if ($WorkerSrc -notmatch 'WaitForExit\((?<ms>\d+)\)') { throw "Could not find WaitForExit(<ms>) in Get-JunosNodeData.ps1" }
+    $BatchTimeoutSec = [int]$Matches.ms / 1000
+
+    $KeepaliveBudget = $Interval * $CountMax
+    if ($KeepaliveBudget -le $BatchTimeoutSec) {
+        throw "ssh keepalive budget ${KeepaliveBudget}s must exceed the ${BatchTimeoutSec}s batch timeout, or ssh kills sessions the batch is still waiting on"
+    }
+    $true
+}
 Test-Case "username with a leading dash is rejected (would be parsed as an ssh flag)" {
     Get-JunosSshArgs -Username "-oProxyCommand=evil" -TargetIP "10.1.2.3"
 } -ExpectThrow

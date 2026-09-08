@@ -561,7 +561,7 @@ window.renderTrendChart = function() {
     container.innerHTML = `<div class="trend-panel-head"><span class="trend-title">${TREND_METRIC_LABELS[metric]} - ${top.length} devices with the highest peak, ${data.snaps.length} snapshots</span><span class="trend-legend"><i class="swatch subject"></i>device <i class="swatch median"></i>fleet median${th ? ' <i class="swatch band"></i>warning / critical' : ''} <i class="swatch reboot"></i>reboot</span></div>
         <div class="trend-multiples">${top.map(e => {
             var tier = th ? severityTier(e.last, th.warn, th.crit) : 'neutral';
-            return `<div class="trend-panel" onclick="document.getElementById('trendModeSelect').value='single'; document.getElementById('trendDeviceSelect').value=${JSON.stringify(e.id).replace(/"/g, '&quot;')}; window.renderTrendChart();" title="Open this device's full chart">
+            return `<div class="trend-panel" onclick="document.getElementById('trendModeSelect').value='single'; document.getElementById('trendDeviceSelect').value=${esc(JSON.stringify(e.id))}; window.renderTrendChart();" title="Open this device's full chart">
                 <div class="trend-panel-head"><span class="trend-name">${esc(e.label)}</span><span class="trend-last tier-${tier}">${e.last}${unit}</span></div>
                 ${trendChartSvg([{ points: e.points, cls: 'subject' }, { points: median, cls: 'median' }], Object.assign({ w: 300, h: 110, maxV: sharedMax, rebootsAt: e.rebootsAt }, common))}</div>`;
         }).join('')}</div>`;
@@ -946,7 +946,7 @@ window.renderReliabilityHeatmap = function() {
             // width, a clipped "12" reading as "1" would be worse than no digit at all. Colour,
             // title and aria-label still carry the full count either way.
             var countText = (showDays && day.alarmCount > 0) ? day.alarmCount : '';
-            return `<div class="rel-cell heatmap-cell ${level(day.alarmCount)}${day.rebooted ? ' rebooted' : ''}" title="${esc(title)}" aria-label="${esc(title)}" tabindex="0" role="button" onclick="window.goToSearchResult(${JSON.stringify(r.ip).replace(/"/g, '&quot;')}, 'tab-alarms')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">${countText}</div>`;
+            return `<div class="rel-cell heatmap-cell ${level(day.alarmCount)}${day.rebooted ? ' rebooted' : ''}" title="${esc(title)}" aria-label="${esc(title)}" tabindex="0" role="button" onclick="window.goToSearchResult(esc(JSON.stringify(r.ip)), 'tab-alarms')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">${countText}</div>`;
         }).join('') +
         `<div class="rel-row-total" title="alarm-days / reboots">${r.alarms}<span class="rel-sep">/</span>${r.reboots}</div>`).join('');
 

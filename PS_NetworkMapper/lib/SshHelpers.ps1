@@ -137,7 +137,13 @@ function Remove-JunosAskPass {
 function Clear-StaleJunosTempFiles {
     param([int]$MaxAgeHours = 4)
     $Cutoff = (Get-Date).AddHours(-$MaxAgeHours)
-    $Patterns = @("junos_cred_*.json", "ssh_pass_*.txt", "ssh_askpass_*.bat")
+    # ssh_out_/ssh_err_ are Invoke-InteractiveBatch's redirected stdout/stderr. Its own finally
+    # deletes them, but that Remove-Item fails silently while an orphaned ssh.exe still holds
+    # the handle (killing the cmd.exe wrapper does not kill ssh.exe), leaving the file behind
+    # forever. ssh_out_ is the most sensitive thing this tool writes to %TEMP%: it holds the
+    # raw `show configuration | display set` output - SNMP communities, TACACS secrets,
+    # encrypted root password - with none of Save-RawDump's redaction applied.
+    $Patterns = @("junos_cred_*.json", "ssh_pass_*.txt", "ssh_askpass_*.bat", "ssh_out_*.txt", "ssh_err_*.txt")
     foreach ($Pattern in $Patterns) {
         try {
             Get-ChildItem -Path $env:TEMP -Filter $Pattern -File -ErrorAction SilentlyContinue |
@@ -152,7 +158,19 @@ function Clear-StaleJunosTempFiles {
 # reimaged switches), and password-only auth so SSH_ASKPASS is what actually gets used
 # instead of falling back to an interactively-prompted key passphrase.
 function Get-JunosSshArgs {
-    param([Parameter(Mandatory=$true)][string]$Username, [Parameter(Mandatory=$true)][string]$TargetIP)
+    param(
+        [Parameter(Mandatory=$true)][string]$Username,
+        [Parameter(Mandatory=$true)][string]$TargetIP,
+        # Forces pty allocation (-tt) even though stdin is redirected/piped, not a real
+        # console. Off by default: Get-JunosNodeData.ps1's batch mode pipes ~20 commands to
+        # stdin the instant the channel opens, and a kernel-tty-echoed pty could echo that
+        # whole burst back before Junos cli even starts (see Invoke-InteractiveBatch's
+        # retry comment) - untested against a live device, so it's only used as a one-shot
+        # fallback on a switch whose plain (non-pty) attempt already came back empty.
+        # Connect-Switch.ps1 never passes this - its session is a real attached console, so
+        # ssh already auto-requests a pty there with no help needed.
+        [switch]$ForcePty
+    )
     # Single choke point every SSH-invoking caller in this repo funnels through (CLI crawl,
     # web-triggered connect/rescan/scan-network, startup-loaded config) - validating here
     # closes the injection even for a $Username that reached this function without ever
@@ -171,11 +189,23 @@ function Get-JunosSshArgs {
     if ($TargetIP -notmatch "^$Octet\.$Octet\.$Octet\.$Octet\z") {
         throw "Invalid Junos target IP: must be a well-formed IPv4 address (four dot-separated octets, each 0-255)"
     }
-    # ServerAliveInterval/ServerAliveCountMax: without a keepalive, a session wedged on a dead
-    # link (e.g. the switch stops responding mid-command) just sits there until something
-    # external notices - for Get-JunosNodeData.ps1's batch mode, that's the orchestrator's 65s
-    # hang timeout in FleetCrawl.ps1, which still has to abandon the job and reap the process.
-    # 10s x 3 unanswered keepalives (30s) lets ssh.exe itself detect the dead session and exit
-    # well before that, instead of the connection just going idle.
-    return @("-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=10", "-o", "ServerAliveCountMax=3", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no", "$Username@$TargetIP")
+    # ServerAliveInterval/ServerAliveCountMax exist so a genuinely dead session lets ssh.exe
+    # terminate ITSELF. That matters because killing the cmd.exe wrapper does not kill its
+    # ssh.exe child, and a surviving ssh.exe keeps the switch session open and keeps a write
+    # handle on the ssh_out_ temp file (which holds unredacted config) so nothing can clean
+    # it up.
+    #
+    # INVARIANT: this budget must stay LONGER than Get-JunosNodeData.ps1's per-batch
+    # Process.WaitForExit timeout (currently 50s). It was originally 10s x 3 = 30s, i.e.
+    # SHORTER - so ssh tore down healthy sessions after 30s of quiet while the batch was still
+    # willing to wait another 20s. Switches with a slow or loaded RE stall past 30s during
+    # `show interfaces extensive` / `show configuration | display set`, so they failed with an
+    # empty payload every time while faster switches were unaffected - the "works on some
+    # switches, not others" regression, confirmed in the field by removing these two options.
+    # At 15s x 6 = 90s the keepalive can never preempt a batch the code is still waiting on
+    # (the 50s timeout always fires first), so it only ever reaps a session that outlives the
+    # batch entirely - which is exactly the orphan case it was added for.
+    $BaseArgs = @("-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=6", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
+    if ($ForcePty) { $BaseArgs += "-tt" }
+    return $BaseArgs + @("$Username@$TargetIP")
 }

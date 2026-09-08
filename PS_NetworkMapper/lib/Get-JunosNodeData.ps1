@@ -66,6 +66,22 @@ function Save-RawDump {
     return $RawLogPath
 }
 
+# ssh's stderr is a handful of connection/auth-status lines - no secrets, so unlike
+# Save-RawDump this needs no redaction. Written alongside the stdout dump on any failure (and
+# under -Log) so a future empty-payload report can be compared line-for-line against a known
+# working switch's stderr (e.g. whether the "Permanently added ... to the list of known
+# hosts" line - expected on every run, since StrictHostKeyChecking=no/UserKnownHostsFile=NUL
+# make every host "new" every time - is present or missing, which is the difference between
+# "reached a shell and got nothing back" and "never completed the SSH handshake at all").
+function Save-RawErrDump {
+    param([string]$ErrOutput)
+    $DumpDir = if ($DebugLogPath) { Join-Path (Split-Path -Parent $DebugLogPath) "RawDumps" } else { Join-Path $PWD "RawDumps" }
+    if (-not (Test-Path $DumpDir)) { New-Item -ItemType Directory -Path $DumpDir -Force | Out-Null }
+    $RawErrLogPath = Join-Path $DumpDir "RawErr_$TargetIP.txt"
+    $ErrOutput | Out-File $RawErrLogPath -Force -Encoding utf8
+    return $RawErrLogPath
+}
+
 $Logs = [System.Collections.Generic.List[string]]::new()
 function Write-LogMsg {
     param([string]$msg)
@@ -101,10 +117,12 @@ function Write-LogMsg {
 }
 
 function Invoke-InteractiveBatch {
+    param([switch]$ForcePty)
+
     $TempOut = Join-Path $env:TEMP "ssh_out_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
     $TempErr = Join-Path $env:TEMP "ssh_err_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
 
-    $SshArgs = Get-JunosSshArgs -Username $Username -TargetIP $TargetIP
+    $SshArgs = Get-JunosSshArgs -Username $Username -TargetIP $TargetIP -ForcePty:$ForcePty
     $ProcInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ssh.exe $($SshArgs -join ' ') > `"$TempOut`" 2> `"$TempErr`"")
     $ProcInfo.UseShellExecute = $false; $ProcInfo.CreateNoWindow = $true
     $ProcInfo.RedirectStandardInput = $true
@@ -117,11 +135,21 @@ function Invoke-InteractiveBatch {
     # If ssh.exe exits immediately (bad host, refused connection, askpass rejected) the pipe
     # breaks and a WriteLine throws. Temp-file reads/cleanup stay inside this try so a throw
     # still reaches the finally below - otherwise $TempOut/$TempErr leak across the crawl.
-    $Output = ""; $ErrText = ""; $TimedOut = $false
+    $Output = ""; $ErrText = ""; $TimedOut = $false; $ExitCode = $null
+    # Distinguishes "ssh exited quickly on its own with nothing to show" from "the session
+    # sat idle until our own 50s WaitForExit gave up and killed it" - both currently produce
+    # an identical-looking empty-payload failure with no way to tell them apart after the
+    # fact, which is exactly what makes this class of bug hard to diagnose from the field.
+    $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
         $Process = [System.Diagnostics.Process]::Start($ProcInfo)
 
         $Process.StandardInput.WriteLine("set cli screen-length 0")
+        # Belt-and-braces alongside screen-length 0: a forced pty with no real terminal gets
+        # sshd's default rows/cols, and an 80-column wrap on "show configuration | display
+        # set" or other wide output would otherwise silently corrupt parsing that assumes
+        # one logical line per record.
+        $Process.StandardInput.WriteLine("set cli screen-width 0")
         $Process.StandardInput.WriteLine("show version")
         $Process.StandardInput.WriteLine("show virtual-chassis")
         $Process.StandardInput.WriteLine("show chassis hardware")
@@ -154,20 +182,33 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.Close()
 
         $Process.WaitForExit(50000) | Out-Null
-        if (-not $Process.HasExited) { $Process.Kill(); $TimedOut = $true; Write-LogMsg "TIMEOUT on interactive batch." }
+        if (-not $Process.HasExited) {
+            $Process.Kill()
+            $TimedOut = $true
+            Write-LogMsg "TIMEOUT on interactive batch."
+            # Kill() is async - HasExited/ExitCode aren't reliably valid until the process
+            # has actually finished tearing down, so wait for that (no timeout needed here,
+            # a killed process exits promptly) before reading ExitCode below.
+            $Process.WaitForExit()
+        }
 
         # -Encoding UTF8 explicit: Junos emits UTF-8 for non-ASCII text, but Get-Content's
         # no-BOM default is the system ANSI codepage, which mangles multi-byte sequences.
         $Output = if (Test-Path $TempOut) { Get-Content $TempOut -Raw -Encoding UTF8 } else { "" }
         # Named $ErrText, not $Error - $Error is PowerShell's automatic error-history variable.
         $ErrText = if (Test-Path $TempErr) { Get-Content $TempErr -Raw -Encoding UTF8 } else { "" }
+        try { $ExitCode = $Process.ExitCode } catch { $ExitCode = $null }
     } finally {
         if ($Process) { $Process.Dispose() }
         if (Test-Path $TempOut) { Remove-Item $TempOut -Force -ErrorAction SilentlyContinue }
         if (Test-Path $TempErr) { Remove-Item $TempErr -Force -ErrorAction SilentlyContinue }
     }
 
-    return @{ Output = $Output; Error = $ErrText; TimedOut = $TimedOut }
+    return @{
+        Output = $Output; Error = $ErrText; TimedOut = $TimedOut
+        ExitCode = $ExitCode; ElapsedSeconds = [Math]::Round($Stopwatch.Elapsed.TotalSeconds, 1)
+        ForcePty = $ForcePty.IsPresent
+    }
 }
 
 $NodeData = @{
@@ -192,7 +233,32 @@ try {
     if ($HumanReadable) { Write-Host "`nGathering node data for $TargetIP..." -ForegroundColor Cyan }
 
     $Result = Invoke-InteractiveBatch
+
+    # A first attempt that comes back with a totally empty stdout and nothing in stderr but
+    # ssh's own benign "Pseudo-terminal will not be allocated" advisory (i.e. not a definitive
+    # ssh-level rejection - those are handled by the classification below and a pty can't fix
+    # them) is retried exactly once with a forced pty (-tt). Root cause unconfirmed without a
+    # live device (see report), but this is consistent with a Junos CLI that never actually
+    # attaches to a non-pty piped-stdin shell on some configurations while it does on others -
+    # forcing a pty on the retry only, and only for this specific failure shape, tests that
+    # without changing behavior for switches the plain (non-pty) path already works for.
+    if ([string]::IsNullOrWhiteSpace($Result.Output)) {
+        $LooksLikeDefiniteSshRejection = -not [string]::IsNullOrWhiteSpace($Result.Error) -and
+            ($Result.Error -match "(?i)permission denied|authentication failed|too many authentication failures|connection refused|no route to host|network is unreachable|operation timed out|connection timed out|could not resolve hostname|host is down|no address associated")
+        if (-not $LooksLikeDefiniteSshRejection) {
+            Write-LogMsg "Empty payload on first (non-pty) attempt (exit=$($Result.ExitCode), elapsed=$($Result.ElapsedSeconds)s, timedOut=$($Result.TimedOut)); retrying once with a forced pty (-tt)."
+            $PlainAttempt = $Result
+            $Result = Invoke-InteractiveBatch -ForcePty
+        }
+    }
     $RawOutput = $Result.Output
+    # Normalize to bare LF before anything downstream parses it. The plain (non-pty) path's
+    # captured output is already almost entirely LF (see Raw_*.txt evidence), so this is a
+    # no-op there; a pty-mode retry is the untested path (a kernel tty line discipline can
+    # emit CRLF), so normalize unconditionally rather than trust every regex below to already
+    # tolerate a mix - most already do (see the `[\r\n]+`/`(?s).*` patterns), but this removes
+    # the ambiguity instead of relying on that audit holding for output nobody's seen yet.
+    if ($RawOutput) { $RawOutput = $RawOutput -replace "`r`n", "`n" }
 
     # --- CONDITIONAL RAW LOG DUMP (config output redacted) ---
     if ($Log -and -not [string]::IsNullOrWhiteSpace($RawOutput)) {
@@ -211,21 +277,56 @@ try {
         # (not the raw output itself, which -log dumps in full above) so a pathological stderr
         # dump can't blow up the debug log - stderr from ssh is normally a handful of lines
         # (auth/host-key/connect errors), so this cap is generous, not a tight truncation.
+        # "Pseudo-terminal will not be allocated because stdin is not a terminal." is emitted by
+        # the ssh CLIENT while parsing arguments, before it opens a socket - it appears above
+        # even a DNS failure. It says nothing about the switch, the login, or the payload, and
+        # it is benign: ssh simply proceeds without a pty. But it is often the ONLY thing on
+        # stderr, so reporting stderr verbatim made it read as the cause of the empty payload
+        # and sent the operator chasing pty problems instead of the real fault. Drop it from the
+        # summary and say so explicitly when nothing else remains. The untouched original still
+        # goes to Save-RawErrDump below, so no evidence is lost.
+        #
+        # Its presence does carry one real signal: this code never passes -t, so seeing it at
+        # all means ssh_config (system or per-user) sets RequestTTY - worth telling the operator.
+        $PtyAdvisory = 'Pseudo-terminal will not be allocated because stdin is not a terminal\.?'
+        $StderrNoise = $null -ne $Result.Error -and $Result.Error -match $PtyAdvisory
         $ErrSummary = if (-not [string]::IsNullOrWhiteSpace($Result.Error)) {
-            $Trimmed = $Result.Error.Trim()
-            if ($Trimmed.Length -gt 4000) { $Trimmed.Substring(0, 4000) + "...(truncated)" } else { $Trimmed }
+            $Trimmed = (($Result.Error -split "`r?`n" | Where-Object { $_ -notmatch $PtyAdvisory }) -join "`n").Trim()
+            if ([string]::IsNullOrWhiteSpace($Trimmed)) {
+                "(ssh reported no error; the only stderr line was the benign no-pty advisory, which means ssh_config sets RequestTTY)"
+            } elseif ($Trimmed.Length -gt 4000) { $Trimmed.Substring(0, 4000) + "...(truncated)" } else { $Trimmed }
         } else { "(no stderr output captured)" }
+        if ($StderrNoise) { $ErrSummary = "$ErrSummary [ssh_config requests a TTY]" }
+        # Diagnostic tag distinguishing "ssh exited on its own with nothing to show" from
+        # "the session sat idle until our 50s WaitForExit gave up and killed it" - both
+        # otherwise look identical from ScanError alone, which is exactly what made this bug
+        # report hard to pin down from the field. Also records whether a forced-pty retry was
+        # attempted (and its own exit/timing), so the next report of this shape says whether
+        # -tt already got a fair try on that switch.
+        $Attempt = if ($Result.ForcePty) { "forced-pty(-tt) retry" } else { "plain (no pty)" }
+        $DiagTag = "[attempt=$Attempt exit=$($Result.ExitCode) elapsed=$($Result.ElapsedSeconds)s timedOut=$($Result.TimedOut)]"
+        if ($PlainAttempt) {
+            $DiagTag += " [first attempt: exit=$($PlainAttempt.ExitCode) elapsed=$($PlainAttempt.ElapsedSeconds)s timedOut=$($PlainAttempt.TimedOut), also empty]"
+        }
+        $ErrSummary = "$DiagTag $ErrSummary"
         if ($HumanReadable) { Write-Host "  [!] CRITICAL ERROR: Switch returned empty payload. ssh said: $ErrSummary" -ForegroundColor Red }
         Write-LogMsg "CRITICAL: Switch returned empty payload. ssh stderr: $ErrSummary"
+        if (-not [string]::IsNullOrWhiteSpace($Result.Error)) {
+            try {
+                $RawErrLogPath = Save-RawErrDump -ErrOutput $Result.Error
+                Write-LogMsg "Raw stderr saved to $RawErrLogPath"
+            } catch { Write-LogMsg "Failed to save raw stderr dump: $_" }
+        }
         # Interfaces starts as a hashtable (converted to an array later in the normal path,
         # a step this early return skips) - force it to @() so it still serializes as JSON
         # "[]" instead of "{}", which some consumers (e.g. CSV export) choke on.
         $NodeData.Interfaces = @()
         # Classify the failure from ssh's stderr so a ghost node (never reached) is
-        # distinguishable from a real, successfully-scanned isolated leaf switch.
-        $NodeData.ScanStatus = if ($ErrSummary -match "(?i)permission denied|authentication failed|too many authentication failures") {
+        # distinguishable from a real, successfully-scanned isolated leaf switch. Matched
+        # against $Result.Error (not $ErrSummary, which now has the $DiagTag prefixed onto it).
+        $NodeData.ScanStatus = if ($Result.Error -match "(?i)permission denied|authentication failed|too many authentication failures") {
             "AuthFailed"
-        } elseif ($ErrSummary -match "(?i)connection refused|no route to host|network is unreachable|operation timed out|connection timed out|could not resolve hostname|host is down|no address associated") {
+        } elseif ($Result.Error -match "(?i)connection refused|no route to host|network is unreachable|operation timed out|connection timed out|could not resolve hostname|host is down|no address associated") {
             "Unreachable"
         } else {
             "Error"
@@ -437,7 +538,11 @@ try {
 
     foreach ($Line in ($DataDict["POE"] -split "`n")) {
         $Line = $Line.Trim()
-        if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?<status>Enabled|Disabled)\s+(?<oper>\S+)\s+\S+\s+(?<class>\S+)\s+(?<power>\d+\.\d+W?)") {
+        # Field count between Oper and Power/Class varies by Junos version/platform (e.g. newer
+        # tables add Pair/Mode and Priority columns that older EX2200/4200 tables lack), so skip
+        # a lazy, variable number of fields and anchor Power+Class as the last two tokens on the
+        # line rather than assuming a fixed column position.
+        if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?<status>Enabled|Disabled)\s+(?<oper>\S+)(?:\s+\S+)*?\s+(?<power>\d+\.\d+W?)\s+(?<class>\S+)$") {
             $p = $Matches.port -replace "\.\d+$",""
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].PoE = "$($Matches.oper) ($($Matches.power))" }
         }
@@ -463,11 +568,23 @@ try {
     $Blocks = $DataDict["LLDP"] -split "(?i)(?=Local Interface\s*:)"
     foreach ($Block in $Blocks) {
         $IsMedEndpoint = ($Block -match "Class III Device") -or ($Block -match "Bridge Telephone") -or ($Block -match "WLAN Access Point") -or ($Block -match "ArubaOS")
-        $IsSwitchOrRouter = ($Block -match "(?i)(?:Enabled|System)\s+Capabilities\s*:\s*[^\r\n]*(?:Bridge|Router)")
+        # Real "show lldp neighbors detail" output splits this across lines - a "System
+        # capabilities" header line (no colon, no Bridge/Router token) followed by separate
+        # "Supported:"/"Enabled  :" lines that carry the actual capability list without
+        # repeating the word "Capabilities". The previous pattern required "Enabled"/"System"
+        # and "Capabilities" on the same line, which never matches that real layout - so
+        # $IsSwitchOrRouter was always false and every switch/router neighbor relied entirely
+        # on $HasManagementIp below; one lacking a management address would leak its whole
+        # downstream MAC table into Clients as fake local devices (see $UplinkPorts comment).
+        $IsSwitchOrRouter = ($Block -match "(?i)Enabled\s*:\s*[^\r\n]*(?:Bridge|Router)")
 
         $Neigh = @{ LocalPort = "Unknown"; RemotePort = "Unknown"; Hostname = "Unknown"; MacAddress = "Unknown"; ManagementIP = "Unknown"; Description = "Unknown" }
         if ($Block -match "(?i)Local Interface\s*:\s*(?<port>[^\r\n]+)") { $Neigh.LocalPort = $Matches.port.Trim() }
-        if ($Block -match "(?i)Port ID\s*:\s*(?<rport>[^\r\n]+)") { $Neigh.RemotePort = $Matches.rport.Trim() }
+        # Anchored to line start: the block opens with a Local Information section containing
+        # "Local Port ID : <local ifIndex>", and an unanchored "Port ID\s*:" matches inside
+        # THAT line first, so every neighbor's remote port came back as the local interface's
+        # ifIndex integer instead of the neighbor's port name.
+        if ($Block -match "(?im)^Port ID\s*:\s*(?<rport>[^\r\n]+)") { $Neigh.RemotePort = $Matches.rport.Trim() }
         if ($Block -match "(?i)System Name\s*:\s*(?<name>[^\r\n]+)") { $Neigh.Hostname = $Matches.name.Trim() }
         # Chassis ID's LLDP subtype isn't guaranteed to be a MAC address (it can be an
         # interface name, IP address, or locally-assigned string depending on neighbor

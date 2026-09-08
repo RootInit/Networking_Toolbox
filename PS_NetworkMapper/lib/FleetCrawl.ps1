@@ -199,6 +199,15 @@ function Invoke-FleetCrawl {
     $RunspacePool.Open()
 
     $Jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    # Must exceed the worker's own worst case or the orchestrator abandons jobs that were
+    # still going to succeed. Get-JunosNodeData.ps1 caps each SSH batch at
+    # Process.WaitForExit(50000) and may run a second -ForcePty attempt after the first comes
+    # back empty, so a worker can legitimately need ~100s of SSH plus parsing time for a large
+    # config. At the previous 65s the pty retry could never finish - it started at ~T+50s and
+    # was killed 15s later - which made that retry dead code on exactly the hung-session case
+    # it was added for. Keep this above 2x the worker's batch timeout if that timeout changes.
+    $JobAbandonSeconds = 130
     $Queue = [System.Collections.Generic.Queue[string]]::new()
     $Visited = [System.Collections.Generic.HashSet[string]]::new()
     $Enqueued = [System.Collections.Generic.HashSet[string]]::new()
@@ -307,7 +316,10 @@ function Invoke-FleetCrawl {
                     # Stop-JunosOrphanProcessesLocal's "CreationDate -ge SinceTime" filter.
                     $JobStartTime = Get-Date
                     $Handle = $PS.BeginInvoke()
-                    $Jobs.Add([PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $NextIP; StartTime = $JobStartTime })
+                    # Abandoned gates the orphan reap below: only a job we gave up on can have
+                    # left an ssh.exe behind. A job that returned normally already ran the
+                    # worker's own finally, which killed its process and cleaned its temp files.
+                    $Jobs.Add([PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $NextIP; StartTime = $JobStartTime; Abandoned = $false })
                 } catch {
                     Write-DebugLogLocal "ORCHESTRATOR ERROR: failed to start job for $($NextIP): $_"
                     Write-Host "`n[!] Failed to start job for $($NextIP): $_" -ForegroundColor Red
@@ -325,7 +337,7 @@ function Invoke-FleetCrawl {
             $JobsToRemove = @()
 
             foreach ($Job in $Jobs) {
-                if (-not $Job.Handle.IsCompleted -and ((Get-Date) - $Job.StartTime).TotalSeconds -gt 65) {
+                if (-not $Job.Handle.IsCompleted -and ((Get-Date) - $Job.StartTime).TotalSeconds -gt $JobAbandonSeconds) {
                     Write-DebugLogLocal "ORCHESTRATOR TIMEOUT: Abandoning hung thread for $($Job.IP)"
                     Write-Host "`n[!] Timed out waiting on $($Job.IP) - abandoning and continuing." -ForegroundColor Red
 
@@ -344,7 +356,7 @@ function Invoke-FleetCrawl {
                         MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
                         MedNeighbors = @(); Configuration = "Unknown";
                         ScanStatus = "Timeout"
-                        ScanError  = "Orchestrator gave up waiting on $($Job.IP) after 65s (job abandoned)."
+                        ScanError  = "Orchestrator gave up waiting on $($Job.IP) after $($JobAbandonSeconds)s (job abandoned)."
                     }
                     $TopologyList.Add($TimeoutNode)
                     $PendingWrites++
@@ -353,6 +365,7 @@ function Invoke-FleetCrawl {
                     # breaker's "3 in a row, OR across the whole crawl" requirement).
                     $ConsecutiveAuthFailures = 0
 
+                    $Job.Abandoned = $true
                     $JobsToRemove += $Job
                     continue
                 }
@@ -487,9 +500,21 @@ function Invoke-FleetCrawl {
                     try { $DeadJob.PS.Dispose() } catch {}
                 }
 
+                # Abandoned jobs only. The reap matches on a machine-wide Win32_Process query for
+                # the "$Username@$TargetIP" token, and Connect-Switch.ps1 builds its ssh.exe
+                # command line from the same Get-JunosSshArgs helper - so the filter cannot tell
+                # this crawl's leftover process from an interactive session the operator opened
+                # to the same switch while the crawl was running. Running it after a job that
+                # completed normally therefore risked killing the operator's own live terminal
+                # to reap a process that had already exited on its own.
+                #
                 # Also reap any orphaned ssh.exe/cmd.exe OS child process this job may have left
                 # running - see Stop-JunosOrphanProcessesLocal above for why PS.Stop()/Dispose()
                 # alone can't do this.
+                if (-not $DeadJob.Abandoned) {
+                    $Jobs.Remove($DeadJob) | Out-Null
+                    continue
+                }
                 # -2s safety margin: $StartTime is DateTime.Now (~15.6ms timer quantization),
                 # while the orphan filter compares against WMI's CreationDate - different
                 # precisions, so CreationDate can still round below a bare $StartTime even with
@@ -575,6 +600,11 @@ function Invoke-FleetCrawl {
         Write-Host "Topology saved to: $OutputFile" -ForegroundColor White
         Write-Host "=================================================" -ForegroundColor Cyan
 
+        # Cleared alongside Done so a status poll after the crawl ends doesn't keep
+        # reporting in-flight work that no longer exists (these are only refreshed at the
+        # top of the loop, so they hold whatever the last iteration saw).
+        $ProgressTable.ActiveJobs = 0
+        $ProgressTable.QueueDepth = $Queue.Count
         $ProgressTable.Done = $true
         return @{ Topology = $TopologyList; ScanTimestampIso = $ScanTimestampIso; OutputFile = $OutputFile; VisitedCount = $Visited.Count; Aborted = $WasAborted; AbortReason = $AbortReason }
     }
@@ -599,6 +629,11 @@ function Invoke-FleetCrawl {
         } catch {
             Write-DebugLogLocal "ORCHESTRATOR FATAL: emergency salvage write also failed: $_"
         }
+        # Cleared alongside Done so a status poll after the crawl ends doesn't keep
+        # reporting in-flight work that no longer exists (these are only refreshed at the
+        # top of the loop, so they hold whatever the last iteration saw).
+        $ProgressTable.ActiveJobs = 0
+        $ProgressTable.QueueDepth = $Queue.Count
         $ProgressTable.Done = $true
         throw
     }

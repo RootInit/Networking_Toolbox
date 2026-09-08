@@ -883,42 +883,70 @@ function Invoke-GetSnapshotsAction {
     }
 
     try {
-        # Max snapshots served per request - without a cap, a large snapshot history makes
-        # every page load read and serve the entire archive (each file fully into memory),
-        # which is arbitrarily slow and, combined with the single-threaded accept loop,
-        # freezes the server for the whole read. Most-recent-first covers the actual use
-        # case (autoload picks the latest anyway); older history is still on disk, just not
-        # served by this endpoint.
+        # Max snapshots listed per request. Most-recent-first covers the actual use case
+        # (autoload wants the latest, plus enough history for cross-snapshot merging); older
+        # history is still on disk, just not offered here.
         $MaxSnapshots = 20
         $Files = Get-ChildItem -LiteralPath $SnapshotDir -File |
             Where-Object { $_.Name -match '^NetworkMap_.*\.json(\.enc)?$' -and $_.Name -notmatch '\.tmp\.json(\.enc)?$' } |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First $MaxSnapshots
 
-        # Per-file try/catch: a single locked/unreadable file (e.g. a concurrent crawl mid-
-        # write, a permissions issue) must not 500 the whole autoload - skip it and serve
-        # every other snapshot, matching processSelectedFiles' own "one bad file in a batch
-        # doesn't discard the rest" convention (app.js). -LiteralPath on both calls - a
-        # filename containing [ or ] would otherwise be wildcard-interpreted by -Path.
-        $Snapshots = @($Files | ForEach-Object {
-            # Captured into a named variable because inside the catch block below, $_ is
-            # rebound to the ErrorRecord (shadowing this ForEach-Object iteration variable) -
-            # referencing $_.FullName there would silently evaluate against the ErrorRecord
-            # instead of the file, losing the filename from the log line.
-            $File = $_
-            try {
-                $Content = Get-Content -LiteralPath $File.FullName -Raw -Encoding UTF8
-                if ([string]::IsNullOrEmpty($Content)) { return }
-                @{ name = $File.Name; content = $Content }
-            } catch {
-                Write-MapperDebugLog "GET-SNAPSHOTS WARNING [$($File.FullName)] Skipped unreadable snapshot: $_"
-            }
-        })
+        # Names and sizes only - the bodies are fetched one at a time from
+        # Invoke-GetSnapshotAction. This action used to inline every snapshot's full content
+        # here, which meant one ConvertTo-Json over the entire archive: at the 20-file cap with
+        # ~2MB snapshots that is a ~40MB serialization, and Windows PowerShell 5.1 backs
+        # ConvertTo-Json with JavaScriptSerializer, which takes minutes on a payload that size
+        # and allocates a string well into the large object heap. It ran on the accept-loop
+        # thread, which serves every request, so for the whole of that time the server answered
+        # nothing at all - a scan started from the browser meanwhile just sat in the HTTP.sys
+        # queue until it was dropped, surfacing as a bare "failed to fetch" with no server-side
+        # error to show for it. The listing is now a few hundred bytes regardless of archive
+        # size, and no single request can monopolise the loop.
+        $Snapshots = @($Files | ForEach-Object { @{ name = $_.Name; size = $_.Length } })
 
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ snapshots = $Snapshots }
     } catch {
-        Write-MapperDebugLog "GET-SNAPSHOTS ERROR [$SnapshotDir] Failed to read snapshot(s): $_"
-        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to read snapshot(s): $_" }
+        Write-MapperDebugLog "GET-SNAPSHOTS ERROR [$SnapshotDir] Failed to list snapshot(s): $_"
+        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to list snapshot(s): $_" }
+    }
+}
+
+# Serves ONE snapshot file, by name, from the listing above. Writes the file's bytes
+# verbatim rather than wrapping them in a JSON envelope: the file already IS the JSON
+# document the client wants, so quoting it into a JSON string would re-introduce exactly the
+# serialization cost this split exists to avoid (see Invoke-GetSnapshotsAction).
+function Invoke-GetSnapshotAction {
+    param($Response, [string]$SnapshotDir, [string]$Name)
+
+    # Same filter the listing applies, so only a name that could have come from it is served.
+    # \z rather than $ - PowerShell's $ also matches before a trailing newline, which would let
+    # "NetworkMap_x.json`n<anything>" through.
+    if ([string]::IsNullOrWhiteSpace($Name) -or
+        $Name -notmatch '^NetworkMap_.*\.json(\.enc)?\z' -or
+        $Name -match '\.tmp\.json(\.enc)?\z') {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid snapshot name" }
+        return
+    }
+
+    # The regex above is anchored but its .* still admits path separators and .. segments, so
+    # confine the resolved path to $SnapshotDir the same way Invoke-StaticFile does rather
+    # than trusting the name's shape. Trailing separator on the root makes this a path-prefix
+    # match instead of a string-prefix one.
+    try {
+        $RootFull = [System.IO.Path]::GetFullPath($SnapshotDir)
+        if (-not $RootFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) { $RootFull += [System.IO.Path]::DirectorySeparatorChar }
+        $FullPath = [System.IO.Path]::GetFullPath((Join-Path $RootFull $Name))
+
+        if (-not $FullPath.StartsWith($RootFull, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
+            Send-WebJson -Response $Response -StatusCode 404 -Object @{ error = "Snapshot not found" }
+            return
+        }
+
+        Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.IO.File]::ReadAllBytes($FullPath)) -ContentType "application/json; charset=utf-8"
+    } catch {
+        Write-MapperDebugLog "GET-SNAPSHOT ERROR [$Name] Failed to read snapshot: $_"
+        Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to read snapshot: $_" }
     }
 }
 
@@ -1092,6 +1120,11 @@ function Start-MapperWebServer {
         [AllowNull()][AllowEmptyString()][string]$DebugLogPath
     )
 
+    # Set before anything that can fail below, not further down with the other script-scoped
+    # assignments: Write-MapperDebugLog is a silent no-op until this is populated, so a bind
+    # or pool-setup failure would otherwise leave no trace of why the server never came up.
+    $script:DebugLogPath = $DebugLogPath
+
     $Listener = [System.Net.HttpListener]::new()
     $Prefix = "http://localhost:$Port/"
     $Listener.Prefixes.Add($Prefix)
@@ -1099,8 +1132,14 @@ function Start-MapperWebServer {
     try {
         $Listener.Start()
     } catch {
+        Write-MapperDebugLog "SERVER BIND FAILED [$Prefix] $_"
         throw "Could not bind $Prefix - is another instance already running? ($_)"
     }
+    # Bookends the SERVER SHUTDOWN line in the finally below. Together these are the only
+    # record of when this process was actually able to serve requests - without them, a
+    # browser-side "failed to fetch" is indistinguishable from a request the server rejected,
+    # since a dead (or never-started) listener writes nothing at all.
+    Write-MapperDebugLog "SERVER START listening on $Prefix (PID $PID)"
 
     # Backs /api/rescan. Only one rescan is ever in flight at the HTTP level ($script:PendingScan
     # gates that with a 409), but the pool itself is sized to 3, not 1: an orphaned rescan
@@ -1143,7 +1182,6 @@ function Start-MapperWebServer {
     # saved from the Settings tab, without requiring a process restart.
     $script:JunosUsername = $JunosUsername
     $script:JunosPassword = $JunosPassword
-    $script:DebugLogPath = $DebugLogPath
 
     # Detect the host that launched this process (pwsh.exe vs powershell.exe) so
     # Invoke-ConnectAction's SSH launch uses the same runtime rather than a hardcoded
@@ -1152,7 +1190,18 @@ function Start-MapperWebServer {
     if ([string]::IsNullOrWhiteSpace($PowerShellExePath)) { $PowerShellExePath = "powershell.exe" }
 
     Write-Host "`nWeb UI listening on $Prefix (localhost only - Ctrl+C to stop)" -ForegroundColor Cyan
-    Start-Process $Prefix
+    # Sits between the pool-setup try/catch above and the serving try/finally below, so an
+    # unguarded throw here kills the process with the listener already bound and the accept
+    # loop never entered - the browser would then see every request fail at the network layer
+    # with nothing logged. ShellExecute can genuinely fail here (no http:// handler
+    # registered, or a managed host blocking it), and it isn't worth the server for.
+    try {
+        Start-Process $Prefix
+    } catch {
+        Write-MapperDebugLog "BROWSER LAUNCH FAILED [$Prefix] $_"
+        Write-Host "Could not open a browser automatically ($_)." -ForegroundColor Yellow
+        Write-Host "The server is running - open $Prefix manually." -ForegroundColor Yellow
+    }
 
     # Console progress for browser-triggered scans: Invoke-ScanNetworkAction runs the crawl
     # in a background runspace, so FleetCrawl.ps1's Write-Host never reaches this console
@@ -1160,6 +1209,15 @@ function Start-MapperWebServer {
     $script:ScanProgressSnapshot = $null
     try {
         while ($Listener.IsListening) {
+          # Outermost per-iteration guard: the two try/catches below cover
+          # BeginGetContext/EndGetContext and the request dispatch, but the statements between
+          # them (unpacking $Context) and anything neither of those anticipates are not
+          # otherwise covered. Anything that escapes this block would fall through to this
+          # function's `finally` (which stops/closes $Listener) without ever reaching a
+          # Write-MapperDebugLog call - exactly the "server dies, nothing in the log" failure
+          # mode. Catch everything here as a last resort, log full exception detail, and keep
+          # the loop alive.
+          try {
             # BeginGetContext/WaitOne(250) instead of a blocking GetContext(): a blocking
             # call gives the engine no statement boundary to act on, so Ctrl+C is ignored.
             # Polling on a timeout hands control back every 250ms, making Ctrl+C work.
@@ -1193,7 +1251,7 @@ function Start-MapperWebServer {
                 }
                 $Context = $Listener.EndGetContext($AsyncResult)
             } catch {
-                Write-MapperDebugLog "ACCEPT LOOP ERROR: $_"
+                Write-MapperDebugLog "ACCEPT LOOP ERROR [$($_.Exception.GetBaseException().GetType().FullName)] $_`nStackTrace: $($_.ScriptStackTrace)"
                 Write-Host "`nAccept loop error (logged to Mapper_Debug.log): $_" -ForegroundColor Red
                 # Guards against a tight CPU-spinning retry loop if the listener is failing
                 # every call (e.g. IsListening hasn't flipped false yet but the underlying
@@ -1203,6 +1261,14 @@ function Start-MapperWebServer {
             }
             $Request = $Context.Request
             $Response = $Context.Response
+
+            # Every request is served on this one thread, so a handler that blocks stops the
+            # whole server answering anything - the browser then sees requests time out or be
+            # dropped by HTTP.sys while this process is still very much alive, which is
+            # indistinguishable from "the server is down" at the client. Nothing recorded how
+            # long a handler ran, so that state was invisible after the fact. Log only the slow
+            # ones: enough to name the blocking endpoint without logging every request.
+            $RequestStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
             try {
                 if ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/connect") {
@@ -1278,6 +1344,13 @@ function Start-MapperWebServer {
                     } else {
                         Invoke-GetSnapshotsAction -Response $Response -SnapshotDir $SnapshotDir
                     }
+                } elseif ($Request.HttpMethod -eq "GET" -and $Request.Url.AbsolutePath -eq "/api/snapshot") {
+                    if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
+                        Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
+                    } else {
+                        $SnapshotName = Get-QueryParam -Query $Request.Url.Query -Name "name"
+                        Invoke-GetSnapshotAction -Response $Response -SnapshotDir $SnapshotDir -Name $SnapshotName
+                    }
                 } elseif ($Request.HttpMethod -eq "POST" -and $Request.Url.AbsolutePath -eq "/api/save-config") {
                     if (-not (Test-SameOriginRequest -Request $Request -Port $Port)) {
                         Send-WebJson -Response $Response -StatusCode 403 -Object @{ error = "Cross-origin request refused"; reason = "Cross-origin request refused" }
@@ -1291,11 +1364,63 @@ function Start-MapperWebServer {
                     Invoke-StaticFile -Response $Response -AbsolutePath $Request.Url.AbsolutePath -VisualizerRoot $VisualizerRoot
                 }
             } catch {
-                Write-MapperDebugLog "UNHANDLED REQUEST ERROR [$($Request.HttpMethod) $($Request.Url.AbsolutePath)] $_"
+                Write-MapperDebugLog "UNHANDLED REQUEST ERROR [$($Request.HttpMethod) $($Request.Url.AbsolutePath)] [$($_.Exception.GetBaseException().GetType().FullName)] $_`nStackTrace: $($_.ScriptStackTrace)"
                 try { Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Server error: $_" } } catch {}
+            } finally {
+                $RequestStopwatch.Stop()
+                if ($RequestStopwatch.Elapsed.TotalSeconds -ge 5) {
+                    Write-MapperDebugLog "SLOW REQUEST [$($Request.HttpMethod) $($Request.Url.AbsolutePath)] blocked the accept loop for $([math]::Round($RequestStopwatch.Elapsed.TotalSeconds, 1))s"
+                }
             }
+          } catch {
+            # Last-resort catch for this iteration - see the comment at the top of this block.
+            Write-MapperDebugLog "ACCEPT LOOP ITERATION FATAL (contained) [$($_.Exception.GetBaseException().GetType().FullName)] $_`nStackTrace: $($_.ScriptStackTrace)"
+            Write-Host "`nAccept loop iteration error, contained (logged to Mapper_Debug.log): $_" -ForegroundColor Red
+            # Best-effort: if a response was partially constructed for this request, abort it
+            # so the browser fails fast instead of hanging on a connection that will never
+            # complete - this must not itself throw and re-enter this catch. Read off $Context
+            # (not $Response): if the exception came from unpacking $Context, $Response still
+            # points at the PREVIOUS iteration's already-closed object.
+            try { if ($Context) { $Context.Response.Abort() } } catch {}
+            Start-Sleep -Milliseconds 250
+          }
         }
+        Write-MapperDebugLog "ACCEPT LOOP EXITED (IsListening=$($Listener.IsListening))"
+    } catch {
+        Write-MapperDebugLog "SERVER FATAL [$($_.Exception.GetBaseException().GetType().FullName)] $_`nStackTrace: $($_.ScriptStackTrace)"
+        throw
     } finally {
+        # FIRST statement in the finally, deliberately: Ctrl+C raises a PipelineStoppedException
+        # that the catch above does NOT intercept, so neither SERVER FATAL nor ACCEPT LOOP
+        # EXITED is written on the single most common way this process ends. Without this line
+        # a Ctrl+C'd server leaves zero trace, and a still-open browser tab clicking "Scan
+        # Network" afterwards reports "failed to fetch" against a log that looks perfectly
+        # healthy. Pairs with SERVER START to bound the process's serving lifetime.
+        #
+        # Written with raw .NET calls rather than Write-MapperDebugLog on purpose. Once Ctrl+C
+        # puts the pipeline in Stopping state, any CMDLET invoked from a finally block
+        # (Out-File/Get-Date/Get-Item, all of which that helper uses) immediately re-throws
+        # PipelineStoppedException at the call boundary; the helper's own `catch {}` would then
+        # swallow it and write nothing. Plain .NET method calls are unaffected.
+        #
+        # KNOWN LIMITATION, for whoever reads this next: that same rule makes most of the rest
+        # of this finally dead on Ctrl+C, which is the usual way this process ends. The
+        # $Listener/runspace teardown below is .NET and does run, but Stop-JunosOrphanProcessesLocal
+        # is a PowerShell function built on Get-CimInstance/Stop-Process, so it throws on its
+        # first statement and every "SHUTDOWN ERROR" line below is likewise unwritable. Net
+        # effect: ssh.exe/cmd.exe grandchildren of an in-flight scan survive a Ctrl+C exit
+        # silently. Fixing it properly means reimplementing that reap with .NET only
+        # (Process.GetProcessesByName + StartTime filter), which cannot be verified from a
+        # non-Windows checkout - so it is documented rather than half-done.
+        try {
+            if ($script:DebugLogPath) {
+                [System.IO.File]::AppendAllText(
+                    $script:DebugLogPath,
+                    "[$([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss'))] SERVER SHUTDOWN (IsListening=$($Listener.IsListening))`r`n",
+                    [System.Text.Encoding]::UTF8)
+            }
+        } catch {}
+
         # Each step below is independently try/catch'd (recovery-1) - these all run once, at
         # process shutdown, and are otherwise unrelated resources; one throwing (e.g. a runspace
         # pool already in a bad state) must not abort the remaining steps and leak whatever

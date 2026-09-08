@@ -21,3 +21,10 @@ PS_NetworkMapper/RawDumps/
 
 # Local git worktrees used for isolated feature-plan execution (superpowers:using-git-worktrees).
 .worktrees/
+
+# Claude Code working directory: per-session audit notes and runtime state, not source.
+.claude/
+
+# Raw switch session captures used as parsing ground truth while debugging. Real device
+# output (hostnames, IPs, MACs), same sensitivity as Network_Maps/ above.
+PS_NetworkMapper/Raw_*.txt

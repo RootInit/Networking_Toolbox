@@ -417,15 +417,46 @@ window.autoloadLastScan = async function() {
     // hasn't populated loadedSnapshots yet.
     var myGenerationAtStart = loadFilesGeneration;
 
-    var entries;
+    var listing;
     try {
         var resp = await fetch('/api/snapshots');
         if (!resp.ok) return;
-        entries = (await resp.json()).snapshots;
+        listing = (await resp.json()).snapshots;
     } catch (err) {
         return;
     }
-    if (!Array.isArray(entries) || entries.length === 0) return;
+    if (!Array.isArray(listing) || listing.length === 0) return;
+
+    // /api/snapshots returns names and sizes only; bodies come one request at a time from
+    // /api/snapshot. The server is single-threaded, so asking for the whole archive in one
+    // response used to block it from answering anything else for as long as that took -
+    // minutes, on a large archive under Windows PowerShell 5.1 (see Invoke-GetSnapshotsAction).
+    // Fetched sequentially rather than in parallel for the same reason: a single-threaded
+    // server gains nothing from concurrent requests, and serialising them leaves gaps in
+    // which it can serve a scan the user starts while this is still running.
+    var entries = [];
+    for (var i = 0; i < listing.length; i++) {
+        // Re-checked every iteration, not just once before committing: this loop yields to the
+        // server between every fetch (that is the point - see above), so a Scan Network started
+        // while it runs would otherwise be silently overwritten by these archived snapshots at
+        // the end. scanNetworkPollActive is the canonical "a scan is in flight" flag and, unlike
+        // loadFilesGeneration/loadedSnapshots, it moves the instant a scan starts rather than
+        // when one finishes. Bailing here also stops competing for the single-threaded server
+        // with a crawl whose results will supersede all of this anyway.
+        if (scanNetworkPollActive || loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0) return;
+        try {
+            var fileResp = await fetch('/api/snapshot?name=' + encodeURIComponent(listing[i].name));
+            // One unreadable snapshot (a concurrent crawl mid-write, a permissions issue)
+            // skips that file rather than abandoning the whole autoload, matching
+            // processSelectedFiles' "one bad file in a batch doesn't discard the rest".
+            if (!fileResp.ok) continue;
+            var content = await fileResp.text();
+            if (content) entries.push({ name: listing[i].name, content: content });
+        } catch (err) {
+            return; // network-level failure - the server is gone or blocked; stop quietly
+        }
+    }
+    if (entries.length === 0) return;
 
     var encryptedEntries = entries.filter(e => {
         try { return JSON.parse(e.content).format === 'PSNetworkMapper-EncryptedTopology'; }
@@ -445,7 +476,7 @@ window.autoloadLastScan = async function() {
         }
     }
 
-    if (loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0) return;
+    if (loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0 || scanNetworkPollActive) return;
     var files = entries.map(e => new File([e.content], e.name, { type: 'application/json' }));
     // This is a silent background autoload, not a user-initiated action - a single corrupt/
     // malformed archived snapshot must not surface the fatal red error state (processSelectedFiles
