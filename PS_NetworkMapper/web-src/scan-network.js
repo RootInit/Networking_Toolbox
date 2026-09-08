@@ -128,12 +128,30 @@ function pollRunningScan() {
             return;
         }
 
-        // Synthesized as a File so the result runs through the same processSelectedFiles
-        // pipeline as a manual upload, in the same envelope shape written to disk.
-        var syntheticContent = JSON.stringify({ Topology: status.topology, ScanTimestamp: status.scanTimestamp });
-        var syntheticFile = new File([syntheticContent], status.outputFile || 'scan-result.json', { type: 'application/json' });
+        // The crawl already wrote this snapshot to disk, so fetch the file rather than having
+        // the status endpoint return the topology inline - that made the single-threaded server
+        // re-serialize the whole fleet on every poll. Fetching it also means an encrypted setup
+        // gets the real .enc envelope and decrypts it through the normal path, instead of the
+        // server handing back plaintext it had already encrypted on disk.
+        if (!status.outputFile) {
+            finish("Scan finished but the server did not report an output file - use Load Folder to open the snapshot manually.", "red");
+            return;
+        }
+        var snapshotResp;
+        try {
+            snapshotResp = await fetch('/api/snapshot?name=' + encodeURIComponent(status.outputFile));
+        } catch (e) {
+            finish("Scan finished but its snapshot could not be retrieved. " + window.describeServerError(e), "red");
+            return;
+        }
+        if (!snapshotResp.ok) {
+            finish("Scan finished but its snapshot could not be read back (HTTP " + snapshotResp.status + "). It is saved in Network_Maps - use Load Folder to open it.", "red");
+            return;
+        }
+        // Read through processSelectedFiles, the same pipeline a manual upload uses.
+        var snapshotFile = new File([await snapshotResp.text()], status.outputFile, { type: 'application/json' });
         finish("Scan complete - " + status.visitedCount + " device(s) found. Loading...", "green");
-        await window.processSelectedFiles([syntheticFile]);
+        await window.processSelectedFiles([snapshotFile]);
     };
     // poll() is fire-and-forget, so an unhandled rejection would leave scanNetworkPollActive
     // stuck true (finish() never runs), permanently disabling the scan/load buttons.

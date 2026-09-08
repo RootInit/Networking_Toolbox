@@ -689,9 +689,18 @@ function Invoke-ScanNetworkStatusAction {
                 if (-not $Payload -or -not $Payload.Topology) {
                     $Job.Outcome = @{ status = "complete"; ok = $false; reason = "Scan produced no data - see server console/debug log" }
                 } else {
+                    # Deliberately NOT carrying $Payload.Topology. Invoke-FleetCrawl has already
+                    # written it to $SnapshotDir under a name Invoke-GetSnapshotAction serves, so
+                    # the client fetches it from there instead. Returning it inline meant every
+                    # request to this endpoint re-serialized the whole fleet, and since the
+                    # completed job is retained to be re-served idempotently, that cost was paid
+                    # on every hit for the life of the process - including the unconditional poll
+                    # the client makes on each page load. Same accept-loop stall as the snapshots
+                    # endpoint. Keeping it out also frees the topology instead of pinning it in
+                    # the server's heap.
                     $Job.Outcome = @{
                         status = "complete"; ok = $true
-                        topology = $Payload.Topology; scanTimestamp = $Payload.ScanTimestampIso
+                        scanTimestamp = $Payload.ScanTimestampIso
                         outputFile = (Split-Path $Payload.OutputFile -Leaf); visitedCount = $Payload.VisitedCount
                     }
                     if ($Payload.Aborted) {
@@ -707,9 +716,7 @@ function Invoke-ScanNetworkStatusAction {
             $Job.Collected = $true
         }
 
-        # -Depth 100 matches FleetCrawl.ps1's Write-TopologyOutputLocal; shallower risks
-        # ConvertTo-Json silently truncating a deeply-nested topology.
-        Send-WebJson -Response $Response -StatusCode 200 -Depth 100 -Object $Job.Outcome
+        Send-WebJson -Response $Response -StatusCode 200 -Object $Job.Outcome
         return
     }
 
