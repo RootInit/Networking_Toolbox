@@ -1,7 +1,8 @@
-// Decrypts a "PSNetworkMapper-EncryptedTopology" envelope (Start-NetworkMapper.ps1's default
-// output unless -NoEncryption): AES-256-CBC, key/HMAC key from PBKDF2-SHA256, encrypt-then-MAC
-// with HMAC-SHA256 over IV+ciphertext. Not AES-GCM: must also run under Windows PowerShell
-// 5.1, whose .NET Framework lacks AesGcm. Self-contained; only caller is app.js.
+// Decrypts a "PSNetworkMapper-EncryptedTopology" envelope: AES-256-CBC, keys from
+// PBKDF2-SHA256, encrypt-then-MAC with HMAC-SHA256 over IV+ciphertext. Every parameter here
+// must stay in lockstep with lib/TopologyCrypto.ps1, which writes the envelope. Not AES-GCM
+// because that side must also run under Windows PowerShell 5.1, whose .NET Framework lacks
+// AesGcm.
 var TopologyCrypto = (function() {
     function b64ToBytes(b64) {
         var bin = atob(b64);
@@ -25,13 +26,12 @@ var TopologyCrypto = (function() {
             baseKey, 512
         );
         var keyMaterial = new Uint8Array(bits);
-        // Same 32/32 split as Protect-TopologyPayload in Start-NetworkMapper.ps1.
+        // Same 32/32 split as Protect-TopologyPayload in lib/TopologyCrypto.ps1.
         return { encKeyBytes: keyMaterial.slice(0, 32), macKeyBytes: keyMaterial.slice(32, 64) };
     }
 
-    // MIN must stay <= any real file's iteration count (the shared PBKDF2 count is 600,000)
-    // or it stops decrypting. MAX is just a CPU-burn guard against a maliciously-crafted file,
-    // not a security boundary.
+    // MIN must stay <= any real file's iteration count (the shared count is 600,000) or
+    // decryption stops working. MAX is a CPU-burn guard, not a security boundary.
     var MIN_ITERATIONS = 1000;
     var MAX_ITERATIONS = 5000000;
 
@@ -46,18 +46,15 @@ var TopologyCrypto = (function() {
         if (envelope.kdf !== 'PBKDF2-SHA256' || envelope.cipher !== 'AES-256-CBC' || envelope.macAlgorithm !== 'HMAC-SHA256') {
             throw new Error(`Unsupported encryption parameters: ${envelope.kdf}/${envelope.cipher}/${envelope.macAlgorithm}`);
         }
-        // Validate type AND range - a tampered envelope could carry a string or float.
+        // Type as well as range: a tampered envelope could carry a string or a float.
         if (!Number.isInteger(envelope.iterations) || envelope.iterations < MIN_ITERATIONS || envelope.iterations > MAX_ITERATIONS) {
             throw new Error(`Iteration count out of range: ${envelope.iterations}`);
         }
 
-        // Everything below can throw a raw browser exception on a malformed/corrupted
-        // envelope: atob() throws DOMException on non-base64 input, and
-        // crypto.subtle.decrypt() throws DOMException (OperationError) when ciphertext
-        // isn't a multiple of the AES block size. Normalize all of that - same as the
-        // wrong-password/bad-MAC case - so the caller can't tell "bad password" apart
-        // from "corrupt file" any worse than it already can't, and never sees a raw
-        // exception escape this function.
+        // A corrupted envelope throws raw DOMExceptions here (atob on non-base64,
+        // crypto.subtle.decrypt on a non-block-multiple ciphertext). Collapse them into the
+        // same message as a bad MAC so no raw exception escapes and the caller cannot
+        // distinguish "wrong password" from "corrupt file".
         try {
             var saltBytes = b64ToBytes(envelope.salt);
             var ivBytes = b64ToBytes(envelope.iv);
@@ -66,8 +63,8 @@ var TopologyCrypto = (function() {
 
             var keys = await deriveKeyMaterial(password, saltBytes, envelope.iterations);
 
-            // Verify MAC before decrypting: a wrong password fails clearly here instead of
-            // producing a confusing AES-CBC padding exception.
+            // MAC is verified before decrypting: a wrong password fails clearly here rather
+            // than as a confusing AES-CBC padding exception.
             var macKey = await crypto.subtle.importKey('raw', keys.macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
             var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, concatBytes(ivBytes, cipherBytes));
             if (!macOk) throw new Error('Incorrect password, or the file is corrupted.');

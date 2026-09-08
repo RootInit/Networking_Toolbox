@@ -5,11 +5,10 @@
 #
 # Not meant to be run directly - dot-source it.
 
-# Single source of truth for the PBKDF2 iteration count, so it can't drift between the
-# crawler and the webserver. A function (not a variable) so it resolves through however
-# many layers of dot-sourcing sit between caller and file.
-# OWASP's current PBKDF2-HMAC-SHA256 guidance (600k). Safe to raise later - iterations is
-# stored per-file in the envelope and read back on decrypt, not assumed.
+# Single source of truth for the iteration count (OWASP's current PBKDF2-HMAC-SHA256
+# guidance), so it can't drift between crawler and webserver. A function, not a variable, so
+# it resolves through however many layers of dot-sourcing sit between caller and file. Safe
+# to raise: iterations is stored per-file in the envelope and read back on decrypt.
 function Get-TopologyPbkdf2Iterations {
     return 600000
 }
@@ -26,8 +25,7 @@ function Get-TopologyKeyMaterial {
     return @{ EncKey = $KeyMaterial[0..31]; MacKey = $KeyMaterial[32..63] }
 }
 
-# Builds an encrypted envelope from a plaintext JSON string. IV is fresh per call; caller
-# derives EncKey/MacKey/Salt via Get-TopologyKeyMaterial above.
+# IV is fresh per call; caller derives EncKey/MacKey/Salt via Get-TopologyKeyMaterial.
 function Protect-TopologyPayload {
     param(
         [Parameter(Mandatory=$true)][string]$PlainJson,
@@ -70,7 +68,7 @@ function Protect-TopologyPayload {
     }
 }
 
-# PowerShell mirror of web-src/topology-crypto.js's decryptEnvelope. Verifies the HMAC
+# Must stay in lockstep with web-src/topology-crypto.js's decryptEnvelope. Verifies the HMAC
 # before decrypting (encrypt-then-MAC) so a wrong password or tampered file fails with one
 # clear error instead of an AES-CBC padding exception.
 function Unprotect-TopologyPayload {
@@ -83,10 +81,9 @@ function Unprotect-TopologyPayload {
     if (-not $Envelope -or $ExpectedFormats -cnotcontains $Envelope.format) {
         throw "Not a recognized encrypted file (expected one of: $($ExpectedFormats -join ', '))."
     }
-    # JS's `envelope.version !== 1` is strict: a JSON string "1" is rejected, not coerced.
-    # PowerShell's -ne coerces the right operand to the left operand's (int) type, so a
-    # string "1" would otherwise compare equal - check the runtime type explicitly first,
-    # mirroring the iterations numeric-type check below.
+    # PowerShell's -ne coerces the right operand to the left's type, so a JSON string "1"
+    # would compare equal - the JS side's strict !== rejects it. Check the runtime type
+    # explicitly to match.
     if ($Envelope.version -isnot [int] -and $Envelope.version -isnot [long] -and $Envelope.version -isnot [double] -and $Envelope.version -isnot [decimal]) {
         throw "Unsupported envelope version: $($Envelope.version)"
     }
@@ -98,21 +95,15 @@ function Unprotect-TopologyPayload {
     }
     # Same bounds as topology-crypto.js's MIN_ITERATIONS/MAX_ITERATIONS - a CPU-burn guard
     # against a tampered file forcing an absurd PBKDF2 cost, not a security boundary.
-    # Must reject a JSON string value (e.g. "600000") the same way topology-crypto.js's
-    # Number.isInteger(envelope.iterations) check does - ConvertFrom-Json already types a
-    # well-formed JSON number as int/long/double, so require that instead of stringifying
-    # first via [long]::TryParse([string]...), which would silently accept a string.
+    # Requiring a numeric runtime type (rather than parsing a string) mirrors the JS side's
+    # Number.isInteger check, which rejects a JSON string like "600000".
     $IterationsValue = $Envelope.iterations
     $IsNumericType = $IterationsValue -is [int] -or $IterationsValue -is [long] -or $IterationsValue -is [double] -or $IterationsValue -is [decimal]
     if (-not $IsNumericType) {
         throw "Iteration count out of range: $($Envelope.iterations)"
     }
-    # A double/decimal far outside Int64 range (e.g. what ConvertFrom-Json produces for a
-    # JSON number like 1e300) makes the [long] cast itself throw a raw
-    # System.Management.Automation.RuntimeException ("Arithmetic operation resulted in an
-    # overflow") before the min/max range check below ever runs. Range-check against the
-    # double's own comparable bounds first so an out-of-range value hits the clean error
-    # instead.
+    # A JSON number like 1e300 parses as a double whose [long] cast throws a raw overflow
+    # RuntimeException before the range check below could run - bound it as a double first.
     if ($IterationsValue -lt [long]::MinValue -or $IterationsValue -gt [long]::MaxValue) {
         throw "Iteration count out of range: $($Envelope.iterations)"
     }
@@ -130,17 +121,14 @@ function Unprotect-TopologyPayload {
         throw "Incorrect password, or the file is corrupted."
     }
 
-    # [Convert]::FromBase64String("") succeeds and returns a 0-length array, so it doesn't
-    # hit the catch above. An empty array would then hit Get-TopologyKeyMaterial's Mandatory
-    # -Salt parameter binding and throw a raw ParameterBindingValidationException instead of
-    # this function's clean error - check explicitly instead of letting parameter binding be
-    # the thing that throws.
+    # FromBase64String("") succeeds with a 0-length array, so it escapes the catch above and
+    # would surface as a raw ParameterBindingValidationException downstream instead of this
+    # function's clean error.
     if ($SaltBytes.Length -eq 0 -or $IvBytes.Length -eq 0 -or $CipherBytes.Length -eq 0 -or $MacBytes.Length -eq 0) {
         throw "Incorrect password, or the file is corrupted."
     }
-    # A present-but-abnormally-short salt (1-7 bytes) can make Rfc2898DeriveBytes throw an
-    # unhandled/raw exception on some .NET runtimes instead of this function's clean error.
-    # 8 bytes is the standard PBKDF2 salt minimum.
+    # Below PBKDF2's 8-byte salt minimum, Rfc2898DeriveBytes throws a raw exception on some
+    # .NET runtimes instead of this function's clean error.
     if ($SaltBytes.Length -lt 8) {
         throw "Incorrect password, or the file is corrupted."
     }

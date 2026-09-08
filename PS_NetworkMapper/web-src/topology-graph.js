@@ -1,10 +1,8 @@
 // Pure device-classification/edge extraction shared by graph.js (diagram) and map.js
 // (geo view), so both views classify devices identically. No DOM, no vis-network, no Leaflet.
 
-// Local copy of utils.js's window.asArray - this file also runs under plain Node (see the
-// dual-mode export below), where window.asArray doesn't exist. PowerShell's ConvertTo-Json
-// serializes a single-element array as a bare object, so device.Neighbors/TrueClients with
-// exactly one entry arrive as {..} instead of [{..}] and must be normalized before .forEach/.map.
+// Local copy of utils.js's window.asArray (see it for the reason) - this file also runs
+// under plain Node, where window doesn't exist.
 function asArray(val) {
   if (Array.isArray(val)) return val.filter(function (item) { return item !== null && item !== undefined; });
   if (val === null || val === undefined) return [];
@@ -14,7 +12,7 @@ function asArray(val) {
 function computeDeviceClassification(topology) {
   var result = new Map();
 
-  // Pass 1: scanned devices always win over a later placeholder for the same IP.
+  // Two passes so a scanned device always wins over a neighbor placeholder for the same IP.
   topology.forEach(function (device) {
     if (!device || !device.DeviceIP) return;
     var isStack = !!(device.StackMembers && device.StackMembers.length > 1);
@@ -23,7 +21,6 @@ function computeDeviceClassification(topology) {
     });
   });
 
-  // Pass 2: unscanned LLDP neighbors get a placeholder entry.
   topology.forEach(function (device) {
     if (!device || !device.DeviceIP || !device.Neighbors) return;
     asArray(device.Neighbors).forEach(function (neighbor) {
@@ -38,8 +35,8 @@ function computeDeviceClassification(topology) {
   return result;
 }
 
-// Per-device VLAN tags from local clients (MAC table), keyed by DeviceIP; shared by
-// graph.js and map.js. A device with no TrueClients gets an empty array, not a missing entry.
+// Per-device VLAN tags from the MAC table, keyed by DeviceIP. A device with no TrueClients
+// gets an empty array, not a missing entry.
 function computeVlanCache(topology) {
   var result = new Map();
   topology.forEach(function (device) {
@@ -69,13 +66,10 @@ function computeNeighborEdges(topology) {
   return edges;
 }
 
-// Topology -> per-node {label, shape, isStack, scanned, vlanCache} metadata for the switch
-// diagram, keyed by IP. Extracted from graph.js's buildSwitchMap so the node-construction
-// logic (classification + device lookup + VLAN cache -> label/shape) has exactly one
-// implementation, shared by the real caller and its regression test, instead of drifting
-// between graph.js and a hand-copied test double. buildSwitchMap itself stays in graph.js -
-// it owns the vis-network-specific pieces (dataset diffing, layout, DOM) this function
-// deliberately has no dependency on.
+// Topology -> per-node {label, shape, isStack, scanned, vlanCache} keyed by IP. Kept out of
+// graph.js's buildSwitchMap so the node-construction rules have one implementation shared by
+// the real caller and its test; buildSwitchMap keeps the vis-network-specific pieces this
+// function deliberately has no dependency on.
 function buildSwitchMapNodeMeta(topology) {
   var allNodeMeta = new Map();
   var classification = computeDeviceClassification(topology);

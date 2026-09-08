@@ -1,30 +1,25 @@
 // Topology data -> node/edge metadata -> vis-network rendering. Owns the graph-structure
-// state and the vis.Network instance's lifecycle. Reads globalTopologyData/network/
-// nodesDataset/edgesDataset (app.js) and window.GraphLayout/window.ElkLayout.
+// state and the vis.Network instance's lifecycle.
 
-// Deterministic layout state (see graph-layout.js / elk-layout.js).
 var allNodeMeta = new Map();   // id -> {label, shape, isStack, vlanCache, scanned}
 var allEdges = [];             // {from, to}[]
 var graphRoot = null;
 var primaryTree = { parentOf: new Map(), childrenOf: new Map(), secondaryEdges: [] };
 var expandedNodes = new Set();
-// True whenever buildSwitchMap most recently (re)constructed the vis.Network instance while
-// #mynetwork was display:none (see window.resizeDiagram below) - i.e. there's a pending
-// degenerate camera transform that a plain redraw won't correct. Only reset when
-// resizeDiagram actually runs fit(), so the user's own pan/zoom is never fought otherwise.
+// Set when the vis.Network instance was constructed while #mynetwork was display:none,
+// leaving a degenerate camera transform a plain redraw won't correct. Cleared only when
+// resizeDiagram actually runs fit(), so the user's own pan/zoom is never fought.
 var diagramSizedWhileHidden = false;
 
-// Read fresh from the DOM on every use rather than cached from the input's `change`
-// event, since the first render after page load could otherwise run before that event
-// fires and silently use the stale default.
+// Read live from the DOM rather than cached on the input's `change` event: the first render
+// after page load can precede that event and would then use a stale default.
 function getClusterThreshold() {
     var el = document.getElementById('clusterThreshold');
     var n = el ? parseInt(el.value, 10) : NaN;
     return (Number.isFinite(n) && n >= 2) ? n : 50;
 }
 
-// Same live-DOM-read approach as getClusterThreshold. Falls back to graph-layout.js's
-// own defaults (via undefined) when a field is missing/invalid.
+// undefined defers to graph-layout.js's own defaults when a field is missing or invalid.
 function readPositiveIntSetting(id, min) {
     var el = document.getElementById(id);
     var n = el ? parseInt(el.value, 10) : NaN;
@@ -49,8 +44,8 @@ window.__debug = {
     get clusterThreshold() { return getClusterThreshold(); },
 };
 
-// Guards against the Vis.js CDN failing to load: surfaces a clear error via
-// window.onerror instead of a cryptic ReferenceError the first time vis.DataSet is used.
+// A failed vis.js load surfaces here as a clear error rather than a cryptic ReferenceError
+// at first use of vis.DataSet.
 document.addEventListener("DOMContentLoaded", function() {
     try {
         if (typeof vis !== 'undefined') {
@@ -87,26 +82,21 @@ window.extractVlans = function() {
     }
 };
 
-// Bumped by buildSwitchMap before it mutates allNodeMeta/graphRoot/primaryTree/expandedNodes
-// and tears down/recreates `network`. renderVisibleGraph's own queuing only serializes CALLS
-// to it - it doesn't stop buildSwitchMap from mutating this state out from under a render
-// that's already in progress (e.g. still awaiting ElkLayout.computeLayout) when a snapshot
-// switch or reload triggers a fresh buildSwitchMap. doRenderVisibleGraph checks this after
-// its own await and bails rather than resuming against a mix of the old visible-set/positions
-// and the new allNodeMeta/primaryTree - a subsequent renderVisibleGraph() (buildSwitchMap
-// always calls one itself, at the end) supersedes it with a consistent render anyway.
+// Bumped by buildSwitchMap before it replaces the graph state. renderVisibleGraph's queue
+// only serializes calls; it cannot stop buildSwitchMap from mutating that state under a
+// render already awaiting its layout. doRenderVisibleGraph re-checks after its await and
+// bails rather than mixing an old visible set with new metadata - buildSwitchMap's own
+// trailing renderVisibleGraph() supersedes it with a consistent render.
 var renderGeneration = 0;
 
-// 2. Topology data -> node/edge metadata (positions are computed separately by renderVisibleGraph)
+// Node/edge metadata only; positions are computed separately by renderVisibleGraph.
 window.buildSwitchMap = async function() {
     renderGeneration++;
     allNodeMeta.clear();
     allEdges = window.TopologyGraph.computeNeighborEdges(globalTopologyData);
 
-    // Node label/shape/vlanCache construction lives in topology-graph.js (buildSwitchMapNodeMeta)
-    // so it's shared with, and exercised directly by, that file's regression test - rather than
-    // being reimplemented here with no real coverage. Copy into allNodeMeta in place; other code
-    // in this file holds a reference to this same Map instance.
+    // Copied in place rather than reassigned: other code in this file holds a reference to
+    // this same Map instance.
     window.TopologyGraph.buildSwitchMapNodeMeta(globalTopologyData).forEach(function (meta, ip) {
         allNodeMeta.set(ip, meta);
     });
@@ -118,27 +108,23 @@ window.buildSwitchMap = async function() {
 
     if (network !== null) { network.destroy(); network = null; }
     var container = document.getElementById('mynetwork');
-    // Construction while #mynetwork is display:none reads clientWidth/clientHeight as 0,
-    // so vis-network's initial camera fit is against a bogus size - the canvas's own pixel
-    // size self-corrects once visible again, but the pan/zoom transform does not. See
-    // resizeDiagram below for the fix.
+    // While display:none, clientWidth/Height read 0 and vis-network fits its camera against
+    // that bogus size. The canvas pixel size self-corrects once visible; the pan/zoom
+    // transform does not - resizeDiagram fixes it.
     diagramSizedWhileHidden = (container.clientWidth === 0 || container.clientHeight === 0);
     network = new vis.Network(container, { nodes: nodesDataset, edges: edgesDataset }, {
         layout: { hierarchical: false },
         physics: { enabled: false },
         edges: { smooth: false },
-        // bindToWindow: false - vis-network's keyboard shortcuts (+/- zoom, arrow-key pan)
-        // default to binding on window, not the graph container, so typing "-" in any text
-        // field elsewhere on the page (an IP, a note, a search box) got eaten as a zoom-out
-        // instead of typing a dash. Scoped to the container, they only fire while it has focus.
-        // navigationButtons: false - vis-network's own green corner buttons are replaced by
-        // #diagram-nav (window.buildDiagramNav below), which adds rotation and stays inside
-        // the canvas instead of clipping at its bottom edge.
+        // bindToWindow: false - vis-network binds its keyboard shortcuts to window by
+        // default, so typing "-" in any text field on the page is eaten as a zoom-out.
+        // navigationButtons: false - replaced by #diagram-nav, which adds rotation and
+        // doesn't clip at the canvas's bottom edge.
         interaction: { navigationButtons: false, keyboard: { bindToWindow: false }, hover: true, dragNodes: true },
     });
     window.buildDiagramNav();
-    // vis-network still fires "click" for a blank click (unlike "selectNode"), so close
-    // the drawer instead of leaving it pointing at a stale selection.
+    // "selectNode" doesn't fire for a blank click, but "click" does - so the drawer is
+    // closed here rather than left pointing at a stale selection.
     network.on("click", function (params) {
         if (params.nodes.length === 0 && params.edges.length === 0) window.closeDrawer();
     });
@@ -147,7 +133,7 @@ window.buildSwitchMap = async function() {
         var id = params.nodes[0];
         var meta = allNodeMeta.get(id);
         if (meta) { window.openRightDrawer(id); return; }
-        // Not real device metadata - it's a cluster placeholder. Toggle expansion.
+        // No metadata means this is a cluster placeholder, not a device.
         var clusterParentId = id.startsWith('cluster:') ? id.slice('cluster:'.length) : null;
         if (clusterParentId) {
             expandedNodes.add(clusterParentId);
@@ -167,13 +153,12 @@ window.buildSwitchMap = async function() {
     await window.renderVisibleGraph();
 };
 
-// 2b. Recompute the visible subgraph (clustering) and lay it out. Owns the progress-bar
-// lifecycle itself so every caller is covered - the ELK round-trip can take a few seconds
-// on a large visible set.
+// Recomputes the visible subgraph (clustering) and lays it out. Owns the progress bar
+// itself so every caller is covered - layout can take seconds on a large visible set.
 var renderChain = Promise.resolve();
 window.renderVisibleGraph = function() {
-    // Swallow a PRIOR call's rejection before chaining, so one failed render doesn't wedge
-    // every future call - only this call's own outcome (thisRender) reaches its caller.
+    // A prior call's rejection is swallowed before chaining, so one failed render doesn't
+    // wedge every future one; only this call's own outcome reaches its caller.
     var thisRender = renderChain.catch(() => {}).then(doRenderVisibleGraph);
     renderChain = thisRender;
     thisRender.catch(err => { console.error('renderVisibleGraph failed:', err); });
@@ -184,15 +169,13 @@ async function doRenderVisibleGraph() {
     var myGeneration = renderGeneration;
     window.showProgress("Computing layout...", 100, true);
     await nextPaint();
-    // Wrapped so a thrown error can't leave the loading overlay stuck at "Computing
-    // layout..." forever - the caller only logs a rejection, it doesn't hide progress.
+    // try/finally so a throw can't leave the overlay stuck at "Computing layout..." - the
+    // caller only logs a rejection, it doesn't hide progress.
     try {
         var visible = window.GraphLayout.computeVisibleTree(graphRoot, primaryTree.childrenOf, expandedNodes, getClusterThreshold(), primaryTree.extraRoots);
         var positions = await window.ElkLayout.computeLayout(visible.visibleNodeIds, visible.visibleEdges, getLayoutSettings());
-        // buildSwitchMap ran while the above awaited - graphRoot/primaryTree/allNodeMeta/
-        // `network` are now for a different topology than `visible` was computed from.
-        // Bail without touching nodesDataset/edgesDataset; buildSwitchMap's own trailing
-        // renderVisibleGraph() call will render the new topology correctly right after this.
+        // buildSwitchMap ran during the await, so the graph state no longer matches
+        // `visible`. See renderGeneration.
         if (myGeneration !== renderGeneration) return;
 
         nodesDataset.clear(); edgesDataset.clear();
@@ -222,11 +205,8 @@ async function doRenderVisibleGraph() {
             }
         });
 
-        // Tracks each primary edge's resolved endpoint pair (order-independent) so a
-        // rerouted secondary edge landing on the exact same pair - e.g. a switch linked
-        // to a neighbor by both a primary LLDP-tree link and a redundant/backup link,
-        // where that neighbor's own subtree just collapsed into a cluster placeholder -
-        // can be recognized as a visual duplicate of the primary edge already rendered.
+        // Order-independent endpoint pairs, so a rerouted secondary edge landing on a pair
+        // a primary edge already drew can be recognised as a visual duplicate.
         var primaryPairs = new Set();
         visible.visibleEdges.forEach((e, i) => {
             edgesDataset.add({ id: `primary-${i}`, from: e.from, to: e.to, width: 2, color: '#848484', dashes: false });
@@ -237,17 +217,14 @@ async function doRenderVisibleGraph() {
         var visibleSet = new Set(visible.visibleNodeIds);
         var seenSecondary = new Set();
         primaryTree.secondaryEdges.forEach((e, i) => {
-            // A secondary/redundant edge whose real endpoint is hidden inside a collapsed
-            // cluster gets rerouted to that cluster's placeholder node instead of being
-            // dropped, mirroring how computeVisibleTree already reroutes primary edges.
+            // An endpoint hidden inside a collapsed cluster reroutes to that cluster's
+            // placeholder rather than being dropped, as computeVisibleTree does for primaries.
             var from = visibleSet.has(e.from) ? e.from : visible.hiddenNodeToCluster.get(e.from);
             var to = visibleSet.has(e.to) ? e.to : visible.hiddenNodeToCluster.get(e.to);
             if (!from || !to || from === to) return;
-            // Several distinct hidden nodes can all reroute to the same cluster placeholder
-            // (e.g. multiple redundant links into one collapsed subtree) - dedupe on the
-            // resolved pair so they don't stack into overlapping parallel edges. Also skip
-            // a pair that a primary edge already rendered (e.g. the cluster's own primary
-            // parent-to-placeholder edge) so the secondary edge doesn't visually duplicate it.
+            // Several hidden nodes can reroute to the same placeholder, so dedupe on the
+            // resolved pair to avoid stacked parallel edges, and skip pairs a primary edge
+            // already drew.
             var key = from < to ? from + '|' + to : to + '|' + from;
             if (seenSecondary.has(key) || primaryPairs.has(key)) return;
             seenSecondary.add(key);
@@ -261,46 +238,35 @@ async function doRenderVisibleGraph() {
     }
 }
 
-// Bottom-up, per-node "which VLANs are reachable through here" - a node's own local
-// client VLANs, unioned with every VLAN reachable through its primary-tree children. This
-// is the only trunk-membership signal available since the crawler records per-client MAC
-// table VLAN tags, not interface trunk config. Operates on the full primaryTree.childrenOf
-// (not the visible/clustered subset), so VLANs inside a collapsed cluster still count on
-// the visible edge leading into it.
+// Per-node "which VLANs are reachable through here": local client VLANs unioned with every
+// VLAN under its primary-tree children. This is the only trunk-membership signal available,
+// since the crawler records per-client MAC-table VLAN tags, not interface trunk config.
+// Walks the full childrenOf, not the visible subset, so VLANs inside a collapsed cluster
+// still count on the edge leading into it.
 function computeSubtreeVlanSets() {
     var result = new Map();
     function visit(id) {
-        if (result.has(id)) return result.get(id); // guards a malformed/cyclic childrenOf
+        if (result.has(id)) return result.get(id);
         var meta = allNodeMeta.get(id);
         var set = new Set(meta ? meta.vlanCache : []);
-        result.set(id, set); // set before recursing so a cycle can't loop forever
+        result.set(id, set); // set before recursing so a cyclic childrenOf can't loop forever
         (primaryTree.childrenOf.get(id) || []).forEach(childId => {
             visit(childId).forEach(v => set.add(v));
         });
         return set;
     }
     if (graphRoot) visit(graphRoot);
-    // Disconnected fabric islands (buildPrimaryTree.extraRoots) are separate trees, not
-    // reachable via graphRoot's own recursion - walk each one too so their subtree VLAN
-    // unions are computed the same way, instead of only getting each node's own local
-    // VLANs via the fallback below.
+    // Disconnected islands are separate trees graphRoot's recursion never reaches.
     (primaryTree.extraRoots || []).forEach(r => visit(r));
-    // Anything buildPrimaryTree still didn't reach (shouldn't happen now that
-    // extraRoots covers every component, but kept as a safety net) still gets its own
-    // local VLANs rather than an undefined lookup later.
+    // Safety net: anything still unreached gets its local VLANs rather than an undefined
+    // lookup later.
     allNodeMeta.forEach((meta, id) => { if (!result.has(id)) result.set(id, new Set(meta.vlanCache || [])); });
     return result;
 }
 
-// A `cluster:X` placeholder id is never itself a key in subtreeVlanSets (that map is only
-// keyed by real device ids), but X's own entry already IS the union of X's local VLANs plus
-// everything reachable through its full subtree - collapsed or not, since computeSubtreeVlanSets
-// recurses over the full primaryTree.childrenOf regardless of what's currently visible. So a
-// `cluster:X` id resolves to that same entry by stripping the prefix back to X. For a primary
-// cluster edge (real parent -> its own cluster:parent placeholder) this was already safe because
-// the real parent side alone carried the answer; this also makes a cluster-to-cluster secondary
-// edge (both endpoints synthetic, e.g. a redundant link between two independently-collapsed
-// subtrees) resolve correctly instead of always missing.
+// subtreeVlanSets is keyed by real device ids only, so a `cluster:X` placeholder maps back
+// to X - whose entry already covers its whole subtree, collapsed or not. Without this, an
+// edge with two synthetic endpoints (a link between two collapsed subtrees) always misses.
 function vlanSetKeyFor(id) {
     var s = String(id);
     return s.indexOf('cluster:') === 0 ? s.slice('cluster:'.length) : s;
@@ -312,11 +278,9 @@ function edgeTrunksVlan(subtreeVlanSets, fromId, toId, vlanTag) {
     return !!((fromSet && fromSet.has(vlanTag)) || (toSet && toSet.has(vlanTag)));
 }
 
-// 3. Global Filters
 window.applyVlanFilter = function() {
-    // Refresh the map FIRST, before the diagram-only work below - if that later work
-    // throws, a user on Map view should still see the filter applied to their own view.
-    // No-ops if Map view was never opened (leafletMap === null).
+    // Map first: if the diagram-only work below throws, a user on Map view should still see
+    // the filter applied to their own view.
     if (typeof window.renderMapMarkers === 'function') window.renderMapMarkers();
 
     var selectedVlan = document.getElementById('vlanFilter').value;
@@ -325,15 +289,14 @@ window.applyVlanFilter = function() {
 
     nodesDataset.get().forEach(node => {
         if (node.isCluster) {
-            // Collapsed groups have no VLAN data of their own - keep the gold/dashed
-            // "collapsed group" styling regardless of filter.
+            // Collapsed groups have no VLAN data of their own, so keep their styling.
             return;
         }
 
         var matchesVlan = selectedVlan === "ALL" || (node.vlanCache && node.vlanCache.includes(selectedVlan.toString()));
 
         if (!scannedIps.has(String(node.id))) {
-            // Unscanned neighbor placeholders stay gray; a VLAN filter can only dim them further.
+            // Unscanned placeholders stay gray; the filter can only dim them further.
             nodeUpdates.push({ id: node.id, color: { background: '#E8E8E8', border: '#B0B0B0' }, font: { color: matchesVlan ? '#666666' : '#dddddd' } });
         } else if (matchesVlan) {
             nodeUpdates.push({ id: node.id, color: node.isStack ? { background: '#D2E5FF', border: '#2B7CE9' } : { background: '#97C2FC', border: '#2B7CE9' }, font: { color: 'black' } });
@@ -343,9 +306,8 @@ window.applyVlanFilter = function() {
     });
     nodesDataset.update(nodeUpdates);
 
-    // Links that trunk the selected VLAN get emphasized like matching nodes; others fade.
-    // "ALL" resets every edge to its plain default styling rather than leaving a previous
-    // selection's highlighting stuck.
+    // Links trunking the selected VLAN are emphasized, others fade; "ALL" resets every edge
+    // so a previous selection's highlighting can't stick.
     var subtreeVlanSets = selectedVlan !== "ALL" ? computeSubtreeVlanSets() : null;
     var edgeUpdates = [];
     edgesDataset.get().forEach(edge => {
@@ -369,11 +331,10 @@ window.applyVlanFilter = function() {
     if (currentSelectedNodeData) window.openRightDrawer(currentSelectedNodeData.DeviceIP);
 };
 
-// Updates one node's metadata and (if currently visible) its rendered appearance after a
-// single-device rescan. Deliberately NOT window.buildSwitchMap(), which would destroy/
-// recreate the vis.Network instance and reset pan/zoom + collapse expanded clusters.
-// .update() (not .add()) is a no-op if the node is hidden inside a collapsed cluster,
-// which is correct - this only refreshes data, not graph shape/visibility.
+// Refreshes one node after a single-device rescan. Deliberately not buildSwitchMap, which
+// would recreate the vis.Network instance, resetting pan/zoom and collapsing clusters.
+// .update() no-ops for a node hidden in a collapsed cluster, which is correct: this changes
+// data, not graph shape.
 window.refreshNodeVisual = function(ip) {
     var device = globalTopologyData.find(d => d && String(d.DeviceIP) === String(ip));
     if (!device) return;
@@ -391,8 +352,7 @@ window.refreshNodeVisual = function(ip) {
     allNodeMeta.set(switchIp, meta);
 
     if (nodesDataset && nodesDataset.get(switchIp)) {
-        // A rescanned device is always "scanned:true" - covers both a data refresh and a
-        // gray unscanned placeholder being promoted to a real scanned node.
+        // Always scanned:true, so this also promotes a gray unscanned placeholder.
         nodesDataset.update({
             id: switchIp, label: meta.label, shape: meta.shape, isStack: meta.isStack,
             color: meta.isStack ? { background: '#D2E5FF', border: '#2B7CE9' } : { background: '#97C2FC', border: '#2B7CE9' },
@@ -408,15 +368,14 @@ window.setClusterThreshold = function(value) {
     window.renderVisibleGraph();
 };
 
-// Just trigger a re-render - the value is re-read live at render time (getLayoutSettings).
+// No argument needed: getLayoutSettings re-reads the value live at render time.
 window.setLayoutSetting = function() {
     window.renderVisibleGraph();
 };
 
-// Called from map.js's switchCenterView when switching TO diagram view, so a diagram built
-// while #mynetwork was hidden gets corrected. setSize+redraw always run (cheap, fixes
-// canvas pixel size). fit() runs only once, only when diagramSizedWhileHidden is true -
-// an unconditional fit() would reset the user's pan/zoom on every plain view switch.
+// Corrects a diagram built while #mynetwork was hidden. setSize+redraw are cheap and always
+// run; fit() is gated on diagramSizedWhileHidden because running it unconditionally would
+// reset the user's pan/zoom on every view switch.
 window.resizeDiagram = function() {
     if (!network) return;
     network.setSize('100%', '100%');
@@ -428,11 +387,9 @@ window.resizeDiagram = function() {
 };
 
 // ---- Diagram navigation widget (#diagram-nav) ----
-// A ring of eight segments around a centre button, replacing vis-network's built-in
-// navigation buttons: pan (N/E/S/W), zoom (+/-), rotate the whole layout (left/right), and
-// "fit to view" in the middle. Pan and zoom repeat while the pointer is held; rotation steps
-// 15 degrees per click. Drawn once as SVG; the same element survives graph rebuilds because
-// it lives in #center-panel, not inside #mynetwork.
+// A ring of eight segments (pan, zoom, rotate) around a "fit to view" centre button. Drawn
+// once as SVG; it survives graph rebuilds because it lives in #center-panel, not inside
+// #mynetwork.
 var DIAGRAM_NAV_STEP_PX = 120;      // pan distance per tick, in screen pixels
 var DIAGRAM_NAV_ZOOM = 1.18;
 var DIAGRAM_NAV_ROTATE_DEG = 15;
@@ -442,7 +399,7 @@ window.buildDiagramNav = function() {
     if (!host || host.dataset.built) return;
     host.dataset.built = '1';
     var C = 75, R = 72, r = 32;   // centre, outer radius, inner (button) radius
-    // Segments are laid out clockwise starting from the top.
+    // Clockwise from the top.
     var segs = [
         { a: 'up',      glyph: 'M-6,3 L0,-3 L6,3' },
         { a: 'rotcw',   glyph: 'M-5,4 A7,7 0 1 1 5,-2 M5,-2 L5,-7 M5,-2 L0,-2' },
@@ -505,10 +462,9 @@ window.diagramNavAction = function(action) {
     }
 };
 
-// vis-network has no camera rotation, so rotate the layout itself: every node (clusters
-// included - they are ordinary nodes in nodesDataset) swings around the current view
-// centre. Physics is off and positions are fixed, so the new coordinates simply stick;
-// a re-layout (renderVisibleGraph) recomputes positions from scratch and resets the angle.
+// vis-network has no camera rotation, so the layout itself is rotated: every node swings
+// around the current view centre. Physics is off, so the new coordinates stick; any
+// re-layout recomputes positions and resets the angle.
 function rotateDiagram(deg) {
     var rad = deg * Math.PI / 180, cos = Math.cos(rad), sin = Math.sin(rad);
     var centre = network.getViewPosition();

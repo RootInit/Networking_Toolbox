@@ -1,13 +1,11 @@
-# HttpListener-based local webserver for Network_Visualizer. Localhost-only by design:
-# binds "localhost" specifically (no netsh urlacl/admin needed), and no auth is needed
-# either - the only sensitive action it can trigger is spawning an SSH session with
-# in-memory switch credentials, which is only safe when caller and process owner are
-# the same person, true for localhost and false the moment this is rebound to a LAN address.
+# HttpListener-based local webserver for Network_Visualizer. Binds "localhost" specifically
+# (no netsh urlacl/admin needed) and runs unauthenticated: the sensitive action it can
+# trigger is an SSH session using in-memory switch credentials, safe only while caller and
+# process owner are the same person - untrue the moment this is rebound to a LAN address.
 #
-# Not meant to be run directly - dot-source it, then call Start-MapperWebServer.
+# Not run directly - dot-source it, then call Start-MapperWebServer.
 
-# Dot-sourced directly (not relying on caller load order) so this file's correctness
-# doesn't depend on Start-NetworkMapper.ps1 having loaded these first.
+# Dot-sourced here rather than relying on caller load order.
 . (Join-Path $PSScriptRoot "TopologyCrypto.ps1")
 . (Join-Path $PSScriptRoot "SshHelpers.ps1")
 . (Join-Path $PSScriptRoot "FileHelpers.ps1")
@@ -32,9 +30,8 @@ function Send-WebResponse {
     try {
         $Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
     } finally {
-        # Best-effort: if the client already disconnected mid-write, Close() can itself
-        # throw - that must not mask the original Write failure (or, if Write succeeded,
-        # silently look like a request failure when it wasn't).
+        # A client that disconnected mid-write makes Close() throw too; that must not mask
+        # the original Write failure (or fake one when Write succeeded).
         try { $Response.OutputStream.Close() } catch {}
     }
 }
@@ -44,10 +41,9 @@ function Send-WebJson {
     try {
         $Json = $Object | ConvertTo-Json -Depth $Depth -Compress
     } catch {
-        # Must not fall through to Start-MapperWebServer's catch-all, which sends a
-        # plain-text 500 body - every client caller does .json() on every response
-        # regardless of status, so a non-JSON body here is a guaranteed parse failure
-        # that discards the real error. Emit a small, always-serializable JSON error instead.
+        # Must not fall through to Start-MapperWebServer's plain-text 500: every client
+        # caller does .json() on every response regardless of status, so a non-JSON body
+        # is a guaranteed parse failure that discards the real error.
         $ErrJson = @{ error = "Server failed to serialize response: $_" } | ConvertTo-Json -Compress
         Send-WebResponse -Response $Response -StatusCode 500 -Bytes ([System.Text.Encoding]::UTF8.GetBytes($ErrJson)) -ContentType "application/json; charset=utf-8"
         return
@@ -55,9 +51,8 @@ function Send-WebJson {
     Send-WebResponse -Response $Response -StatusCode $StatusCode -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Json)) -ContentType "application/json; charset=utf-8"
 }
 
-# Simple size cap (logging-1) - this is a long-running server process with no other rotation,
-# so an unbounded log otherwise grows forever. Not a full rotation scheme (no .1/.2 history) -
-# a single local analyst just needs it not to grow without bound.
+# Truncate-at-size, not real rotation: a single local analyst only needs the log of this
+# long-running process not to grow without bound.
 $script:DebugLogMaxBytes = 10MB
 
 # Mapper_Debug.log - the same file Invoke-FleetCrawl's Write-DebugLogLocal writes crawl
@@ -65,10 +60,9 @@ $script:DebugLogMaxBytes = 10MB
 function Write-MapperDebugLog {
     param([string]$Message)
     if (-not $script:DebugLogPath) { return }
-    # Best-effort: a full disk or locked log file must not take down the request logging to it.
-    # -Encoding utf8 explicit, or a mixed-encoding file causes CJK mojibake in text editors. The
-    # size check below shares this same try/catch for the same reason - a failed Get-Item (e.g.
-    # a concurrent Invoke-FleetCrawl -Force truncation racing this) must not block the append.
+    # Best-effort throughout: a full disk, a locked file, or a Get-Item racing a concurrent
+    # Invoke-FleetCrawl -Force truncation must not block the append or take down the caller.
+    # -Encoding utf8 explicit, or a mixed-encoding file causes CJK mojibake in text editors.
     try {
         $ExistingFile = Get-Item -LiteralPath $script:DebugLogPath -ErrorAction SilentlyContinue
         if ($ExistingFile -and $ExistingFile.Length -gt $script:DebugLogMaxBytes) {
@@ -78,27 +72,20 @@ function Write-MapperDebugLog {
     } catch {}
 }
 
-# Max length (chars) accepted per client-error field before truncation (P7LOG-02) - mirrors
-# the 500-char stderr cap Get-JunosNodeData.ps1's $ErrSummary uses for the same "don't let
-# unbounded attacker/bug-controlled text hit the log" reason, just larger since a JS stack
-# trace legitimately runs longer than an ssh stderr dump.
+# Caps unbounded client-controlled text hitting the log, like Get-JunosNodeData.ps1's
+# 500-char $ErrSummary - larger here because a JS stack trace legitimately runs longer.
 $script:ClientErrorFieldMaxLength = 4000
 
-# Server-side throttle (logging-1) for /api/client-error - utils.js's reportedClientErrors
-# Set only dedupes on the CLIENT, so a modified/malicious client (or a bug bypassing that Set)
-# can still POST here without limit and flood Mapper_Debug.log. This listener is
-# localhost-only/single-analyst (see the file header), so one global counter/window is enough -
-# no per-client-IP bucketing needed. Generous limits: normal usage is a handful of distinct
-# errors per page load, not a sustained stream.
+# Server-side throttle for /api/client-error: utils.js's reportedClientErrors Set dedupes
+# only on the CLIENT, so a modified client could flood the log. One global counter/window
+# suffices here (localhost-only, single analyst). Normal usage is a few errors per load.
 $script:ClientErrorRateLimitMax = 50
 $script:ClientErrorRateLimitWindowSeconds = 60
 $script:ClientErrorRateLimitCount = 0
 $script:ClientErrorRateLimitWindowStart = Get-Date
 
-# Neutralizes a client-supplied log field: replaces embedded CR/LF with visible escape
-# sequences (so multi-line content stays visible but can't fabricate a second, realistic-
-# looking "[timestamp] ..." line - P7LOG-01) and truncates to $MaxLength (P7LOG-02), so one
-# malicious/buggy report can't inject fake log entries or write unbounded data to the log.
+# Neutralizes a client-supplied log field: CR/LF become visible escapes (content stays
+# readable but can't forge a second "[timestamp] ..." entry) and the value is truncated.
 function ConvertTo-SafeLogField {
     param([string]$Text, [int]$MaxLength = $script:ClientErrorFieldMaxLength)
     if ([string]::IsNullOrEmpty($Text)) { return $Text }
@@ -107,16 +94,13 @@ function ConvertTo-SafeLogField {
     return $Safe
 }
 
-# Lets the browser (window.reportClientError, utils.js) forward client-side errors into
-# Mapper_Debug.log, so server- and client-side failures of a scan end up in one place.
-# Tolerant of a malformed/missing body - a logging endpoint must not itself throw.
+# Forwards browser errors (window.reportClientError) into Mapper_Debug.log so both sides of
+# a failed scan land in one place. Tolerant of a bad body - a log sink must not throw.
 function Invoke-ClientErrorAction {
     param($Response, [string]$Body)
 
-    # Rate-limit enforcement lives here (server-side), not in utils.js's Set, so a client that
-    # skips/clears that Set can't use this endpoint to flood the log. Responds 200 either way -
-    # this is a fire-and-forget logging sink from the browser's perspective (see utils.js), so a
-    # throttled request shouldn't surface as a visible failure there.
+    # Responds 200 even when throttled: this is a fire-and-forget sink from the browser's
+    # perspective (utils.js), so a dropped report shouldn't surface as a visible failure.
     $Now = Get-Date
     if (($Now - $script:ClientErrorRateLimitWindowStart).TotalSeconds -ge $script:ClientErrorRateLimitWindowSeconds) {
         $script:ClientErrorRateLimitWindowStart = $Now
@@ -124,8 +108,7 @@ function Invoke-ClientErrorAction {
     }
     $script:ClientErrorRateLimitCount++
     if ($script:ClientErrorRateLimitCount -gt $script:ClientErrorRateLimitMax) {
-        # Log the throttle engaging exactly once per window, not on every dropped request -
-        # otherwise the throttle notice itself becomes the flood it's meant to prevent.
+        # Once per window only, or the throttle notice becomes the flood it prevents.
         if ($script:ClientErrorRateLimitCount -eq $script:ClientErrorRateLimitMax + 1) {
             Write-MapperDebugLog "CLIENT ERROR RATE LIMIT: exceeded $script:ClientErrorRateLimitMax reports in $($script:ClientErrorRateLimitWindowSeconds)s - dropping further reports until the window resets."
         }
@@ -141,8 +124,8 @@ function Invoke-ClientErrorAction {
     $UrlText = if ($Parsed -and $Parsed.url) { [string]$Parsed.url } else { "" }
     $StackText = if ($Parsed -and $Parsed.stack) { [string]$Parsed.stack } else { "" }
 
-    # message/source/url compose the single HeaderLine below and must not be able to smuggle
-    # a CR/LF that fabricates what looks like a separate, legitimate timestamped log entry.
+    # These three compose the single HeaderLine below, so a smuggled CR/LF would fabricate
+    # what looks like a separate timestamped entry.
     $MessageText = ConvertTo-SafeLogField $MessageText
     $SourceText = ConvertTo-SafeLogField $SourceText
     $UrlText = ConvertTo-SafeLogField $UrlText
@@ -151,18 +134,15 @@ function Invoke-ClientErrorAction {
     if ($UrlText) { $HeaderLine += " (at $UrlText)" }
     Write-MapperDebugLog $HeaderLine
     if ($StackText) {
-        # Stack is legitimately multi-line and already split on `n before each line gets its
-        # own real "[timestamp]    " prefix from Write-MapperDebugLog, so a line can't forge a
-        # new entry the way an unsanitized message/source/url could - only length-cap it here
-        # (P7LOG-02), don't touch its newline structure.
+        # Split below so each line gets its own real "[timestamp]    " prefix, so a stack
+        # can't forge an entry - only length-cap it, leave its newline structure alone.
         if ($StackText.Length -gt $script:ClientErrorFieldMaxLength) {
             $StackText = $StackText.Substring(0, $script:ClientErrorFieldMaxLength) + "...(truncated)"
         }
         foreach ($StackLine in ($StackText -split "`n")) {
-            # TrimEnd() only strips a trailing `r; a lone mid-line `r (no paired `n) would
-            # otherwise survive into the log and, on playback, carriage-return the cursor back
-            # to overwrite the real timestamp prefix - the same forged-entry effect P7LOG-01
-            # guards against for `r`n, just via a bare `r (P8REC-02). Escape it to a literal.
+            # TrimEnd() only strips a trailing `r; a lone mid-line `r would survive and, on
+            # playback, return the cursor to overwrite the real timestamp prefix - the same
+            # forged-entry effect, so escape it to a literal.
             Write-MapperDebugLog "    $($StackLine.Replace("`r", '\r').TrimEnd())"
         }
     }
@@ -193,14 +173,11 @@ function Get-QueryParam {
     return $null
 }
 
-# CSRF/DNS-rebinding guard for every endpoint that changes state or hands back something
-# sensitive (e.g. /api/session-password). Localhost binding only proves the caller runs as
-# this user, not that it's our page - a rebound-DNS fetch or hidden cross-origin form still
-# looks same-machine. Origin (Referer as fallback) is browser-set and unforgeable by page JS,
-# so check it; fail closed if neither header is present.
-#
-# Does NOT cover a hostile process running as a different OS user on the same machine - it
-# can set any Origin it likes talking directly to this HttpListener. Pre-existing, app-wide gap.
+# CSRF/DNS-rebinding guard for every endpoint that changes state or returns something
+# sensitive. Localhost binding only proves the caller runs as this user, not that it's our
+# page - a rebound-DNS fetch or cross-origin form still looks same-machine. Origin (Referer
+# as fallback) is browser-set and unforgeable by page JS; fail closed if neither is present.
+# Does NOT stop a hostile process on this machine talking to the listener directly.
 function Test-SameOriginRequest {
     param($Request, [int]$Port)
     $Expected = "http://localhost:$Port"
@@ -212,12 +189,8 @@ function Test-SameOriginRequest {
 }
 
 # Launches Connect-Switch.ps1 (interactive SSH, askpass-injected via a short-lived
-# credential file) against a target IP. Deliberately narrow: fixed script, one validated
-# parameter, no free-form command surface. $TargetIP is regex-locked to IPv4 shape before
-# reaching Start-Process, so it carries no shell metacharacters.
-#
-# $PowerShellExePath is resolved by Start-MapperWebServer from the CURRENT process rather
-# than hardcoded, since a pwsh-only machine has no "powershell.exe" to find.
+# credential file). Deliberately narrow: fixed script, no free-form command surface, and
+# $TargetIP is regex-locked to IPv4 shape so it carries no shell metacharacters.
 function Invoke-ConnectAction {
     param($Response, [string]$Body, [string]$ConnectScriptPath, [string]$JunosUsername, [string]$JunosPassword, [string]$PowerShellExePath = "powershell.exe", [string[]]$AllowedScopes)
 
@@ -235,16 +208,16 @@ function Invoke-ConnectAction {
         return
     }
 
-    # AllowedScopes is enforced on every crawl-discovered neighbor IP (FleetCrawl.ps1's
-    # Test-IpInAllowedScopes) - a manually-triggered SSH launch target must be held to the
-    # same fence, or a typo'd/out-of-scope IP would reach an SSH login with saved credentials.
+    # Crawl-discovered neighbors are scope-checked in FleetCrawl.ps1; a manually-supplied
+    # target must clear the same fence, or a typo'd IP reaches an SSH login with saved
+    # credentials. (Same check guards /api/rescan and /api/scan-network below.)
     if (-not (Test-IpInAllowedScopes -IP $TargetIP -AllowedScopes $AllowedScopes)) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes ($($AllowedScopes -join ', '))" }
         return
     }
 
-    # Declared outside the try so the catch can see it: the plaintext credential file in
-    # %TEMP% is normally removed by Connect-Switch.ps1's own finally block once it reads it.
+    # Declared outside the try so the catch can see it: the plaintext %TEMP% credential file
+    # is normally removed by Connect-Switch.ps1's own finally block once it reads it.
     $CredFile = $null
     try {
         $CredFile = New-JunosCredentialFile -Username $JunosUsername -Password $JunosPassword
@@ -252,19 +225,16 @@ function Invoke-ConnectAction {
         Start-Process -FilePath $PowerShellExePath -ArgumentList $ArgString | Out-Null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "launched"; ip = $TargetIP }
     } catch {
-        # Launch failed before Connect-Switch.ps1 could clean up its own credential file -
-        # remove it here so the plaintext password doesn't leak/accumulate in %TEMP%.
+        # Launch failed before Connect-Switch.ps1 could clean up its own credential file.
         if ($CredFile) { Remove-JunosCredentialFile -CredentialFile $CredFile }
         Write-MapperDebugLog "CONNECT ERROR [$TargetIP] Failed to launch SSH session: $_"
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to launch SSH session: $_" }
     }
 }
 
-# Re-scans a single device without waiting for a full fleet crawl. Async: a scan can take
-# up to ~50s and the accept loop handles one request at a time, so this starts it in a
-# single-slot runspace pool and returns immediately; the browser polls
-# Invoke-RescanStatusAction for the result. Only one rescan may be in-flight at a time
-# (hygiene, not a security boundary - the analyst already has SSH access via /api/connect).
+# Re-scans a single device without a full fleet crawl. Async because a scan can take ~50s
+# and the accept loop serves one request at a time; polled via Invoke-RescanStatusAction.
+# One rescan at a time is hygiene, not a security boundary (/api/connect already gives SSH).
 function Invoke-RescanAction {
     param($Response, [string]$Body, [string]$WorkerPath, [string]$JunosUsername, [string]$JunosPassword, [string[]]$AllowedScopes)
 
@@ -282,16 +252,14 @@ function Invoke-RescanAction {
         return
     }
 
-    # AllowedScopes is enforced on every crawl-discovered neighbor IP (FleetCrawl.ps1's
-    # Test-IpInAllowedScopes) - a manually-triggered rescan target must be held to the same
-    # fence, or a typo'd/out-of-scope IP would reach an SSH login with saved credentials.
+    # Scope fence - see Invoke-ConnectAction.
     if (-not (Test-IpInAllowedScopes -IP $TargetIP -AllowedScopes $AllowedScopes)) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes ($($AllowedScopes -join ', '))" }
         return
     }
 
-    # Reap any previously-timed-out job that has since finished (see the timeout handling
-    # in Invoke-RescanStatusAction for why a timed-out job isn't force-stopped).
+    # Reap any previously-timed-out job that has since finished (Invoke-RescanStatusAction
+    # explains why a timed-out job isn't force-stopped).
     for ($i = $script:OrphanedScans.Count - 1; $i -ge 0; $i--) {
         $Orphan = $script:OrphanedScans[$i]
         if ($Orphan.Handle.IsCompleted) {
@@ -301,22 +269,18 @@ function Invoke-RescanAction {
             } catch {
                 Write-MapperDebugLog "RESCAN ORPHAN [$($Orphan.IP)] Job completed after client timeout but failed: $_"
             }
-            # Unguarded Dispose() here would skip RemoveAt below on throw, wedging this slot
-            # until process restart - same reasoning as the sibling abandoned-poll block below.
+            # Unguarded Dispose() would skip RemoveAt on throw, wedging this slot until restart.
             try { $Orphan.PS.Dispose() } catch {}
-            # Get-JunosNodeData.ps1 (this job's $WorkerPath) spawns ssh.exe via cmd.exe from
-            # this process - PS.Dispose() above doesn't touch that OS-level grandchild (see
-            # Stop-JunosOrphanProcessesLocal in FleetCrawl.ps1 for why).
+            # Get-JunosNodeData.ps1 spawns ssh.exe via cmd.exe from this process; PS.Dispose()
+            # doesn't touch that OS-level grandchild (see Stop-JunosOrphanProcessesLocal).
             Stop-JunosOrphanProcessesLocal -TargetIP $Orphan.IP -SinceTime $Orphan.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
             $script:OrphanedScans.RemoveAt($i)
         }
     }
 
-    # A rescan whose result the browser never polled (drawer closed, page reload) would
-    # otherwise hold the single slot forever, 409-ing every future rescan - same reasoning as
-    # Invoke-ScanNetworkAction's reap of an unpolled scan job. If Invoke-RescanStatusAction
-    # already collected the result (Collected=true), PS is already EndInvoke'd/Disposed -
-    # just clear the slot rather than calling EndInvoke a second time (which throws).
+    # A rescan whose result the browser never polled (drawer closed, page reload) would hold
+    # the slot forever, 409-ing every future rescan. Collected=true means the status action
+    # already EndInvoke'd/Disposed it - just clear the slot; a second EndInvoke throws.
     if ($script:PendingScan -and $script:PendingScan.Handle.IsCompleted) {
         $Finished = $script:PendingScan
         if (-not $Finished.Collected) {
@@ -339,19 +303,15 @@ function Invoke-RescanAction {
         return
     }
 
-    # Never -HumanReadable (ends in `exit`, killing this runspace) and never -Log (no reason
-    # for a clean ad-hoc rescan to write RawDumps/ on success) - but -DebugLogPath IS passed,
-    # so a failed login/scan lands in Mapper_Debug.log even if the browser never polls the
-    # result (drawer closed, page reload) rather than existing only in the transient HTTP
-    # response. A failed/timed-out rescan can still write to RawDumps/ despite -Log being
-    # absent - Get-JunosNodeData.ps1's failure paths dump unconditionally, since that's the
-    # data that's actually useful for debugging why it failed.
+    # Never -HumanReadable (it ends in `exit`, killing this runspace) and never -Log (a clean
+    # ad-hoc rescan has no reason to write RawDumps/; failure paths in Get-JunosNodeData.ps1
+    # dump unconditionally anyway). -DebugLogPath IS passed so a failed login/scan survives in
+    # Mapper_Debug.log even if the browser never polls for the result.
     $JobId = [guid]::NewGuid().ToString()
     $PS = [powershell]::Create().AddCommand($WorkerPath).AddParameter("TargetIP", $TargetIP).AddParameter("Username", $JunosUsername).AddParameter("Password", $JunosPassword)
     if ($script:DebugLogPath) { $PS.AddParameter("DebugLogPath", $script:DebugLogPath) | Out-Null }
     $PS.RunspacePool = $script:RescanPool
-    # $PS isn't reachable from $script:PendingScan until BeginInvoke succeeds below - if it
-    # throws, dispose it here or it leaks (nothing else references it to clean up later).
+    # Nothing else references $PS until BeginInvoke succeeds, so a throw here leaks it.
     try {
         $Handle = $PS.BeginInvoke()
     } catch {
@@ -359,19 +319,13 @@ function Invoke-RescanAction {
         throw
     }
 
-    # Collected/Outcome: filled in once by Invoke-RescanStatusAction on first completion so
-    # the result can be re-served idempotently to later polls (same pattern as
-    # Invoke-ScanNetworkAction/Invoke-ScanNetworkStatusAction).
+    # Collected/Outcome: set on first completion so later polls get the same result.
     $script:PendingScan = [PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $TargetIP; JobId = $JobId; StartTime = (Get-Date); Collected = $false; Outcome = $null }
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; jobId = $JobId; ip = $TargetIP }
 }
 
-# Quick reachability check (a few ICMP echoes). Async, same "don't block the accept loop"
-# reasoning as Invoke-RescanAction: Test-Connection -Count 4 -TimeoutSeconds 2 can take up
-# to ~8s against an unreachable device, and the accept loop dispatches every request inline
-# on a single thread - a synchronous call here would stall scan/rescan status polling and
-# every other request for that long. Offloaded to a single-slot runspace pool, mirroring the
-# rescan pattern; the browser polls Invoke-PingStatusAction for the result.
+# Quick reachability check. Async for the same reason as Invoke-RescanAction: 4 pings at 2s
+# can take ~8s against a dead device, stalling every other request on the accept loop.
 function Invoke-PingAction {
     param($Response, [string]$Body)
 
@@ -379,15 +333,13 @@ function Invoke-PingAction {
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
     $TargetIP = if ($Parsed) { [string]$Parsed.ip } else { $null }
 
-    # Strict dotted-quad check - stops this from becoming a generic "resolve and probe
-    # anything" endpoint (a hostname, a flag-looking string, etc.).
+    # Strict dotted-quad - stops this becoming a generic "resolve and probe anything" endpoint.
     if (-not $TargetIP -or $TargetIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing IP address" }
         return
     }
 
-    # Reap any previously-timed-out job that has since finished (see the timeout handling
-    # in Invoke-PingStatusAction for why a timed-out job isn't force-stopped).
+    # Reap a previously-timed-out job that has since finished.
     for ($i = $script:OrphanedPings.Count - 1; $i -ge 0; $i--) {
         $Orphan = $script:OrphanedPings[$i]
         if ($Orphan.Handle.IsCompleted) {
@@ -397,18 +349,12 @@ function Invoke-PingAction {
             } catch {
                 Write-MapperDebugLog "PING ORPHAN [$($Orphan.IP)] Job completed after client timeout but failed: $_"
             }
-            # Unguarded Dispose() here would skip RemoveAt below on throw, wedging this slot
-            # until process restart - same reasoning as the sibling abandoned-poll block below.
             try { $Orphan.PS.Dispose() } catch {}
             $script:OrphanedPings.RemoveAt($i)
         }
     }
 
-    # A ping whose result the browser never polled (drawer closed, page reload) would
-    # otherwise hold the single slot forever, 409-ing every future ping - same reasoning as
-    # Invoke-ScanNetworkAction's reap of an unpolled scan job. If Invoke-PingStatusAction
-    # already collected the result (Collected=true), PS is already EndInvoke'd/Disposed -
-    # just clear the slot rather than calling EndInvoke a second time (which throws).
+    # Same abandoned-poll reap as Invoke-RescanAction.
     if ($script:PendingPing -and $script:PendingPing.Handle.IsCompleted) {
         $Finished = $script:PendingPing
         if (-not $Finished.Collected) {
@@ -435,12 +381,10 @@ function Invoke-PingAction {
         param($TargetIP)
         try {
             # -Quiet avoided (no latency/loss detail). Parameter set and failure shape differ
-            # by generation: PS 7+'s Test-Connection returns one object per ping including
-            # timeouts (Status='TimedOut', Latency=0) - must filter on Status -eq 'Success' or
-            # a dead device reports as 4/4 replies. PS 5.1's classic cmdlet only ever returns
-            # successes as objects (failures go to the error stream), so plain assignment
-            # already collects successes only - -ErrorAction Stop there would wrongly turn the
-            # first failure into a terminating exception and discard earlier successes.
+            # by generation: PS 7+ returns one object per ping including timeouts, so it must
+            # filter on Status -eq 'Success' or a dead device reports 4/4 replies. PS 5.1
+            # returns only successes as objects (failures go to the error stream), and
+            # -ErrorAction Stop there would discard earlier successes on the first failure.
             if ($PSVersionTable.PSVersion.Major -ge 6) {
                 $AllResults = Test-Connection -TargetName $TargetIP -Count 4 -TimeoutSeconds 2 -ErrorAction SilentlyContinue
                 $Results = @($AllResults | Where-Object { $_.Status -eq 'Success' })
@@ -448,7 +392,7 @@ function Invoke-PingAction {
                 $Results = @(Test-Connection -ComputerName $TargetIP -Count 4 -ErrorAction SilentlyContinue)
             }
         } catch {
-            # Report as zero replies, not a failure - an unreachable device is an expected result here.
+            # Zero replies, not a failure - an unreachable device is an expected result.
             $Results = @()
         }
 
@@ -463,8 +407,7 @@ function Invoke-PingAction {
         [PSCustomObject]@{ ReplyCount = $ReplyCount; AvgLatency = $AvgLatency }
     }).AddArgument($TargetIP)
     $PS.RunspacePool = $script:PingPool
-    # $PS isn't reachable from $script:PendingPing until BeginInvoke succeeds below - if it
-    # throws, dispose it here or it leaks (nothing else references it to clean up later).
+    # Nothing else references $PS until BeginInvoke succeeds, so a throw here leaks it.
     try {
         $Handle = $PS.BeginInvoke()
     } catch {
@@ -472,18 +415,14 @@ function Invoke-PingAction {
         throw
     }
 
-    # Collected/Outcome: filled in once by Invoke-PingStatusAction on first completion so the
-    # result can be re-served idempotently to later polls (same pattern as
-    # Invoke-ScanNetworkAction/Invoke-ScanNetworkStatusAction).
+    # Collected/Outcome: set on first completion so later polls get the same result.
     $script:PendingPing = [PSCustomObject]@{ PS = $PS; Handle = $Handle; IP = $TargetIP; JobId = $JobId; StartTime = (Get-Date); Collected = $false; Outcome = $null }
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; jobId = $JobId; ip = $TargetIP }
 }
 
 # Polled by the browser every ~1-2s while a ping is outstanding. Response shape mirrors
-# Invoke-RescanStatusAction: {status:"running"|"timeout"|"complete", ...}. On "complete" the
-# result carries the same fields the old synchronous /api/ping used to return in one shot
-# (ip/alive/sent/received/avgLatencyMs), plus ok:true so the browser can tell a successful
-# probe apart from a job that errored out (ok:false, reason).
+# Invoke-RescanStatusAction: {status:"running"|"timeout"|"complete", ...}; on "complete",
+# ok distinguishes a successful probe from a job that errored out.
 function Invoke-PingStatusAction {
     param($Response, [string]$JobId)
 
@@ -495,18 +434,13 @@ function Invoke-PingStatusAction {
     $Job = $script:PendingPing
 
     if ($Job.Handle.IsCompleted) {
-        # Collect (EndInvoke + Dispose) exactly once and cache the outcome - EndInvoke
-        # throws if called twice, and later polls just re-serve the cached outcome. Same
-        # pattern as Invoke-ScanNetworkStatusAction, so a client disconnect between the job
-        # finishing and this response write doesn't lose the result: the next poll (or the
-        # next Invoke-PingAction's reap) finds Collected=true/Outcome already set.
+        # Collect exactly once and cache the outcome: EndInvoke throws if called twice, and a
+        # client disconnect mid-write must not lose the result (the next poll re-serves it).
         if (-not $Job.Collected) {
             try {
                 $Result = $Job.PS.EndInvoke($Job.Handle)
 
-                # Non-terminating errors/warnings inside the worker don't fail EndInvoke and
-                # would otherwise never surface anywhere - same reasoning as Invoke-FleetCrawl's
-                # drain of these streams for its worker jobs.
+                # Non-terminating worker errors don't fail EndInvoke and surface nowhere else.
                 if ($Job.PS.HadErrors) {
                     foreach ($ErrRecord in $Job.PS.Streams.Error) {
                         Write-MapperDebugLog "PING ERROR STREAM [$($Job.IP)] $ErrRecord"
@@ -518,10 +452,8 @@ function Invoke-PingStatusAction {
                     }
                 }
 
-                # Index explicitly ($Result[0]), not by dotting into $Result, matching
-                # Invoke-ScanNetworkStatusAction's convention - member enumeration on a 1-item
-                # collection would still work for these two scalar properties, but indexing keeps
-                # this consistent with how EndInvoke results are unwrapped elsewhere in this file.
+                # Index explicitly, matching how EndInvoke results are unwrapped elsewhere in
+                # this file (see Invoke-ScanNetworkStatusAction for where it actually matters).
                 $Payload = if ($Result -and $Result.Count -gt 0) { $Result[0] } else { $null }
                 $ReplyCount = if ($Payload) { $Payload.ReplyCount } else { 0 }
                 $AvgLatency = if ($Payload) { $Payload.AvgLatency } else { $null }
@@ -543,13 +475,9 @@ function Invoke-PingStatusAction {
 
     $Elapsed = ((Get-Date) - $Job.StartTime).TotalSeconds
     if ($Elapsed -gt 20) {
-        # Not force-stopped, same reasoning as Invoke-RescanStatusAction's timeout handling:
-        # .Stop() can't interrupt a pipeline blocked in a synchronous native/WMI ping call, so
-        # risking it here would just trade one indefinite hang for another. This only clears
-        # the HTTP-facing $script:PendingPing slot so a new ping can be *submitted* -
-        # $Job.PS keeps running and keeps occupying a $script:PingPool runspace until it
-        # finishes (or forever, if truly hung) - that's why the pool below is sized with spare
-        # capacity rather than 1, so one stuck ping doesn't queue every later ping behind it.
+        # Not force-stopped: .Stop() can't interrupt a pipeline blocked in a synchronous
+        # native ping. This frees only the HTTP-facing slot; $Job.PS keeps a $script:PingPool
+        # runspace until it finishes, which is why that pool has spare capacity.
         $script:OrphanedPings.Add($Job)
         $script:PendingPing = $null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "timeout"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
@@ -571,18 +499,12 @@ function Invoke-RescanStatusAction {
     $Job = $script:PendingScan
 
     if ($Job.Handle.IsCompleted) {
-        # Collect (EndInvoke + Dispose) exactly once and cache the outcome - EndInvoke
-        # throws if called twice, and later polls just re-serve the cached outcome. Same
-        # pattern as Invoke-ScanNetworkStatusAction, so a client disconnect between the job
-        # finishing and this response write doesn't lose the result: the next poll finds
-        # Collected=true/Outcome already set.
+        # Collect exactly once and cache the outcome - EndInvoke throws if called twice.
         if (-not $Job.Collected) {
             try {
                 $Result = $Job.PS.EndInvoke($Job.Handle)
 
-                # Non-terminating errors/warnings inside the worker don't fail EndInvoke and
-                # would otherwise never surface anywhere - same reasoning as Invoke-FleetCrawl's
-                # drain of these streams for its worker jobs.
+                # Non-terminating worker errors don't fail EndInvoke and surface nowhere else.
                 if ($Job.PS.HadErrors) {
                     foreach ($ErrRecord in $Job.PS.Streams.Error) {
                         Write-MapperDebugLog "RESCAN ERROR STREAM [$($Job.IP)] $ErrRecord"
@@ -594,19 +516,16 @@ function Invoke-RescanStatusAction {
                     }
                 }
 
-                # Success/failure decided here from the CRITICAL log-line signal
-                # Get-JunosNodeData.ps1 emits, not inferred by the browser. ok:false omits
-                # `node` entirely, since a failed scan's fields are placeholder-shaped and
-                # should not overwrite existing good data.
+                # Success/failure decided here from Get-JunosNodeData.ps1's CRITICAL log-line
+                # signal, not inferred by the browser. ok:false omits `node` entirely - a
+                # failed scan's fields are placeholders and must not overwrite good data.
                 $Logs = if ($Result -and $Result.Logs) { @($Result.Logs) } else { @() }
                 $HasCritical = $false
                 foreach ($LogLine in $Logs) { if ($LogLine -match 'CRITICAL') { $HasCritical = $true; break } }
 
                 if (-not $Result -or -not $Result.Node -or $HasCritical) {
-                    # The worker (Get-JunosNodeData.ps1) was given -DebugLogPath above and
-                    # already wrote $Logs straight to Mapper_Debug.log as they happened - not
-                    # replayed here, so a closed drawer or page reload doesn't lose the only
-                    # copy the way it would if these lines existed solely in this HTTP response.
+                    # Not replayed to the log here: the worker's -DebugLogPath already wrote
+                    # these lines as they happened.
                     $Job.Outcome = @{
                         status = "complete"; ok = $false; ip = $Job.IP
                         reason = "Switch returned empty payload or scan failed - see logs"; logs = $Logs
@@ -619,10 +538,8 @@ function Invoke-RescanStatusAction {
                 Write-MapperDebugLog "RESCAN [$($Job.IP)] Scan failed: $_"
             }
             try { $Job.PS.Dispose() } catch {}
-            # Get-JunosNodeData.ps1 spawns ssh.exe via cmd.exe from this process - PS.Dispose()
-            # above doesn't touch that OS-level grandchild even on a clean completion (see
-            # Stop-JunosOrphanProcessesLocal in FleetCrawl.ps1), so mirror FleetCrawl's own
-            # "call it after every job removal" pattern here too, not just the orphan paths.
+            # Needed on clean completion too, not just the orphan paths: PS.Dispose() never
+            # touches the ssh.exe/cmd.exe grandchildren.
             Stop-JunosOrphanProcessesLocal -TargetIP $Job.IP -SinceTime $Job.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
             $Job.Collected = $true
         }
@@ -633,12 +550,10 @@ function Invoke-RescanStatusAction {
 
     $Elapsed = ((Get-Date) - $Job.StartTime).TotalSeconds
     if ($Elapsed -gt 90) {
-        # Not force-stopped: New-JunosAskPass writes the switch password to a plaintext
-        # %TEMP% file cleaned up only by the worker's own finally block, and .Stop()'ing a
-        # pipeline blocked in Process.WaitForExit isn't guaranteed to run that promptly.
-        # Instead free the HTTP-facing slot and let Invoke-RescanAction reap it once it
-        # actually finishes on its own - it still occupies a $script:RescanPool runspace
-        # until then, which is why that pool carries spare capacity (see its creation site).
+        # Not force-stopped: New-JunosAskPass's plaintext %TEMP% password file is removed only
+        # by the worker's own finally block, which .Stop() on a pipeline blocked in
+        # Process.WaitForExit may never reach. Free the HTTP-facing slot instead and let
+        # Invoke-RescanAction reap it later; it holds a $script:RescanPool runspace until then.
         $script:OrphanedScans.Add($Job)
         $script:PendingScan = $null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "timeout"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
@@ -648,9 +563,8 @@ function Invoke-RescanStatusAction {
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "running"; ip = $Job.IP; elapsedSeconds = [math]::Round($Elapsed) }
 }
 
-# Kicks off a full fleet crawl asynchronously (same "don't block the accept loop" reasoning
-# as Invoke-RescanAction, but the runspace pool is sized to $MaxConcurrent). Only one scan
-# may be in flight, tracked in $script:PendingScanNetwork; a second click gets a 409.
+# Kicks off a full fleet crawl asynchronously, same accept-loop reasoning as
+# Invoke-RescanAction. Only one scan in flight; a second click gets a 409.
 function Invoke-ScanNetworkAction {
     param($Response, [string]$Body, [string]$WorkerPath, [string]$JunosUsername, [string]$JunosPassword,
           [string]$MaxConcurrent, [string[]]$AllowedScopes, [string]$SnapshotDir,
@@ -661,10 +575,8 @@ function Invoke-ScanNetworkAction {
         return
     }
 
-    # Reap a finished scan job before deciding whether a new one can start - without this,
-    # a scan whose result the browser never polled (tab closed) would sit here forever,
-    # 409-ing every future click. If .Collected is already set, PS/Runspace are already
-    # disposed and this just clears the slot; otherwise collect here so nothing leaks.
+    # Reap a finished job first, or a scan the browser never polled (tab closed) 409s every
+    # future click. Collected=true means PS/Runspace are already disposed.
     if ($script:PendingScanNetwork -and $script:PendingScanNetwork.Handle.IsCompleted) {
         $Finished = $script:PendingScanNetwork
         if (-not $Finished.Collected) {
@@ -694,17 +606,15 @@ function Invoke-ScanNetworkAction {
         return
     }
 
-    # AllowedScopes is enforced on every crawl-discovered neighbor IP (FleetCrawl.ps1's
-    # Test-IpInAllowedScopes) - a manually-entered entry-point IP must be held to the same
-    # fence, or a typo'd/out-of-scope IP would reach an SSH login with saved credentials
-    # before the crawl ever gets a chance to apply scope filtering.
+    # Scope fence - see Invoke-ConnectAction. The entry-point IP is reached before the crawl
+    # applies any filtering of its own.
     if (-not (Test-IpInAllowedScopes -IP $StartIP -AllowedScopes $AllowedScopes)) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes ($($AllowedScopes -join ', '))" }
         return
     }
 
     # Without this, Invoke-FleetCrawl's Write-DebugLogLocal is a no-op for web-triggered
-    # scans, making a failed scan undiagnosable. Overwritten per crawl, same as the CLI path.
+    # scans. Overwritten per crawl, same as the CLI path.
     $DebugLogPath = Join-Path $SnapshotDir "ScanNetwork_Debug.log"
 
     $ProgressTable = [hashtable]::Synchronized(@{ Visited = 0; QueueDepth = 1; ActiveJobs = 0; Done = $false })
@@ -720,15 +630,12 @@ function Invoke-ScanNetworkAction {
         AddParameter("DebugLogPath", $DebugLogPath)
     if ($EncKey) { $PS.AddParameter("EncKey", $EncKey).AddParameter("MacKey", $MacKey).AddParameter("Salt", $Salt).AddParameter("Iterations", $Iterations) | Out-Null }
 
-    # A fresh [powershell]::Create() runspace doesn't inherit Invoke-FleetCrawl's
-    # definition from this session by default, so load it explicitly.
+    # A fresh runspace doesn't inherit Invoke-FleetCrawl's definition from this session.
     $InitialState = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
     $FleetCrawlPath = Join-Path $PSScriptRoot "FleetCrawl.ps1"
     $InitialState.StartupScripts.Add($FleetCrawlPath) | Out-Null
     $Runspace = [runspacefactory]::CreateRunspace($InitialState)
-    # $PS/$Runspace aren't reachable from $script:PendingScanNetwork until BeginInvoke
-    # succeeds below - if Open()/BeginInvoke() throws, dispose both here or they leak
-    # (nothing else references them to clean up later).
+    # Nothing else references $PS/$Runspace until BeginInvoke succeeds, so a throw leaks them.
     try {
         $Runspace.Open()
         $PS.Runspace = $Runspace
@@ -738,16 +645,14 @@ function Invoke-ScanNetworkAction {
         $Runspace.Dispose()
         throw
     }
-    # Collected/Outcome: filled in once by Invoke-ScanNetworkStatusAction on first
-    # completion so the result can be re-served idempotently to later polls.
+    # Collected/Outcome: set on first completion so later polls get the same result.
     $script:PendingScanNetwork = [PSCustomObject]@{ PS = $PS; Runspace = $Runspace; Handle = $Handle; StartIP = $StartIP; StartTime = (Get-Date); ProgressTable = $ProgressTable; Collected = $false; Outcome = $null }
     Send-WebJson -Response $Response -StatusCode 202 -Object @{ status = "started"; startIp = $StartIP }
 }
 
-# Polled by the browser every ~2s. Unlike a rescan, a fleet crawl can run for many minutes,
-# so no timeout ceiling is imposed - the browser just keeps polling until "complete".
-# Returns the full decrypted topology inline (already in memory) rather than writing it to
-# disk and adding new file-serving surface outside $VisualizerRoot.
+# Polled by the browser every ~2s. No timeout ceiling: a fleet crawl can legitimately run
+# for many minutes. Returns the decrypted topology inline (already in memory) rather than
+# writing it to disk and adding file-serving surface outside $VisualizerRoot.
 function Invoke-ScanNetworkStatusAction {
     param($Response)
 
@@ -759,15 +664,12 @@ function Invoke-ScanNetworkStatusAction {
     $Job = $script:PendingScanNetwork
 
     if ($Job.Handle.IsCompleted) {
-        # Collect (EndInvoke + Dispose) exactly once and cache the outcome - EndInvoke
-        # throws if called twice, and later polls just re-serve the cached outcome.
+        # Collect exactly once and cache the outcome - EndInvoke throws if called twice.
         if (-not $Job.Collected) {
             try {
                 $Result = $Job.PS.EndInvoke($Job.Handle)
 
-                # Non-terminating errors/warnings inside the worker don't fail EndInvoke and
-                # would otherwise never surface anywhere - same reasoning as Invoke-FleetCrawl's
-                # drain of these streams for its worker jobs.
+                # Non-terminating worker errors don't fail EndInvoke and surface nowhere else.
                 if ($Job.PS.HadErrors) {
                     foreach ($ErrRecord in $Job.PS.Streams.Error) {
                         Write-MapperDebugLog "SCAN-NETWORK ERROR STREAM [$($Job.StartIP)] $ErrRecord"
@@ -779,11 +681,9 @@ function Invoke-ScanNetworkStatusAction {
                     }
                 }
 
-                # Index explicitly ($Result[0]) rather than dotting into $Result: PowerShell
-                # member enumeration on a 1-item collection unwraps straight to that item's
-                # own .Topology, which for a single-device crawl is a bare PSCustomObject
-                # instead of the List[object] Invoke-FleetCrawl actually returns - breaking
-                # ConvertTo-Json's array shape and the browser's .forEach(...) on it.
+                # Index explicitly rather than dotting into $Result: member enumeration on a
+                # 1-item collection unwraps to a bare PSCustomObject for a single-device
+                # crawl, breaking ConvertTo-Json's array shape and the browser's .forEach.
                 $Payload = if ($Result -and $Result.Count -gt 0) { $Result[0] } else { $null }
 
                 if (-not $Payload -or -not $Payload.Topology) {
@@ -807,8 +707,8 @@ function Invoke-ScanNetworkStatusAction {
             $Job.Collected = $true
         }
 
-        # -Depth 100 matches FleetCrawl.ps1's Write-TopologyOutputLocal - a shallower depth
-        # risks ConvertTo-Json silently truncating a deeply-nested topology.
+        # -Depth 100 matches FleetCrawl.ps1's Write-TopologyOutputLocal; shallower risks
+        # ConvertTo-Json silently truncating a deeply-nested topology.
         Send-WebJson -Response $Response -StatusCode 200 -Depth 100 -Object $Job.Outcome
         return
     }
@@ -820,13 +720,9 @@ function Invoke-ScanNetworkStatusAction {
     }
 }
 
-# Serves the current Configuration.json.enc envelope as-is (still encrypted - the browser
-# decrypts it client-side). 404 with a JSON body so the browser can tell "no config yet"
-# apart from a real error.
-#
-# Skips ConvertFrom-Json/Send-WebJson entirely: `-AsHashtable` (needed for Send-WebJson's
-# [hashtable] param) is PowerShell 6.0+ only and throws under Windows PowerShell 5.1. The
-# envelope is already JSON on disk, so just write the raw bytes straight through.
+# Serves the Configuration.json.enc envelope as-is (the browser decrypts client-side). 404
+# carries a JSON body so "no config yet" is distinguishable from an error. Bypasses
+# Send-WebJson because -AsHashtable, which its [hashtable] param needs, is pwsh 6.0+ only.
 function Invoke-GetConfigAction {
     param($Response, [string]$ConfigPath)
 
@@ -836,9 +732,8 @@ function Invoke-GetConfigAction {
     }
 
     try {
-        # -Encoding UTF8 explicit: Get-Content -Raw with no -Encoding falls back to the
-        # system ANSI codepage on a BOM-less UTF-8 file (e.g. written under pwsh 7+, read
-        # back under Windows PowerShell 5.1), silently mis-decoding non-ASCII fields.
+        # -Encoding UTF8 explicit: without it, Windows PowerShell 5.1 reads a BOM-less UTF-8
+        # file (as written by pwsh 7+) using the system ANSI codepage, mangling non-ASCII.
         $Raw = Get-Content $ConfigPath -Raw -Encoding UTF8
         Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Raw)) -ContentType "application/json; charset=utf-8"
     } catch {
@@ -847,33 +742,22 @@ function Invoke-GetConfigAction {
     }
 }
 
-# Hands the browser the encryption password Start-NetworkMapper.ps1 already prompted for at
-# startup, so it can decrypt Configuration.json.enc / NetworkMap_*.json.enc client-side
-# without re-prompting the operator. A deliberate exception to Invoke-SaveConfigAction's
-# "the password never crosses the wire" posture below.
-#
-# Gated by Test-SameOriginRequest even though this is a read-only GET: a DNS-rebinding
-# attack makes a same-origin-looking fetch from the browser's point of view, so "no side
-# effects" alone doesn't protect it - and a leaked password here is silent and durable
-# (decrypts every archived snapshot offline, indefinitely), unlike /api/connect's worst case.
-#
-# Returns "" (not null) when there's nothing to offer - the browser falls back to prompting.
+# Hands the browser the encryption password Start-NetworkMapper.ps1 prompted for at startup
+# so it can decrypt Configuration.json.enc / NetworkMap_*.json.enc client-side without
+# re-prompting - a deliberate exception to Invoke-SaveConfigAction's "the password never
+# crosses the wire" posture. Same-origin-gated despite being a read-only GET: a leak here is
+# silent and durable (decrypts every archived snapshot offline), so "no side effects" isn't
+# enough. Returns "" (not null) when there's nothing to offer; the browser then prompts.
 function Invoke-GetSessionPasswordAction {
     param($Response, [string]$EncryptionPassword)
-    # Must not be cached by an intermediate proxy or the browser's own disk cache - this
-    # response body is the plaintext encryption password.
+    # This body is the plaintext password - keep it out of proxy and browser disk caches.
     $Response.Headers.Add("Cache-Control", "no-store")
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ password = [string]$EncryptionPassword }
 }
 
-# Backs the browser's startup autoload (window.autoloadLastScan in app.js) - hands back
-# every archived snapshot's raw content so the browser can feed them straight into the same
-# processSelectedFiles() path a manual folder-pick uses, without a file-picker gesture.
-# Same NetworkMap_*.json(.enc) naming/exclusion convention as the folder-picker filter in
-# app.js's forceLoadFolder - a mid-crawl *.tmp.json(.enc) must not be picked up as finished.
-#
-# Gated by Test-SameOriginRequest for the same reason as Invoke-GetSessionPasswordAction:
-# this is read-only but hands back full topology contents on a bare GET.
+# Backs the browser's startup autoload (window.autoloadLastScan in app.js), listing archived
+# snapshots without a file-picker gesture. Mirrors app.js forceLoadFolder's naming filter -
+# a mid-crawl *.tmp.json(.enc) must not be picked up as finished.
 function Invoke-GetSnapshotsAction {
     param($Response, [string]$SnapshotDir)
 
@@ -883,26 +767,18 @@ function Invoke-GetSnapshotsAction {
     }
 
     try {
-        # Max snapshots listed per request. Most-recent-first covers the actual use case
-        # (autoload wants the latest, plus enough history for cross-snapshot merging); older
-        # history is still on disk, just not offered here.
+        # Most-recent-first covers the use case (the latest, plus enough history for
+        # cross-snapshot merging); older files stay on disk, just aren't offered here.
         $MaxSnapshots = 20
         $Files = Get-ChildItem -LiteralPath $SnapshotDir -File |
             Where-Object { $_.Name -match '^NetworkMap_.*\.json(\.enc)?$' -and $_.Name -notmatch '\.tmp\.json(\.enc)?$' } |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First $MaxSnapshots
 
-        # Names and sizes only - the bodies are fetched one at a time from
-        # Invoke-GetSnapshotAction. This action used to inline every snapshot's full content
-        # here, which meant one ConvertTo-Json over the entire archive: at the 20-file cap with
-        # ~2MB snapshots that is a ~40MB serialization, and Windows PowerShell 5.1 backs
-        # ConvertTo-Json with JavaScriptSerializer, which takes minutes on a payload that size
-        # and allocates a string well into the large object heap. It ran on the accept-loop
-        # thread, which serves every request, so for the whole of that time the server answered
-        # nothing at all - a scan started from the browser meanwhile just sat in the HTTP.sys
-        # queue until it was dropped, surfacing as a bare "failed to fetch" with no server-side
-        # error to show for it. The listing is now a few hundred bytes regardless of archive
-        # size, and no single request can monopolise the loop.
+        # Names and sizes only; bodies are fetched one at a time from Invoke-GetSnapshotAction.
+        # Inlining contents here would mean one ConvertTo-Json over the whole archive (~40MB at
+        # this cap), which Windows PowerShell 5.1's JavaScriptSerializer takes minutes to do -
+        # on the accept-loop thread, so the server would answer nothing at all meanwhile.
         $Snapshots = @($Files | ForEach-Object { @{ name = $_.Name; size = $_.Length } })
 
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ snapshots = $Snapshots }
@@ -912,16 +788,15 @@ function Invoke-GetSnapshotsAction {
     }
 }
 
-# Serves ONE snapshot file, by name, from the listing above. Writes the file's bytes
-# verbatim rather than wrapping them in a JSON envelope: the file already IS the JSON
-# document the client wants, so quoting it into a JSON string would re-introduce exactly the
-# serialization cost this split exists to avoid (see Invoke-GetSnapshotsAction).
+# Serves ONE snapshot file, by name, from the listing above. Bytes verbatim, not wrapped in
+# a JSON envelope: the file already IS the JSON document the client wants, and quoting it
+# would re-introduce the serialization cost this split exists to avoid.
 function Invoke-GetSnapshotAction {
     param($Response, [string]$SnapshotDir, [string]$Name)
 
-    # Same filter the listing applies, so only a name that could have come from it is served.
-    # \z rather than $ - PowerShell's $ also matches before a trailing newline, which would let
-    # "NetworkMap_x.json`n<anything>" through.
+    # Same filter the listing applies, so only a name it could have produced is served. \z
+    # rather than $, which in PowerShell also matches before a trailing newline - that would
+    # let "NetworkMap_x.json`n<anything>" through.
     if ([string]::IsNullOrWhiteSpace($Name) -or
         $Name -notmatch '^NetworkMap_.*\.json(\.enc)?\z' -or
         $Name -match '\.tmp\.json(\.enc)?\z') {
@@ -929,10 +804,8 @@ function Invoke-GetSnapshotAction {
         return
     }
 
-    # The regex above is anchored but its .* still admits path separators and .. segments, so
-    # confine the resolved path to $SnapshotDir the same way Invoke-StaticFile does rather
-    # than trusting the name's shape. Trailing separator on the root makes this a path-prefix
-    # match instead of a string-prefix one.
+    # The regex is anchored but its .* still admits path separators and .. segments, so
+    # confine the resolved path to $SnapshotDir rather than trusting the name's shape.
     try {
         $RootFull = [System.IO.Path]::GetFullPath($SnapshotDir)
         if (-not $RootFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) { $RootFull += [System.IO.Path]::DirectorySeparatorChar }
@@ -950,17 +823,16 @@ function Invoke-GetSnapshotAction {
     }
 }
 
-# Encrypts and writes Configuration.json.enc. The browser sends PLAINTEXT edited config
-# JSON - the encryption password itself never crosses in this request (see
-# Invoke-GetSessionPasswordAction for the one deliberate exception). A fresh salt/IV is
-# generated per save (saves are rare/interactive, no reason to cache the key across calls).
+# Encrypts and writes Configuration.json.enc. The browser sends PLAINTEXT config JSON - the
+# encryption password never crosses in this request (Invoke-GetSessionPasswordAction is the
+# one deliberate exception). Fresh salt/IV per save; saves are rare and interactive, so
+# there's no reason to cache the derived key across calls.
 function Invoke-SaveConfigAction {
     param($Response, [string]$Body, [string]$ConfigPath, [string]$EncryptionPassword, [switch]$NoEncryption)
 
-    # Fail closed: if Configuration.json.enc failed to decrypt at startup and the operator
-    # chose to continue anyway, $EncryptionPassword is blanked - re-encrypting under it would
-    # silently lock every future session out under an unrecorded password. Doesn't apply in
-    # -NoEncryption mode, where there's no password to have failed to decrypt.
+    # Fail closed: $EncryptionPassword is blanked when startup decryption failed and the
+    # operator continued anyway, and re-encrypting under it would silently lock every future
+    # session out under an unrecorded password. Not applicable under -NoEncryption.
     if (-not $NoEncryption -and [string]::IsNullOrWhiteSpace($EncryptionPassword)) {
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "No working encryption password for this session - Configuration.json.enc could not be decrypted at startup, so saving is disabled to avoid rewriting the file under an unverified password. Restart Start-NetworkMapper.ps1 with the correct password." }
         return
@@ -968,26 +840,18 @@ function Invoke-SaveConfigAction {
 
     $Parsed = $null
     try { $Parsed = $Body | ConvertFrom-Json } catch {}
-    # Presence check, not truthiness: `-not $Parsed.devices` would also reject a legitimate
-    # `devices: []` save, since PowerShell treats an empty array as falsy.
+    # Presence check, not truthiness: PowerShell treats an empty array as falsy, so
+    # `-not $Parsed.devices` would reject a legitimate `devices: []` save.
     if (-not $Parsed -or $null -eq $Parsed.devices) {
         Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Request body must be JSON with a 'devices' array" }
         return
     }
 
-    # $Username ends up interpolated unquoted into an ssh.exe/cmd.exe command line
-    # (Get-JunosSshArgs -> Connect-Switch.ps1/Get-JunosNodeData.ps1), so - unlike a normal
-    # form field - a stray space or shell/ssh metacharacter here is a command-injection
-    # vector, not just a cosmetic issue (SSH-001/SSH-002: an unvalidated username such as
-    # `admin -oProxyCommand=calc.exe x` or `admin & calc.exe & echo ` reaches ssh.exe's/
-    # cmd.exe's argv unescaped). Locked to typical Junos login-name shape, mirroring how
-    # $TargetIP is regex-locked elsewhere in this file. Empty string is still allowed
-    # (an explicit {username:"", password:""} intentionally clears saved credentials).
-    #
-    # No PowerShell test runner exists in this repo (only `node --test` under web-src/) to
-    # host an automated regression test for this validation, so a manual repro is recorded
-    # here instead: POST {"devices":[],"credentials":{"username":"admin -oProxyCommand=calc.exe x","password":"x"}}
-    # to /api/save-config (with a matching Origin header) should 400 with "Invalid username: ...".
+    # $Username is interpolated unquoted into an ssh.exe/cmd.exe command line (Get-JunosSshArgs
+    # -> Connect-Switch.ps1/Get-JunosNodeData.ps1), so a stray space or metacharacter is a
+    # command-injection vector (e.g. `admin -oProxyCommand=calc.exe x`), not a cosmetic issue.
+    # Locked to typical Junos login shape; empty string stays legal, since an explicit
+    # {username:"", password:""} intentionally clears saved credentials.
     if ($Parsed.credentials) {
         $NewUsername = [string]$Parsed.credentials.username
         if ($NewUsername -and $NewUsername -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}\z') {
@@ -998,17 +862,12 @@ function Invoke-SaveConfigAction {
 
     try {
         if ($NoEncryption) {
-            # Re-serialize rather than raw $Body | Out-File, so the file is consistently
-            # formatted. Written atomically (temp file + rename via FileHelpers.ps1's
-            # Set-FileContentAtomic, dot-sourced above) so a crash/disk-full mid-write can't
-            # leave Configuration.json truncated - it's the operator's only copy of their
-            # saved device list and credentials.
+            # Re-serialized rather than writing $Body raw, for consistent formatting. Atomic
+            # (temp file + rename) because this is the operator's only copy of their device
+            # list and credentials - a crash mid-write must not truncate it.
             Set-FileContentAtomic -DestinationPath $ConfigPath -Content ($Parsed | ConvertTo-Json -Depth 10) -Encoding utf8
-            # Configuration.json holds the operator's plaintext Junos credentials under
-            # -NoEncryption. Set-FileContentAtomic's rename-into-place (FileHelpers.ps1's
-            # Move-FileAtomic) leaves $ConfigPath with a freshly-created file's default ACL on
-            # every save, same as FleetCrawl.ps1's $OutputFile - harden it post-write the same
-            # way Move-TopologyOutputAtomicLocal does there (P8SEC-03).
+            # Under -NoEncryption this file holds plaintext Junos credentials, and the atomic
+            # rename leaves it with a newly-created file's default ACL on every save.
             Protect-JunosSensitiveFileAcl -Path $ConfigPath
         } else {
             $SaltBytes = [byte[]]::new(16)
@@ -1016,23 +875,20 @@ function Invoke-SaveConfigAction {
             $Rng.GetBytes($SaltBytes)
             $Rng.Dispose()
 
-            # Shared with the crawl's own encryption via TopologyCrypto.ps1, so iteration
-            # count can't drift between the crawler and the webserver.
+            # Shared with the crawl via TopologyCrypto.ps1 so the iteration count can't drift
+            # between crawler and webserver.
             $Iterations = Get-TopologyPbkdf2Iterations
             $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $Iterations
             $Envelope = Protect-TopologyPayload -PlainJson $Body -EncKey $KeyMaterial.EncKey -MacKey $KeyMaterial.MacKey -Salt $SaltBytes -Iterations $Iterations -Format "PSNetworkMapper-EncryptedConfig"
 
-            # Same atomic write as the -NoEncryption branch above - Configuration.json.enc is
-            # equally the operator's only copy.
+            # Atomic for the same reason as the branch above.
             Set-FileContentAtomic -DestinationPath $ConfigPath -Content ($Envelope | ConvertTo-Json -Depth 10) -Encoding utf8
         }
 
-        # Push just-saved credentials into the running server's live copies so
-        # /api/connect, /api/rescan, /api/scan-network use them immediately, instead of
-        # requiring a restart. After the file write (a failed save must not update live
-        # credentials) and a presence check, not truthiness: `credentials:null` (sent when
-        # nothing was loaded) leaves in-memory copies alone, but an explicit {username:"",
-        # password:""} does clear them.
+        # Push just-saved credentials into the live copies so the SSH endpoints pick them up
+        # without a restart. Deliberately after the file write - a failed save must not update
+        # them. Presence check, not truthiness: `credentials:null` (sent when nothing was
+        # loaded) leaves them alone, while an explicit {username:"", password:""} clears them.
         if ($Parsed.credentials) {
             $script:JunosUsername = [string]$Parsed.credentials.username
             $script:JunosPassword = [string]$Parsed.credentials.password
@@ -1045,9 +901,9 @@ function Invoke-SaveConfigAction {
     }
 }
 
-# Serves a file under $VisualizerRoot, defaulting "/" to index.html. Resolves the
-# request path to an absolute path and rejects anything that lands outside
-# $VisualizerRoot (../ traversal, absolute-path requests) before it ever touches disk.
+# Serves a file under $VisualizerRoot, defaulting "/" to index.html. Resolves to an absolute
+# path and rejects anything landing outside the root (../ traversal, absolute-path requests)
+# before touching disk.
 function Invoke-StaticFile {
     param($Response, [string]$AbsolutePath, [string]$VisualizerRoot)
 
@@ -1058,9 +914,8 @@ function Invoke-StaticFile {
     if (-not $RootFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) { $RootFull += [System.IO.Path]::DirectorySeparatorChar }
     $FullPath = [System.IO.Path]::GetFullPath((Join-Path $RootFull $RelPath))
 
-    # $RootFull's trailing separator (added above) makes this a path-prefix match, not a
-    # string-prefix match - otherwise "Network_Visualizer" would also accept
-    # "Network_Visualizer_old".
+    # The trailing separator makes this a path-prefix match rather than a string-prefix one -
+    # otherwise "Network_Visualizer" would also accept "Network_Visualizer_old".
     if (-not $FullPath.StartsWith($RootFull, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $FullPath -PathType Leaf)) {
         Send-WebResponse -Response $Response -StatusCode 404 -Bytes ([System.Text.Encoding]::UTF8.GetBytes("Not found"))
         return
@@ -1071,10 +926,10 @@ function Invoke-StaticFile {
     Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.IO.File]::ReadAllBytes($FullPath)) -ContentType $CType
 }
 
-# Serves the ONE portable single-file visualizer bundle instead of Invoke-StaticFile's
-# whole-directory serving. Only "/" and "/Network_Visualizer.html" resolve - the bundle has
-# no external .js/.css/image files, so nothing else is ever requested. Never falls through
-# to $VisualizerRoot, or single-file mode would silently widen back to serving the whole tree.
+# Serves the portable single-file visualizer bundle instead of Invoke-StaticFile's
+# whole-directory serving. Only "/" and "/Network_Visualizer.html" resolve (the bundle has no
+# external assets), and it never falls through to $VisualizerRoot - that would silently widen
+# single-file mode back to serving the whole tree.
 function Invoke-SingleFileVisualizer {
     param($Response, [string]$AbsolutePath, [string]$SingleFileVisualizerPath)
 
@@ -1093,17 +948,14 @@ function Start-MapperWebServer {
         # instead of requiring/using $EncryptionPassword.
         [switch]$NoEncryption,
         [Parameter(Mandatory=$true)][string]$VisualizerRoot,
-        # Set only when Start-NetworkMapper.ps1 found a single-file bundle next to itself -
-        # see Invoke-SingleFileVisualizer for why this takes over serving entirely.
+        # Set only when Start-NetworkMapper.ps1 found a single-file bundle next to itself.
         [AllowNull()][AllowEmptyString()][string]$SingleFileVisualizerPath,
         [Parameter(Mandatory=$true)][string]$ConnectScriptPath,
         [Parameter(Mandatory=$true)][string]$WorkerPath,
         [Parameter(Mandatory=$true)][string]$ConfigPath,
-        # Empty/null is a legal VALUE (not "omit"): Start-NetworkMapper.ps1 passes $null on
-        # the "continue without server-side credentials" path, meaning "no verified password
-        # this session" - Invoke-SaveConfigAction then refuses to write the config file.
-        # Keep AllowNull/AllowEmptyString, or that path dies at launch instead of serving
-        # the viewer read-only.
+        # Empty/null is a legal VALUE (not "omit"): it means "no verified password this
+        # session", after which Invoke-SaveConfigAction refuses to write. Without
+        # AllowNull/AllowEmptyString that path dies at launch instead of serving read-only.
         [Parameter(Mandatory=$true)][AllowNull()][AllowEmptyString()][string]$EncryptionPassword,
         [string]$JunosUsername = "",
         [string]$JunosPassword = "",
@@ -1115,14 +967,13 @@ function Start-MapperWebServer {
         [byte[]]$Salt,
         [int]$Iterations,
         [int]$Port = 8787,
-        # Mapper_Debug.log. Optional - Write-MapperDebugLog is a no-op without it, so an
-        # unwired caller just loses client-error logging rather than failing to start.
+        # Mapper_Debug.log. Optional - Write-MapperDebugLog no-ops without it, so an unwired
+        # caller loses logging rather than failing to start.
         [AllowNull()][AllowEmptyString()][string]$DebugLogPath
     )
 
-    # Set before anything that can fail below, not further down with the other script-scoped
-    # assignments: Write-MapperDebugLog is a silent no-op until this is populated, so a bind
-    # or pool-setup failure would otherwise leave no trace of why the server never came up.
+    # Must precede anything that can fail below: Write-MapperDebugLog is a silent no-op until
+    # this is set, so a bind or pool-setup failure would otherwise leave no trace.
     $script:DebugLogPath = $DebugLogPath
 
     $Listener = [System.Net.HttpListener]::new()
@@ -1135,37 +986,26 @@ function Start-MapperWebServer {
         Write-MapperDebugLog "SERVER BIND FAILED [$Prefix] $_"
         throw "Could not bind $Prefix - is another instance already running? ($_)"
     }
-    # Bookends the SERVER SHUTDOWN line in the finally below. Together these are the only
-    # record of when this process was actually able to serve requests - without them, a
-    # browser-side "failed to fetch" is indistinguishable from a request the server rejected,
-    # since a dead (or never-started) listener writes nothing at all.
+    # Bookends the SERVER SHUTDOWN line in the finally below; together they are the only
+    # record of when this process could actually serve requests, which is what separates a
+    # browser-side "failed to fetch" from a request the server rejected.
     Write-MapperDebugLog "SERVER START listening on $Prefix (PID $PID)"
 
-    # Backs /api/rescan. Only one rescan is ever in flight at the HTTP level ($script:PendingScan
-    # gates that with a 409), but the pool itself is sized to 3, not 1: an orphaned rescan
-    # (Invoke-RescanStatusAction's 90s timeout) is never force-stopped - see the comment there -
-    # so a genuinely hung rescan (an SSH session into a dead/slow switch, which can run far
-    # longer than a ping) keeps occupying a runspace indefinitely. With a 1-slot pool that
-    # silently wedges every future rescan behind the zombie job forever; the spare slots give
-    # headroom to absorb that instead.
-    # Both pools' .Open() calls happen before the function's main try/finally below (which
-    # is what disposes them on the way out) - if the second .Open() throws, nothing would
-    # otherwise close the already-Start()ed $Listener or dispose the first pool, since the
-    # exception would propagate straight out of this function with no cleanup at all. Guard
-    # this setup with its own try/catch that tears down whatever was already created.
+    # Both pools open before the main try/finally that would otherwise dispose them, so this
+    # setup needs its own try/catch: a throw from the second .Open() would escape the function
+    # leaving the already-Start()ed $Listener and the first pool leaked.
+    #
+    # Pools are sized 3, not 1, even though $script:PendingScan/$script:PendingPing already
+    # 409-gate one job at a time: an orphaned job is never force-stopped (see the status
+    # actions' timeout handling), so a truly hung one holds a runspace indefinitely. The spare
+    # slots absorb that instead of wedging every later job behind the zombie.
     try {
         $script:RescanPool = [runspacefactory]::CreateRunspacePool(1, 3)
         $script:RescanPool.Open()
         $script:PendingScan = $null
         $script:OrphanedScans = [System.Collections.Generic.List[object]]::new()
         $script:PendingScanNetwork = $null
-        # Backs /api/ping. Only one ping is ever in flight at the HTTP level ($script:PendingPing
-        # gates that with a 409), but the pool itself is sized to 3, not 1: an orphaned ping
-        # (Invoke-PingStatusAction's 20s timeout) is never force-stopped - see the comment there -
-        # so a genuinely hung ping (e.g. the PS 5.1 Test-Connection branch above has no
-        # -TimeoutSeconds bound at all) keeps occupying a runspace indefinitely. With a 1-slot pool
-        # that silently wedges every future ping behind the zombie job forever; the spare slots
-        # give headroom to absorb that instead.
+        # A ping can hang unboundedly: the PS 5.1 Test-Connection branch has no timeout at all.
         $script:PingPool = [runspacefactory]::CreateRunspacePool(1, 3)
         $script:PingPool.Open()
         $script:PendingPing = $null
@@ -1177,24 +1017,21 @@ function Start-MapperWebServer {
         try { $Listener.Close() } catch {}
         throw
     }
-    # -JunosUsername/-JunosPassword are only the seed (decrypted once at startup).
-    # Script-scoped so Invoke-SaveConfigAction can update them live when credentials are
-    # saved from the Settings tab, without requiring a process restart.
+    # The parameters are only the seed (decrypted once at startup); script scope lets
+    # Invoke-SaveConfigAction update them live without a process restart.
     $script:JunosUsername = $JunosUsername
     $script:JunosPassword = $JunosPassword
 
-    # Detect the host that launched this process (pwsh.exe vs powershell.exe) so
-    # Invoke-ConnectAction's SSH launch uses the same runtime rather than a hardcoded
-    # literal that may not exist. try/catch + the default param are a last-resort fallback.
+    # Invoke-ConnectAction's SSH launch must reuse the host that started this process: a
+    # pwsh-only machine has no "powershell.exe" to hardcode.
     $PowerShellExePath = try { [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { $null }
     if ([string]::IsNullOrWhiteSpace($PowerShellExePath)) { $PowerShellExePath = "powershell.exe" }
 
     Write-Host "`nWeb UI listening on $Prefix (localhost only - Ctrl+C to stop)" -ForegroundColor Cyan
-    # Sits between the pool-setup try/catch above and the serving try/finally below, so an
-    # unguarded throw here kills the process with the listener already bound and the accept
-    # loop never entered - the browser would then see every request fail at the network layer
-    # with nothing logged. ShellExecute can genuinely fail here (no http:// handler
-    # registered, or a managed host blocking it), and it isn't worth the server for.
+    # Guarded because this sits between the pool setup and the serving try/finally: an
+    # unguarded throw would leave the listener bound with the accept loop never entered.
+    # ShellExecute genuinely fails on hosts with no http:// handler, and isn't worth the
+    # server for.
     try {
         Start-Process $Prefix
     } catch {
@@ -1203,31 +1040,21 @@ function Start-MapperWebServer {
         Write-Host "The server is running - open $Prefix manually." -ForegroundColor Yellow
     }
 
-    # Console progress for browser-triggered scans: Invoke-ScanNetworkAction runs the crawl
-    # in a background runspace, so FleetCrawl.ps1's Write-Host never reaches this console
-    # otherwise. Piggybacks on the 250ms accept-loop tick below.
+    # Console progress for browser-triggered scans: the crawl runs in a background runspace,
+    # so FleetCrawl.ps1's Write-Host never reaches this console. Piggybacks on the 250ms
+    # accept-loop tick below.
     $script:ScanProgressSnapshot = $null
     try {
         while ($Listener.IsListening) {
-          # Outermost per-iteration guard: the two try/catches below cover
-          # BeginGetContext/EndGetContext and the request dispatch, but the statements between
-          # them (unpacking $Context) and anything neither of those anticipates are not
-          # otherwise covered. Anything that escapes this block would fall through to this
-          # function's `finally` (which stops/closes $Listener) without ever reaching a
-          # Write-MapperDebugLog call - exactly the "server dies, nothing in the log" failure
-          # mode. Catch everything here as a last resort, log full exception detail, and keep
-          # the loop alive.
+          # Outermost per-iteration guard. The two try/catches below cover accept and dispatch,
+          # but not the statements between them; anything escaping would reach this function's
+          # finally without ever hitting a Write-MapperDebugLog call - the "server dies,
+          # nothing in the log" failure mode. Catch all, log, keep the loop alive.
           try {
-            # BeginGetContext/WaitOne(250) instead of a blocking GetContext(): a blocking
-            # call gives the engine no statement boundary to act on, so Ctrl+C is ignored.
-            # Polling on a timeout hands control back every 250ms, making Ctrl+C work.
-            #
-            # This accept machinery needs its own try/catch, separate from the per-request
-            # dispatch below: an uncaught HttpListenerException here - e.g. a transient
-            # EndGetContext failure - would otherwise fall all the way out of this function,
-            # silently killing the whole server process with nothing written to
-            # Mapper_Debug.log and the browser just reporting "Lost connection to the local
-            # server". Log and retry instead of dying.
+            # BeginGetContext/WaitOne(250) rather than a blocking GetContext(): a blocking call
+            # gives the engine no statement boundary, so Ctrl+C is ignored. Its own try/catch,
+            # separate from the dispatch below, so a transient HttpListenerException is logged
+            # and retried instead of killing the server process silently.
             try {
                 $AsyncResult = $Listener.BeginGetContext($null, $null)
                 while (-not $AsyncResult.AsyncWaitHandle.WaitOne(250)) {
@@ -1253,21 +1080,18 @@ function Start-MapperWebServer {
             } catch {
                 Write-MapperDebugLog "ACCEPT LOOP ERROR [$($_.Exception.GetBaseException().GetType().FullName)] $_`nStackTrace: $($_.ScriptStackTrace)"
                 Write-Host "`nAccept loop error (logged to Mapper_Debug.log): $_" -ForegroundColor Red
-                # Guards against a tight CPU-spinning retry loop if the listener is failing
-                # every call (e.g. IsListening hasn't flipped false yet but the underlying
-                # socket is already dead) - a real per-request hiccup only costs 250ms.
+                # Stops a CPU-spinning retry loop when the listener fails every call (socket
+                # dead but IsListening not yet false); a real hiccup only costs 250ms.
                 Start-Sleep -Milliseconds 250
                 continue
             }
             $Request = $Context.Request
             $Response = $Context.Response
 
-            # Every request is served on this one thread, so a handler that blocks stops the
-            # whole server answering anything - the browser then sees requests time out or be
-            # dropped by HTTP.sys while this process is still very much alive, which is
-            # indistinguishable from "the server is down" at the client. Nothing recorded how
-            # long a handler ran, so that state was invisible after the fact. Log only the slow
-            # ones: enough to name the blocking endpoint without logging every request.
+            # Every request is served on this one thread, so a blocking handler stops the whole
+            # server while the process still looks alive - indistinguishable from "server down"
+            # at the client. Only slow requests are logged: enough to name the blocking
+            # endpoint without logging every request.
             $RequestStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
 
             try {
@@ -1373,14 +1197,11 @@ function Start-MapperWebServer {
                 }
             }
           } catch {
-            # Last-resort catch for this iteration - see the comment at the top of this block.
             Write-MapperDebugLog "ACCEPT LOOP ITERATION FATAL (contained) [$($_.Exception.GetBaseException().GetType().FullName)] $_`nStackTrace: $($_.ScriptStackTrace)"
             Write-Host "`nAccept loop iteration error, contained (logged to Mapper_Debug.log): $_" -ForegroundColor Red
-            # Best-effort: if a response was partially constructed for this request, abort it
-            # so the browser fails fast instead of hanging on a connection that will never
-            # complete - this must not itself throw and re-enter this catch. Read off $Context
-            # (not $Response): if the exception came from unpacking $Context, $Response still
-            # points at the PREVIOUS iteration's already-closed object.
+            # Abort a partially-constructed response so the browser fails fast rather than
+            # hanging. Read off $Context, not $Response: if the exception came from unpacking
+            # $Context, $Response still points at the previous iteration's closed object.
             try { if ($Context) { $Context.Response.Abort() } } catch {}
             Start-Sleep -Milliseconds 250
           }
@@ -1391,27 +1212,19 @@ function Start-MapperWebServer {
         throw
     } finally {
         # FIRST statement in the finally, deliberately: Ctrl+C raises a PipelineStoppedException
-        # that the catch above does NOT intercept, so neither SERVER FATAL nor ACCEPT LOOP
-        # EXITED is written on the single most common way this process ends. Without this line
-        # a Ctrl+C'd server leaves zero trace, and a still-open browser tab clicking "Scan
-        # Network" afterwards reports "failed to fetch" against a log that looks perfectly
-        # healthy. Pairs with SERVER START to bound the process's serving lifetime.
+        # the catch above does not intercept, so neither SERVER FATAL nor ACCEPT LOOP EXITED is
+        # written on the most common way this process ends. Pairs with SERVER START to bound
+        # the process's serving lifetime.
         #
-        # Written with raw .NET calls rather than Write-MapperDebugLog on purpose. Once Ctrl+C
-        # puts the pipeline in Stopping state, any CMDLET invoked from a finally block
-        # (Out-File/Get-Date/Get-Item, all of which that helper uses) immediately re-throws
-        # PipelineStoppedException at the call boundary; the helper's own `catch {}` would then
-        # swallow it and write nothing. Plain .NET method calls are unaffected.
+        # Raw .NET calls, not Write-MapperDebugLog: once Ctrl+C puts the pipeline in Stopping
+        # state, any CMDLET invoked from a finally block re-throws PipelineStoppedException at
+        # the call boundary (the helper's own `catch {}` would then swallow it and write
+        # nothing). Plain .NET method calls are unaffected.
         #
-        # KNOWN LIMITATION, for whoever reads this next: that same rule makes most of the rest
-        # of this finally dead on Ctrl+C, which is the usual way this process ends. The
-        # $Listener/runspace teardown below is .NET and does run, but Stop-JunosOrphanProcessesLocal
-        # is a PowerShell function built on Get-CimInstance/Stop-Process, so it throws on its
-        # first statement and every "SHUTDOWN ERROR" line below is likewise unwritable. Net
-        # effect: ssh.exe/cmd.exe grandchildren of an in-flight scan survive a Ctrl+C exit
-        # silently. Fixing it properly means reimplementing that reap with .NET only
-        # (Process.GetProcessesByName + StartTime filter), which cannot be verified from a
-        # non-Windows checkout - so it is documented rather than half-done.
+        # That rule also means the cmdlet-based parts of this finally do not run on Ctrl+C:
+        # the .NET $Listener/runspace teardown below does, but Stop-JunosOrphanProcessesLocal
+        # and every SHUTDOWN ERROR line do not, so ssh.exe/cmd.exe grandchildren of an
+        # in-flight scan survive a Ctrl+C exit. A .NET-only reap would fix it.
         try {
             if ($script:DebugLogPath) {
                 [System.IO.File]::AppendAllText(
@@ -1421,19 +1234,16 @@ function Start-MapperWebServer {
             }
         } catch {}
 
-        # Each step below is independently try/catch'd (recovery-1) - these all run once, at
-        # process shutdown, and are otherwise unrelated resources; one throwing (e.g. a runspace
-        # pool already in a bad state) must not abort the remaining steps and leak whatever
-        # comes after it. Failures are logged, not rethrown - there's no caller left to handle
-        # them and the process is exiting regardless.
+        # Each step is independently try/catch'd: these are unrelated resources, and one
+        # throwing must not abort the rest and leak whatever comes after it. Failures are
+        # logged, not rethrown - there's no caller left and the process is exiting anyway.
         try { $Listener.Stop() } catch { Write-MapperDebugLog "SHUTDOWN ERROR [Listener.Stop] $_" }
         try { $Listener.Close() } catch { Write-MapperDebugLog "SHUTDOWN ERROR [Listener.Close] $_" }
         try {
             if ($script:PendingScan) {
                 try { $script:PendingScan.PS.Stop() } catch {}
                 $script:PendingScan.PS.Dispose()
-                # Same ssh.exe/cmd.exe grandchild leak as the other rescan job cleanup points
-                # in this file - see Stop-JunosOrphanProcessesLocal in FleetCrawl.ps1.
+                # Same ssh.exe/cmd.exe grandchild leak as the other rescan cleanup points.
                 Stop-JunosOrphanProcessesLocal -TargetIP $script:PendingScan.IP -SinceTime $script:PendingScan.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
             }
         } catch { Write-MapperDebugLog "SHUTDOWN ERROR [PendingScan cleanup] $_" }
@@ -1445,8 +1255,7 @@ function Start-MapperWebServer {
             }
         } catch { Write-MapperDebugLog "SHUTDOWN ERROR [OrphanedScans cleanup] $_" }
         try {
-            # .Collected means Invoke-ScanNetworkStatusAction already disposed this job -
-            # avoid double-disposing PS/Runspace.
+            # .Collected means Invoke-ScanNetworkStatusAction already disposed PS/Runspace.
             if ($script:PendingScanNetwork -and -not $script:PendingScanNetwork.Collected) {
                 try { $script:PendingScanNetwork.PS.Stop() } catch {}
                 try { $script:PendingScanNetwork.PS.Dispose() } catch {}

@@ -4,35 +4,15 @@
     security/safety-critical logic.
 
 .DESCRIPTION
-    This repo has zero automated PowerShell test coverage. A codebase audit
-    (.audit/proposals/coverage-bundle.md, coverage-1..5) flagged five HIGH/CRITICAL pieces of
-    logic with no regression protection at all - one of which (the RawDumps secret-redaction
-    regex) has already silently regressed once in this project's history. This script is the
-    audit's own recommended fix: a minimal no-Pester smoke test (plain PowerShell, since
-    Pester is not guaranteed to be installed on every deployment target) that dot-sources the
-    real lib/*.ps1 files and exercises their actual, shipped behavior - it never re-implements
-    the logic under test.
-
-    Covers:
-      1. Get-JunosNodeData.ps1's RawDumps secret-redaction regex (coverage-1)
-      2. SshHelpers.ps1's Get-JunosSshArgs injection guard (coverage-2)
-      3. FleetCrawl.ps1's Test-IpInAllowedScopes crawl-scope fence (coverage-3)
-      4. FileHelpers.ps1's Move-FileAtomic / Set-FileContentAtomic (coverage-4)
-      5. (coverage-5, cross-session history-merge/reboot-detection) lives entirely in
-         web-src/persistence.js and is already covered by web-src/test/*.test.mjs via
-         `node --test` - nothing PowerShell-side to test there. As a related bonus, this
-         script also covers Get-JunosNodeData.ps1's Uptime "System booted:" parsing regex,
-         since it shares the same "inline regex, no dedicated function, no test" risk shape
-         as item 1 and is the PS-side data that feeds the JS-side reboot detection - but it is
-         NOT a substitute for coverage-5 itself.
+    Plain PowerShell, no Pester - it isn't guaranteed to be installed on every deployment
+    target. Dot-sources the real lib/*.ps1 files and exercises their shipped behavior; it
+    never re-implements the logic under test. See the section banners below for what it covers.
 
 .USAGE
     powershell.exe -File .\Run-Tests.ps1
-    (run from the PS_NetworkMapper project root; plain functions/scriptblocks only, so this
-    also runs fine under pwsh if that's what's on hand)
+    (run from the project root; plain functions/scriptblocks only, so pwsh works too)
 
-    Exits 0 if every case passed, 1 otherwise - suitable for wiring into CI later even though
-    none currently exists.
+    Exits 0 if every case passed, 1 otherwise.
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -75,15 +55,11 @@ function Test-Case {
 }
 
 # =========================================================================================
-# 1. Get-JunosNodeData.ps1 RawDumps secret-redaction regex (coverage-1)
+# 1. Get-JunosNodeData.ps1 RawDumps secret-redaction regex
 # =========================================================================================
-# Get-JunosNodeData.ps1 is a full CLI-driving script (it opens a real ssh.exe session), not a
-# dot-sourceable library, so there's no clean function to call. Rather than re-implementing
-# the regex by hand here (which would repeat the exact "test re-implements instead of
-# imports" anti-pattern this same audit already flagged elsewhere), extract the ACTUAL,
-# shipped -replace pattern/replacement literals straight out of the source file and apply
-# them - this exercises the real regex, verbatim, not a hand-copied stand-in that could drift
-# from it (which is exactly how the historical regression slipped through).
+# Get-JunosNodeData.ps1 opens a real ssh.exe session, so there's no dot-sourceable function to
+# call. Extract the shipped -replace pattern/replacement literals from the source and apply
+# them, rather than hand-copying the regex here where it could drift from the real one.
 Write-Host "`n--- 1. RawDumps secret-redaction regex (Get-JunosNodeData.ps1:147) ---" -ForegroundColor Cyan
 
 $JunosNodeDataPath = Join-Path $LibDir 'Get-JunosNodeData.ps1'
@@ -128,12 +104,10 @@ Local Interface: ge-0/0/0, Parent Interface: -, Chassis Id: 00:11:22:33:44:55
     $RedactedB = $DumpNoConfig -replace $RedactPattern, $RedactReplacement
     Test-Case "dump with no config section passes through byte-for-byte unchanged" { $RedactedB -eq $DumpNoConfig }
 
-    # Case C: the historical Pass 6->7 regression shape - a decoy, prompt-shaped line
-    # ("admin@switch1> show configuration | display set") planted INSIDE a later command's
-    # output (e.g. an operator-set interface Description shown in "show interfaces
-    # extensive"), positioned AFTER the real config section. A greedy prefix would backtrack
-    # to this LATER decoy match and leave the real, earlier secret un-redacted; the shipped
-    # regex uses a non-greedy prefix specifically to avoid that.
+    # Case C: a decoy, prompt-shaped line planted inside a later command's output (e.g. an
+    # operator-set interface Description), positioned AFTER the real config section. A greedy
+    # prefix would backtrack to the later decoy and leave the earlier real secret
+    # un-redacted; the shipped regex uses a non-greedy prefix to avoid that.
     $DumpWithDecoy = @"
 admin@switch1> show system uptime
 System booted: 2024-01-01 00:00:00 UTC
@@ -152,7 +126,7 @@ Physical interface: ge-0/0/0, Enabled, Physical link is Up
 }
 
 # =========================================================================================
-# 2. SshHelpers.ps1 Get-JunosSshArgs injection guard (coverage-2)
+# 2. SshHelpers.ps1 Get-JunosSshArgs injection guard
 # =========================================================================================
 Write-Host "`n--- 2. Get-JunosSshArgs injection guard (SshHelpers.ps1) ---" -ForegroundColor Cyan
 . (Join-Path $LibDir 'SshHelpers.ps1')
@@ -161,11 +135,9 @@ Test-Case "valid username + valid IP is accepted" {
     (Get-JunosSshArgs -Username "admin" -TargetIP "10.1.2.3") -join ' ' -match '10\.1\.2\.3'
 }
 
-# Regression guard. ServerAliveInterval x ServerAliveCountMax was once 10x3=30s, SHORTER than
-# Get-JunosNodeData.ps1's 50s per-batch Process.WaitForExit - so ssh tore down healthy sessions
-# to switches whose RE stalled past 30s mid-batch, giving an empty payload on those switches
-# only. Confirmed in the field. Assert the budget still exceeds the batch timeout so a future
-# tweak to either number can't silently reintroduce it.
+# Regression guard: if ServerAliveInterval x ServerAliveCountMax is shorter than the worker's
+# per-batch Process.WaitForExit, ssh tears down healthy sessions to switches whose RE stalls
+# mid-batch, yielding an empty payload on those switches only.
 Test-Case "ssh keepalive budget stays longer than the worker's per-batch timeout" {
     $SshArgs = Get-JunosSshArgs -Username "admin" -TargetIP "10.1.2.3"
     $Interval = [int](($SshArgs | Where-Object { $_ -like 'ServerAliveInterval=*' }) -replace '\D')
@@ -208,7 +180,7 @@ Test-Case "target IP missing an octet is rejected" {
 } -ExpectThrow
 
 # =========================================================================================
-# 3. FleetCrawl.ps1 Test-IpInAllowedScopes crawl-scope fence (coverage-3)
+# 3. FleetCrawl.ps1 Test-IpInAllowedScopes crawl-scope fence
 # =========================================================================================
 Write-Host "`n--- 3. Test-IpInAllowedScopes crawl-scope fence (FleetCrawl.ps1) ---" -ForegroundColor Cyan
 . (Join-Path $LibDir 'FleetCrawl.ps1')
@@ -236,7 +208,7 @@ Test-Case "empty IP is blocked" {
 } -ExpectFalse
 
 # =========================================================================================
-# 4. FileHelpers.ps1 Move-FileAtomic / Set-FileContentAtomic (coverage-4)
+# 4. FileHelpers.ps1 Move-FileAtomic / Set-FileContentAtomic
 # =========================================================================================
 Write-Host "`n--- 4. Move-FileAtomic / Set-FileContentAtomic (FileHelpers.ps1) ---" -ForegroundColor Cyan
 . (Join-Path $LibDir 'FileHelpers.ps1')
@@ -276,17 +248,15 @@ try {
 }
 
 # =========================================================================================
-# 5. coverage-5 (cross-session history-merge / reboot detection)
+# 5. Cross-session history-merge / reboot detection
 # =========================================================================================
 Write-Host "`n--- 5. coverage-5 (history-merge / reboot detection) ---" -ForegroundColor Cyan
 Write-Host "SKIPPED: this logic lives entirely in web-src/persistence.js (JS), already covered" -ForegroundColor Yellow
 Write-Host "by web-src/test/*.test.mjs via 'node --test'. No PowerShell-side reboot-detection" -ForegroundColor Yellow
 Write-Host "(comparison) logic exists to test here - not forcing an inapplicable PS test." -ForegroundColor Yellow
 
-# Bonus (not a substitute for coverage-5): Get-JunosNodeData.ps1's Uptime "System booted:"
-# parsing regex - the PS-side data that feeds the JS-side reboot detection, extracted from
-# source the same way as item 1 above, since it shares that item's "inline regex, no
-# dedicated function" shape.
+# Bonus: the Uptime "System booted:" parsing regex that feeds the JS-side reboot detection,
+# extracted from source the same way as item 1 above.
 $UptimeMatch = [regex]::Match(
     $JunosNodeDataSrc,
     "(?s)if\s*\(\`$DataDict\[`"UPTIME`"\]\s*-match\s*`"([^`"]*)`"\)"
