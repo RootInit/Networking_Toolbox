@@ -609,7 +609,10 @@ function Invoke-RescanStatusAction {
     }
 
     $Elapsed = ((Get-Date) - $Job.StartTime).TotalSeconds
-    if ($Elapsed -gt 90) {
+    # INVARIANT: must outlast Get-JunosNodeData.ps1's per-batch Process.WaitForExit, or a
+    # rescan reports "timeout" for the slow-RE switches that budget exists to accommodate.
+    # Matches the crawl orchestrator's $JobAbandonSeconds for the same reason.
+    if ($Elapsed -gt 145) {
         # Not force-stopped: New-JunosAskPass's plaintext %TEMP% password file is removed only
         # by the worker's own finally block, which .Stop() on a pipeline blocked in
         # Process.WaitForExit may never reach. Free the HTTP-facing slot instead and let

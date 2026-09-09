@@ -200,6 +200,26 @@ Test-Case "orchestrator job-abandon deadline stays longer than the worker's per-
     }
     $true
 }
+# Third layer of the same coupling: the UI's single-device Rescan runs the worker directly, not
+# through Invoke-FleetCrawl, so it needs its own deadline longer than the batch. Left behind at
+# 90s it reported "timeout" for exactly the slow-RE switches the batch budget was raised for.
+Test-Case "the web rescan deadline stays longer than the worker's per-batch timeout" {
+    $WorkerSrc = Get-Content -LiteralPath (Join-Path $LibDir 'Get-JunosNodeData.ps1') -Raw
+    if ($WorkerSrc -notmatch 'WaitForExit\((?<ms>\d+)\)') { throw "Could not find WaitForExit(<ms>) in Get-JunosNodeData.ps1" }
+    $BatchTimeoutSec = [int]$Matches.ms / 1000
+
+    $WebSrc = Get-Content -LiteralPath (Join-Path $LibDir 'WebServer.ps1') -Raw
+    if ($WebSrc -notmatch '\$script:OrphanedScans') { throw "Could not find the rescan orphan path in WebServer.ps1" }
+    # The deadline immediately above the OrphanedScans hand-off.
+    $RescanMatch = [regex]::Match($WebSrc, '(?s)\$Elapsed\s*-gt\s*(?<sec>\d+)\)\s*\{(?:(?!\$Elapsed).)*?\$script:OrphanedScans')
+    if (-not $RescanMatch.Success) { throw "Could not find the rescan deadline guarding `$script:OrphanedScans in WebServer.ps1" }
+    $RescanSec = [int]$RescanMatch.Groups['sec'].Value
+
+    if ($RescanSec -le $BatchTimeoutSec) {
+        throw "web rescan deadline ${RescanSec}s must exceed the ${BatchTimeoutSec}s batch timeout, or a single-device rescan reports 'timeout' for switches the worker was still scanning"
+    }
+    $true
+}
 Test-Case "username with a leading dash is rejected (would be parsed as an ssh flag)" {
     Get-JunosSshArgs -Username "-oProxyCommand=evil" -TargetIP "10.1.2.3"
 } -ExpectThrowMatch 'Invalid Junos username'
@@ -1011,6 +1031,140 @@ return @{ Node = $Base; Logs = @() }
     }
 } finally {
     Remove-Item -LiteralPath $CrawlDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# --- Retry pass ---
+# A device lost to a transient failure used to be lost for the whole crawl: $Visited was
+# stamped at dispatch, so nothing could re-queue it. These cover the retry rules, including
+# the one that must NOT retry - repeating a bad credential is how an account gets locked out.
+$RetryDir = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_retry_$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $RetryDir -Force | Out-Null
+try {
+    $RetryWorker = Join-Path $RetryDir 'RetryWorker.ps1'
+    # Attempts are counted through files in the worker's own directory: runspaces share no
+    # state, and retries for one IP never overlap, so a plain file-per-attempt count is safe.
+    Set-Content -LiteralPath $RetryWorker -Encoding utf8 -Value @'
+param([string]$TargetIP, [string]$Username, [string]$Password, [switch]$Log, [string]$DebugLogPath)
+$AttemptDir = Join-Path $PSScriptRoot 'attempts'
+if (-not (Test-Path $AttemptDir)) { New-Item -ItemType Directory -Path $AttemptDir -Force | Out-Null }
+$Attempt = @(Get-ChildItem -LiteralPath $AttemptDir -Filter "$TargetIP`_*" -ErrorAction SilentlyContinue).Count + 1
+New-Item -ItemType File -Path (Join-Path $AttemptDir "$TargetIP`_$Attempt") -Force | Out-Null
+
+$Base = @{
+    DeviceIP = $TargetIP; Hostname = "sw-$TargetIP"; JunosVersion = "x"; Gateway = "x";
+    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+    Uptime = "x"; LastConfigured = "x"; LastConfiguredBy = "x"; Alarms = @();
+    MasterCpuUtilization = "x"; MasterMemoryUtilization = "x"; MedNeighbors = @();
+    Configuration = "x"; ScanStatus = "Ok"; ScanError = $null
+}
+switch -Regex ($TargetIP) {
+    '10\.1\.0\.1$' { $Base.Neighbors = @(2,3,4 | ForEach-Object { @{ ManagementIP = "10.1.0.$_" } }) }
+    # Transient: fails once, then succeeds - the case the retry exists for.
+    '10\.1\.0\.2$' { if ($Attempt -eq 1) { $Base.ScanStatus = "Error"; $Base.ScanError = "empty payload" } }
+    # Permanently down: burns both attempts and settles as a failure node.
+    '10\.1\.0\.3$' { $Base.ScanStatus = "Unreachable"; $Base.ScanError = "connection timed out" }
+    # Must be tried exactly once, no matter what.
+    '10\.1\.0\.4$' { $Base.ScanStatus = "AuthFailed"; $Base.ScanError = "bad creds" }
+}
+return @{ Node = $Base; Logs = @() }
+'@
+
+    $RetryProgress = @{}
+    $RetryResult = Invoke-FleetCrawl -StartIP '10.1.0.1' -AllowedScopes @('10.1.0.') -MaxConcurrent 4 `
+        -WorkerPath $RetryWorker -Username 'u' -Password 'p' `
+        -SnapshotDir $RetryDir -ProgressTable $RetryProgress 3>$null
+
+    function Get-RetryAttemptCount { param([string]$IP)
+        @(Get-ChildItem -LiteralPath (Join-Path $RetryDir 'attempts') -Filter "$IP`_*" -ErrorAction SilentlyContinue).Count
+    }
+    # Callers wrap this in @(): a node is a hashtable, so an unwrapped single result would
+    # report .Count as its key count (19) rather than 1.
+    function Get-RetryNodes { param([string]$IP)
+        $RetryResult.Topology | Where-Object { $_.DeviceIP -eq $IP }
+    }
+
+    Test-Case "a device that fails transiently is dispatched a second time" {
+        (Get-RetryAttemptCount '10.1.0.2') -eq 2
+    }
+    Test-Case "a device that succeeds on retry ends up Ok, with no leftover failure node" {
+        $Nodes = @(Get-RetryNodes '10.1.0.2')
+        $Nodes.Count -eq 1 -and $Nodes[0].ScanStatus -eq 'Ok'
+    }
+    Test-Case "an auth failure is never retried (a repeat attempt is how an account gets locked out)" {
+        (Get-RetryAttemptCount '10.1.0.4') -eq 1
+    }
+    Test-Case "a permanently failing device stops at the attempt cap" {
+        (Get-RetryAttemptCount '10.1.0.3') -eq 2
+    }
+    Test-Case "a device that fails every attempt still lands exactly one node in the topology" {
+        $Nodes = @(Get-RetryNodes '10.1.0.3')
+        $Nodes.Count -eq 1 -and $Nodes[0].ScanStatus -eq 'Unreachable'
+    }
+    Test-Case "retrying does not duplicate or drop devices - one node per visited IP" {
+        $RetryResult.Topology.Count -eq $RetryResult.VisitedCount
+    }
+    Test-Case "a successful device is never re-dispatched" {
+        (Get-RetryAttemptCount '10.1.0.1') -eq 1
+    }
+} finally {
+    Remove-Item -LiteralPath $RetryDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# A retry-queued IP is the one state that is in $Visited, has no node yet (its failed attempt
+# was discarded) and is in the QUEUE rather than in $Jobs - so the abort path's live-job sweep
+# does not see it. Without a drain it vanishes from the topology entirely, which is exactly the
+# silent-drop the abort placeholders exist to prevent.
+$AbortRetryDir = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_abortretry_$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $AbortRetryDir -Force | Out-Null
+try {
+    $AbortRetryWorker = Join-Path $AbortRetryDir 'AbortRetryWorker.ps1'
+    Set-Content -LiteralPath $AbortRetryWorker -Encoding utf8 -Value @'
+param([string]$TargetIP, [string]$Username, [string]$Password, [switch]$Log, [string]$DebugLogPath)
+$Base = @{
+    DeviceIP = $TargetIP; Hostname = "sw-$TargetIP"; JunosVersion = "x"; Gateway = "x";
+    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+    Uptime = "x"; LastConfigured = "x"; LastConfiguredBy = "x"; Alarms = @();
+    MasterCpuUtilization = "x"; MasterMemoryUtilization = "x"; MedNeighbors = @();
+    Configuration = "x"; ScanStatus = "Ok"; ScanError = $null
+}
+switch -Regex ($TargetIP) {
+    '10\.2\.0\.1$'       { $Base.Neighbors = @(2,3,4,5 | ForEach-Object { @{ ManagementIP = "10.2.0.$_" } }) }
+    # Retryable: queued for a second attempt that the abort below will never dispatch.
+    '10\.2\.0\.2$'       { $Base.ScanStatus = "Error"; $Base.ScanError = "empty payload" }
+    '10\.2\.0\.[345]$'   { $Base.ScanStatus = "AuthFailed"; $Base.ScanError = "bad creds" }
+}
+return @{ Node = $Base; Logs = @() }
+'@
+
+    $AbortRetryProgress = @{}
+    $AbortRetryResult = Invoke-FleetCrawl -StartIP '10.2.0.1' -AllowedScopes @('10.2.0.') -MaxConcurrent 5 `
+        -WorkerPath $AbortRetryWorker -Username 'u' -Password 'p' `
+        -SnapshotDir $AbortRetryDir -ProgressTable $AbortRetryProgress 3>$null
+
+    Test-Case "a crawl aborting while a retry is queued still aborts" {
+        $AbortRetryResult.Aborted -eq $true
+    }
+    Test-Case "a device awaiting a retry when the crawl aborts is not silently dropped" {
+        @($AbortRetryResult.Topology | Where-Object { $_.DeviceIP -eq '10.2.0.2' }).Count -eq 1
+    }
+    Test-Case "no device is dropped when the crawl aborts with retries pending" {
+        $AbortRetryResult.Topology.Count -eq $AbortRetryResult.VisitedCount
+    }
+} finally {
+    Remove-Item -LiteralPath $AbortRetryDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# A batch killed mid-stream still parses whatever arrived, so the node used to come back
+# ScanStatus="Ok" and the orchestrator never learned the data was truncated - which would also
+# make it invisible to the retry rules above.
+Test-Case "a timed-out batch that still produced output is flagged Partial, not Ok" {
+    $JunosNodeDataSrc -match '(?s)\$Result\.TimedOut[^\r\n]*\r?\n[^\r\n]*ScanStatus\s*=\s*"Partial"'
+}
+Test-Case "the retryable statuses exclude AuthFailed and Aborted" {
+    if ($FleetCrawlSrc -notmatch '\$RetryableStatuses\s*=\s*@\(([^\)]*)\)') { throw "Could not find `$RetryableStatuses in FleetCrawl.ps1" }
+    $List = $Matches[1]
+    ($List -match 'Timeout') -and ($List -match 'Partial') -and ($List -match 'Error') -and
+    ($List -match 'Unreachable') -and ($List -notmatch 'AuthFailed') -and ($List -notmatch 'Aborted')
 }
 
 # =========================================================================================

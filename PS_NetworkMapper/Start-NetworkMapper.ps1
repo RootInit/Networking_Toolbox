@@ -6,7 +6,7 @@ param (
     [string[]]$AllowedScopes = @("131.30."),
 
     [ValidateRange(1, 64)]
-    [int]$MaxConcurrent = 10,
+    [int]$MaxConcurrent = 25,
     [switch]$Log,
     # Encryption is on by default. Disabling it writes plain .json topology and reads/saves a
     # plaintext Configuration.json; an existing .enc is ignored, not migrated.

@@ -145,11 +145,11 @@ function Get-JunosSshArgs {
     # Defense in depth now that Get-JunosNodeData.ps1 kills ssh.exe directly: it still cannot
     # do so if the PowerShell host itself dies, and an orphan holds the switch session open.
     #
-    # INVARIANT: this budget (15s x 6 = 90s) must stay LONGER than Get-JunosNodeData.ps1's
-    # per-batch Process.WaitForExit timeout (50s). A shorter budget tears down healthy sessions
+    # INVARIANT: this budget (15s x 10 = 150s) must stay LONGER than Get-JunosNodeData.ps1's
+    # per-batch Process.WaitForExit timeout (120s). A shorter budget tears down healthy sessions
     # the batch is still waiting on - switches with a slow/loaded RE stall during
     # `show interfaces extensive` / `show configuration | display set` and return an empty
     # payload every time, while faster switches look fine.
-    $BaseArgs = @("-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=6", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
+    $BaseArgs = @("-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=10", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
     return $BaseArgs + @("$Username@$TargetIP")
 }

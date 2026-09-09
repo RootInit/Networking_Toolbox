@@ -131,7 +131,8 @@ function Invoke-FleetCrawl {
     }
 
     # Without a synthetic node a device that never produced one vanishes from the output
-    # entirely: its IP is already in $Visited, so it is never retried and never reappears.
+    # entirely: its IP is already in $Visited, and once its attempts are spent nothing
+    # re-dispatches it.
     # Mirrors Get-JunosNodeData.ps1's $NodeData initializer field-for-field (Interfaces is a
     # hashtable there, not an array) - consumers assume every key a real node has is present.
     function New-PlaceholderNodeLocal {
@@ -183,13 +184,59 @@ function Invoke-FleetCrawl {
     # were still going to succeed - abandoning gains nothing and costs the crawl a device.
     # Set it no higher than that either: a dead switch holds a runspace slot for this whole
     # budget. Get-JunosNodeData.ps1 makes exactly one SSH batch call, capped at
-    # Process.WaitForExit(50000); the remaining 25s covers process start, parsing and the
+    # Process.WaitForExit(120000); the remaining 25s covers process start, parsing and the
     # result write. Raise this if that cap rises or a second batch is ever added.
-    $JobAbandonSeconds = 75
+    $JobAbandonSeconds = 145
     $Queue = [System.Collections.Generic.Queue[string]]::new()
     $Visited = [System.Collections.Generic.HashSet[string]]::new()
     $Enqueued = [System.Collections.Generic.HashSet[string]]::new()
     $TopologyList = [System.Collections.Generic.List[object]]::new()
+
+    # Retry pass, for a device lost to a transient fault (a stalled RE, a dropped connect). A
+    # failed IP goes to the BACK of the same queue and the main loop handles it, which reuses
+    # dispatch, neighbor discovery, the periodic writes and the circuit breaker rather than
+    # growing a second loop that has to repeat all of them. Back of the queue, not the front, so
+    # the retry lands after the rest of the sweep and a transient fault has time to clear.
+    #
+    # AuthFailed is deliberately absent: retrying a bad credential is precisely how the estate
+    # locks the account out, which is what the circuit breaker below exists to prevent. Aborted
+    # is absent because the crawl is already stopping.
+    $RetryableStatuses = @("Timeout", "Partial", "Error", "Unreachable")
+    $MaxAttempts = 2
+    $Attempts = @{}
+    # The discarded node from a retried attempt, keyed by IP. A Partial carries real data, so if
+    # the retry then produces nothing (abandoned as hung, or cut short by an abort) the stashed
+    # node is still the better record - without this, retrying could report LESS than one attempt.
+    $LastFailedNode = @{}
+
+    # $true means the IP is queued for another attempt, and the caller must NOT record a node
+    # for this one: a device that succeeds on its retry has to leave no failure behind, and
+    # consumers do last-write-wins by DeviceIP, so a stale placeholder would be indistinguishable
+    # from a real result. The final attempt returns $false and is recorded normally.
+    function Request-JobRetryLocal {
+        param([string]$IP, [string]$Status)
+        if ($RetryableStatuses -notcontains $Status) { return $false }
+        if ($Attempts[$IP] -ge $MaxAttempts) {
+            Write-DebugLogLocal "RETRY EXHAUSTED: $IP failed $($Attempts[$IP]) attempts, last status '$Status'"
+            return $false
+        }
+        $Queue.Enqueue($IP)
+        Write-DebugLogLocal "RETRY QUEUED: $IP (attempt $($Attempts[$IP]) failed with status '$Status')"
+        return $true
+    }
+
+    # The one node a failed IP ends up with. Prefers whatever a discarded earlier attempt
+    # collected over an empty placeholder, so a device never loses data by being retried.
+    # Callers own $PendingWrites: assigning to it here would only create a local copy.
+    function Add-FinalNodeLocal {
+        param([string]$IP, [string]$Status, [string]$ScanErrorText)
+        if ($LastFailedNode.ContainsKey($IP)) {
+            $TopologyList.Add($LastFailedNode[$IP])
+            $LastFailedNode.Remove($IP)
+        } else {
+            $TopologyList.Add((New-PlaceholderNodeLocal -IP $IP -Status $Status -ScanErrorText $ScanErrorText))
+        }
+    }
 
     $Queue.Enqueue($StartIP)
     $Enqueued.Add($StartIP) | Out-Null
@@ -287,7 +334,15 @@ function Invoke-FleetCrawl {
             $DispatchedThisIteration = 0
             while ($Jobs.Count -lt $MaxConcurrent -and $Queue.Count -gt 0 -and $DispatchedThisIteration -lt $DispatchLimitThisIteration) {
                 $NextIP = $Queue.Dequeue()
-                if (!$Visited.Add($NextIP)) { continue }
+                # $Visited dedupes first dispatches only. A retry is a deliberate re-dispatch of
+                # an already-visited IP, so it bypasses that gate and is bounded by $MaxAttempts.
+                $PriorAttempts = if ($Attempts.ContainsKey($NextIP)) { $Attempts[$NextIP] } else { 0 }
+                if ($PriorAttempts -eq 0) {
+                    if (!$Visited.Add($NextIP)) { continue }
+                } elseif ($PriorAttempts -ge $MaxAttempts) {
+                    continue
+                }
+                $Attempts[$NextIP] = $PriorAttempts + 1
 
                 # Reset $PS before the try: it's function-scoped, so a throw here would
                 # otherwise leave it pointing at the previous iteration's live job, which the
@@ -333,9 +388,11 @@ function Invoke-FleetCrawl {
                     Write-DebugLogLocal "ORCHESTRATOR TIMEOUT: Abandoning hung thread for $($Job.IP)"
                     Write-Host "`n[!] Timed out waiting on $($Job.IP) - abandoning and continuing." -ForegroundColor Red
 
-                    $TopologyList.Add((New-PlaceholderNodeLocal -IP $Job.IP -Status "Timeout" `
-                        -ScanErrorText "Orchestrator gave up waiting on $($Job.IP) after $($JobAbandonSeconds)s (job abandoned)."))
-                    $PendingWrites++
+                    if (-not (Request-JobRetryLocal -IP $Job.IP -Status "Timeout")) {
+                        Add-FinalNodeLocal -IP $Job.IP -Status "Timeout" `
+                            -ScanErrorText "Orchestrator gave up waiting on $($Job.IP) after $($JobAbandonSeconds)s (job abandoned)."
+                        $PendingWrites++
+                    }
                     # A timeout resets only the consecutive streak; $TotalAuthFailures is a
                     # whole-crawl tally so interleaved timeouts can't mask a failing credential.
                     $ConsecutiveAuthFailures = 0
@@ -372,11 +429,22 @@ function Invoke-FleetCrawl {
                             # would duplicate every line.
                             if (-not $DebugLogPath -and $Result.Logs) { foreach ($LogLine in $Result.Logs) { Write-DebugLogLocal $LogLine } }
 
+                            # Retryable failures are dropped here rather than recorded: the
+                            # re-dispatch discovers this device's neighbors itself, so nothing
+                            # is lost by waiting for the attempt that actually reaches it.
+                            if (Request-JobRetryLocal -IP $Job.IP -Status $Node.ScanStatus) {
+                                # The enclosing try's finally adds $Job to $JobsToRemove.
+                                $LastFailedNode[$Job.IP] = $Node
+                                Write-Host "`n[~] $($Job.IP) failed ($($Node.ScanStatus)) - queued for another attempt." -ForegroundColor Yellow
+                                continue
+                            }
+
                             Write-Host "`n[+] Finished $($Job.IP) ($($Node.Hostname)) - $($Node.Neighbors.Count) Neighbors, $($Node.Clients.Count) Clients" -ForegroundColor Green
 
                             # Before the neighbor loop, so a malformed neighbor entry throwing
                             # partway through doesn't cost the node its collected data.
                             $TopologyList.Add($Node)
+                            $LastFailedNode.Remove($Job.IP)
                             $PendingWrites++
 
                             if ($Node.ScanStatus -eq "AuthFailed") {
@@ -411,17 +479,29 @@ function Invoke-FleetCrawl {
                                 Write-Host "`n[!] Error enqueuing neighbors for $($Job.IP): $_" -ForegroundColor Red
                             }
                         } else {
-                            # Shouldn't happen - Get-JunosNodeData always returns a Node.
+                            # Get-JunosNodeData always returns a Node, so reaching here means the
+                            # worker died before its own error handling could - a FIPS-policy host
+                            # rejecting a hash provider did exactly this. Recorded rather than
+                            # skipped: a silent drop leaves the device in $Visited with no node
+                            # anywhere in the output.
                             Write-DebugLogLocal "ORCHESTRATOR WARNING: $($Job.IP) produced no result (worker returned nothing)."
-                            Write-Host "`n[!] $($Job.IP) produced no result - skipping." -ForegroundColor Red
+                            Write-Host "`n[!] $($Job.IP) produced no result." -ForegroundColor Red
+
+                            if (-not (Request-JobRetryLocal -IP $Job.IP -Status "Error")) {
+                                Add-FinalNodeLocal -IP $Job.IP -Status "Error" `
+                                    -ScanErrorText "Worker returned nothing for $($Job.IP) - it exited before it could report a fault. See the debug log's WORKER ERROR STREAM lines."
+                                $PendingWrites++
+                            }
                         }
                     } catch {
                         Write-DebugLogLocal "ORCHESTRATOR ERROR parsing result from $($Job.IP): $_"
                         Write-Host "`n[!] Error processing result from $($Job.IP): $_" -ForegroundColor Red
 
-                        $TopologyList.Add((New-PlaceholderNodeLocal -IP $Job.IP -Status "Error" `
-                            -ScanErrorText "Orchestrator failed to process result from $($Job.IP): $_"))
-                        $PendingWrites++
+                        if (-not (Request-JobRetryLocal -IP $Job.IP -Status "Error")) {
+                            Add-FinalNodeLocal -IP $Job.IP -Status "Error" `
+                                -ScanErrorText "Orchestrator failed to process result from $($Job.IP): $_"
+                            $PendingWrites++
+                        }
                     } finally {
                         $JobsToRemove += $Job
                     }
@@ -486,6 +566,19 @@ function Invoke-FleetCrawl {
                     Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime.AddSeconds(-2) -DebugLogPath $DebugLogPath
                 }
                 $Jobs.Clear()
+
+                # A retry waiting in the queue is in $Visited with no node and no live job, so
+                # the sweep above cannot see it - without this it would vanish from the output
+                # entirely, the same silent drop the Aborted placeholders exist to prevent.
+                # Only IPs already dispatched at least once: an IP merely enqueued from a
+                # neighbor was never visited and is not expected to have a node.
+                foreach ($QueuedIP in @($Queue.ToArray())) {
+                    if (-not $Attempts.ContainsKey($QueuedIP)) { continue }
+                    Add-FinalNodeLocal -IP $QueuedIP -Status "Aborted" `
+                        -ScanErrorText "Crawl aborted (repeated authentication failures) while this device was waiting to be retried."
+                    $PendingWrites++
+                }
+                $Queue.Clear()
                 break
             }
 

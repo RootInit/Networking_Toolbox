@@ -67,12 +67,12 @@ $Logs = [System.Collections.Generic.List[string]]::new()
 
 # Computed once, not per log call: the name depends only on $DebugLogPath, which is fixed for the run.
 #
-# Hashed in-script rather than with a .NET hash provider: on a host with the Windows FIPS
-# policy enforced, MD5 (and every *Managed hash class) throws from its constructor. The name is not
-# a security boundary - it only has to be deterministic across processes and legal as a mutex name
-# (no backslash, under 260 chars), so
-# FNV-1a is enough. A collision between two unrelated log paths costs extra serialization, nothing
-# more. String.GetHashCode is not usable here: it is per-process randomized on .NET Core.
+# Hashed in-script rather than with a .NET hash provider: on a host with the Windows FIPS policy
+# enforced, MD5 (and every *Managed hash class) throws from its constructor. The name is not a
+# security boundary - it only has to be deterministic across processes and legal as a mutex name
+# (no backslash, under 260 chars) - so FNV-1a is enough. A collision between two unrelated log
+# paths costs extra serialization, nothing more. String.GetHashCode is not usable here: it is
+# per-process randomized on .NET Core.
 #
 # 0xFFFFFFFFL, not 0xFFFFFFFF - PowerShell parses the latter as Int32 -1, making the mask a no-op
 # and letting the accumulator overflow into [double].
@@ -203,7 +203,7 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.WriteLine("quit")
         $Process.StandardInput.Close()
 
-        $Process.WaitForExit(50000) | Out-Null
+        $Process.WaitForExit(120000) | Out-Null
         if (-not $Process.HasExited) {
             # Targets ssh.exe itself, so the switch session and both pipes really do go away.
             # Kill() races HasExited and throws if the process exited in between.
@@ -285,7 +285,7 @@ try {
         } else { "(no stderr output captured)" }
         if ($StderrNoise) { $ErrSummary = "$ErrSummary [ssh_config requests a TTY]" }
         # Distinguishes "ssh exited on its own with nothing to show" from "the session sat idle
-        # until our 50s WaitForExit killed it" - identical from ScanError alone otherwise.
+        # until our 120s WaitForExit killed it" - identical from ScanError alone otherwise.
         $DiagTag = "[exit=$($Result.ExitCode) elapsed=$($Result.ElapsedSeconds)s timedOut=$($Result.TimedOut)]"
         $ErrSummary = "$DiagTag $ErrSummary"
         if ($HumanReadable) { Write-Host "  [!] CRITICAL ERROR: Switch returned empty payload. ssh said: $ErrSummary" -ForegroundColor Red }
@@ -804,6 +804,15 @@ if ($HumanReadable) {
         Write-Host " (Showing first 15 interfaces of $($PhysicalPorts.Count) total...)`n" -ForegroundColor DarkGray
     }
     exit
+}
+
+# A killed batch that still delivered some output parses fine, so nothing above would mark it:
+# the node looks complete while missing every command the kill cut off. Flagged Partial so the
+# truncation is distinguishable from a full scan and the orchestrator can retry it.
+# Only overrides a clean parse; an "Error" from the catch above names a more specific fault.
+if ($Result.TimedOut -and $NodeData.ScanStatus -eq "Ok") {
+    $NodeData.ScanStatus = "Partial"
+    $NodeData.ScanError = "Session timed out mid-batch; the commands after the last one captured are missing from this node."
 }
 
 return @{ Node = $NodeData; Logs = $Logs }

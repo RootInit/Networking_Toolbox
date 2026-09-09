@@ -6,8 +6,11 @@
     <title>Enterprise Network Visualizer</title>
 
     <!-- Stamps data-theme before the <style> below is parsed, so dark rules apply from first
-         paint; doing it from a script file would flash the wrong theme. A persisted choice
-         wins, otherwise the OS setting. -->
+         paint; doing it from a script file would flash the wrong theme. localStorage is the
+         first-paint cache, not the source of truth: the real preference lives in the encrypted
+         Configuration.json.enc, which cannot be read this early (it needs a password prompt),
+         so persistence.js reconciles the two once that config resolves. A cached choice wins
+         here, otherwise the OS setting. -->
     <script>
         (function() {
             try {

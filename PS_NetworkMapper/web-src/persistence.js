@@ -3,22 +3,26 @@
 // never writes them, and reloading a fresh set of snapshots rebuilds them.
 
 // --- Dark Mode ---
-// Client-only preference, deliberately in localStorage rather than the server-synced
-// Configuration.json.enc. index.html's inline boot script stamps data-theme before first
-// paint to avoid a wrong-theme flash; this only keeps the checkbox in sync afterward.
+// Two layers. localStorage is the first-paint cache index.html's boot script reads, since the
+// server-synced Configuration.json.enc is encrypted and only resolves after a password prompt.
+// The config is the source of truth, so the preference follows the operator to another browser
+// or machine; applyDarkMode is the single writer that keeps the two in step.
+function applyDarkMode(dark) {
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    var checkbox = document.getElementById('setting-darkMode');
+    if (checkbox) checkbox.checked = dark;
+    try { localStorage.setItem('darkMode', dark ? 'dark' : 'light'); } catch (e) {}
+    // Everything else is CSS and repaints itself; the trend chart is drawn to a <canvas>
+    // that samples theme colors at draw time, so it needs an explicit re-render.
+    var trendsTab = document.getElementById('analysis-tab-trends');
+    if (trendsTab && trendsTab.classList.contains('active')) window.renderTrendChart();
+}
+
 window.initDarkModeToggle = function() {
     var checkbox = document.getElementById('setting-darkMode');
     if (!checkbox) return;
     checkbox.checked = document.documentElement.getAttribute('data-theme') === 'dark';
-    checkbox.addEventListener('change', function() {
-        var dark = checkbox.checked;
-        document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
-        try { localStorage.setItem('darkMode', dark ? 'dark' : 'light'); } catch (e) {}
-        // Everything else is CSS and repaints itself; the trend chart is drawn to a <canvas>
-        // that samples theme colors at draw time, so it needs an explicit re-render.
-        var trendsTab = document.getElementById('analysis-tab-trends');
-        if (trendsTab && trendsTab.classList.contains('active')) window.renderTrendChart();
-    });
+    checkbox.addEventListener('change', function() { applyDarkMode(checkbox.checked); });
 };
 document.addEventListener('DOMContentLoaded', window.initDarkModeToggle);
 
@@ -63,6 +67,10 @@ window.populateSettingsInputs = function() {
         if (el) el.value = settings[key];
     });
 
+    // Tri-state: a config saved before dark mode moved here has no darkMode key, and must not
+    // override the cached/OS choice already applied at first paint. Only an explicit boolean wins.
+    if (typeof settings.darkMode === 'boolean') applyDarkMode(settings.darkMode);
+
     var creds = window.getLoadedCredentials ? window.getLoadedCredentials() : { username: '', password: '' };
     var userEl = document.getElementById('setting-junosUsername');
     var passEl = document.getElementById('setting-junosPassword');
@@ -102,6 +110,12 @@ window.saveSettingsPanel = async function() {
         window.setStatus("Settings not saved - all fields must be valid numbers within range.", "red");
         return;
     }
+
+    // Not a DEFAULT_SETTINGS key - the loop above is numeric-only (parseFloat + range check) -
+    // but it must be written here regardless: setLoadedSettings REPLACES the settings object,
+    // so a darkMode left out would be silently dropped on the next threshold save.
+    var darkEl = document.getElementById('setting-darkMode');
+    if (darkEl) settings.darkMode = darkEl.checked;
 
     var userEl = document.getElementById('setting-junosUsername');
     var passEl = document.getElementById('setting-junosPassword');
