@@ -29,7 +29,7 @@ CORE, USER-FACING, SERVICE (local HTTP server + background jobs), DATA (encrypte
 
 ## Baseline
 - `cd web-src && node --test` → **80 tests, 80 pass, 0 fail**, 833ms. (2026-09-02)
-- No PowerShell test suite exists (no Pester tests found). `pwsh` 7.6.2 available via `nix develop`-free PATH (`/run/current-system/sw/bin/pwsh`).
+- No PowerShell test suite exists (no Pester tests found). `pwsh` 7.6.2 available via `nix develop`-free PATH (`/run/current-system/sw/bin/pwsh`). [Superseded 2026-09-08: `Run-Tests.ps1` now provides a no-framework PowerShell suite.]
 - No `package.json` / build step for web-src beyond `web-src/tools/build-inline.mjs` (inlines JS into `lib/Network_Visualizer.html`? — verify in Phase 1).
 - Working tree clean at start (git status: clean, branch main, HEAD c531285).
 
@@ -47,7 +47,7 @@ CORE, USER-FACING, SERVICE (local HTTP server + background jobs), DATA (encrypte
 6. `lib/Protect-MapperFile.ps1`, `web-src/persistence.js`, `web-src/config-resolve.js` — file save/load paths, INV-DATA
 7. Everything else (search.js, utils.js, scan-network.js, Update-OuiDatabase.ps1)
 
-## Findings table (Phase 1 complete, all 7 category agents returned; full detail in .claude/audit-findings-*.md)
+## Findings table (Phase 1 complete, all 7 category agents returned; per-agent detail was in .claude/audit-findings-*.md, removed from the repo 2026-09-08 - recoverable from git history)
 | ID | Track | File:line | Severity | Verdict | Notes |
 |----|-------|-----------|----------|---------|-------|
 | SSH-001 | CORE/SERVICE | SshHelpers.ps1:76-85, Connect-Switch.ps1:42 | CRITICAL | pending verify | Username unvalidated, interpolated into ssh.exe cmdline → ProxyCommand injection |
