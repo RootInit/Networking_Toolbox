@@ -277,3 +277,136 @@ test('buildMembers: pooling still demotes when every member carries contrary evi
   assert.deepEqual(members.map(m => m.inferred), [true, true]);
 });
 
+
+// ---- SFP cage binding: the prefix follows the optic, not the cage ----
+// A 1G optic in an SFP+ cage reports as ge-, not xe-. The catalogue art names EX4600 cages
+// xe-, so exact-name binding covered none of them, the whole pool was demoted to the inferred
+// panel, and inferModel's "all ports are ge- so it must be copper" rule then drew RJ45 jacks
+// on an all-fiber switch.
+function sfpVcDevice(prefix) {
+  const interfaces = [];
+  for (const fpc of [0, 1]) {
+    for (let n = 0; n < 24; n++) {
+      interfaces.push({ Port: `${prefix}-${fpc}/0/${n}`, Admin: 'up', Link: n % 3 ? 'down' : 'up' });
+    }
+  }
+  return {
+    StackMembers: [
+      { FPC: '0', Model: 'EX4600-40F', Serial: 'A', Role: 'Master' },
+      { FPC: '1', Model: 'EX4600-40F', Serial: 'B', Role: 'Backup' },
+    ],
+    Interfaces: interfaces, Alarms: [],
+  };
+}
+
+test('an EX4600 reporting 1G optics as ge- still gets its catalogue art, not the inferred panel', () => {
+  for (const m of buildMembers(sfpVcDevice('ge'))) {
+    assert.equal(m.catalogueKey, 'EX4600-40F');
+    assert.equal(m.inferred, false, 'catalogue art must not be demoted over an optic-speed prefix');
+  }
+});
+
+test('a cage binds to the name the switch actually reports, so its lens and tooltip resolve', () => {
+  const [m] = buildMembers(sfpVcDevice('ge'));
+  assert.equal(m.catalogueKey, 'EX4600-40F', 'must be the catalogue art, not the inferred panel');
+  // The art names this cage xe-0/0/7; the device reports ge-0/0/7, and that is what must
+  // reach data-port - lightStates and the tooltip are both keyed by the reported name.
+  assert.ok(m.html.includes('data-port="ge-0/0/7"'), 'cage bound to the reported ge- name');
+  assert.ok(!m.html.includes('port-absent" data-port="xe-0/0/7"'), 'not reported as an absent xe- port');
+});
+
+test('the same art still binds xe- names when 10G optics are fitted', () => {
+  const [m] = buildMembers(sfpVcDevice('xe'));
+  assert.equal(m.catalogueKey, 'EX4600-40F');
+  assert.equal(m.inferred, false);
+  assert.ok(m.html.includes('data-port="xe-0/0/7"'));
+});
+
+// ---- catalogue-wide guard against the EX4600 failure mode ----
+// Every model is driven through each prefix its cages could legitimately report. A model whose
+// art only binds one spelling gets demoted to the inferred panel and, if its ports happen to
+// be ge-, redrawn as RJ45 - which is how an all-fiber EX4600 came out with copper jacks.
+function artPortsOf(key) {
+  // Rendered with no interfaces: nothing is reported, so nothing can be demoted, and the SVG
+  // carries the art's own port names.
+  const [m] = buildMembers({ StackMembers: [{ FPC: '0', Model: key, Role: 'Standalone' }], Interfaces: [], Alarms: [] });
+  return [...m.html.matchAll(/data-port="([^"]+)"/g)].map(x => x[1]);
+}
+function renderWith(key, ports) {
+  const [m] = buildMembers({
+    StackMembers: [{ FPC: '0', Model: key, Role: 'Standalone' }],
+    Interfaces: ports.map(p => ({ Port: p, Admin: 'up', Link: 'up' })), Alarms: [],
+  });
+  return m;
+}
+
+const CATALOGUE = Object.keys(MODELS).filter(k => !MODELS[k].inferred);
+
+test('every catalogue model keeps its art when its own port names are reported', () => {
+  const failures = [];
+  for (const key of CATALOGUE) {
+    const ports = artPortsOf(key);
+    if (ports.length < 8) continue; // under the demotion sample size; nothing to prove
+    if (renderWith(key, ports).catalogueKey !== key) failures.push(key);
+  }
+  assert.deepEqual(failures, [], 'demoted despite reporting exactly their own ports');
+});
+
+test('no pluggable-cage model is demoted because a different optic speed is fitted', () => {
+  const failures = [];
+  for (const key of CATALOGUE) {
+    if (MODELS[key].style !== 'sfp') continue; // rj45 access ports are fixed copper, not cages
+    const ports = artPortsOf(key);
+    if (ports.length < 8) continue;
+    for (const prefix of ['ge', 'xe', 'et']) {
+      const swapped = ports.map(p => p.replace(/^(ge|xe|et)-/, prefix + '-'));
+      if (renderWith(key, swapped).catalogueKey !== key) failures.push(`${key} demoted when its cages report ${prefix}-`);
+    }
+  }
+  assert.deepEqual(failures, []);
+});
+
+test('an rj45 model keeps its art when only the uplink cages change optic speed', () => {
+  const failures = [];
+  for (const key of CATALOGUE) {
+    if (MODELS[key].style !== 'rj45') continue;
+    const ports = artPortsOf(key);
+    if (ports.length < 8) continue;
+    for (const prefix of ['ge', 'xe', 'et']) {
+      // PIC 0 is the fixed copper field and keeps its names; only the uplink cages vary.
+      const swapped = ports.map(p => (/^(ge|xe|et)-\d+\/0\//.test(p) ? p : p.replace(/^(ge|xe|et)-/, prefix + '-')));
+      if (renderWith(key, swapped).catalogueKey !== key) failures.push(`${key} demoted when its uplinks report ${prefix}-`);
+    }
+  }
+  assert.deepEqual(failures, []);
+});
+
+// ---- EX4300-32F: an all-SFP chassis whose uplink bay is drawn from what is reported ----
+
+const F32 = Array.from({ length: 32 }, (_, i) => `ge-0/0/${i}`);
+const cageKeys = (html) => [...html.matchAll(/id="uplink_[^"]*"[^>]*data-port="([^"]+)"/g)].map(m => m[1]);
+
+test('EX4300-32F resolves to its own art and binds all 32 SFP cages', () => {
+  const m = renderWith('EX4300-32F', F32);
+  assert.equal(m.catalogueKey, 'EX4300-32F');
+  assert.equal(m.inferred, false);
+  for (const p of F32) assert.ok(m.html.includes(`data-port="${p}"`), `${p} unbound`);
+});
+
+test('an unreported uplink bay draws a cover panel, not phantom cages', () => {
+  assert.deepEqual(cageKeys(renderWith('EX4300-32F', F32).html).filter(p => /\/1\//.test(p)), []);
+});
+
+test('a populated uplink bay is drawn from the module actually fitted', () => {
+  const sfpp = cageKeys(renderWith('EX4300-32F', F32.concat(Array.from({ length: 8 }, (_, i) => `xe-0/1/${i}`))).html);
+  assert.deepEqual(sfpp.filter(p => /\/1\//.test(p)), Array.from({ length: 8 }, (_, i) => `xe-0/1/${i}`));
+
+  const qsfp = cageKeys(renderWith('EX4300-32F', F32.concat(['et-0/1/0', 'et-0/1/1'])).html);
+  assert.deepEqual(qsfp.filter(p => /\/1\//.test(p)), ['et-0/1/0', 'et-0/1/1']);
+});
+
+test('the bay is detected from any of its ports, not only port 0', () => {
+  // device.Interfaces is a filtered subset, so a fitted module can arrive missing its first cage.
+  const html = renderWith('EX4300-32F', F32.concat(['xe-0/1/3', 'xe-0/1/6'])).html;
+  assert.ok(cageKeys(html).includes('xe-0/1/3'), 'a module reported only from port 3 must still draw');
+});

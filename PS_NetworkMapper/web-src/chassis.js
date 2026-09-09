@@ -144,7 +144,7 @@ function cageLabel(cx, y, key, n, style) {
 }
 /* one column of two stacked cages (top even nT, bottom odd nB) with labels above and below */
 function cageColumn(x, yT, yB, w, h, unit, prefix, pic, nT, nB, style, kind) {
-    var kT = unit.key(pn(prefix, unit.fpc, pic, nT)), kB = unit.key(pn(prefix, unit.fpc, pic, nB));
+    var kT = unit.key(pn(prefix, unit.fpc, pic, nT), true), kB = unit.key(pn(prefix, unit.fpc, pic, nB), true);
     var s = sfpCage(x, yT, w, h, kT, unit.id + '_' + pic + '_' + nT, { kind: kind }, unit) + sfpCage(x, yB, w, h, kB, unit.id + '_' + pic + '_' + nB, { bailTop: true, kind: kind }, unit);
     if (style === 'dots') { s += cageLabel(x + w / 2, yT - 3.2, kT, nT, 'dots') + cageLabel(x + w / 2, yB + h + .8, kB, nB, 'dots'); }
     else if (style === 'arrows') {
@@ -201,7 +201,7 @@ var RIGHT = {
     ex2300: function (u, s) {
         var ux = B + 365.4;
         var sfps = '';
-        for (var i = 0; i < 4; i++) { var cx0 = ux + i * 14.35, key = u.key(pn(s.upPrefix || 'xe', u.fpc, 1, i)); sfps += sfpCage(cx0, 26.3, 9.8, 9.2, key, u.id + '_u' + i, {}, u) + cageLabel(cx0 + 4.9, 38.6, key, i); }
+        for (var i = 0; i < 4; i++) { var cx0 = ux + i * 14.35, key = u.key(pn(s.upPrefix || 'xe', u.fpc, 1, i), true); sfps += sfpCage(cx0, 26.3, 9.8, 9.2, key, u.id + '_u' + i, {}, u) + cageLabel(cx0 + 4.9, 38.6, key, i); }
         return '<rect class="block-frame" x="' + f(ux - 1.4) + '" y="25" width="' + f(4 * 14.35 - 4.5 + 2.8) + '" height="11.8" rx=".5"></rect>' +
             ventHex(u.id, ux - 1, 18, 55, 6) +
             '<text class="model-text big" x="' + f(B + 367.6) + '" y="5.4">' + escHtml(s.modelText) + '</text>' +
@@ -212,21 +212,8 @@ var RIGHT = {
     /* EX4200/EX4300: mini-USB CON, model text, LCD + menu/enter, SYS/ALM/MST, SFP+ uplink module. */
     lcd: function (u, s) {
         var cages = '';
-        for (var i = 0; i < 4; i++) { var cx0 = B + 378.5 + i * 14.7, key = u.key(pn(s.upPrefix || 'xe', u.fpc, 2, i)); cages += sfpCage(cx0, 26.4, 11, 10.4, key, u.id + '_u' + i, {}, u) + cageLabel(cx0 + 5.5, 37.7, key, i); }
-        var mx = B + 372.5, my = 24.4, mw = 69, mh = 16.6;
-        return usbSmall(B + 361, 2.4, 9, 3.6) + label(B + 360.2, 5.2, 'CON', 'end') +
-            '<text class="model-text big" x="' + f(B + 384) + '" y="5.6">' + escHtml(s.modelText) + '</text>' +
-            '<rect class="lcd-screen" x="' + f(B + 381) + '" y="12.4" width="37" height="7.6" rx=".5"></rect>' +
-            '<text class="lcd-text" x="' + f(B + 383) + '" y="15.5">MEMBER ' + u.fpc + (u.master ? ' MASTER' : '') + '</text>' +
-            '<text class="lcd-text" x="' + f(B + 383) + '" y="18.6">' + escHtml(s.lcd2 || '48x1G PoE+ 4x10G') + '</text>' +
-            '<circle class="btn" cx="' + f(B + 428) + '" cy="12.6" r="2.5"></circle><path class="btn-glyph" d="M' + f(B + 426.5) + ',11.6 h3 M' + f(B + 426.5) + ',12.6 h3 M' + f(B + 426.5) + ',13.6 h3"></path>' +
-            '<circle class="btn" cx="' + f(B + 428) + '" cy="20.2" r="2.5"></circle><path class="btn-glyph" d="M' + f(B + 429.4) + ',19 v1.4 h-2.6 m.9,-.9 l-.9,.9 l.9,.9"></path>' +
-            dot(B + 435.5, 11.6, .9, null, null, 'green') + label(B + 437.2, 12.2, 'SYS') +
-            dot(B + 435.5, 16.0, .9, null, null, u.alarm ? 'red' : null) + label(B + 437.2, 16.6, 'ALM') +
-            dot(B + 435.5, 20.4, .9, null, null, u.master ? 'green' : null) + label(B + 437.2, 21.0, 'MST') +
-            '<rect class="sfp-frame" x="' + f(mx) + '" y="' + f(my) + '" width="' + f(mw) + '" height="' + f(mh) + '" rx=".8"></rect>' +
-            '<rect class="sfp-latch" x="' + f(mx + .6) + '" y="30" width="4.6" height="9.8" rx=".8"></rect><rect class="sfp-latch" x="' + f(mx + mw - 5.2) + '" y="30" width="4.6" height="9.8" rx=".8"></rect>' +
-            screw(mx + 3, 27.6, 1.3) + screw(mx + mw - 3, 27.6, 1.3) + cages;
+        for (var i = 0; i < 4; i++) { var cx0 = B + 378.5 + i * 14.7, key = u.key(pn(s.upPrefix || 'xe', u.fpc, 2, i), true); cages += sfpCage(cx0, 26.4, 11, 10.4, key, u.id + '_u' + i, {}, u) + cageLabel(cx0 + 5.5, 37.7, key, i); }
+        return ex4300RightCluster(u, s, cages);
     },
     /* EX4400 / EX4300-MP: sub-panel with model text, RUNNING JUNOS, console (USB-C or mini),
        2x4 LED cluster, mode button, uplink-module bay drawn populated with a 4x SFP+ module. */
@@ -234,7 +221,7 @@ var RIGHT = {
         var panelX = s.panelX || 361, px = B + panelX, w = BODY_W - panelX - 2;
         var bayX = px + 3, bayW = w - 6, pitch = (bayW - 12) / 4, cw = Math.min(10, pitch - 3.2);
         var cages = '';
-        for (var i = 0; i < 4; i++) { var cx0 = bayX + 6 + i * pitch + (pitch - cw) / 2, key = u.key(pn('xe', u.fpc, 2, i)); cages += sfpCage(cx0, 23.5, cw, 9.4, key, u.id + '_u' + i, {}, u) + cageLabel(cx0 + cw / 2, 35.2, key, i); }
+        for (var i = 0; i < 4; i++) { var cx0 = bayX + 6 + i * pitch + (pitch - cw) / 2, key = u.key(pn('xe', u.fpc, 2, i), true); cages += sfpCage(cx0, 23.5, cw, 9.4, key, u.id + '_u' + i, {}, u) + cageLabel(cx0 + cw / 2, 35.2, key, i); }
         var bay = moduleBay(bayX, 16.5, bayW, 25.5, '<rect class="block-frame" x="' + f(bayX + 5) + '" y="22" width="' + f(4 * pitch + 2) + '" height="16" rx=".5"></rect>' + cages, s.moduleName || 'EX4400-EM-4S');
         var wide = w > 70;
         return '<rect class="subpanel" x="' + f(px) + '" y="1.6" width="' + f(w) + '" height="41.2" rx=".5"></rect>' +
@@ -289,6 +276,26 @@ function rj45Rack(u) {
     return svgOpen(uid, RACK_W, RACK_H) + rackBody() + rackEars() + vents + brand + blocks + RIGHT[s.right](u, s) + '</svg>';
 }
 
+// The EX4300 right-hand cluster, shared by the RJ45 family's `lcd` variant and the all-SFP
+// EX4300-32F: both chassis carry the same console/LCD/LED furniture and the same uplink
+// module bay, and only the bay's contents differ.
+function ex4300RightCluster(u, s, cages) {
+    var mx = B + 372.5, my = 24.4, mw = 69, mh = 16.6;
+        return usbSmall(B + 361, 2.4, 9, 3.6) + label(B + 360.2, 5.2, 'CON', 'end') +
+        '<text class="model-text big" x="' + f(B + 384) + '" y="5.6">' + escHtml(s.modelText) + '</text>' +
+        '<rect class="lcd-screen" x="' + f(B + 381) + '" y="12.4" width="37" height="7.6" rx=".5"></rect>' +
+        '<text class="lcd-text" x="' + f(B + 383) + '" y="15.5">MEMBER ' + u.fpc + (u.master ? ' MASTER' : '') + '</text>' +
+        '<text class="lcd-text" x="' + f(B + 383) + '" y="18.6">' + escHtml(s.lcd2 || '48x1G PoE+ 4x10G') + '</text>' +
+        '<circle class="btn" cx="' + f(B + 428) + '" cy="12.6" r="2.5"></circle><path class="btn-glyph" d="M' + f(B + 426.5) + ',11.6 h3 M' + f(B + 426.5) + ',12.6 h3 M' + f(B + 426.5) + ',13.6 h3"></path>' +
+        '<circle class="btn" cx="' + f(B + 428) + '" cy="20.2" r="2.5"></circle><path class="btn-glyph" d="M' + f(B + 429.4) + ',19 v1.4 h-2.6 m.9,-.9 l-.9,.9 l.9,.9"></path>' +
+        dot(B + 435.5, 11.6, .9, null, null, 'green') + label(B + 437.2, 12.2, 'SYS') +
+        dot(B + 435.5, 16.0, .9, null, null, u.alarm ? 'red' : null) + label(B + 437.2, 16.6, 'ALM') +
+        dot(B + 435.5, 20.4, .9, null, null, u.master ? 'green' : null) + label(B + 437.2, 21.0, 'MST') +
+        '<rect class="sfp-frame" x="' + f(mx) + '" y="' + f(my) + '" width="' + f(mw) + '" height="' + f(mh) + '" rx=".8"></rect>' +
+        '<rect class="sfp-latch" x="' + f(mx + .6) + '" y="30" width="4.6" height="9.8" rx=".8"></rect><rect class="sfp-latch" x="' + f(mx + mw - 5.2) + '" y="30" width="4.6" height="9.8" rx=".8"></rect>' +
+        screw(mx + 3, 27.6, 1.3) + screw(mx + mw - 3, 27.6, 1.3) + cages;
+}
+
 /* ================= family 2: SFP / QSFP rack ================= */
 function sfpRack(u) {
     var s = u.spec, uid = u.id;
@@ -304,7 +311,7 @@ function sfpRack(u) {
         for (var c = 0; c < q.cols; c++) {
             var x = B + q.x + c * qpitch, nT = q.base + 2 * c, nB = nT + 1;
             if (q.rows === 1) {
-                var k = u.key(pn(q.prefix || 'et', u.fpc, q.pic || 0, q.base + c));
+                var k = u.key(pn(q.prefix || 'et', u.fpc, q.pic || 0, q.base + c), true);
                 out += sfpCage(x, yT - .4, qw, qh, k, uid + '_q' + c, {}, u) + cageLabel(x + qw / 2, yT + qh + 1.2, k, q.base + c, 'dots');
             } else out += cageColumn(x, yT - .4, yB - .4, qw, qh, u, q.prefix || 'et', q.pic || 0, nT, nB, 'dots', q.kind || 'uplink');
         }
@@ -325,6 +332,30 @@ function sfpRack(u) {
         extras += mgmtConPair(B + 12, 8.8, uid).replace('CON', '') + '<circle class="coax" cx="' + f(B + 34) + '" cy="14" r="2.2"></circle><circle class="coax" cx="' + f(B + 34) + '" cy="14" r=".8"></circle>' + label(B + 34, 9.6, 'PPS', 'middle') + '<circle class="coax" cx="' + f(B + 44) + '" cy="14" r="2.2"></circle><circle class="coax" cx="' + f(B + 44) + '" cy="14" r=".8"></circle>' + label(B + 44, 9.6, '10M', 'middle') + ventHex(uid, B + 2, 20, 50, 20) + ventHex(uid, B + 400, 8, 38, 28) + warnTri(B + 412, 16);
     }
     if (s.left === 'esd') extras += esdMark(B + 4, 20) + '<circle class="btn" cx="' + f(B + 6.5) + '" cy="33" r="1.1"></circle>';
+    // EX4300-32F: same console/LCD/LED furniture and uplink bay as the RJ45 EX4300s, over an
+    // all-SFP port field. The bay is drawn from what the switch reports rather than assumed:
+    // the slot ships with a cover panel, and takes either an 8x SFP+ or a 2x QSFP+ module.
+    if (s.left === 'ex4300f') {
+        var upCages = '';
+        // Any port in the bay, not just port 0: device.Interfaces is a filtered subset, so a
+        // populated module whose first cage is empty or omitted would otherwise draw as a cover.
+        var anyAt = function (pfx, count) {
+            for (var i = 0; i < count; i++) if (u.hasPort(pn(pfx, u.fpc, 1, i))) return true;
+            return false;
+        };
+        if (anyAt('xe', 8) || anyAt('ge', 8)) {
+            for (var r = 0; r < 2; r++) for (var c = 0; c < 4; c++) {
+                var n = r * 4 + c, k = u.key(pn('xe', u.fpc, 1, n), true);
+                upCages += sfpCage(B + 378.5 + c * 14.7, r === 0 ? 25.4 : 33.2, 11, 6.6, k, uid + '_u' + n, { bailTop: r === 1 }, u);
+            }
+        } else if (anyAt('et', 2)) {
+            for (var c2 = 0; c2 < 2; c2++) {
+                var k2 = u.key(pn('et', u.fpc, 1, c2), true);
+                upCages += sfpCage(B + 380 + c2 * 30, 27.4, 24, 11, k2, uid + '_u' + c2, {}, u) + cageLabel(B + 392 + c2 * 30, 40.2, k2, c2);
+            }
+        }
+        extras += wordmark(B + 4, 6, {}) + ex4300RightCluster(u, s, upCages);
+    }
     if (s.left === 'ex4400-24x') {
         var GJ = { w: 12.5, open: 6.2, strip: 3.4, nO: 4.4, nI: 6.6, dO: 1.8, win: { w: 2.4, h: 2.6 } };
         extras += wordmark(B + 3, 6.4, { mist: true })
@@ -334,7 +365,10 @@ function sfpRack(u) {
         extras += RIGHT.ex4400(u, Object.assign({ panelX: 355, modelText: 'EX4400-24X', leds: [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', '']] }, s));
     }
     var vents = '';
-    if (s.vents === 'hexBands') vents = ventHex(uid, B + 6, 1.0, s.hexW || 430, 4.4) + ventHex(uid, B + 6, 38.6, s.hexW || 430, 4.4);
+    // hexX lets a face whose port field does not start at the left edge put its bands in the
+    // gap it actually has: an SFP column's numbers sit above the top cage, so a band running
+    // the full width would print over them.
+    if (s.vents === 'hexBands') { var hx = B + (s.hexX == null ? 6 : s.hexX); vents = ventHex(uid, hx, 1.0, s.hexW || 430, 4.4) + ventHex(uid, hx, 38.6, s.hexW || 430, 4.4); }
     else if (s.vents === 'holesBands') vents = ventHoles(uid, B + 8, 1.2, s.hexW || 425, 5.6) + ventHoles(uid, B + 8, 37.4, s.hexW || 425, 5.6);
     else if (s.vents === 'hexTop') vents = ventHex(uid, B + 62, 1.2, s.hexW || 340, 6);
     return svgOpen(uid, RACK_W, RACK_H) + rackBody() + rackEars() + vents + out + extras + '</svg>';
@@ -359,7 +393,7 @@ function compact(u) {
     if (s.variant === 'ex4100f') {
         /* EX4100-F-12: 4x SFP+ in a row (PIC 1) right of the block, labels under, SYS..PoE cluster,
            menu button, USB-C CON, warning triangle, green base stripe (drawn as a thick lip). */
-        for (var i = 0; i < 4; i++) { var x = R + 180 + i * 15, key = u.key(pn('xe', u.fpc, 1, i)); sfps += sfpCage(x, 23.3, 13.8, 10.5, key, uid + '_u' + i, {}, u) + cageLabel(x + 6.9, 35.2, key, i); }
+        for (var i = 0; i < 4; i++) { var x = R + 180 + i * 15, key = u.key(pn('xe', u.fpc, 1, i), true); sfps += sfpCage(x, 23.3, 13.8, 10.5, key, uid + '_u' + i, {}, u) + cageLabel(x + 6.9, 35.2, key, i); }
         sfps += '<rect class="block-frame" x="' + f(R + 179) + '" y="22.3" width="' + f(3 * 15 + 13.8 + 2) + '" height="12.5" rx=".5"></rect>';
         right = statusCluster(R + 248, 7.5, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 5.0)
             + menuButton(R + 253, 29, 2.2) + usbSmall(R + 249.5, 35.6, 7, 3.2) + label(R + 258, 38.4, 'CON') + warnTri(R + 206, 8)
@@ -368,7 +402,7 @@ function compact(u) {
     } else {
         /* EX2300-C / EX2200-C: 2x SFP with LINK/ST dots, USB-A, MGMT over CON (+ mini-USB), RUNNING JUNOS cluster. */
         [{ x: R + 135.5, ledX: R + 128.6 }, { x: R + 171.2, ledX: R + 164 }].forEach(function (c, i) {
-            var key = u.key(pn(s.upPrefix || 'xe', u.fpc, 1, i));
+            var key = u.key(pn(s.upPrefix || 'xe', u.fpc, 1, i), true);
             sfps += sfpCage(c.x, 23, 14.2, 9.4, key, uid + '_u' + i, {}, u) + dot(c.ledX, 25.2, 1.0, key, 'link') + label(c.ledX - 2.2, 25.8, 'LINK', 'end') + dot(c.ledX, 29.2, 1.0, key, 'act') + label(c.ledX - 2.2, 29.8, 'ST', 'end') + '<text class="port-num" x="' + f(c.x + 7.1) + '" y="35.6" text-anchor="middle">' + i + '</text>';
         });
         var GM = { w: 13.1, open: 6.4, strip: 3.4, nO: 4.4, nI: 6.6, dO: 1.8, win: { w: 2.5, h: 2.6 } };
@@ -430,6 +464,9 @@ var MODELS = {
     'EX4200-24T': { style: 'rj45', label: '2x6 RJ45 rack + LCD (legacy)', spec: RJ(FAMILY_BLOCKS.slice(2), 'lcd', { modelText: 'EX4200', lcd2: '24x1G 4x1G', upPrefix: 'ge' }), poe: false },
     'EX4200-48T': { style: 'rj45', label: '2x6 RJ45 rack + LCD (legacy)', spec: RJ(FAMILY_BLOCKS, 'lcd', { modelText: 'EX4200', lcd2: '48x1G 4x1G', upPrefix: 'ge' }), poe: false },
     'EX4200-48P': { style: 'rj45', label: '2x6 RJ45 rack + LCD (legacy)', spec: RJ(FAMILY_BLOCKS, 'lcd', { modelText: 'EX4200 PoE', lcd2: '48x1G PoE 4x1G', upPrefix: 'ge' }), poe: true },
+    // 32x 1G SFP front ports; the built-in 10G/40G ports are on the REAR (VCPs by default) and
+    // are deliberately not drawn. Front geometry is proportional, not measured from this SKU.
+    'EX4300-32F': { style: 'sfp', label: '32x 1G SFP rack + LCD, uplink module bay', spec: { groups: [{ x: 10, cols: 4 }, { x: 78, cols: 4 }, { x: 146, cols: 4 }, { x: 214, cols: 4 }], vents: 'hexBands', hexX: 278, hexW: 74, left: 'ex4300f', prefix: 'ge', modelText: 'EX4300-32F', lcd2: '32x1G SFP' }, poe: false },
     'EX4300-48MP': { style: 'rj45', label: '2x6 RJ45 rack, mGig, module bay', spec: RJ([{ x: 8, cols: 6 }, { x: 97.6, cols: 6 }, { x: 189, cols: 6, mgig: true, prefix: 'mge' }, { x: 282.6, cols: 6, mgig: true, prefix: 'mge' }], 'ex4400', { modelText: 'EX4300-48MP', console: 'mini', panelX: 372, moduleName: 'EX-UM-4SFPP-MR', slotsTo: 365, hexW: 335, leds: [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['', 'PoE']] }), poe: true },
     // ---- RJ45 rack: EX4400 (fully perforated) ----
     'EX4400-24T': { style: 'rj45', label: '2x6 RJ45 rack, perforated', spec: RJ(FAMILY_BLOCKS.slice(0, 2), 'ex4400', { modelText: 'EX4400', vents: 'hexAll' }), poe: false },
@@ -582,9 +619,29 @@ function buildMembers(device) {
         if (!model) { out.note = 'No front-panel drawing for ' + (m.model || 'this model') + '.'; return draft; }
         var reported = interfaces.filter(function (intf) { var p = parsePort(intf && intf.Port); return p && p.fpc === m.fpc; }).map(function (intf) { return String(intf.Port); });
         var bound = {};
+        // A pluggable cage's interface prefix follows the OPTIC, not the cage: a 1G optic in an
+        // SFP+ port reports as ge-, a 10G one as xe-, a 25G one as et-. The catalogue art can
+        // only name one of them, so a cage resolves to whichever sibling the switch actually
+        // reports; an unbound cage counts against coverage and can demote the whole pool to the
+        // inferred panel, which would draw RJ45 jacks on an all-fiber switch.
+        // mge is excluded - it is copper-only, never a pluggable cage.
+        var SFP_PREFIXES = ['ge', 'xe', 'et'];
+        var reportedName = function (ifname) {
+            if (byPort.has(ifname)) return ifname;
+            var p = parsePort(ifname);
+            if (!p || SFP_PREFIXES.indexOf(p.prefix) === -1) return ifname;
+            for (var i = 0; i < SFP_PREFIXES.length; i++) {
+                var alt = pn(SFP_PREFIXES[i], p.fpc, p.pic, p.n);
+                if (byPort.has(alt)) return alt;
+            }
+            return ifname;
+        };
         var makeUnit = function (mdl) { return {
             id: 'fpc' + m.fpc, fpc: m.fpc, model: out.model, master: out.master, poe: mdl.poe, alarm: hasAlarm, spec: mdl.spec,
-            key: function (ifname) { bound[ifname] = true; return ifname; },
+            // cage=true only where the art draws a PLUGGABLE cage. An RJ45 jack is fixed
+            // copper, so a ge-/xe- mismatch there is real evidence the art is wrong for this
+            // device and must still count against coverage.
+            key: function (ifname, cage) { var actual = cage ? reportedName(ifname) : ifname; bound[actual] = true; return actual; },
             hasPort: function (ifname) { return byPort.has(ifname); },
             // Detail line only: the tooltip prints the interface name from data-port.
             title: function (ifname) {

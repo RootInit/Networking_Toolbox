@@ -214,6 +214,21 @@ window.ensureConfigLoaded = async function() {
     return mapConfigLoaded;
 };
 
+// Repaints only the two markers whose state changed. A full renderMapMarkers would also drop
+// any in-progress "Edit position" arming, which selecting a device must not do.
+window.updateMapSelection = function(ip) {
+    var next = (ip === null || ip === undefined) ? null : String(ip);
+    if (next === selectedMapIp) return;
+    var previous = selectedMapIp;
+    selectedMapIp = next;
+    [previous, next].forEach(function (target) {
+        if (!target) return;
+        var marker = mapMarkersByIp.get(target);
+        if (!marker || !marker._iconState) return;
+        marker.setIcon(iconForClassification(marker._iconState.meta, marker._iconState.dimmedByVlan, target === selectedMapIp));
+    });
+};
+
 window.showMapStatus = function(message) {
     var el = document.getElementById('mapStatusNote');
     el.textContent = message;
@@ -226,11 +241,20 @@ var MARKER_COLORS = {
     unscanned: { background: '#E8E8E8', border: '#B0B0B0' },
     // Matches applyVlanFilter's non-matching node color, for parity with the diagram.
     vlanDimmed: { background: '#f2f2f2', border: '#e6e6e6' },
+    selected: { background: '#4CAF50', border: '#2E7D32' },
 };
 
+// The IP whose drawer is open, or null. Tracked here rather than read from
+// currentSelectedNodeData so a selection made before the Map view has ever been opened is
+// still painted by the first renderMapMarkers.
+var selectedMapIp = null;
+
 // dimmedByVlan: a filter is active and this device's clients don't carry the selected tag.
-function iconForClassification(meta, dimmedByVlan) {
-    var colors = !meta.scanned ? MARKER_COLORS.unscanned
+// Selection outranks every other state, VLAN dimming included: losing track of which device
+// is open costs more than the filter's marker staying truthful about this one.
+function iconForClassification(meta, dimmedByVlan, selected) {
+    var colors = selected ? MARKER_COLORS.selected
+        : !meta.scanned ? MARKER_COLORS.unscanned
         : dimmedByVlan ? MARKER_COLORS.vlanDimmed
         : (meta.isStack ? MARKER_COLORS.scannedStack : MARKER_COLORS.scanned);
     // Deliberately small and textless (the hostname is a tooltip): a circle big enough for
@@ -327,7 +351,9 @@ window.renderMapMarkers = function() {
 
         placedByIp.set(ip, { lat: entry.lat, lng: entry.lng });
         var dimmedByVlan = selectedVlan !== 'ALL' && !(vlanCacheByIp.get(ip) || []).includes(selectedVlan.toString());
-        var marker = L.marker([entry.lat, entry.lng], { icon: iconForClassification(meta, dimmedByVlan) }).addTo(leafletMap);
+        var marker = L.marker([entry.lat, entry.lng], { icon: iconForClassification(meta, dimmedByVlan, ip === selectedMapIp) }).addTo(leafletMap);
+        // Kept so updateMapSelection can regenerate this marker's icon without a full rebuild.
+        marker._iconState = { meta: meta, dimmedByVlan: dimmedByVlan };
         // esc is required here: Leaflet's DivOverlay sets tooltip content via innerHTML, so
         // a device-supplied hostname would otherwise be an XSS sink.
         if (meta.hostname !== 'Unknown') {

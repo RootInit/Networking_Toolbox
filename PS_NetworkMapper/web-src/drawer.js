@@ -8,6 +8,7 @@ window.closeDrawer = function() {
     document.getElementById('device-empty').style.display = '';
     currentSelectedNodeData = null;
     if (network) network.unselectAll();
+    if (window.updateMapSelection) window.updateMapSelection(null);
 };
 
 window.switchTab = function(tabId) {
@@ -445,6 +446,7 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
 window.openRightDrawer = function(ip) {
     var previous = currentSelectedNodeData;
     currentSelectedNodeData = deviceByIp.get(String(ip));
+    if (window.updateMapSelection) window.updateMapSelection(ip);
     // A port selection belongs to one device. A same-device reopen keeps it, so the
     // highlight survives a rescan merge.
     if (!previous || String(previous.DeviceIP) !== String(ip)) selectedInterfacePort = null;
@@ -697,18 +699,16 @@ window.focusPortFor = function(device, focus) {
     return null;
 };
 
-// Interfaces and their edge clients in one table. Rows collapse to what identifies a port at
-// a glance; the selected row expands into a detail strip plus its client rows, one port at a
-// time. Clients still honor the shared #vlanFilter.
-window.renderInterfaces = function() {
-    var tbody = document.getElementById('interfaces-tbody');
+// The one place the interfaces table's filter and sort are decided. The on-screen table, the
+// CSV export and the printable report all read the view from here, so they cannot disagree
+// about which ports are shown or in what order.
+// Reads the live controls, so it must be called at render/export time, not cached.
+window.buildInterfaceView = function(device) {
     var hideDown = document.getElementById('hideDownPorts').checked;
     var vlanFilter = document.getElementById('vlanFilter').value;
-    var daisyChains = window.detectDaisyChains(currentSelectedNodeData);
-    var html = "";
 
     var clientsByPort = new Map();
-    var clients = window.asArray(currentSelectedNodeData.TrueClients).slice();
+    var clients = window.asArray(device.TrueClients).slice();
     if (vlanFilter !== "ALL") {
         clients = clients.filter(c => String(c.VLAN_Tag) === vlanFilter.toString());
     }
@@ -724,34 +724,58 @@ window.renderInterfaces = function() {
         clientsByPort.get(key).push(c);
     });
     var neighborsByPort = new Map();
-    window.asArray(currentSelectedNodeData.Neighbors).forEach(n => { if (n && n.LocalPort && n.LocalPort !== 'Unknown') neighborsByPort.set(window.normalizePort(n.LocalPort), n); });
-    var ctx = { clientsByPort: clientsByPort, neighborsByPort: neighborsByPort, modeByPort: buildPortModes(currentSelectedNodeData) };
+    window.asArray(device.Neighbors).forEach(n => { if (n && n.LocalPort && n.LocalPort !== 'Unknown') neighborsByPort.set(window.normalizePort(n.LocalPort), n); });
+    var ctx = { clientsByPort: clientsByPort, neighborsByPort: neighborsByPort, modeByPort: buildPortModes(device) };
+
+    var rows = window.asArray(device.Interfaces).filter(intf => {
+        if (!intf.Port || String(intf.Port).includes('.')) return false;
+        if (hideDown && String(intf.Link).toLowerCase() !== "up") return false;
+        return true;
+    });
+    var typeOf = new Map(rows.map(intf => [intf, classifyInterface(intf, ctx)]));
+
+    if (interfaceSortState.column && INTERFACE_SORT_COMPARATORS[interfaceSortState.column]) {
+        var cmp = INTERFACE_SORT_COMPARATORS[interfaceSortState.column];
+        rows.sort((a, b) => interfaceSortState.dir * cmp(a, b, typeOf));
+    } else {
+        // Down ports first, longest-inactive first, unknown durations last among them -
+        // the ports most worth attention surface at the top. Up ports keep their original
+        // order: the comparator returns 0 for any up/up pair and the sort is stable.
+        rows.sort((a, b) => {
+            var aDown = String(a.Link).toLowerCase() !== "up", bDown = String(b.Link).toLowerCase() !== "up";
+            if (aDown !== bDown) return aDown ? -1 : 1;
+            if (!aDown) return 0;
+            var av = a.LastFlappedSeconds, bv = b.LastFlappedSeconds;
+            if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
+            if (bv === null || bv === undefined) return -1;
+            return bv - av;
+        });
+    }
+    return { rows: rows, typeOf: typeOf, ctx: ctx, vlanFilter: vlanFilter, hideDown: hideDown };
+};
+
+// A port's dark time as shown everywhere: an up port has none, and a down port with no
+// LastFlappedSeconds (an older snapshot, or "Last flapped: Never") is Unknown rather than 0.
+window.inactiveForText = function(intf) {
+    if (String(intf.Link).toLowerCase() === "up") return "-";
+    var secs = intf.LastFlappedSeconds;
+    return (secs === null || secs === undefined) ? "Unknown" : window.formatAge(secs * 1000);
+};
+
+// Interfaces and their edge clients in one table. Rows collapse to what identifies a port at
+// a glance; the selected row expands into a detail strip plus its client rows, one port at a
+// time. Clients still honor the shared #vlanFilter.
+window.renderInterfaces = function() {
+    var tbody = document.getElementById('interfaces-tbody');
+    var daisyChains = window.detectDaisyChains(currentSelectedNodeData);
+    var html = "";
+
+    var view = window.buildInterfaceView(currentSelectedNodeData);
+    var ctx = view.ctx, clientsByPort = ctx.clientsByPort, neighborsByPort = ctx.neighborsByPort;
+    var vlanFilter = view.vlanFilter;
 
     if (currentSelectedNodeData.Interfaces) {
-        var rows = window.asArray(currentSelectedNodeData.Interfaces).filter(intf => {
-            if (!intf.Port || String(intf.Port).includes('.')) return false;
-            if (hideDown && String(intf.Link).toLowerCase() !== "up") return false;
-            return true;
-        });
-        var typeOf = new Map(rows.map(intf => [intf, classifyInterface(intf, ctx)]));
-
-        if (interfaceSortState.column && INTERFACE_SORT_COMPARATORS[interfaceSortState.column]) {
-            var cmp = INTERFACE_SORT_COMPARATORS[interfaceSortState.column];
-            rows.sort((a, b) => interfaceSortState.dir * cmp(a, b, typeOf));
-        } else {
-            // Down ports first, longest-inactive first, unknown durations last among them -
-            // the ports most worth attention surface at the top. Up ports keep their original
-            // order: the comparator returns 0 for any up/up pair and the sort is stable.
-            rows.sort((a, b) => {
-                var aDown = String(a.Link).toLowerCase() !== "up", bDown = String(b.Link).toLowerCase() !== "up";
-                if (aDown !== bDown) return aDown ? -1 : 1;
-                if (!aDown) return 0;
-                var av = a.LastFlappedSeconds, bv = b.LastFlappedSeconds;
-                if (av === null || av === undefined) return (bv === null || bv === undefined) ? 0 : 1;
-                if (bv === null || bv === undefined) return -1;
-                return bv - av;
-            });
-        }
+        var rows = view.rows, typeOf = view.typeOf;
 
         rows.forEach(intf => {
             var portName = String(intf.Port);
@@ -772,9 +796,7 @@ window.renderInterfaces = function() {
 
             var stpBadge = String(intf.STP) === "FWD" ? "green" : (String(intf.STP) === "BLK" ? "red" : "gray");
             var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
-            var secs = intf.LastFlappedSeconds;
-            var inactiveFor = String(intf.Link).toLowerCase() === "up" ? "-"
-                : ((secs === null || secs === undefined) ? "Unknown" : window.formatAge(secs * 1000));
+            var inactiveFor = window.inactiveForText(intf);
             var neighbor = neighborsByPort.get(window.normalizePort(intf.Port));
             var portClients = clientsByPort.get(window.normalizePort(intf.Port)) || [];
             html += `<tr class="intf-detail"><td colspan="4"><div class="intf-detail-grid">
@@ -1122,7 +1144,8 @@ window.printDeviceReport = function() {
     var alarms = window.asArray(d.Alarms);
     var stack = window.asArray(d.StackMembers);
     var neighbors = window.asArray(d.Neighbors);
-    var interfaces = window.asArray(d.Interfaces);
+    // Same filter and sort as the on-screen table, through the shared view.
+    var interfaces = window.buildInterfaceView(d).rows;
     var clients = window.asArray(d.TrueClients || d.Clients);
 
     function row(cells) { return `<tr>${cells.map(c => `<td>${c}</td>`).join('')}</tr>`; }
@@ -1169,7 +1192,7 @@ ${table(['Class', 'Time', 'Description'], alarms.map(a => row([esc(a.Class), esc
 ${table(['Local Port', 'Neighbor', 'Remote Port', 'Description'], neighbors.map(n => row([esc(n.LocalPort), `${esc(n.Hostname)} (${esc(n.ManagementIP)})`, esc(n.RemotePort), esc(n.Description)])), 'No LLDP neighbors found')}
 
 <h2>Interfaces</h2>
-${table(['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description'], interfaces.map(i => row([esc(i.Port), esc(i.Admin), esc(i.Link), esc(i.STP), esc(i.PoE), esc(i.Desc)])), 'No interface data')}
+${table(['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description', 'Inactive For'], interfaces.map(i => row([esc(i.Port), esc(i.Admin), esc(i.Link), esc(i.STP), esc(i.PoE), esc(i.Desc), esc(window.inactiveForText(i))])), 'No interface data')}
 
 <h2>Clients</h2>
 ${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(c => row([esc(c.IP), esc(c.MAC), esc(c.Port), esc(c.VLAN_Tag), esc(c.Dot1x_User), esc(c.Dot1x_State)])), 'No clients')}
@@ -1187,23 +1210,16 @@ ${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(
     }
 };
 
-// Exports the currently displayed (filtered) rows, not the full dataset, so the download
-// matches what's on screen.
+// Exports exactly the rows on screen, in the order they are on screen - same filter, same
+// sort - via the shared view. "Inactive For" is as of the snapshot's capture time, since
+// LastFlappedSeconds is frozen at the scan, not a live clock.
 window.exportInterfacesCsv = function() {
     if (!currentSelectedNodeData) { window.setStatus("Select a switch first.", "red"); return; }
-    var hideDown = document.getElementById('hideDownPorts').checked;
     var rows = [['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description', 'Inactive For']];
 
-    window.asArray(currentSelectedNodeData.Interfaces).forEach(intf => {
-        if (!intf.Port || String(intf.Port).includes('.')) return;
-        if (hideDown && String(intf.Link).toLowerCase() !== "up") return;
+    window.buildInterfaceView(currentSelectedNodeData).rows.forEach(intf => {
         var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
-        // LastFlappedSeconds is captured once per scan, so this is as of the snapshot's
-        // capture time, not a live clock.
-        var secs = intf.LastFlappedSeconds;
-        var inactiveFor = String(intf.Link).toLowerCase() === "up" ? "-"
-            : ((secs === null || secs === undefined) ? "Unknown" : window.formatAge(secs * 1000));
-        rows.push([intf.Port, intf.Admin, intf.Link, intf.STP, poeTxt, intf.Desc, inactiveFor]);
+        rows.push([intf.Port, intf.Admin, intf.Link, intf.STP, poeTxt, intf.Desc, window.inactiveForText(intf)]);
     });
 
     downloadCsv(`${currentSelectedNodeData.DeviceIP}_interfaces.csv`, rows);
