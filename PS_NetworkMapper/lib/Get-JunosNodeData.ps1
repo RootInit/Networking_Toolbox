@@ -65,16 +65,25 @@ function Save-RawErrDump {
 
 $Logs = [System.Collections.Generic.List[string]]::new()
 
-# Computed once, not per log call: the name depends only on $DebugLogPath, which is fixed for the
-# run, and the old per-call form allocated an MD5 provider it never disposed on every line.
+# Computed once, not per log call: the name depends only on $DebugLogPath, which is fixed for the run.
+#
+# Hashed in-script rather than with a .NET hash provider: on a host with the Windows FIPS
+# policy enforced, MD5 (and every *Managed hash class) throws from its constructor. The name is not
+# a security boundary - it only has to be deterministic across processes and legal as a mutex name
+# (no backslash, under 260 chars), so
+# FNV-1a is enough. A collision between two unrelated log paths costs extra serialization, nothing
+# more. String.GetHashCode is not usable here: it is per-process randomized on .NET Core.
+#
+# 0xFFFFFFFFL, not 0xFFFFFFFF - PowerShell parses the latter as Int32 -1, making the mask a no-op
+# and letting the accumulator overflow into [double].
 $LogMutexName = $null
 if ($DebugLogPath) {
-    $Md5 = [System.Security.Cryptography.MD5]::Create()
-    try {
-        $LogMutexName = "Global\JunosMapperLog_" + [System.BitConverter]::ToString(
-            $Md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($DebugLogPath))
-        ).Replace("-", "")
-    } finally { $Md5.Dispose() }
+    $Hash = [long]2166136261
+    foreach ($Byte in [System.Text.Encoding]::UTF8.GetBytes($DebugLogPath)) {
+        $Hash = $Hash -bxor $Byte
+        $Hash = ($Hash * 16777619) -band 0xFFFFFFFFL
+    }
+    $LogMutexName = "Global\JunosMapperLog_" + ('{0:x8}' -f $Hash)
 }
 
 function Write-LogMsg {

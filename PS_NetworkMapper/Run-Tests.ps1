@@ -681,13 +681,23 @@ Test-Case "the redirected streams are decoded as UTF-8, not the console codepage
 }
 
 # --- log mutex name ---
-Test-Case "the log mutex name is computed once per run, not per log line (leaked an MD5 provider)" {
+Test-Case "the log mutex name is computed once per run, not per log line" {
     $WriteLogIdx = $JunosNodeDataSrc.IndexOf('function Write-LogMsg')
     $Body = $JunosNodeDataSrc.Substring($WriteLogIdx)
-    $Body -notmatch 'Cryptography\.MD5\]::Create'
+    $Body -notmatch '16777619'
 }
-Test-Case "the hoisted MD5 provider is disposed" {
-    $JunosNodeDataSrc -match '(?s)Cryptography\.MD5\]::Create\(\).*?\$Md5\.Dispose\(\)'
+Test-Case "the worker touches no System.Security.Cryptography type (FIPS-enforced hosts throw on MD5 before the worker emits anything)" {
+    $JunosNodeDataSrc -notmatch 'System\.Security\.Cryptography'
+}
+Test-Case "the mutex-name block yields a stable 8-hex-char name with no crypto provider" {
+    $Block = [regex]::Match($JunosNodeDataSrc, '(?s)\$Hash = \[long\]2166136261.*?-f \$Hash\)').Value
+    $DebugLogPath = 'C:\Users\Test\ScanNetwork_Debug.log'
+    Invoke-Expression $Block; $A = $LogMutexName
+    Invoke-Expression $Block; $B = $LogMutexName
+    [bool]$Block -and ($A -eq $B) -and ($A -match '^Global\\JunosMapperLog_[0-9a-f]{8}$')
+}
+Test-Case "the worker masks with an int64 literal (bare 0xFFFFFFFF parses as Int32 -1, a no-op mask that overflows to double)" {
+    ($JunosNodeDataSrc -match '-band\s+0xFFFFFFFFL') -and ($JunosNodeDataSrc -notmatch '-band\s+0xFFFFFFFF\b')
 }
 
 # =========================================================================================
