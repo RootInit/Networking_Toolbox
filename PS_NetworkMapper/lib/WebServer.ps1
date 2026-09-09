@@ -331,8 +331,8 @@ function Invoke-RescanAction {
             }
             # Unguarded Dispose() would skip RemoveAt on throw, wedging this slot until restart.
             try { $Orphan.PS.Dispose() } catch {}
-            # Get-JunosNodeData.ps1 spawns ssh.exe via cmd.exe from this process; PS.Dispose()
-            # doesn't touch that OS-level grandchild (see Stop-JunosOrphanProcessesLocal).
+            # Get-JunosNodeData.ps1 spawns ssh.exe from this process; PS.Dispose() doesn't touch
+            # that OS-level grandchild (see Stop-JunosOrphanProcessesLocal).
             Stop-JunosOrphanProcessesLocal -TargetIP $Orphan.IP -SinceTime $Orphan.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
             $script:OrphanedScans.RemoveAt($i)
         }
@@ -599,7 +599,7 @@ function Invoke-RescanStatusAction {
             }
             try { $Job.PS.Dispose() } catch {}
             # Needed on clean completion too, not just the orphan paths: PS.Dispose() never
-            # touches the ssh.exe/cmd.exe grandchildren.
+            # touches the ssh.exe grandchildren.
             Stop-JunosOrphanProcessesLocal -TargetIP $Job.IP -SinceTime $Job.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
             $Job.Collected = $true
         }
@@ -932,7 +932,7 @@ function Invoke-SaveConfigAction {
         return
     }
 
-    # $Username is interpolated unquoted into an ssh.exe/cmd.exe command line (Get-JunosSshArgs
+    # $Username is interpolated unquoted into an ssh.exe command line (Get-JunosSshArgs
     # -> Connect-Switch.ps1/Get-JunosNodeData.ps1), so a stray space or metacharacter is a
     # command-injection vector (e.g. `admin -oProxyCommand=calc.exe x`), not a cosmetic issue.
     # Locked to typical Junos login shape; empty string stays legal, since an explicit
@@ -1340,7 +1340,7 @@ function Start-MapperWebServer {
             if ($script:PendingScan -and -not $script:PendingScan.Collected) {
                 try { $script:PendingScan.PS.Stop() } catch {}
                 $script:PendingScan.PS.Dispose()
-                # Same ssh.exe/cmd.exe grandchild leak as the other rescan cleanup points.
+                # Same ssh.exe grandchild leak as the other rescan cleanup points.
                 Stop-JunosOrphanProcessesLocal -TargetIP $script:PendingScan.IP -SinceTime $script:PendingScan.StartTime.AddSeconds(-2) -DebugLogPath $script:DebugLogPath
             }
         } catch { Write-MapperDebugLog "SHUTDOWN ERROR [PendingScan cleanup] $_" }

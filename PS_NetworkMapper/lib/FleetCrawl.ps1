@@ -24,10 +24,10 @@ function Test-IpInAllowedScopes {
     return $false
 }
 
-# A worker's ssh.exe runs as `cmd.exe /c ssh.exe ...`, an OS-level grandchild of THIS process
-# that $PS.Stop()/.Dispose() know nothing about, so abandoning a hung job leaks a live ssh.exe
-# with its session to the switch open. Many jobs share this PID, so candidates must match on
-# command line plus creation time, not process name.
+# A worker's ssh.exe is an OS-level grandchild of THIS process that $PS.Stop()/.Dispose() know
+# nothing about, so abandoning a hung job leaks a live ssh.exe with its session to the switch
+# open. Many jobs share this PID, so candidates must match on command line plus creation time,
+# not process name.
 #
 # -DebugLogPath must be an explicit parameter, since PowerShell resolves unscoped names via
 # the *call stack*: called from WebServer.ps1, Invoke-FleetCrawl's Write-DebugLogLocal
@@ -44,11 +44,9 @@ function Stop-JunosOrphanProcessesLocal {
         # Anchored on the "$Username@$TargetIP" token Get-JunosSshArgs appends last. A bare
         # "*$TargetIP*" wildcard would match 10.1.1.5 against a concurrent job for
         # 10.1.1.50-59, killing a healthy in-flight scan.
-        $Candidates = Get-CimInstance Win32_Process -Filter "Name='ssh.exe' OR Name='cmd.exe'" -ErrorAction Stop |
+        $Candidates = Get-CimInstance Win32_Process -Filter "Name='ssh.exe'" -ErrorAction Stop |
             Where-Object { $_.CommandLine -and $_.CommandLine -match "@$([regex]::Escape($TargetIP))(\s|$)" -and $_.CreationDate -ge $SinceTime }
-        # ssh.exe before cmd.exe: once the parent is gone there's no process-tree link left to
-        # fall back on if a later command-line match misses.
-        foreach ($Proc in ($Candidates | Sort-Object { if ($_.Name -eq 'ssh.exe') { 0 } else { 1 } })) {
+        foreach ($Proc in $Candidates) {
             try {
                 Stop-Process -Id $Proc.ProcessId -Force -ErrorAction Stop
                 Write-OrphanCleanupLogLocal "ORCHESTRATOR CLEANUP: killed orphaned $($Proc.Name) (PID $($Proc.ProcessId)) for $TargetIP"

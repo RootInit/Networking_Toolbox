@@ -32,8 +32,8 @@ try {
     $SshArgs = Get-JunosSshArgs -Username $Username -TargetIP $TargetIP
     Write-Host "Connecting to $TargetIP as $Username..." -ForegroundColor Cyan
 
-    # No cmd.exe wrapper/redirection, unlike the crawler - stdin/stdout/stderr stay attached to
-    # this console for a real interactive session.
+    # No redirection, unlike the crawler - stdin/stdout/stderr stay attached to this console for
+    # a real interactive session.
     $ProcInfo = New-Object System.Diagnostics.ProcessStartInfo("ssh.exe", ($SshArgs -join ' '))
     $ProcInfo.UseShellExecute = $false
     foreach ($EnvKey in $AskPass.EnvironmentVariables.Keys) { $ProcInfo.EnvironmentVariables[$EnvKey] = $AskPass.EnvironmentVariables[$EnvKey] }

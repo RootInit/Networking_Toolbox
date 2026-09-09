@@ -151,9 +151,8 @@ function Invoke-InteractiveBatch {
     $Output = ""; $ErrText = ""; $TimedOut = $false; $ExitCode = $null
     $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        # A missing ssh.exe throws Win32Exception "The system cannot find the file specified"
-        # here, which names nothing an operator can act on; the old cmd.exe wrapper at least
-        # reported the name on stderr.
+        # A missing ssh.exe throws Win32Exception "The system cannot find the file specified",
+        # which names nothing an operator can act on - hence the rethrow carrying the path.
         try {
             $Process = [System.Diagnostics.Process]::Start($ProcInfo)
         } catch {
