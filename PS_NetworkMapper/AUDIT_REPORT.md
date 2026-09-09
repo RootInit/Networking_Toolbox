@@ -17,8 +17,8 @@ four areas it named — the regex-anchor validation choke point, RawDumps redact
 `Test-IpInAllowedScopes`, and the atomic-write helpers — plus `TopologyCrypto` (round-trip,
 tamper rejection, and a fixed vector shared with the JS suite), the Junos PoE/LLDP parsing
 regexes, and the web-server endpoint payload shapes. Every case was mutation-tested: the bug
-it guards was reintroduced and the case confirmed to fail. Counts are now **55 PowerShell /
-132 JS**, versus the 0/99 in "Baseline vs final" below.
+it guards was reintroduced and the case confirmed to fail. Counts are now **110 PowerShell /
+141 JS**, versus the 0/99 in "Baseline vs final" below.
 
 **Two of the audit's own conclusions did not hold**, both found on 2026-09-08 and both
 outside the shape any pass was looking for:
@@ -33,12 +33,34 @@ outside the shape any pass was looking for:
   Windows PowerShell 5.1 and surfacing to the operator only as a browser-side "failed to
   fetch" with nothing in the server log.
 
+**Three items this addendum previously listed as "needs a Windows host, therefore unfixed" are
+now fixed**, by answering each as a documentation question instead of waiting for hardware:
+
+- The orphaned `ssh.exe` after a batch timeout. `Process.Kill(Boolean)` lists no
+  `netframework-*` moniker at all, so 5.1 cannot kill a process tree — the fix was to delete
+  the `cmd.exe` wrapper entirely, so the killed process *is* the one holding the unredacted
+  `show configuration | display set` output, and no `%TEMP%` payload file is written at all.
+- `$PowerShellExePath` resolving to the host rather than the engine. Now resolved from
+  `$PSHOME` + `PSEdition`, with `powershell_ise.exe` explicitly excluded from the fallback.
+- The blocking `Dispose()` on the crawl abort path — and `RunspacePool.Close()`, which blocked
+  identically and was the larger half. Both are bounded now; measured 16.0s → 4.5s.
+
+Newly documented by the same round: `Rfc2898DeriveBytes(String, Byte[], Int32,
+HashAlgorithmName)` requires **.NET Framework 4.7.2+**, and Windows Server 2016 ships 4.6.2 by
+default — so on a plausible target *all* encryption would have failed at startup. Guarded by a
+reflection check that runs before the password prompt, and recorded in the README.
+
+One claim made in this addendum's own commit history did not hold, and is corrected here for
+the record: that a cmdlet called from a `finally` re-throws `PipelineStoppedException` once
+Ctrl+C puts the pipeline in Stopping state, making the shutdown orphan reap dead code. It does
+not — PowerShell suspends the stopping state for the duration of a `finally` body, and the only
+documented restriction is that pipeline *output* is discarded. The reap was always live.
+
 **Still open from Remaining Risk below**: #2/#3 (no hardware-in-the-loop coverage), #4 (SSH
 username validation strictness), #5 (Windows ACL-ordering semantics unverified), #6
-(`/api/session-password` shared-machine gap). Newly documented and unfixed for the same
-reason — they need a Windows host to validate — are the orphaned `ssh.exe` after a batch
-timeout, `$PowerShellExePath` resolving to the host rather than the engine under ISE, and the
-blocking `Dispose()` on the crawl abort path.
+(`/api/session-password` shared-machine gap). And the standing caveat over everything above:
+none of it has been executed on Windows PowerShell 5.1. The .NET-Framework-only API surface is
+verified against Microsoft's documentation, not against a running 5.1 host.
 
 ---
 
@@ -102,8 +124,8 @@ The protocol's formal stop condition — 2 consecutive clean passes — was neve
 Given the 8-pass hard cap is a hard stop, not a soft target, continuing was not an option this session. The recommended path forward is not a "Pass 9" but the two concrete items above: build the minimal PowerShell smoke-test suite (turns "no regression protection" from a standing risk into a closed one) and get real hardware time against a Junos device for the Inactive Ports feature and the SSH command-and-control path generally.
 
 ## Baseline vs final (Pass 1 start → Pass 8 end)
-- JS test count: **80 → 99** passing throughout. (132 as of 2026-09-08.)
-- PowerShell: 0 → 0 tests (still no framework — CFG-004 remains open; see Remaining Risk #1). (55 as of 2026-09-08; CFG-004 closed.)
+- JS test count: **80 → 99** passing throughout. (141 as of 2026-09-08.)
+- PowerShell: 0 → 0 tests (still no framework — CFG-004 remains open; see Remaining Risk #1). (110 as of 2026-09-08; CFG-004 closed.)
 - Write-path architecture: 4 independent atomic-write implementations (1 not atomic at all) → 1 shared implementation (`lib/FileHelpers.ps1`) used by every write site, now also ACL-hardening `-NoEncryption` snapshot output (Pass 8).
 - Timestamp-parseability: fixed once, found incomplete twice more → 1 shared, test-backed implementation (`utils.js`'s `parseTimestampMs`) used by every call site.
 - `-AllowedScopes` scope fence: originally enforced at 1 of 5 SSH-dialing entry points → enforced consistently at all 5, closed incrementally across 4 passes with user approval each time.
