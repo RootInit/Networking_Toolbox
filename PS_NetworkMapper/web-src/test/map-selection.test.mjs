@@ -95,3 +95,44 @@ test('selecting a device whose marker is not on the map is still remembered', ()
     'renderMapMarkers must build each icon against the tracked selection');
   assert.ok(MARKER_COLORS.selected);
 });
+
+// ---- the diagram and the Map must agree on which device is open ----
+
+const graphSrc = fs.readFileSync(new URL('../graph.js', import.meta.url), 'utf8');
+const drawerSrc = fs.readFileSync(new URL('../drawer.js', import.meta.url), 'utf8');
+const indexSrc = fs.readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+
+test('the diagram paints the selected node the same green as the map marker', () => {
+  const { MARKER_COLORS } = load();
+  const opts = graphSrc.match(/nodes: \{ color: \{ highlight: \{[^}]*\} \} \}/)[0];
+  assert.match(opts, new RegExp(`background: '${MARKER_COLORS.selected.background}'`));
+  assert.match(opts, new RegExp(`border: '${MARKER_COLORS.selected.border}'`));
+});
+
+test('the highlight is declared globally so a colour rewrite cannot drop it', () => {
+  // applyVlanFilter and refreshNodeVisual replace a node's whole colour object; vis falls back
+  // to the network-level highlight only because it is not carried per node.
+  const perNode = [...graphSrc.matchAll(/color: (node\.isStack \?|meta\.(?:isStack|scanned) \?|\{ background: '#(?:97C2FC|D2E5FF|E8E8E8|f2f2f2)')/g)];
+  assert.ok(perNode.length > 0, 'the per-node colour sites should still exist');
+  for (const m of perNode) {
+    const tail = graphSrc.slice(m.index, m.index + 260);
+    assert.ok(!/highlight/.test(tail.split('\n')[0]), 'device nodes must not carry their own highlight');
+  }
+});
+
+test('a cluster placeholder keeps its own colour when selected', () => {
+  const cluster = graphSrc.match(/color: \{ background: '#fdf6e3'[^\n]*/)[0];
+  assert.match(cluster, /highlight: \{ background: '#fdf6e3', border: '#d9b34e' \}/);
+});
+
+test('opening the drawer from anywhere selects the diagram node too', () => {
+  const fn = drawerSrc.match(/window\.openRightDrawer = function[\s\S]*?\n\};/)[0];
+  assert.match(fn, /network\.selectNodes\(\[String\(ip\)\]\)/);
+  assert.match(fn, /nodesDataset\.get\(String\(ip\)\)/, 'guarded: a node inside a collapsed cluster does not exist');
+});
+
+test('a focused port does not draw the UA focus ring over the panel art', () => {
+  // Every port carries tabindex; the default ring is a ~3px band around a ~12px jack.
+  assert.match(indexSrc, /svg\.chassis-svg \.port-el:focus \{ outline: none; \}/);
+  assert.match(indexSrc, /\.port-el:focus-visible \.port-body[^\n]*stroke-width: \.7;/);
+});

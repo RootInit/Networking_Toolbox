@@ -447,6 +447,12 @@ window.openRightDrawer = function(ip) {
     var previous = currentSelectedNodeData;
     currentSelectedNodeData = deviceByIp.get(String(ip));
     if (window.updateMapSelection) window.updateMapSelection(ip);
+    // Opened from search, the Map or a neighbour link, the diagram has no selection of its own,
+    // so its node and the Map's marker would disagree about which device is open. Guarded on
+    // the dataset: a device hidden inside a collapsed cluster has no node to select.
+    if (typeof network !== 'undefined' && network && nodesDataset && nodesDataset.get(String(ip))) {
+        network.selectNodes([String(ip)]);
+    }
     // A port selection belongs to one device. A same-device reopen keeps it, so the
     // highlight survives a rescan merge.
     if (!previous || String(previous.DeviceIP) !== String(ip)) selectedInterfacePort = null;

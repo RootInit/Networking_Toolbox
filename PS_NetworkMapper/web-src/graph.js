@@ -116,6 +116,11 @@ window.buildSwitchMap = async function() {
         layout: { hierarchical: false },
         physics: { enabled: false },
         edges: { smooth: false },
+        // Green, matching the Map view's marker for the same device. Declared globally rather
+        // than per node: vis falls back to this whenever a node's own colour object omits
+        // highlight, so the VLAN filter's and refreshNodeVisual's colour rewrites - which
+        // replace that object wholesale - can't drop the selection colour.
+        nodes: { color: { highlight: { background: '#4CAF50', border: '#2E7D32' } } },
         // bindToWindow: false - vis-network binds its keyboard shortcuts to window by
         // default, so typing "-" in any text field on the page is eaten as a zoom-out.
         // navigationButtons: false - replaced by #diagram-nav, which adds rotation and
@@ -197,7 +202,9 @@ async function doRenderVisibleGraph() {
                 var cluster = visible.clusters.get(id);
                 nodesDataset.add({
                     id: id, label: `+${cluster.memberIds.length} devices`, shape: 'box', isCluster: true,
-                    color: { background: '#fdf6e3', border: '#d9b34e' },
+                    // Keeps its own amber when selected: the green means "this device's drawer
+                    // is open", and a cluster is a group, not a device.
+                    color: { background: '#fdf6e3', border: '#d9b34e', highlight: { background: '#fdf6e3', border: '#d9b34e' } },
                     font: { bold: true, color: '#8a6d1a' },
                     borderWidth: 2, shapeProperties: { borderDashes: [6, 4] },
                     vlanCache: [], x: pos.x, y: pos.y, physics: false,

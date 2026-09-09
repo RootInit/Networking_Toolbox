@@ -505,6 +505,11 @@
         svg.chassis-svg .port-body { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .32; cursor: pointer; }
         svg.chassis-svg .port-el:hover .port-body, svg.chassis-svg .port-el:hover .uplink-body { stroke-width: .7; }
         svg.chassis-svg .port-body.selected, svg.chassis-svg .uplink-body.selected { stroke: var(--accent); stroke-width: .9; fill: var(--accent); fill-opacity: .22; }
+        /* Every port carries tabindex so the panel is keyboard-navigable, but the UA focus ring
+           is a ~3px band drawn around a ~12px jack - at panel scale it reads as a rendering
+           fault, not a focus cue. Replaced with the same stroke the hover state uses. */
+        svg.chassis-svg .port-el:focus { outline: none; }
+        svg.chassis-svg .port-el:focus-visible .port-body, svg.chassis-svg .port-el:focus-visible .uplink-body { stroke: var(--accent); stroke-width: .7; }
         svg.chassis-svg .port-el.port-absent { cursor: default; opacity: .4; }
         svg.chassis-svg .port-contacts { stroke: var(--chassis-fg); stroke-width: .22; pointer-events: none; }
         svg.chassis-svg .port-static { fill: var(--chassis-bg); stroke: var(--chassis-fg); stroke-width: .32; }
