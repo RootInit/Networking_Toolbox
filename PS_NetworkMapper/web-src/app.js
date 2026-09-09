@@ -149,7 +149,13 @@ window.getSessionEncryptionPassword = function() {
         sessionPasswordPromise = fetch('/api/session-password')
             .then(resp => resp.ok ? resp.json() : { password: '' })
             .then(json => json.password || '')
-            .catch(() => '');
+            .catch(() => {
+                // A transport failure is transient - the single-threaded server is often just
+                // busy at page load - so it must not be cached for the session. A !resp.ok
+                // answer is a real "no password" and stays cached.
+                sessionPasswordPromise = null;
+                return '';
+            });
     }
     return sessionPasswordPromise;
 };
@@ -312,7 +318,9 @@ window.switchSidebarTab = async function(tabId) {
 };
 
 // Reads and, if needed, decrypts one File into a {sourceFile, scanTimestamp, topology} record.
-function readSnapshotFile(file) {
+// batch, when given, carries the last password that worked earlier in this batch, so a folder
+// of snapshots sharing one password prompts once rather than once per file.
+function readSnapshotFile(file, batch) {
     return new Promise((resolve, reject) => {
         var reader = new FileReader();
         reader.onerror = () => reject(new Error(`Browser blocked read access to "${file.name}".`));
@@ -328,17 +336,26 @@ function readSnapshotFile(file) {
                     // reached if it is missing or fails to decrypt.
                     var sessionPassword = await window.getSessionEncryptionPassword();
                     var triedSessionPassword = false;
+                    var triedBatchPassword = false;
                     while (decryptedText === null) {
                         var password;
                         if (sessionPassword && !triedSessionPassword) {
                             password = sessionPassword;
                             triedSessionPassword = true;
+                        } else if (batch && batch.password && !triedBatchPassword) {
+                            password = batch.password;
+                            triedBatchPassword = true;
                         } else {
                             password = await window.promptForPassword(errorMsg); // rejects on Cancel, exiting the loop
                         }
                         try {
                             decryptedText = await window.TopologyCrypto.decryptEnvelope(data, password);
+                            if (batch) batch.password = password;
                         } catch (decErr) {
+                            // Only a wrong password is worth another attempt. An unsupported
+                            // version or bad envelope parameters fail identically for every
+                            // password, so re-prompting would be an unsatisfiable modal.
+                            if (!decErr.wrongPassword) throw decErr;
                             errorMsg = decErr.message;
                         }
                     }
@@ -401,7 +418,11 @@ window.autoloadLastScan = async function() {
             var content = await fileResp.text();
             if (content) entries.push({ name: listing[i].name, content: content });
         } catch (err) {
-            return; // the server is gone or blocked; stop quietly
+            // Stop fetching, but keep what was already retrieved: processSelectedFiles'
+            // multi-file path tolerates a partial batch, and the check below still handles
+            // the genuinely-empty case.
+            console.warn('Autoload stopped after a transport error - continuing with the ' + entries.length + ' snapshot(s) already retrieved.', err);
+            break;
         }
     }
     if (entries.length === 0) return;
@@ -496,6 +517,9 @@ window.processSelectedFiles = async function(files) {
     // A single file's failure aborts the load; in a folder batch one bad file must not
     // discard the rest.
     var tolerateFailures = files.length > 1;
+    // Scoped to this call, so a manually entered password is reused across the batch rather
+    // than prompted for once per encrypted file.
+    var batch = { password: null };
 
     try {
         for (var i = 0; i < files.length; i++) {
@@ -505,7 +529,7 @@ window.processSelectedFiles = async function(files) {
 
             if (tolerateFailures) {
                 try {
-                    newSnapshots.push(await readSnapshotFile(files[i]));
+                    newSnapshots.push(await readSnapshotFile(files[i], batch));
                 } catch (fileErr) {
                     // A cancelled password prompt aborts the batch instead of counting as
                     // one bad file; otherwise Cancel just re-prompts for the next encrypted
@@ -514,7 +538,7 @@ window.processSelectedFiles = async function(files) {
                     skipped.push({ name: files[i].name, reason: fileErr.message });
                 }
             } else {
-                newSnapshots.push(await readSnapshotFile(files[i]));
+                newSnapshots.push(await readSnapshotFile(files[i], batch));
             }
             if (myGeneration !== loadFilesGeneration) return; // superseded mid-read
         }

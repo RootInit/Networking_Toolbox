@@ -1,7 +1,7 @@
 # Shared SSH/askpass plumbing and credential loading, dot-sourced by Get-JunosNodeData.ps1
 # (scripted batch mode) and Connect-Switch.ps1 (interactive quick-connect). The ssh.exe
-# invocation itself stays separate per script: batch mode redirects stdout/stderr to temp
-# files, interactive mode needs a directly attached console.
+# invocation itself stays separate per script: batch mode starts ssh.exe with its stdio pipes
+# redirected into the worker, interactive mode needs a directly attached console.
 #
 # Dot-source it: `. (Join-Path $PSScriptRoot "SshHelpers.ps1")`
 
@@ -106,11 +106,11 @@ function Remove-JunosAskPass {
 function Clear-StaleJunosTempFiles {
     param([int]$MaxAgeHours = 4)
     $Cutoff = (Get-Date).AddHours(-$MaxAgeHours)
-    # ssh_out_/ssh_err_ are Invoke-InteractiveBatch's redirected stdout/stderr; its own cleanup
-    # fails silently while an orphaned ssh.exe still holds the handle (killing the cmd.exe
-    # wrapper does not kill ssh.exe). ssh_out_ is the most sensitive thing written to %TEMP%:
-    # raw `show configuration | display set` - SNMP communities, TACACS secrets, encrypted root
-    # password - with none of Save-RawDump's redaction applied.
+    # ssh_out_/ssh_err_ were Invoke-InteractiveBatch's redirected stdout/stderr before it owned
+    # ssh.exe's pipes directly; it no longer writes them, but a machine that ran an older build
+    # can still hold one, and ssh_out_ was the most sensitive thing ever written to %TEMP%: raw
+    # `show configuration | display set` - SNMP communities, TACACS secrets, encrypted root
+    # password - with none of Save-RawDump's redaction applied. Kept so those get swept.
     $Patterns = @("junos_cred_*.json", "ssh_pass_*.txt", "ssh_askpass_*.bat", "ssh_out_*.txt", "ssh_err_*.txt")
     foreach ($Pattern in $Patterns) {
         try {
@@ -127,12 +127,7 @@ function Clear-StaleJunosTempFiles {
 function Get-JunosSshArgs {
     param(
         [Parameter(Mandatory=$true)][string]$Username,
-        [Parameter(Mandatory=$true)][string]$TargetIP,
-        # Forces pty allocation (-tt) on piped stdin. Off by default: a kernel-tty-echoed pty
-        # can echo the whole ~20-command burst back before Junos cli starts, and this is
-        # untested against a live device - so it is only a one-shot fallback after a plain
-        # attempt came back empty. Connect-Switch.ps1 has a real console and never needs it.
-        [switch]$ForcePty
+        [Parameter(Mandatory=$true)][string]$TargetIP
     )
     # SECURITY: this is the single choke point every SSH-invoking caller funnels through, so
     # both checks below close command injection even for values that never passed WebServer.ps1's
@@ -146,9 +141,9 @@ function Get-JunosSshArgs {
     if ($TargetIP -notmatch "^$Octet\.$Octet\.$Octet\.$Octet\z") {
         throw "Invalid Junos target IP: must be a well-formed IPv4 address (four dot-separated octets, each 0-255)"
     }
-    # ServerAliveInterval/ServerAliveCountMax let a dead session's ssh.exe terminate ITSELF:
-    # killing the cmd.exe wrapper does not kill its ssh.exe child, and a survivor holds the
-    # switch session plus a write handle on the unredacted ssh_out_ temp file.
+    # ServerAliveInterval/ServerAliveCountMax let a dead session's ssh.exe terminate ITSELF.
+    # Defense in depth now that Get-JunosNodeData.ps1 kills ssh.exe directly: it still cannot
+    # do so if the PowerShell host itself dies, and an orphan holds the switch session open.
     #
     # INVARIANT: this budget (15s x 6 = 90s) must stay LONGER than Get-JunosNodeData.ps1's
     # per-batch Process.WaitForExit timeout (50s). A shorter budget tears down healthy sessions
@@ -156,6 +151,5 @@ function Get-JunosSshArgs {
     # `show interfaces extensive` / `show configuration | display set` and return an empty
     # payload every time, while faster switches look fine.
     $BaseArgs = @("-o", "ConnectTimeout=5", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=6", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=NUL", "-o", "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no")
-    if ($ForcePty) { $BaseArgs += "-tt" }
     return $BaseArgs + @("$Username@$TargetIP")
 }

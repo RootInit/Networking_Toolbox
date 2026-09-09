@@ -51,18 +51,20 @@ function Resolve-EnvelopeFormat {
     return 'PSNetworkMapper-EncryptedTopology'
 }
 
+# Before the prompt - see Assert-TopologyCryptoRuntime.
+Assert-TopologyCryptoRuntime
+
 if (-not $Password) { $Password = Read-Host -Prompt "Enter encryption password" -AsSecureString }
 $PlainPassword = ConvertFrom-SecurePassword -SecureString $Password
 if ([string]::IsNullOrEmpty($PlainPassword)) { throw "Password cannot be empty." }
 
 $ResolvedInput = (Resolve-Path -LiteralPath $InputFile).Path
 
-function Confirm-Overwrite {
-    param([string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return $true }
-    if ($Force) { return $true }
-    return $PSCmdlet.ShouldProcess($Path, "Overwrite existing file")
-}
+# -Force means "don't ask", which now has to work through $ConfirmPreference rather than by
+# skipping the check: the ShouldProcess call below is also what makes -WhatIf work, and
+# Set-FileContentAtomic can't carry it - Set-Content honours -WhatIf and writes nothing, then
+# Move-FileAtomic throws trying to Convert-Path the temp file that was never created.
+if ($Force) { $ConfirmPreference = 'None' }
 
 if ($Decrypt) {
     # -Encoding UTF8 explicit: Get-Content -Raw with no -Encoding falls back to the system
@@ -83,7 +85,7 @@ if ($Decrypt) {
     $DefaultOutput = if ($ResolvedInput -match '\.enc$') { $ResolvedInput -replace '\.enc$', '' } else { "$ResolvedInput.decrypted.json" }
     $TargetPath = if ($OutputFile) { $OutputFile } else { $DefaultOutput }
 
-    if (-not (Confirm-Overwrite -Path $TargetPath)) { return }
+    if (-not $PSCmdlet.ShouldProcess($TargetPath, "Write decrypted plaintext")) { return }
     # Written verbatim: a ConvertFrom-Json/ConvertTo-Json round-trip would reformat date-like
     # string fields depending on PowerShell version/culture.
     #
@@ -117,7 +119,7 @@ if ($Decrypt) {
     $DefaultOutput = if ($ResolvedInput -match '\.enc$') { $ResolvedInput } else { "$ResolvedInput.enc" }
     $TargetPath = if ($OutputFile) { $OutputFile } else { $DefaultOutput }
 
-    if (-not (Confirm-Overwrite -Path $TargetPath)) { return }
+    if (-not $PSCmdlet.ShouldProcess($TargetPath, "Write encrypted envelope")) { return }
     Set-FileContentAtomic -DestinationPath $TargetPath -Content ($Envelope | ConvertTo-Json -Depth 10) -Encoding utf8
     Write-Host "Encrypted (format: $Format) to: $TargetPath" -ForegroundColor Green
 }

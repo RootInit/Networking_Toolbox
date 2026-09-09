@@ -35,6 +35,13 @@ var TopologyCrypto = (function() {
     var MIN_ITERATIONS = 1000;
     var MAX_ITERATIONS = 5000000;
 
+    // The one failure a different password could fix. Callers re-prompt only on this flag.
+    function wrongPasswordError() {
+        var err = new Error('Incorrect password, or the file is corrupted.');
+        err.wrongPassword = true;
+        return err;
+    }
+
     async function decryptEnvelope(envelope, password, expectedFormats) {
         expectedFormats = expectedFormats || ['PSNetworkMapper-EncryptedTopology'];
         if (!envelope || expectedFormats.indexOf(envelope.format) === -1) {
@@ -54,7 +61,9 @@ var TopologyCrypto = (function() {
         // A corrupted envelope throws raw DOMExceptions here (atob on non-base64,
         // crypto.subtle.decrypt on a non-block-multiple ciphertext). Collapse them into the
         // same message as a bad MAC so no raw exception escapes and the caller cannot
-        // distinguish "wrong password" from "corrupt file".
+        // distinguish "wrong password" from "corrupt file". Everything thrown from here on is
+        // tagged wrongPassword, which is what callers gate their re-prompt loop on: the
+        // checks above are password-independent, so re-prompting for them can never succeed.
         try {
             var saltBytes = b64ToBytes(envelope.salt);
             var ivBytes = b64ToBytes(envelope.iv);
@@ -67,16 +76,14 @@ var TopologyCrypto = (function() {
             // than as a confusing AES-CBC padding exception.
             var macKey = await crypto.subtle.importKey('raw', keys.macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
             var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, concatBytes(ivBytes, cipherBytes));
-            if (!macOk) throw new Error('Incorrect password, or the file is corrupted.');
+            if (!macOk) throw wrongPasswordError();
 
             var encKey = await crypto.subtle.importKey('raw', keys.encKeyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
             var plainBuf = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, encKey, cipherBytes);
             return new TextDecoder().decode(plainBuf);
         } catch (err) {
-            if (err instanceof Error && err.message === 'Incorrect password, or the file is corrupted.') {
-                throw err;
-            }
-            throw new Error('Incorrect password, or the file is corrupted.');
+            if (err instanceof Error && err.wrongPassword) throw err;
+            throw wrongPasswordError();
         }
     }
 

@@ -160,6 +160,16 @@ window.loadMapConfiguration = async function() {
             try {
                 decryptedText = await window.TopologyCrypto.decryptEnvelope(envelope, password, ['PSNetworkMapper-EncryptedConfig']);
             } catch (decErr) {
+                // Only a wrong password is retryable; an unsupported version or bad envelope
+                // parameters fail for every password, so surface them instead of re-prompting.
+                if (!decErr.wrongPassword) {
+                    window.showMapStatus('Could not decrypt Configuration.json.enc: ' + decErr.message + ' Devices will show without saved locations.');
+                    mapConfigEntries = [];
+                    loadedCredentials = null;
+                    loadedSettings = {};
+                    mapConfigLoaded = false;
+                    return;
+                }
                 errorMsg = decErr.message;
             }
         }

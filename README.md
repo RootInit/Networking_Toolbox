@@ -8,6 +8,10 @@ Misc networking tools and scripts created by me or stolen from other people.
 - [`PS_IPv4Scanner/`](#ps_ipv4scanner) — async IPv4 range/subnet scanner with optional MAC/vendor resolution.
 
 Both are PowerShell scripts; run them with either Windows PowerShell 5.1 or PowerShell 7+ (`pwsh`).
+PS_NetworkMapper's encryption additionally needs **.NET Framework 4.7.2 or newer** under
+Windows PowerShell 5.1 — earlier versions cannot derive keys with SHA-256, and the mapper
+refuses to start rather than write a file it could not read back. Pass `-NoEncryption` to run
+without it.
 
 ---
 

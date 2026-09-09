@@ -259,7 +259,10 @@ window.startNetworkScan = async function() {
             }
             resp = await fetch('/api/scan-network', scanRequest);
         }
-        var result = await resp.json();
+        // A non-JSON error body (an HTML 500 page, an empty response) must not throw out to
+        // the outer catch, which would report a server that demonstrably answered as
+        // unreachable. The !resp.ok branch below falls back to the status code.
+        var result = await resp.json().catch(() => ({}));
         if (!resp.ok) {
             if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
             if (loadBtn) loadBtn.disabled = false;

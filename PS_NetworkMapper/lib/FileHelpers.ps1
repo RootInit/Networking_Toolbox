@@ -1,6 +1,20 @@
 # Shared filesystem-write helpers. Not meant to be run directly - dot-source it:
 # `. (Join-Path $PSScriptRoot "FileHelpers.ps1")`
 
+# Raw .NET static calls ([System.IO.File]::...) resolve a relative path against
+# [Environment]::CurrentDirectory, which PowerShell does NOT keep in step with $PWD - so a
+# relative path handed to one can land in a completely different directory. Everything below
+# routes through here first. The leaf is rejoined rather than resolved because the target file
+# often doesn't exist yet, which Convert-Path rejects.
+function Resolve-PathForDotNetIo {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $Dir = Split-Path -Path $Path -Parent
+    $Leaf = Split-Path -Path $Path -Leaf
+    $ResolvedDir = if ([string]::IsNullOrEmpty($Dir)) { Convert-Path -LiteralPath '.' } else { Convert-Path -LiteralPath $Dir }
+    return Join-Path $ResolvedDir $Leaf
+}
+
 # Swaps an already-written temp file into place in a single rename, so a crash/disk-full
 # mid-write can never leave $DestinationPath truncated.
 #
@@ -9,11 +23,6 @@
 # target). Replace's quirk is that it requires $dst to already exist, hence the placeholder.
 # [NullString]::Value (not a bare $null) for the backup-path argument: $null coerces to an
 # empty string across the PowerShell/.NET boundary and Replace rejects that.
-#
-# Raw .NET static calls resolve relative paths against [Environment]::CurrentDirectory, not
-# PowerShell's $PWD - so both paths are Convert-Path'd first or this could touch the wrong
-# directory. $DestinationPath may not exist yet, so its parent is resolved and the leaf
-# rejoined instead.
 function Move-FileAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$SourcePath,
@@ -21,11 +30,7 @@ function Move-FileAtomic {
     )
 
     $ResolvedSource = Convert-Path -LiteralPath $SourcePath
-
-    $DestDir = Split-Path -Path $DestinationPath -Parent
-    $DestLeaf = Split-Path -Path $DestinationPath -Leaf
-    $ResolvedDestDir = if ([string]::IsNullOrEmpty($DestDir)) { Convert-Path -LiteralPath '.' } else { Convert-Path -LiteralPath $DestDir }
-    $ResolvedDestination = Join-Path $ResolvedDestDir $DestLeaf
+    $ResolvedDestination = Resolve-PathForDotNetIo -Path $DestinationPath
 
     if (-not (Test-Path -LiteralPath $ResolvedDestination)) {
         New-Item -ItemType File -Path $ResolvedDestination -Force | Out-Null

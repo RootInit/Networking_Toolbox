@@ -112,7 +112,7 @@ function Invoke-FleetCrawl {
             # the same single-user ACL SshHelpers.ps1 gives its credential temp files. Touch
             # the file empty and harden it BEFORE the plaintext lands, so the content is never
             # on disk under $SnapshotDir's broader default ACL even momentarily.
-            [System.IO.File]::WriteAllText($Path, "")
+            [System.IO.File]::WriteAllText((Resolve-PathForDotNetIo -Path $Path), "")
             Protect-JunosSensitiveFileAcl -Path $Path
             $PlainJson | Out-File -FilePath $Path -Encoding utf8
         }
@@ -129,6 +129,23 @@ function Invoke-FleetCrawl {
         Move-FileAtomic -SourcePath $SourcePath -DestinationPath $DestinationPath
         if (-not $Encrypted) {
             Protect-JunosSensitiveFileAcl -Path $DestinationPath
+        }
+    }
+
+    # Without a synthetic node a device that never produced one vanishes from the output
+    # entirely: its IP is already in $Visited, so it is never retried and never reappears.
+    # Mirrors Get-JunosNodeData.ps1's $NodeData initializer field-for-field (Interfaces is a
+    # hashtable there, not an array) - consumers assume every key a real node has is present.
+    function New-PlaceholderNodeLocal {
+        param([string]$IP, [string]$Status, [string]$ScanErrorText)
+        return @{
+            DeviceIP = $IP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
+            StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+            Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
+            MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
+            MedNeighbors = @(); Configuration = "Unknown";
+            ScanStatus = $Status
+            ScanError  = $ScanErrorText
         }
     }
 
@@ -164,12 +181,13 @@ function Invoke-FleetCrawl {
 
     $Jobs = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # Must exceed the worker's own worst case or the orchestrator abandons jobs that were
-    # still going to succeed. Get-JunosNodeData.ps1 caps each SSH batch at
-    # Process.WaitForExit(50000) and may run a second -ForcePty attempt after the first comes
-    # back empty, so a worker can legitimately need ~100s plus parsing. Keep this above 2x the
-    # worker's batch timeout if that timeout changes, or the pty retry becomes dead code.
-    $JobAbandonSeconds = 130
+    # INVARIANT: must exceed the worker's own worst case or the orchestrator abandons jobs that
+    # were still going to succeed - abandoning gains nothing and costs the crawl a device.
+    # Set it no higher than that either: a dead switch holds a runspace slot for this whole
+    # budget. Get-JunosNodeData.ps1 makes exactly one SSH batch call, capped at
+    # Process.WaitForExit(50000); the remaining 25s covers process start, parsing and the
+    # result write. Raise this if that cap rises or a second batch is ever added.
+    $JobAbandonSeconds = 75
     $Queue = [System.Collections.Generic.Queue[string]]::new()
     $Visited = [System.Collections.Generic.HashSet[string]]::new()
     $Enqueued = [System.Collections.Generic.HashSet[string]]::new()
@@ -179,6 +197,10 @@ function Invoke-FleetCrawl {
     $Enqueued.Add($StartIP) | Out-Null
     $LastWriteTime = Get-Date
     $PendingWrites = 0
+    # Grows adaptively with the measured cost of a write - see the periodic-write block below.
+    $BaseWriteIntervalSeconds = 5
+    $MaxWriteIntervalSeconds = 120
+    $WriteIntervalSeconds = $BaseWriteIntervalSeconds
 
     # Circuit breaker: the same credential is retried against every device in the queue, so on
     # a TACACS+/RADIUS estate with lockout-after-N-failures one mistyped password could lock
@@ -194,6 +216,13 @@ function Invoke-FleetCrawl {
     # PowerShell instances whose BeginStop() is in flight, awaiting EndStop()+Dispose() once
     # it completes - see the cleanup site below for why this can't be done inline.
     $PendingDisposal = [System.Collections.Generic.List[PSCustomObject]]::new()
+    # Accumulated across both final drains (the normal-exit one and the finally's), so the
+    # runspace-pool close below still knows a pipeline was abandoned earlier.
+    $AbandonedPipelines = 0
+
+    # Bounds the final drain. The circuit-breaker abort BeginStops every in-flight job and
+    # drains immediately, so entries can reach the drain having had no polling window at all.
+    $FinalDrainSeconds = 3
 
     function Complete-PendingDisposalsLocal {
         param([bool]$OnlyCompleted = $true)
@@ -203,14 +232,38 @@ function Invoke-FleetCrawl {
                 try { $Entry.PS.EndStop($Entry.Async) } catch {}
                 try { $Entry.PS.Dispose() } catch {}
                 $PendingDisposal.RemoveAt($i)
-            } elseif (-not $OnlyCompleted) {
-                # Final drain, entry not done yet: EndStop() would block until completion, the
-                # exact hang BeginStop exists to avoid. Dispose() alone here - this runs once,
-                # at shutdown, on whatever rare entry is still pending.
-                try { $Entry.PS.Dispose() } catch {}
-                $PendingDisposal.RemoveAt($i)
             }
         }
+        if ($OnlyCompleted) { return }
+
+        # Final drain. Dispose() blocks for exactly as long as the synchronous Stop() this code
+        # avoids (a pipeline wedged in Process.WaitForExit(50000) blocks the orchestrator - and
+        # in the web path the whole single-threaded HttpListener loop - for the rest of that
+        # wait), so give the stops a bounded window and then abandon what is left rather than
+        # disposing it. .NET primitives rather than cmdlets (Thread.Sleep over Start-Sleep,
+        # Stopwatch over Get-Date) only to keep a tight poll loop cheap - cmdlets DO run
+        # normally here, including from the finally under Ctrl+C, since PowerShell suspends the
+        # pipeline's stopping state for the duration of a finally body. What Ctrl+C does break
+        # is pipeline OUTPUT, so anything reported from this path must go to a file.
+        $DrainClock = [System.Diagnostics.Stopwatch]::StartNew()
+        while ($PendingDisposal.Count -gt 0 -and $DrainClock.Elapsed.TotalSeconds -lt $FinalDrainSeconds) {
+            [System.Threading.Thread]::Sleep(100)
+            for ($i = $PendingDisposal.Count - 1; $i -ge 0; $i--) {
+                $Entry = $PendingDisposal[$i]
+                if ($Entry.Async.IsCompleted) {
+                    try { $Entry.PS.EndStop($Entry.Async) } catch {}
+                    try { $Entry.PS.Dispose() } catch {}
+                    $PendingDisposal.RemoveAt($i)
+                }
+            }
+        }
+        $Leaked = $PendingDisposal.Count
+        if ($Leaked -gt 0) {
+            $PendingDisposal.Clear()
+            Write-DebugLogLocal "ORCHESTRATOR: abandoned $Leaked pipeline(s) still stopping after $($FinalDrainSeconds)s - Dispose() would have blocked on them."
+        }
+        # Sole output: callers capture it to decide whether waiting on the pool is worthwhile.
+        return $Leaked
     }
 
     try {
@@ -224,7 +277,7 @@ function Invoke-FleetCrawl {
         while ($Queue.Count -gt 0 -or $Jobs.Count -gt 0) {
 
             # 0. Finish off any async Stop()s that completed since the last iteration.
-            Complete-PendingDisposalsLocal
+            $null = Complete-PendingDisposalsLocal
 
             # 1. Fill available thread slots (Safely dequeueing)
             #
@@ -282,20 +335,8 @@ function Invoke-FleetCrawl {
                     Write-DebugLogLocal "ORCHESTRATOR TIMEOUT: Abandoning hung thread for $($Job.IP)"
                     Write-Host "`n[!] Timed out waiting on $($Job.IP) - abandoning and continuing." -ForegroundColor Red
 
-                    # Without a synthetic node the device vanishes from the output entirely,
-                    # unlike a worker-level failure which is reported with its own ScanStatus.
-                    # Must mirror Get-JunosNodeData.ps1's $NodeData initializer field-for-field
-                    # - consumers assume every key a real node has is present.
-                    $TimeoutNode = @{
-                        DeviceIP = $Job.IP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
-                        StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @();
-                        Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
-                        MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
-                        MedNeighbors = @(); Configuration = "Unknown";
-                        ScanStatus = "Timeout"
-                        ScanError  = "Orchestrator gave up waiting on $($Job.IP) after $($JobAbandonSeconds)s (job abandoned)."
-                    }
-                    $TopologyList.Add($TimeoutNode)
+                    $TopologyList.Add((New-PlaceholderNodeLocal -IP $Job.IP -Status "Timeout" `
+                        -ScanErrorText "Orchestrator gave up waiting on $($Job.IP) after $($JobAbandonSeconds)s (job abandoned)."))
                     $PendingWrites++
                     # A timeout resets only the consecutive streak; $TotalAuthFailures is a
                     # whole-crawl tally so interleaved timeouts can't mask a failing credential.
@@ -380,18 +421,8 @@ function Invoke-FleetCrawl {
                         Write-DebugLogLocal "ORCHESTRATOR ERROR parsing result from $($Job.IP): $_"
                         Write-Host "`n[!] Error processing result from $($Job.IP): $_" -ForegroundColor Red
 
-                        # Same reasoning as the timeout path above; $Visited was already set, so
-                        # this device is never retried either.
-                        $ErrorNode = @{
-                            DeviceIP = $Job.IP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
-                            StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
-                            Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
-                            MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
-                            MedNeighbors = @(); Configuration = "Unknown";
-                            ScanStatus = "Error"
-                            ScanError  = "Orchestrator failed to process result from $($Job.IP): $_"
-                        }
-                        $TopologyList.Add($ErrorNode)
+                        $TopologyList.Add((New-PlaceholderNodeLocal -IP $Job.IP -Status "Error" `
+                            -ScanErrorText "Orchestrator failed to process result from $($Job.IP): $_"))
                         $PendingWrites++
                     } finally {
                         $JobsToRemove += $Job
@@ -448,6 +479,11 @@ function Invoke-FleetCrawl {
                         $StopHandle = $LiveJob.PS.BeginStop($null, $null)
                         $PendingDisposal.Add([PSCustomObject]@{ PS = $LiveJob.PS; Async = $StopHandle })
                     } catch { try { $LiveJob.PS.Dispose() } catch {} }
+                    # Same reasoning as the timeout and EndInvoke-error paths: killed mid-flight
+                    # these devices are already in $Visited, so without a node they vanish.
+                    $TopologyList.Add((New-PlaceholderNodeLocal -IP $LiveJob.IP -Status "Aborted" `
+                        -ScanErrorText "Crawl aborted (repeated authentication failures) while this device was still being scanned."))
+                    $PendingWrites++
                     # Same -2s margin as the step-3 cleanup above - see comment there.
                     Stop-JunosOrphanProcessesLocal -TargetIP $LiveJob.IP -SinceTime $LiveJob.StartTime.AddSeconds(-2) -DebugLogPath $DebugLogPath
                 }
@@ -456,11 +492,22 @@ function Invoke-FleetCrawl {
             }
 
             # 4. Periodic snapshot write
-            if ($PendingWrites -gt 0 -and ((Get-Date) - $LastWriteTime).TotalSeconds -gt 5) {
+            if ($PendingWrites -gt 0 -and ((Get-Date) - $LastWriteTime).TotalSeconds -gt $WriteIntervalSeconds) {
                 try {
+                    $WriteStopwatch = [System.Diagnostics.Stopwatch]::StartNew()
                     Update-ClientIpCorrelationLocal -Topology $TopologyList
                     Write-TopologyOutputLocal -Topology $TopologyList -Path $TempOutputFile -ScanTimestampIso $ScanTimestampIso
                     Move-TopologyOutputAtomicLocal -SourcePath $TempOutputFile -DestinationPath $OutputFile
+                    $WriteStopwatch.Stop()
+                    # This whole block runs on the orchestrator thread, stealing time from job
+                    # reaping while in-flight jobs' abandon timers keep running - and its cost
+                    # grows with the fleet, since it re-correlates every client and re-serializes
+                    # every device's full Configuration text each time (far worse under Windows
+                    # PowerShell 5.1's JavaScriptSerializer-backed ConvertTo-Json). Back the
+                    # interval off to ~10x the last write's duration so periodic writes stay
+                    # around a tenth of the loop's time regardless of fleet size. The final write
+                    # below is unconditional and unaffected.
+                    $WriteIntervalSeconds = [Math]::Max($BaseWriteIntervalSeconds, [Math]::Min($MaxWriteIntervalSeconds, [int]($WriteStopwatch.Elapsed.TotalSeconds * 10)))
                     $PendingWrites = 0
                     $LastWriteTime = Get-Date
                 } catch {
@@ -474,7 +521,7 @@ function Invoke-FleetCrawl {
 
         # $OnlyCompleted:$false: best-effort drain rather than waiting indefinitely - the crawl
         # is ending either way, so a wedged pipeline just gets abandoned.
-        Complete-PendingDisposalsLocal -OnlyCompleted:$false
+        $AbandonedPipelines += Complete-PendingDisposalsLocal -OnlyCompleted:$false
 
         # No "next cycle" retry left, but a failure here must not stop the crawl reporting
         # completion - the caller still gets $TopologyList in memory.
@@ -542,8 +589,28 @@ function Invoke-FleetCrawl {
 
         # The normal-exit path already drains this, but the re-throw from the catch above skips
         # that, leaving whatever is still pending to leak.
-        Complete-PendingDisposalsLocal -OnlyCompleted:$false
-        $RunspacePool.Close(); $RunspacePool.Dispose()
+        $AbandonedPipelines += Complete-PendingDisposalsLocal -OnlyCompleted:$false
+
+        # Close() blocks on a runspace still inside an uninterruptible native call for exactly
+        # as long as Dispose() does, so closing synchronously here would just move the stall the
+        # drain above exists to prevent. Close asynchronously, wait the same bounded window, and
+        # abandon the pool to the process if it hasn't finished - Dispose() would block too, so
+        # it only runs once the close completed.
+        try {
+            $CloseHandle = $RunspacePool.BeginClose($null, $null)
+            # No wait at all when the drain already gave up on a pipeline: the same wedged
+            # runspace is what the close is waiting for, so the window can only expire.
+            $CloseClock = [System.Diagnostics.Stopwatch]::StartNew()
+            while (-not $CloseHandle.IsCompleted -and $AbandonedPipelines -eq 0 -and $CloseClock.Elapsed.TotalSeconds -lt $FinalDrainSeconds) { [System.Threading.Thread]::Sleep(100) }
+            if ($CloseHandle.IsCompleted) {
+                $RunspacePool.EndClose($CloseHandle)
+                $RunspacePool.Dispose()
+            } else {
+                Write-DebugLogLocal "ORCHESTRATOR: runspace pool still closing after $($FinalDrainSeconds)s - abandoned rather than blocking on Close()."
+            }
+        } catch {
+            Write-DebugLogLocal "ORCHESTRATOR: runspace pool close failed: $_"
+        }
         if (Test-Path $TempOutputFile) { Remove-Item -LiteralPath $TempOutputFile -Force }
     }
 }

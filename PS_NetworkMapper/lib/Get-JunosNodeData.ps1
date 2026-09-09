@@ -64,6 +64,19 @@ function Save-RawErrDump {
 }
 
 $Logs = [System.Collections.Generic.List[string]]::new()
+
+# Computed once, not per log call: the name depends only on $DebugLogPath, which is fixed for the
+# run, and the old per-call form allocated an MD5 provider it never disposed on every line.
+$LogMutexName = $null
+if ($DebugLogPath) {
+    $Md5 = [System.Security.Cryptography.MD5]::Create()
+    try {
+        $LogMutexName = "Global\JunosMapperLog_" + [System.BitConverter]::ToString(
+            $Md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($DebugLogPath))
+        ).Replace("-", "")
+    } finally { $Md5.Dispose() }
+}
+
 function Write-LogMsg {
     param([string]$msg)
     $Line = "[$TargetIP] $msg"
@@ -73,10 +86,7 @@ function Write-LogMsg {
         # concurrently: measured under 8-way concurrency, a bare try/catch with retries still
         # lost over half the lines. The mutex name is per-log-path so unrelated scans don't
         # serialize against each other.
-        $MutexName = "Global\JunosMapperLog_" + [System.BitConverter]::ToString(
-            [System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($DebugLogPath))
-        ).Replace("-", "")
-        $Mutex = New-Object System.Threading.Mutex($false, $MutexName)
+        $Mutex = New-Object System.Threading.Mutex($false, $LogMutexName)
         $Acquired = $false
         try {
             # AbandonedMutexException still grants us the mutex, and Out-File is never left
@@ -91,16 +101,45 @@ function Write-LogMsg {
     }
 }
 
+# ReadToEndAsync completes as soon as the child closes its end of the pipe, so a killed ssh.exe
+# resolves these immediately; the bounded wait only guards against a process that inherited the
+# handle still holding it open. .Result rethrows a faulted task as an AggregateException, hence
+# the try - a stream we could not read is reported as empty, same as an empty payload.
+function Get-StreamTaskText {
+    param($Task)
+    try {
+        if ($Task.Wait(5000)) {
+            $Text = $Task.Result
+            if ($null -ne $Text) { return $Text }
+        }
+    } catch {}
+    return ""
+}
+
 function Invoke-InteractiveBatch {
-    param([switch]$ForcePty)
-
-    $TempOut = Join-Path $env:TEMP "ssh_out_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
-    $TempErr = Join-Path $env:TEMP "ssh_err_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
-
-    $SshArgs = Get-JunosSshArgs -Username $Username -TargetIP $TargetIP -ForcePty:$ForcePty
-    $ProcInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ssh.exe $($SshArgs -join ' ') > `"$TempOut`" 2> `"$TempErr`"")
+    $SshArgs = Get-JunosSshArgs -Username $Username -TargetIP $TargetIP
+    # ssh.exe is started DIRECTLY, not as `cmd.exe /c ssh.exe ... > file`: Windows does not kill
+    # a child when its parent is killed, and .NET Framework 4.x (Windows PowerShell 5.1) has no
+    # Kill(entireProcessTree) overload - that arrived in .NET Core 3.0. Killing the wrapper on
+    # timeout therefore left ssh.exe alive holding the switch session and a write handle on the
+    # redirect target, whose unredacted `show configuration` text then could not be deleted.
+    # Owning the pipes here means Kill() hits the process that actually holds the data, and
+    # nothing sensitive is written to %TEMP% at all.
+    $SshExe = "ssh.exe"
+    $SshCmd = Get-Command "ssh.exe" -CommandType Application -ErrorAction SilentlyContinue
+    if ($SshCmd) { $SshExe = @($SshCmd)[0].Source }
+    # Space-joining needs no quoting: every element is either a literal option constant or
+    # "user@ip", and Get-JunosSshArgs' regexes admit no whitespace or quote character in either
+    # field. ArgumentList does not exist on .NET Framework 4.x, so .Arguments is the portable form.
+    $ProcInfo = New-Object System.Diagnostics.ProcessStartInfo($SshExe, ($SshArgs -join ' '))
     $ProcInfo.UseShellExecute = $false; $ProcInfo.CreateNoWindow = $true
     $ProcInfo.RedirectStandardInput = $true
+    $ProcInfo.RedirectStandardOutput = $true
+    $ProcInfo.RedirectStandardError = $true
+    # Junos emits UTF-8 for non-ASCII text; the default here is the console codepage, which
+    # mangles multi-byte sequences.
+    $ProcInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $ProcInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
 
     foreach ($EnvKey in $AskPass.EnvironmentVariables.Keys) { $ProcInfo.EnvironmentVariables[$EnvKey] = $AskPass.EnvironmentVariables[$EnvKey] }
 
@@ -108,12 +147,24 @@ function Invoke-InteractiveBatch {
 
     $Process = $null
     # If ssh.exe exits immediately (bad host, refused connection, askpass rejected) the pipe
-    # breaks and a WriteLine throws. Temp-file reads/cleanup stay inside this try so a throw
-    # still reaches the finally below - otherwise $TempOut/$TempErr leak across the crawl.
+    # breaks and a WriteLine throws; the finally below still tears the process down.
     $Output = ""; $ErrText = ""; $TimedOut = $false; $ExitCode = $null
     $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $Process = [System.Diagnostics.Process]::Start($ProcInfo)
+        # A missing ssh.exe throws Win32Exception "The system cannot find the file specified"
+        # here, which names nothing an operator can act on; the old cmd.exe wrapper at least
+        # reported the name on stderr.
+        try {
+            $Process = [System.Diagnostics.Process]::Start($ProcInfo)
+        } catch {
+            throw "Could not start ssh.exe ('$SshExe'): $_"
+        }
+        # Both reads start BEFORE the first command is written. Reading either stream
+        # synchronously while the child fills the other deadlocks once a pipe buffer is full,
+        # and ~20 Junos commands produce far more than one buffer's worth.
+        # https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.processstartinfo.redirectstandardoutput
+        $OutTask = $Process.StandardOutput.ReadToEndAsync()
+        $ErrTask = $Process.StandardError.ReadToEndAsync()
 
         $Process.StandardInput.WriteLine("set cli screen-length 0")
         # A forced pty with no real terminal gets sshd's default rows/cols, and an 80-column
@@ -146,29 +197,31 @@ function Invoke-InteractiveBatch {
 
         $Process.WaitForExit(50000) | Out-Null
         if (-not $Process.HasExited) {
-            $Process.Kill()
+            # Targets ssh.exe itself, so the switch session and both pipes really do go away.
+            # Kill() races HasExited and throws if the process exited in between.
+            try { $Process.Kill() } catch {}
             $TimedOut = $true
             Write-LogMsg "TIMEOUT on interactive batch."
             # Kill() is async: ExitCode isn't valid until teardown finishes.
             $Process.WaitForExit()
         }
 
-        # -Encoding UTF8 explicit: Junos emits UTF-8 for non-ASCII text, but Get-Content's
-        # no-BOM default is the system ANSI codepage, which mangles multi-byte sequences.
-        $Output = if (Test-Path $TempOut) { Get-Content $TempOut -Raw -Encoding UTF8 } else { "" }
+        $Output = Get-StreamTaskText -Task $OutTask
         # Named $ErrText, not $Error - $Error is PowerShell's automatic error-history variable.
-        $ErrText = if (Test-Path $TempErr) { Get-Content $TempErr -Raw -Encoding UTF8 } else { "" }
+        $ErrText = Get-StreamTaskText -Task $ErrTask
         try { $ExitCode = $Process.ExitCode } catch { $ExitCode = $null }
     } finally {
-        if ($Process) { $Process.Dispose() }
-        if (Test-Path $TempOut) { Remove-Item $TempOut -Force -ErrorAction SilentlyContinue }
-        if (Test-Path $TempErr) { Remove-Item $TempErr -Force -ErrorAction SilentlyContinue }
+        if ($Process) {
+            # A WriteLine throwing on a broken pipe skips the timeout kill above; without this an
+            # ssh.exe that is merely unresponsive rather than dead would outlive the worker.
+            try { if (-not $Process.HasExited) { $Process.Kill() } } catch {}
+            $Process.Dispose()
+        }
     }
 
     return @{
         Output = $Output; Error = $ErrText; TimedOut = $TimedOut
         ExitCode = $ExitCode; ElapsedSeconds = [Math]::Round($Stopwatch.Elapsed.TotalSeconds, 1)
-        ForcePty = $ForcePty.IsPresent
     }
 }
 
@@ -192,22 +245,8 @@ try {
 
     $Result = Invoke-InteractiveBatch
 
-    # Empty stdout with no definitive ssh-level rejection in stderr (a pty can't fix those) is
-    # retried exactly once with a forced pty: some Junos configurations appear not to attach a
-    # CLI to a non-pty piped-stdin shell. Scoped to this failure shape only, so switches the
-    # plain path already works for are unaffected.
-    if ([string]::IsNullOrWhiteSpace($Result.Output)) {
-        $LooksLikeDefiniteSshRejection = -not [string]::IsNullOrWhiteSpace($Result.Error) -and
-            ($Result.Error -match "(?i)permission denied|authentication failed|too many authentication failures|connection refused|no route to host|network is unreachable|operation timed out|connection timed out|could not resolve hostname|host is down|no address associated")
-        if (-not $LooksLikeDefiniteSshRejection) {
-            Write-LogMsg "Empty payload on first (non-pty) attempt (exit=$($Result.ExitCode), elapsed=$($Result.ElapsedSeconds)s, timedOut=$($Result.TimedOut)); retrying once with a forced pty (-tt)."
-            $PlainAttempt = $Result
-            $Result = Invoke-InteractiveBatch -ForcePty
-        }
-    }
     $RawOutput = $Result.Output
-    # Normalize to bare LF: a pty-mode retry can emit CRLF (kernel tty line discipline), and
-    # relying on every regex below to tolerate a mix is more fragile than normalizing once.
+    # Normalize to bare LF so no regex below has to tolerate a mix.
     if ($RawOutput) { $RawOutput = $RawOutput -replace "`r`n", "`n" }
 
     # --- CONDITIONAL RAW LOG DUMP (config output redacted) ---
@@ -238,13 +277,8 @@ try {
         } else { "(no stderr output captured)" }
         if ($StderrNoise) { $ErrSummary = "$ErrSummary [ssh_config requests a TTY]" }
         # Distinguishes "ssh exited on its own with nothing to show" from "the session sat idle
-        # until our 50s WaitForExit killed it" - identical from ScanError alone otherwise - and
-        # records whether the forced-pty retry already got a fair try on this switch.
-        $Attempt = if ($Result.ForcePty) { "forced-pty(-tt) retry" } else { "plain (no pty)" }
-        $DiagTag = "[attempt=$Attempt exit=$($Result.ExitCode) elapsed=$($Result.ElapsedSeconds)s timedOut=$($Result.TimedOut)]"
-        if ($PlainAttempt) {
-            $DiagTag += " [first attempt: exit=$($PlainAttempt.ExitCode) elapsed=$($PlainAttempt.ElapsedSeconds)s timedOut=$($PlainAttempt.TimedOut), also empty]"
-        }
+        # until our 50s WaitForExit killed it" - identical from ScanError alone otherwise.
+        $DiagTag = "[exit=$($Result.ExitCode) elapsed=$($Result.ElapsedSeconds)s timedOut=$($Result.TimedOut)]"
         $ErrSummary = "$DiagTag $ErrSummary"
         if ($HumanReadable) { Write-Host "  [!] CRITICAL ERROR: Switch returned empty payload. ssh said: $ErrSummary" -ForegroundColor Red }
         Write-LogMsg "CRITICAL: Switch returned empty payload. ssh stderr: $ErrSummary"
@@ -298,9 +332,26 @@ try {
         elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+(?:{[^}]+}[\r\n]+)?\S+@\S+[>#](?s).*)?\z') { $DataDict["CONFIG"] = $Matches.content }
     }
 
+    # A virtual chassis emits one "fpcN:" block per member for "show version" and "show system
+    # uptime", so a bare -match takes fpc0's - which is not necessarily the master. The prompt's
+    # {master:N} marker names the RE that actually answered this session, so scope both parses to
+    # that member. Matters for reboot detection: a separately-rebooted member otherwise supplies
+    # the boot time compared against the master's. Same intent as the routing-engine parse below,
+    # which already scopes via "Current state Master". Standalone switches emit neither marker
+    # nor fpcN block and fall back to the whole section, unchanged.
+    $MasterFpcId = $null
+    if ($RawOutput -match "(?m)^\{master:(?<fpc>\d+)\}") { $MasterFpcId = $Matches.fpc }
+    $VersionScope = $DataDict["VERSION"]
+    $UptimeScope = $DataDict["UPTIME"]
+    if ($null -ne $MasterFpcId) {
+        $MasterFpcBlockPattern = "(?ms)^fpc${MasterFpcId}:[^\r\n]*\r?\n(?:-+\r?\n)?(?<masterfpc>.*?)(?=^fpc\d+:|\z)"
+        if ($DataDict["VERSION"] -match $MasterFpcBlockPattern) { $VersionScope = $Matches.masterfpc }
+        if ($DataDict["UPTIME"] -match $MasterFpcBlockPattern) { $UptimeScope = $Matches.masterfpc }
+    }
+
     # --- Parse Identity ---
-    if ($DataDict["VERSION"] -match "(?i)Hostname:\s*(?<host>\S+)") { $NodeData.Hostname = $Matches.host }
-    if ($DataDict["VERSION"] -match "(?i)Junos:\s*(?<ver>\S+)") { $NodeData.JunosVersion = $Matches.ver }
+    if ($VersionScope -match "(?i)Hostname:\s*(?<host>\S+)") { $NodeData.Hostname = $Matches.host }
+    if ($VersionScope -match "(?i)Junos:\s*(?<ver>\S+)") { $NodeData.JunosVersion = $Matches.ver }
 
     # --- Parse Config Backup (stored verbatim, redacted from RawDumps - see above) ---
     if (-not [string]::IsNullOrWhiteSpace($DataDict["CONFIG"])) { $NodeData.Configuration = $DataDict["CONFIG"].Trim() }
@@ -332,8 +383,15 @@ try {
     } 
     
     if (-not $ParsedStack) {
-        if ($DataDict["CHASSIS_HARDWARE"] -match "(?i)Chassis\s+(?<serial>\S+)\s+(?<model>\S+)") {
-            $NodeData.StackMembers += [PSCustomObject]@{ FPC = "0"; Model = $Matches.model; Serial = $Matches.serial; Role = "Standalone" }
+        # The Description column is a phrase, not a token: a VC reads "Chassis <serial> Virtual
+        # Chassis", and capturing \S+ took "Virtual" as the model. This fallback runs only when
+        # the VC parse already failed - exactly when the device IS a VC - so that model was wrong
+        # every time it appeared. No model is honest here; the serial is still useful.
+        if ($DataDict["CHASSIS_HARDWARE"] -match "(?im)^Chassis\s+(?<serial>\S+)\s+(?<model>[^\r\n]+?)\s*$") {
+            $ChassisSerial = $Matches.serial
+            $ChassisModel = $Matches.model.Trim()
+            if ($ChassisModel -match "(?i)^virtual\s+chassis$") { $ChassisModel = "Unknown" }
+            $NodeData.StackMembers += [PSCustomObject]@{ FPC = "0"; Model = $ChassisModel; Serial = $ChassisSerial; Role = "Standalone" }
         }
     }
 
@@ -341,8 +399,8 @@ try {
     if ($DataDict["ROUTE"] -match "to\s+(?<gw>\b(?:\d{1,3}\.){3}\d{1,3}\b)\s+via") { $NodeData.Gateway = $Matches.gw }
 
     # --- Parse Uptime / Last Config Change (both from "show system uptime") ---
-    if ($DataDict["UPTIME"] -match "(?i)System booted:\s*(?<boot>[^\(\r\n]+)") { $NodeData.Uptime = $Matches.boot.Trim() }
-    if ($DataDict["UPTIME"] -match "(?i)Last configured:\s*(?<cfg>[^\(\r\n]+?)\s*\([^\)]*\)\s*by\s+(?<user>\S+)") {
+    if ($UptimeScope -match "(?i)System booted:\s*(?<boot>[^\(\r\n]+)") { $NodeData.Uptime = $Matches.boot.Trim() }
+    if ($UptimeScope -match "(?i)Last configured:\s*(?<cfg>[^\(\r\n]+?)\s*\([^\)]*\)\s*by\s+(?<user>\S+)") {
         $NodeData.LastConfigured = $Matches.cfg.Trim()
         $NodeData.LastConfiguredBy = $Matches.user.Trim()
     }
@@ -439,12 +497,24 @@ try {
         }
     }
 
+    # "show spanning-tree interface" repeats a port once per VLAN, and a trunk can genuinely be
+    # BLK in some VLANs and FWD in others. The field stays a single state string (the web UI
+    # renders it as one), so the repeats are collapsed by precedence rather than last-VLAN-wins:
+    # a port blocking in ANY VLAN is the condition an operator needs to see, so BLK outranks the
+    # rest, and FWD - the state that silently masked a block before - ranks last but for DIS.
+    $StpStatePrecedence = @{ BLK = 5; LST = 4; LRN = 3; FWD = 2; DIS = 1 }
     foreach ($Line in ($DataDict["STP"] -split "`n")) {
         $Line = $Line.Trim()
         if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+.*?(?<state>FWD|BLK|DIS|LRN|LST)") {
             # Strip any trailing ".N" (not just ".0") to land on the collapsed physical-port key.
             $p = $Matches.port -replace "\.\d+$",""
-            if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].STP = $Matches.state }
+            $NewState = $Matches.state
+            if ($NodeData.Interfaces.ContainsKey($p)) {
+                $CurrentRank = 0
+                $CurrentState = $NodeData.Interfaces[$p].STP
+                if ($StpStatePrecedence.ContainsKey($CurrentState)) { $CurrentRank = $StpStatePrecedence[$CurrentState] }
+                if ($StpStatePrecedence[$NewState] -gt $CurrentRank) { $NodeData.Interfaces[$p].STP = $NewState }
+            }
         }
     }
 

@@ -303,7 +303,7 @@ window.pingDevice = async function() {
             return;
         }
         if (status.status === 'running') {
-            pingPollTimer = setTimeout(poll, 2000);
+            pingPollTimer = setTimeout(() => { poll().catch(e => finish("Ping poll failed unexpectedly: " + e.message, "red")); }, 2000);
             return;
         }
         // status.status === 'complete'
@@ -324,7 +324,9 @@ window.pingDevice = async function() {
             window.setStatus(ip + " did not respond to ping (" + status.received + "/" + status.sent + " replies).", "red");
         }
     };
-    poll();
+    // Unguarded, a throw inside poll() escapes as an unhandled rejection: finish() never runs,
+    // so pingPollTargetIp stays set and #pingBtn stays disabled for the rest of the session.
+    poll().catch(e => finish("Ping poll failed unexpectedly: " + e.message, "red"));
 };
 
 // Client-side port of Update-ClientIpCorrelation. A single-device rescan only has that
@@ -832,6 +834,11 @@ function renderClientSubRow(c, daisyChains) {
 
 function csvEscapeField(val) {
     var s = (val === null || val === undefined) ? '' : String(val);
+    // Device-supplied text (Desc, Hostname, Dot1x_User, ...) reaching a spreadsheet as a
+    // formula. Quoting does not stop this - the sheet strips the quotes, then evaluates - so
+    // the leading character is neutralised with an apostrophe first. A lone '-' is the
+    // exports' own "no value" placeholder and is not a formula, so it is left alone.
+    if (/^[=+@\t\r]|^-(?!$)/.test(s)) { s = "'" + s; }
     if (/[",\r\n]/.test(s)) { s = '"' + s.replace(/"/g, '""') + '"'; }
     return s;
 }

@@ -260,10 +260,17 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     const n = extents.length;
     const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => extents[b] - extents[a]);
     const posOf = new Array(n).fill(-1);
+    // All-equal extents (every child a leaf - the common case, and the same one relaxRadii
+    // fast-paths) make every permutation equivalent, so the O(n^3) search below buys nothing.
+    // Without this, n=3000 spent 15.2s here before the 8s budget could even be noticed.
+    if (extents.every(e => e === extents[0])) return posOf.map((_, i) => i);
     const filled = new Array(n).fill(false);
     posOf[order[0]] = 0;
     filled[0] = true;
     for (let k = 1; k < n; k++) {
+      // The sweep below is O(n^2) per placement, long enough that the budget must be
+      // observed here rather than only once this whole function has returned.
+      checkDeadline();
       let bestPos = -1, bestMinDist = -1;
       for (let p = 0; p < n; p++) {
         if (filled[p]) continue;

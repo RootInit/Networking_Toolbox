@@ -568,14 +568,18 @@ function buildMembers(device) {
     }
     members.sort(function (a, b) { return a.fpc - b.fpc; });
     var multi = members.length > 1;
-    return members.map(function (m) {
+    // Drafted first, then judged, because the "does the catalogue art fit reality?" ratio
+    // below is pooled across the device rather than decided per member: device.Interfaces is a
+    // filtered subset, so one member of a stack can report a handful of port names the art has
+    // no jacks for while its identical sibling reports none at all.
+    var drafts = members.map(function (m) {
         var out = { fpc: m.fpc, role: m.role || '', model: m.model || 'Unknown', master: multi ? /master/i.test(m.role || '') : true, multi: multi };
+        var draft = { out: out, m: m };
         var upper = String(m.model || '').toUpperCase();
-        if (MODULAR_RE.test(upper)) { out.note = 'Modular chassis (' + m.model + ') - no front-panel drawing.'; return out; }
+        if (MODULAR_RE.test(upper)) { out.note = 'Modular chassis (' + m.model + ') - no front-panel drawing.'; return draft; }
         var res = resolveModel(m.model);
         var model = res ? res.model : inferModel(m.model, m.fpc, interfaces);
-        if (!model) { out.note = 'No front-panel drawing for ' + (m.model || 'this model') + '.'; return out; }
-        // Used below to check the catalogue art actually fits what this member reports.
+        if (!model) { out.note = 'No front-panel drawing for ' + (m.model || 'this model') + '.'; return draft; }
         var reported = interfaces.filter(function (intf) { var p = parsePort(intf && intf.Port); return p && p.fpc === m.fpc; }).map(function (intf) { return String(intf.Port); });
         var bound = {};
         var makeUnit = function (mdl) { return {
@@ -592,16 +596,47 @@ function buildMembers(device) {
             },
         }; };
         curUid = 'fpc' + m.fpc;
-        var html = STYLE_GEN[model.style](makeUnit(model));
+        draft.res = res;
+        draft.model = model;
+        draft.html = STYLE_GEN[model.style](makeUnit(model));
+        draft.reported = reported;
+        draft.covered = reported.filter(function (p) { return bound[p]; }).length;
+        // A member with no reported ports has nothing to infer a layout from, so it cannot be
+        // demoted at all - which is what the verdict below has to know before demoting anyone.
+        draft.fallback = res ? inferModel(m.model, m.fpc, interfaces) : null;
+        draft.render = function (mdl) { bound = {}; curUid = 'fpc' + m.fpc; return STYLE_GEN[mdl.style](makeUnit(mdl)); };
+        return draft;
+    });
+
+    // Pooled per catalogue key, not per device, so a mixed stack's bad fit for one model
+    // cannot condemn another model's good art.
+    var pools = {};
+    drafts.forEach(function (d) {
+        if (!d.res) return;
+        var p = pools[d.res.key] || (pools[d.res.key] = { reported: 0, covered: 0, allInferable: true });
+        p.reported += d.reported.length;
+        p.covered += d.covered;
+        if (!d.fallback) p.allInferable = false;
+    });
+    Object.keys(pools).forEach(function (k) {
+        var p = pools[k];
         // Artwork covering under half the reported ports (a misidentified model, or a naming
         // scheme the measured SKU doesn't use) would light almost nothing; the
-        // interface-derived layout is the more honest picture.
-        if (res && reported.length) {
-            var covered = reported.filter(function (p) { return bound[p]; }).length;
-            if (covered / reported.length < 0.5) {
-                var inferred = inferModel(m.model, m.fpc, interfaces);
-                if (inferred) { bound = {}; res = null; model = inferred; html = STYLE_GEN[model.style](makeUnit(model)); }
-            }
+        // interface-derived layout is the more honest picture. Sample size matters as much as
+        // the ratio - a couple of uplink names say nothing about a 48-port panel - and
+        // allInferable keeps it all-or-nothing, since demoting only the members that happen to
+        // have interfaces to infer from is what made one chassis render as two switches.
+        p.demote = p.allInferable && p.reported >= 8 && (p.covered / p.reported) < 0.5;
+    });
+
+    return drafts.map(function (d) {
+        var out = d.out;
+        if (out.note) return out;
+        var res = d.res;
+        var model = d.model;
+        var html = d.html;
+        if (res && pools[res.key] && pools[res.key].demote) {
+            res = null; model = d.fallback; html = d.render(d.fallback);
         }
         out.catalogueKey = res ? res.key : null;
         out.inferred = !res;

@@ -22,12 +22,19 @@ $script:ContentTypes = @{
     ".ico"  = "image/x-icon"
 }
 
+# Set once the body starts going out. HttpListenerResponse exposes no "already submitted"
+# property, and after submission StatusCode/ContentLength64 are read-only - so an error path
+# that reaches Send-WebJson at that point throws a second time instead of reporting anything.
+# The accept loop is single-threaded and resets this per request, so one flag is enough.
+$script:WebResponseStarted = $false
+
 function Send-WebResponse {
     param($Response, [int]$StatusCode, [byte[]]$Bytes, [string]$ContentType = "text/plain; charset=utf-8")
     $Response.StatusCode = $StatusCode
     $Response.ContentType = $ContentType
     $Response.ContentLength64 = $Bytes.Length
     try {
+        $script:WebResponseStarted = $true
         $Response.OutputStream.Write($Bytes, 0, $Bytes.Length)
     } finally {
         # A client that disconnected mid-write makes Close() throw too; that must not mask
@@ -57,9 +64,14 @@ $script:DebugLogMaxBytes = 10MB
 
 # Mapper_Debug.log - the same file Invoke-FleetCrawl's Write-DebugLogLocal writes crawl
 # activity to (set once via $script:DebugLogPath in Start-MapperWebServer).
+#
+# Accepts an array as well as a single string: each element still gets its own real
+# "[timestamp] " prefix (the anti-forgery property callers rely on), but the whole batch costs
+# one open/close and one size check instead of one per line. This runs on the accept loop.
 function Write-MapperDebugLog {
-    param([string]$Message)
+    param([string[]]$Message)
     if (-not $script:DebugLogPath) { return }
+    if ($null -eq $Message -or $Message.Count -eq 0) { return }
     # Best-effort throughout: a full disk, a locked file, or a Get-Item racing a concurrent
     # Invoke-FleetCrawl -Force truncation must not block the append or take down the caller.
     # -Encoding utf8 explicit, or a mixed-encoding file causes CJK mojibake in text editors.
@@ -68,7 +80,9 @@ function Write-MapperDebugLog {
         if ($ExistingFile -and $ExistingFile.Length -gt $script:DebugLogMaxBytes) {
             "=== Mapper_Debug.log truncated at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') (exceeded $($script:DebugLogMaxBytes) bytes) ===" | Out-File -FilePath $script:DebugLogPath -Encoding utf8
         }
-        "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Message" | Out-File -FilePath $script:DebugLogPath -Append -Encoding utf8
+        $Stamp = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] "
+        $Stamped = foreach ($Line in $Message) { $Stamp + $Line }
+        ($Stamped -join [Environment]::NewLine) | Out-File -FilePath $script:DebugLogPath -Append -Encoding utf8
     } catch {}
 }
 
@@ -132,7 +146,10 @@ function Invoke-ClientErrorAction {
 
     $HeaderLine = "CLIENT ERROR [$SourceText] $MessageText"
     if ($UrlText) { $HeaderLine += " (at $UrlText)" }
-    Write-MapperDebugLog $HeaderLine
+    # Accumulated and written in one call: a stack can be ~40 lines, and one open/close per
+    # line on the single-threaded accept loop is what the client can drive up.
+    $LogLines = [System.Collections.Generic.List[string]]::new()
+    $LogLines.Add($HeaderLine)
     if ($StackText) {
         # Split below so each line gets its own real "[timestamp]    " prefix, so a stack
         # can't forge an entry - only length-cap it, leave its newline structure alone.
@@ -143,9 +160,10 @@ function Invoke-ClientErrorAction {
             # TrimEnd() only strips a trailing `r; a lone mid-line `r would survive and, on
             # playback, return the cursor to overwrite the real timestamp prefix - the same
             # forged-entry effect, so escape it to a literal.
-            Write-MapperDebugLog "    $($StackLine.Replace("`r", '\r').TrimEnd())"
+            $LogLines.Add("    $($StackLine.Replace("`r", '\r').TrimEnd())")
         }
     }
+    Write-MapperDebugLog $LogLines.ToArray()
 
     Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "logged" }
 }
@@ -188,6 +206,41 @@ function Test-SameOriginRequest {
     return $false
 }
 
+# Resolves the ENGINE executable, which is not the host process: the engine is embedded in
+# whatever host started it, and the ISE is such a host, so MainModule.FileName there is
+# powershell_ise.exe. Its documented switches are only "[-File] <FilePath[]> [-NoProfile]
+# [-MTA]" - no -NoExit, and its -File OPENS a file in the editor instead of running it - yet
+# Start-Process still succeeds, so Invoke-ConnectAction's catch never fires and every click
+# reports "launched" while leaking an unconsumed plaintext credential file in %TEMP%.
+#
+# $PSHOME is the engine's own install directory. Keyed on PSVersion.Major, not PSEdition:
+# 5.1 on Nano Server/IoT reports PSEdition 'Core' while its engine is still powershell.exe.
+function Get-PowerShellEnginePath {
+    $Candidates = @()
+    if ($PSHOME) {
+        if ($PSVersionTable.PSVersion.Major -ge 6) {
+            # "pwsh.exe for Windows and pwsh for macOS and Linux" - try both, no platform test.
+            $Candidates += (Join-Path $PSHOME "pwsh.exe")
+            $Candidates += (Join-Path $PSHOME "pwsh")
+        } else {
+            $Candidates += (Join-Path $PSHOME "powershell.exe")
+        }
+    }
+    foreach ($Candidate in $Candidates) {
+        if ([System.IO.File]::Exists($Candidate)) { return $Candidate }
+    }
+
+    # Last resort, kept because it is correct whenever the host IS the engine (the common
+    # case) and a pwsh-only machine has no "powershell.exe" to hardcode. The ISE is excluded
+    # explicitly: falling back to it would restore exactly the bug above.
+    $HostPath = try { [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { $null }
+    if (-not [string]::IsNullOrWhiteSpace($HostPath) -and
+        [System.IO.Path]::GetFileName($HostPath) -ne "powershell_ise.exe") {
+        return $HostPath
+    }
+    return "powershell.exe"
+}
+
 # Launches Connect-Switch.ps1 (interactive SSH, askpass-injected via a short-lived
 # credential file). Deliberately narrow: fixed script, no free-form command surface, and
 # $TargetIP is regex-locked to IPv4 shape so it carries no shell metacharacters.
@@ -225,6 +278,13 @@ function Invoke-ConnectAction {
         Start-Process -FilePath $PowerShellExePath -ArgumentList $ArgString | Out-Null
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "launched"; ip = $TargetIP }
     } catch {
+        # Checked before the cleanup below: if the body was already going out, Start-Process
+        # succeeded and Connect-Switch.ps1 is about to read that credential file - deleting it
+        # here would break a session that is in fact launching.
+        if ($script:WebResponseStarted) {
+            Write-MapperDebugLog "CONNECT ABORTED [$TargetIP] Client disconnected mid-response: $_"
+            return
+        }
         # Launch failed before Connect-Switch.ps1 could clean up its own credential file.
         if ($CredFile) { Remove-JunosCredentialFile -CredentialFile $CredFile }
         Write-MapperDebugLog "CONNECT ERROR [$TargetIP] Failed to launch SSH session: $_"
@@ -575,8 +635,29 @@ function Invoke-ScanNetworkAction {
         return
     }
 
-    # Reap a finished job first, or a scan the browser never polled (tab closed) 409s every
-    # future click. Collected=true means PS/Runspace are already disposed.
+    $Parsed = $null
+    try { $Parsed = $Body | ConvertFrom-Json } catch {}
+    $StartIP = if ($Parsed -and $Parsed.startIp) { [string]$Parsed.startIp } else { $null }
+
+    if (-not $StartIP -or $StartIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing starting IP address" }
+        return
+    }
+
+    # Scope fence - see Invoke-ConnectAction. The entry-point IP is reached before the crawl
+    # applies any filtering of its own.
+    if (-not (Test-IpInAllowedScopes -IP $StartIP -AllowedScopes $AllowedScopes)) {
+        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes ($($AllowedScopes -join ', '))" }
+        return
+    }
+
+    # Every rejection above must leave server state untouched: this reap clears the slot the
+    # previous scan's result is polled from, so running it before validation made a typo'd or
+    # out-of-scope IP silently discard that result and 404 every later status poll.
+    #
+    # Reaping a finished job is still required before the 409 below, or a scan the browser
+    # never polled (tab closed) 409s every future click. Collected=true means PS/Runspace are
+    # already disposed.
     if ($script:PendingScanNetwork -and $script:PendingScanNetwork.Handle.IsCompleted) {
         $Finished = $script:PendingScanNetwork
         if (-not $Finished.Collected) {
@@ -594,22 +675,6 @@ function Invoke-ScanNetworkAction {
 
     if ($script:PendingScanNetwork) {
         Send-WebJson -Response $Response -StatusCode 409 -Object @{ error = "A network scan is already in progress"; ip = $script:PendingScanNetwork.StartIP }
-        return
-    }
-
-    $Parsed = $null
-    try { $Parsed = $Body | ConvertFrom-Json } catch {}
-    $StartIP = if ($Parsed -and $Parsed.startIp) { [string]$Parsed.startIp } else { $null }
-
-    if (-not $StartIP -or $StartIP -notmatch '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\z') {
-        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "Invalid or missing starting IP address" }
-        return
-    }
-
-    # Scope fence - see Invoke-ConnectAction. The entry-point IP is reached before the crawl
-    # applies any filtering of its own.
-    if (-not (Test-IpInAllowedScopes -IP $StartIP -AllowedScopes $AllowedScopes)) {
-        Send-WebJson -Response $Response -StatusCode 400 -Object @{ error = "IP is outside the configured AllowedScopes ($($AllowedScopes -join ', '))" }
         return
     }
 
@@ -744,6 +809,11 @@ function Invoke-GetConfigAction {
         $Raw = Get-Content $ConfigPath -Raw -Encoding UTF8
         Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.Text.Encoding]::UTF8.GetBytes($Raw)) -ContentType "application/json; charset=utf-8"
     } catch {
+        # See $script:WebResponseStarted: once the body is out there is nothing left to send.
+        if ($script:WebResponseStarted) {
+            Write-MapperDebugLog "GET-CONFIG ABORTED [$ConfigPath] Client disconnected mid-response: $_"
+            return
+        }
         Write-MapperDebugLog "GET-CONFIG ERROR [$ConfigPath] Failed to read configuration file: $_"
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to read configuration file: $_" }
     }
@@ -790,6 +860,10 @@ function Invoke-GetSnapshotsAction {
 
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ snapshots = $Snapshots }
     } catch {
+        if ($script:WebResponseStarted) {
+            Write-MapperDebugLog "GET-SNAPSHOTS ABORTED [$SnapshotDir] Client disconnected mid-response: $_"
+            return
+        }
         Write-MapperDebugLog "GET-SNAPSHOTS ERROR [$SnapshotDir] Failed to list snapshot(s): $_"
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to list snapshot(s): $_" }
     }
@@ -825,6 +899,10 @@ function Invoke-GetSnapshotAction {
 
         Send-WebResponse -Response $Response -StatusCode 200 -Bytes ([System.IO.File]::ReadAllBytes($FullPath)) -ContentType "application/json; charset=utf-8"
     } catch {
+        if ($script:WebResponseStarted) {
+            Write-MapperDebugLog "GET-SNAPSHOT ABORTED [$Name] Client disconnected mid-response: $_"
+            return
+        }
         Write-MapperDebugLog "GET-SNAPSHOT ERROR [$Name] Failed to read snapshot: $_"
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to read snapshot: $_" }
     }
@@ -903,6 +981,10 @@ function Invoke-SaveConfigAction {
 
         Send-WebJson -Response $Response -StatusCode 200 -Object @{ status = "saved" }
     } catch {
+        if ($script:WebResponseStarted) {
+            Write-MapperDebugLog "SAVE-CONFIG ABORTED [$ConfigPath] Client disconnected mid-response: $_"
+            return
+        }
         Write-MapperDebugLog "SAVE-CONFIG ERROR [$ConfigPath] Failed to save configuration: $_"
         Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Failed to save configuration: $_" }
     }
@@ -923,7 +1005,10 @@ function Invoke-StaticFile {
 
     # The trailing separator makes this a path-prefix match rather than a string-prefix one -
     # otherwise "Network_Visualizer" would also accept "Network_Visualizer_old".
-    if (-not $FullPath.StartsWith($RootFull, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path $FullPath -PathType Leaf)) {
+    # -LiteralPath: without it a name containing [ ] or * is read as a wildcard, so an existing
+    # "chart[1].js" 404s and a "*.js" request can match a different file that ReadAllBytes then
+    # fails to open. The containment check above is a plain string compare and is unaffected.
+    if (-not $FullPath.StartsWith($RootFull, [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $FullPath -PathType Leaf)) {
         Send-WebResponse -Response $Response -StatusCode 404 -Bytes ([System.Text.Encoding]::UTF8.GetBytes("Not found"))
         return
     }
@@ -1029,10 +1114,9 @@ function Start-MapperWebServer {
     $script:JunosUsername = $JunosUsername
     $script:JunosPassword = $JunosPassword
 
-    # Invoke-ConnectAction's SSH launch must reuse the host that started this process: a
-    # pwsh-only machine has no "powershell.exe" to hardcode.
-    $PowerShellExePath = try { [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { $null }
-    if ([string]::IsNullOrWhiteSpace($PowerShellExePath)) { $PowerShellExePath = "powershell.exe" }
+    # Invoke-ConnectAction's SSH launch must reuse the engine running this process, which is
+    # not the same as the process itself - see Get-PowerShellEnginePath.
+    $PowerShellExePath = Get-PowerShellEnginePath
 
     Write-Host "`nWeb UI listening on $Prefix (localhost only - Ctrl+C to stop)" -ForegroundColor Cyan
     # Guarded because this sits between the pool setup and the serving try/finally: an
@@ -1094,6 +1178,7 @@ function Start-MapperWebServer {
             }
             $Request = $Context.Request
             $Response = $Context.Response
+            $script:WebResponseStarted = $false
 
             # Every request is served on this one thread, so a blocking handler stops the whole
             # server while the process still looks alive - indistinguishable from "server down"
@@ -1195,8 +1280,14 @@ function Start-MapperWebServer {
                     Invoke-StaticFile -Response $Response -AbsolutePath $Request.Url.AbsolutePath -VisualizerRoot $VisualizerRoot
                 }
             } catch {
-                Write-MapperDebugLog "UNHANDLED REQUEST ERROR [$($Request.HttpMethod) $($Request.Url.AbsolutePath)] [$($_.Exception.GetBaseException().GetType().FullName)] $_`nStackTrace: $($_.ScriptStackTrace)"
-                try { Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Server error: $_" } } catch {}
+                # A disconnect after the body started is a client event, not a server error:
+                # no 500 can reach that client, and attempting one just throws again.
+                if ($script:WebResponseStarted) {
+                    Write-MapperDebugLog "REQUEST ABORTED [$($Request.HttpMethod) $($Request.Url.AbsolutePath)] Client disconnected mid-response: $_"
+                } else {
+                    Write-MapperDebugLog "UNHANDLED REQUEST ERROR [$($Request.HttpMethod) $($Request.Url.AbsolutePath)] [$($_.Exception.GetBaseException().GetType().FullName)] $_`nStackTrace: $($_.ScriptStackTrace)"
+                    try { Send-WebJson -Response $Response -StatusCode 500 -Object @{ error = "Server error: $_" } } catch {}
+                }
             } finally {
                 $RequestStopwatch.Stop()
                 if ($RequestStopwatch.Elapsed.TotalSeconds -ge 5) {
@@ -1223,15 +1314,11 @@ function Start-MapperWebServer {
         # written on the most common way this process ends. Pairs with SERVER START to bound
         # the process's serving lifetime.
         #
-        # Raw .NET calls, not Write-MapperDebugLog: once Ctrl+C puts the pipeline in Stopping
-        # state, any CMDLET invoked from a finally block re-throws PipelineStoppedException at
-        # the call boundary (the helper's own `catch {}` would then swallow it and write
-        # nothing). Plain .NET method calls are unaffected.
-        #
-        # That rule also means the cmdlet-based parts of this finally do not run on Ctrl+C:
-        # the .NET $Listener/runspace teardown below does, but Stop-JunosOrphanProcessesLocal
-        # and every SHUTDOWN ERROR line do not, so ssh.exe/cmd.exe grandchildren of an
-        # in-flight scan survive a Ctrl+C exit. A .NET-only reap would fix it.
+        # Raw .NET here, but NOT because cmdlets are unusable: PowerShell suspends the
+        # pipeline's stopping state for the duration of a finally, so the cmdlet-based cleanup
+        # below does run on Ctrl+C ("A finally block runs even if you use CTRL+C to stop the
+        # script" - about_Try_Catch_Finally). What Ctrl+C does break is pipeline OUTPUT, so
+        # anything logged here must go to a file, never to the success/error stream.
         try {
             if ($script:DebugLogPath) {
                 [System.IO.File]::AppendAllText(
@@ -1247,7 +1334,10 @@ function Start-MapperWebServer {
         try { $Listener.Stop() } catch { Write-MapperDebugLog "SHUTDOWN ERROR [Listener.Stop] $_" }
         try { $Listener.Close() } catch { Write-MapperDebugLog "SHUTDOWN ERROR [Listener.Close] $_" }
         try {
-            if ($script:PendingScan) {
+            # .Collected means Invoke-RescanStatusAction already disposed PS and reaped the
+            # grandchildren; re-doing it throws ObjectDisposedException into the catch below,
+            # and the reap could hit an unrelated ssh.exe now matching the same "@<IP>".
+            if ($script:PendingScan -and -not $script:PendingScan.Collected) {
                 try { $script:PendingScan.PS.Stop() } catch {}
                 $script:PendingScan.PS.Dispose()
                 # Same ssh.exe/cmd.exe grandchild leak as the other rescan cleanup points.
@@ -1271,7 +1361,8 @@ function Start-MapperWebServer {
         } catch { Write-MapperDebugLog "SHUTDOWN ERROR [PendingScanNetwork cleanup] $_" }
         try { $script:RescanPool.Close(); $script:RescanPool.Dispose() } catch { Write-MapperDebugLog "SHUTDOWN ERROR [RescanPool cleanup] $_" }
         try {
-            if ($script:PendingPing) { try { $script:PendingPing.PS.Stop() } catch {}; $script:PendingPing.PS.Dispose() }
+            # .Collected as above - Invoke-PingStatusAction already disposed it.
+            if ($script:PendingPing -and -not $script:PendingPing.Collected) { try { $script:PendingPing.PS.Stop() } catch {}; $script:PendingPing.PS.Dispose() }
         } catch { Write-MapperDebugLog "SHUTDOWN ERROR [PendingPing cleanup] $_" }
         try {
             foreach ($Orphan in $script:OrphanedPings) { try { $Orphan.PS.Stop() } catch {}; $Orphan.PS.Dispose() }

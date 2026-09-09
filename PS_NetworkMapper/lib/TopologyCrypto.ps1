@@ -13,6 +13,24 @@ function Get-TopologyPbkdf2Iterations {
     return 600000
 }
 
+# Rfc2898DeriveBytes(String, Byte[], Int32, HashAlgorithmName) - the SHA-256 overload
+# Get-TopologyKeyMaterial needs, since the older 3-arg constructor is SHA-1 only and would
+# derive different keys - requires .NET Framework 4.7.2 or later:
+#   https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.rfc2898derivebytes.-ctor
+# Windows Server 2016 and Windows 10 up to 1709 ship 4.6.2/4.7/4.7.1 by default (4.7.2 is an
+# optional install there), so this is reachable on plausible targets:
+#   https://learn.microsoft.com/en-us/dotnet/framework/install/versions-and-dependencies
+# Without this check the shortfall surfaces as a constructor-resolution error from inside a
+# password-retry loop, which re-prompts the operator three times for something no password can
+# fix. Callers invoke it once at startup, before prompting. Not run at dot-source time: the
+# -NoEncryption path loads this file without ever deriving a key.
+function Assert-TopologyCryptoRuntime {
+    $Signature = [type[]]@([string], [byte[]], [int], [System.Security.Cryptography.HashAlgorithmName])
+    if ($null -eq [System.Security.Cryptography.Rfc2898DeriveBytes].GetConstructor($Signature)) {
+        throw "This runtime is too old for PS_NetworkMapper's encryption: Rfc2898DeriveBytes(String, Byte[], Int32, HashAlgorithmName) requires .NET Framework 4.7.2 or later. Install .NET Framework 4.7.2+ (or run under PowerShell 7), or re-run with -NoEncryption."
+    }
+}
+
 function Get-TopologyKeyMaterial {
     param(
         [Parameter(Mandatory=$true)][string]$Password,
