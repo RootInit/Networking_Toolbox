@@ -245,3 +245,35 @@ test('every catalogue entry renders without throwing and binds at least one port
     assert.equal(m.catalogueKey, key);
   }
 });
+
+test('buildMembers: a stack member with no reported ports blocks its sibling being demoted', () => {
+  // 10.55.10.1's shape: fpc0 reports 9 ports the EX4300 art has no jacks for, fpc1 reports
+  // none at all. fpc1 has nothing to infer a layout from, so demoting fpc0 alone would render
+  // one virtual chassis as two different switches.
+  const ifs = [{ Port: 'xe-0/1/0', Link: 'up' }].concat(
+    Array.from({ length: 8 }, (_, n) => ({ Port: `xe-0/0/${n}`, Link: 'up' })));
+  const members = buildMembers({
+    StackMembers: [{ FPC: '0', Model: 'ex4300-48p', Role: 'Master' }, { FPC: '1', Model: 'ex4300-48p', Role: 'Backup' }],
+    Interfaces: ifs,
+  });
+  assert.deepEqual(members.map(m => m.inferred), [false, false]);
+  assert.deepEqual(members.map(m => m.catalogueKey), ['EX4300-48P', 'EX4300-48P']);
+});
+
+test('buildMembers: a reported-port sample under the minimum floor cannot demote', () => {
+  const ifs = Array.from({ length: 7 }, (_, n) => ({ Port: `xe-0/0/${n}`, Link: 'up' }));
+  const [m] = buildMembers({ StackMembers: [{ FPC: '0', Model: 'ex4300-48p', Role: 'Master' }], Interfaces: ifs });
+  assert.equal(m.inferred, false);
+  assert.equal(m.catalogueKey, 'EX4300-48P');
+});
+
+test('buildMembers: pooling still demotes when every member carries contrary evidence', () => {
+  const ifs = [];
+  for (const fpc of [0, 1]) for (let n = 0; n < 8; n++) ifs.push({ Port: `xe-${fpc}/0/${n}`, Link: 'up' });
+  const members = buildMembers({
+    StackMembers: [{ FPC: '0', Model: 'ex4300-48p', Role: 'Master' }, { FPC: '1', Model: 'ex4300-48p', Role: 'Backup' }],
+    Interfaces: ifs,
+  });
+  assert.deepEqual(members.map(m => m.inferred), [true, true]);
+});
+

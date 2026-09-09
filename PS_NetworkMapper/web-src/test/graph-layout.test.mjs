@@ -629,3 +629,13 @@ test('computeRecursiveRadialLayout completes normally when opts.deadline is omit
   assert.doesNotThrow(() => computeRecursiveRadialLayout('root', childrenOf, {}));
   assert.doesNotThrow(() => computeRecursiveRadialLayout('root', childrenOf, { deadline: Date.now() + 60000 }));
 });
+
+test('computeRecursiveRadialLayout places equal-extent leaves in childrenOf order around the ring', () => {
+  // All-equal extents skip spreadBySize's O(n^3) search, so the ordering is identity.
+  const kids = Array.from({ length: 8 }, (_, i) => 'n' + i);
+  const pos = computeRecursiveRadialLayout('root', new Map([['root', kids]]), { nodeSpacing: 190, minRadius: 190 });
+  const angles = kids.map(id => { const p = pos.get(id); return Math.atan2(p.y, p.x); });
+  const norm = angles.map(a => (a - angles[0] + 2 * Math.PI) % (2 * Math.PI));
+  norm.forEach((a, i) => assert.ok(Math.abs(a - (2 * Math.PI * i) / 8) < 1e-9, `child ${i} at ${a}`));
+});
+

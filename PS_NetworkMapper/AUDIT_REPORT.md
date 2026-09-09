@@ -1,6 +1,68 @@
 # AUDIT_REPORT.md — PS_NetworkMapper Full-Depth Audit (Closing Report)
 
-Date: 2026-09-02 to 2026-09-03. Full detail and raw agent output live in `.claude/audit-findings-*.md`, `.claude/verify-*.md` (Pass 1), `.claude/p2-findings-*.md`, `.claude/p2-verify-*.md` (Pass 2), `.claude/p3-findings-*.md` onward; full process log in `AUDIT_LEDGER.md`.
+Date: 2026-09-02 to 2026-09-03. Full process log in `AUDIT_LEDGER.md`. The per-agent raw
+output that used to sit in `.claude/` was removed from the repo on 2026-09-08; it is still
+recoverable from git history if a specific finding needs re-reading.
+
+---
+
+## Post-audit status (2026-09-08)
+
+This section is an addendum, not a revision — everything below it is the audit's closing
+report as written, left intact. Since it was written:
+
+**Remaining Risk #1 (CFG-004, "no PowerShell test infrastructure") is CLOSED.** The minimal
+no-framework smoke-test script it recommended now exists as `Run-Tests.ps1`, covering all
+four areas it named — the regex-anchor validation choke point, RawDumps redaction,
+`Test-IpInAllowedScopes`, and the atomic-write helpers — plus `TopologyCrypto` (round-trip,
+tamper rejection, and a fixed vector shared with the JS suite), the Junos PoE/LLDP parsing
+regexes, and the web-server endpoint payload shapes. Every case was mutation-tested: the bug
+it guards was reintroduced and the case confirmed to fail. Counts are now **110 PowerShell /
+141 JS**, versus the 0/99 in "Baseline vs final" below.
+
+**Two of the audit's own conclusions did not hold**, both found on 2026-09-08 and both
+outside the shape any pass was looking for:
+
+- The Pass 4 "regex end-anchor" work hardened *validation* regexes, but the *parsing* regexes
+  were never audited as a class. Two of them — `show poe interface` and the LLDP neighbour
+  `Port ID` field — were matching nothing, or the wrong field, on 100% of real device output.
+  Neither failed loudly; the data just arrived as "Unknown" or as a meaningless integer. Both
+  are now fixed and regression-tested.
+- The single-threaded accept loop was never treated as a shared resource. Two endpoints
+  serialized their whole payload on it, stalling every other request for minutes under
+  Windows PowerShell 5.1 and surfacing to the operator only as a browser-side "failed to
+  fetch" with nothing in the server log.
+
+**Three items this addendum previously listed as "needs a Windows host, therefore unfixed" are
+now fixed**, by answering each as a documentation question instead of waiting for hardware:
+
+- The orphaned `ssh.exe` after a batch timeout. `Process.Kill(Boolean)` lists no
+  `netframework-*` moniker at all, so 5.1 cannot kill a process tree — the fix was to delete
+  the `cmd.exe` wrapper entirely, so the killed process *is* the one holding the unredacted
+  `show configuration | display set` output, and no `%TEMP%` payload file is written at all.
+- `$PowerShellExePath` resolving to the host rather than the engine. Now resolved from
+  `$PSHOME` + `PSEdition`, with `powershell_ise.exe` explicitly excluded from the fallback.
+- The blocking `Dispose()` on the crawl abort path — and `RunspacePool.Close()`, which blocked
+  identically and was the larger half. Both are bounded now; measured 16.0s → 4.5s.
+
+Newly documented by the same round: `Rfc2898DeriveBytes(String, Byte[], Int32,
+HashAlgorithmName)` requires **.NET Framework 4.7.2+**, and Windows Server 2016 ships 4.6.2 by
+default — so on a plausible target *all* encryption would have failed at startup. Guarded by a
+reflection check that runs before the password prompt, and recorded in the README.
+
+One claim made in this addendum's own commit history did not hold, and is corrected here for
+the record: that a cmdlet called from a `finally` re-throws `PipelineStoppedException` once
+Ctrl+C puts the pipeline in Stopping state, making the shutdown orphan reap dead code. It does
+not — PowerShell suspends the stopping state for the duration of a `finally` body, and the only
+documented restriction is that pipeline *output* is discarded. The reap was always live.
+
+**Still open from Remaining Risk below**: #2/#3 (no hardware-in-the-loop coverage), #4 (SSH
+username validation strictness), #5 (Windows ACL-ordering semantics unverified), #6
+(`/api/session-password` shared-machine gap). And the standing caveat over everything above:
+none of it has been executed on Windows PowerShell 5.1. The .NET-Framework-only API surface is
+verified against Microsoft's documentation, not against a running 5.1 host.
+
+---
 
 ## Status: ALL 8 PASSES COMPLETE. Hard cap reached. Termination condition (2 consecutive clean passes) was NEVER met — no pass in the engagement came back with zero CONFIRMED findings, though Pass 8 came closer than any prior pass (2 of its 7 review agents were completely clean).
 
@@ -37,7 +99,7 @@ This finding is the audit's clearest evidence for two things: (1) a fix pass can
 
 ## Escalated to the human (full list, all 8 passes)
 1. **SSH-001/002's validation regex strictness** (Pass 1) — still open, no further action taken.
-2. **CFG-004 (no PowerShell test suite)** — open across all 8 passes; Pass 8 turned this from a standing observation into a concretely evidenced risk (see below) and scoped, but did not implement, a fix.
+2. **CFG-004 (no PowerShell test suite)** — open across all 8 passes; Pass 8 turned this from a standing observation into a concretely evidenced risk (see below) and scoped, but did not implement, a fix. **Closed 2026-09-08** — see Post-audit status.
 3. **Pass 3 consolidation decision** (atomic writes, manual verification over new Pester dependency) — resolved, user approved.
 4. **P3FRESH-004's `-AllowedScopes` behavior change** (manual scan/rescan IP) — resolved, user approved.
 5. **P5's `-AllowedScopes` on manual scan entry** — resolved, user approved.
@@ -48,7 +110,7 @@ This finding is the audit's clearest evidence for two things: (1) a fix pass can
 Every escalation followed the same pattern established in Pass 3: a genuine security-relevant *behavior change* (not just a bugfix) gets `AskUserQuestion`, not unilateral implementation. All 6 behavior-change escalations across Passes 3-7 were approved by the user.
 
 ## Remaining risk (handed off — no further audit passes remain)
-1. **No PowerShell test infrastructure (CFG-004) — the single largest open item.** Pass 8's dedicated closing assessment made this concrete rather than theoretical: roughly half of the audit's 99 total fixes have zero automated regression protection, and severity-weighted the picture is worse — every HIGH/CRITICAL PowerShell-side finding (the regex end-anchor bypass, the RawDumps redaction fix, the atomic-write helper, `-AllowedScopes` enforcement) has no automated test locking it in. This is not a hypothetical risk: the RawDumps redaction fix already regressed once, from an unrelated change (a command reorder) in the very next pass, precisely because nothing automated would have caught it. **Recommended next step**: a minimal, no-framework PowerShell smoke-test script (`pwsh`'s own `if`/`throw` is sufficient — no Pester dependency needed, consistent with the user's Pass 3 decision) covering at minimum: the regex-anchor validation choke point, RawDumps redaction, `Test-IpInAllowedScopes`, and the atomic-write helpers. This was explicitly scoped by a Pass 8 agent but deliberately not implemented, per the same "new test-infrastructure investment is a user decision" precedent set by the declined Pass 3 Pester question.
+1. **~~No PowerShell test infrastructure (CFG-004) — the single largest open item.~~ CLOSED 2026-09-08 (`Run-Tests.ps1`; see Post-audit status). Retained below as written, for the reasoning.** Pass 8's dedicated closing assessment made this concrete rather than theoretical: roughly half of the audit's 99 total fixes have zero automated regression protection, and severity-weighted the picture is worse — every HIGH/CRITICAL PowerShell-side finding (the regex end-anchor bypass, the RawDumps redaction fix, the atomic-write helper, `-AllowedScopes` enforcement) has no automated test locking it in. This is not a hypothetical risk: the RawDumps redaction fix already regressed once, from an unrelated change (a command reorder) in the very next pass, precisely because nothing automated would have caught it. **Recommended next step**: a minimal, no-framework PowerShell smoke-test script (`pwsh`'s own `if`/`throw` is sufficient — no Pester dependency needed, consistent with the user's Pass 3 decision) covering at minimum: the regex-anchor validation choke point, RawDumps redaction, `Test-IpInAllowedScopes`, and the atomic-write helpers. This was explicitly scoped by a Pass 8 agent but deliberately not implemented, per the same "new test-infrastructure investment is a user decision" precedent set by the declined Pass 3 Pester question.
 2. **The Inactive Ports feature has never been verified against a live or simulated Junos device.** A Pass 8 agent produced a 5-step hardware-validation checklist (not reproduced in full here — see the Pass 8 findings in `AUDIT_LEDGER.md` / the agent's own report) covering the `show interfaces extensive` command's actual output shape, the "Last flapped" duration format across Junos versions, and the Description-field collision guard, none of which can be confirmed without real hardware.
 3. **Hardware-in-the-loop / simulator coverage** — unchanged across all 8 passes: nothing in this codebase is tested against a real or simulated Junos device. This is the root cause of item 2 above and a standing limitation of any future audit of this codebase's SSH/parsing logic.
 4. **SSH username validation strictness** — still needs a real-world answer (open since Pass 1).
@@ -62,8 +124,8 @@ The protocol's formal stop condition — 2 consecutive clean passes — was neve
 Given the 8-pass hard cap is a hard stop, not a soft target, continuing was not an option this session. The recommended path forward is not a "Pass 9" but the two concrete items above: build the minimal PowerShell smoke-test suite (turns "no regression protection" from a standing risk into a closed one) and get real hardware time against a Junos device for the Inactive Ports feature and the SSH command-and-control path generally.
 
 ## Baseline vs final (Pass 1 start → Pass 8 end)
-- JS test count: **80 → 99** passing throughout.
-- PowerShell: 0 → 0 tests (still no framework — CFG-004 remains open; see Remaining Risk #1).
+- JS test count: **80 → 99** passing throughout. (141 as of 2026-09-08.)
+- PowerShell: 0 → 0 tests (still no framework — CFG-004 remains open; see Remaining Risk #1). (110 as of 2026-09-08; CFG-004 closed.)
 - Write-path architecture: 4 independent atomic-write implementations (1 not atomic at all) → 1 shared implementation (`lib/FileHelpers.ps1`) used by every write site, now also ACL-hardening `-NoEncryption` snapshot output (Pass 8).
 - Timestamp-parseability: fixed once, found incomplete twice more → 1 shared, test-backed implementation (`utils.js`'s `parseTimestampMs`) used by every call site.
 - `-AllowedScopes` scope fence: originally enforced at 1 of 5 SSH-dialing entry points → enforced consistently at all 5, closed incrementally across 4 passes with user approval each time.

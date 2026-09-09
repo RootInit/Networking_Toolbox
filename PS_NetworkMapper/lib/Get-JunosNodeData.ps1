@@ -14,50 +14,34 @@ param (
     # Only write raw payload text files if this flag is present.
     [switch]$Log,
 
-    # When set, failures are written straight to this file as they happen, not just
-    # buffered into $Logs for the caller to replay after EndInvoke - a job the orchestrator
-    # abandons as hung (FleetCrawl.ps1's 65s thread-abandon path) never calls EndInvoke, so
-    # $Logs would otherwise never reach disk at all.
+    # Failures are written here as they happen, not just buffered into $Logs: a job the
+    # orchestrator abandons as hung never calls EndInvoke, so $Logs would never reach disk.
     [string]$DebugLogPath
 )
 
 $WorkerScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 . (Join-Path $WorkerScriptDir "SshHelpers.ps1")
 
-# Everything below (including New-JunosAskPass itself) runs inside a try/finally so the
-# plaintext askpass files (containing the real switch password) are always removed, even if
-# New-JunosAskPass fails partway (%TEMP% full/locked), which would otherwise leave the
-# plaintext credential on disk with nothing to remove it.
+# Everything below (New-JunosAskPass included) runs inside a try/finally so the plaintext
+# askpass files are always removed, even on a partway failure (%TEMP% full/locked).
 $AskPass = $null
 try {
 
 $AskPass = New-JunosAskPass -Password $Password
 
-# Config backup contains secrets (SNMP communities, RADIUS/TACACS+ shared secrets, etc) and
-# is stored verbatim/unparsed, so redact it here: keep the command echo line, replace only the
-# config command's OWN output section - bounded to the next command's echoed prompt line (or
-# end-of-string if config is genuinely last), the same bounded-capture approach used for
-# $DataDict["CONFIG"] below (via $Sections / the "stop at the next prompt line" pattern).
-# Deliberately does NOT assume "config is written last" (it currently is not - see
-# Invoke-InteractiveBatch's comment; "show interfaces extensive" runs after it) and
-# deliberately uses a non-greedy `.*?` prefix (matching the FIRST/real echoed config command)
-# rather than a greedy one, so this can't be fooled into anchoring on a LATER, coincidentally
-# prompt-shaped line inside some other command's output (e.g. an operator-set interface
-# Description containing text like "> show configuration | display set") - a greedy prefix
-# would shift the redaction boundary to that later false match and leave the real config
-# secrets, earlier in the stream, completely unredacted.
+# SECURITY: the config backup holds secrets (SNMP communities, RADIUS/TACACS+ keys) and is
+# stored verbatim, so redact it here - keep the command echo line, replace only that command's
+# own output, bounded to the next echoed prompt line (config is not last in the batch).
+# The prefix is non-greedy so it anchors on the FIRST/real echoed config command; a greedy
+# prefix would latch onto a later prompt-shaped line (e.g. an operator-set interface
+# Description) and leave the real secrets, earlier in the stream, unredacted.
 #
-# Shared by both the -Log success-path dump and the failure-path dumps below it, so a raw
-# payload written anywhere always goes through this same redaction - never inline the regex
-# again elsewhere, or a second copy could drift and leak secrets that this one catches.
+# Every raw dump - success path and failure paths - goes through this one function; never
+# inline the regex elsewhere, or a second copy will drift and leak.
 function Save-RawDump {
     param([string]$RawOutput)
-    # $PWD is only reliably the repo root for the original CLI -Log caller (invoked from
-    # there). The web paths that now also reach here run this script inside a runspace pool
-    # whose working directory isn't guaranteed to be anything in particular - anchor next to
-    # $DebugLogPath (a path the caller already resolved deliberately, e.g. next to
-    # Mapper_Debug.log/ScanNetwork_Debug.log) whenever it's available, falling back to the
-    # old $PWD-relative behavior only when it isn't.
+    # $PWD is only the repo root for the CLI -Log caller; web paths run in a runspace pool with
+    # no guaranteed working directory, so anchor next to the caller-resolved $DebugLogPath.
     $DumpDir = if ($DebugLogPath) { Join-Path (Split-Path -Parent $DebugLogPath) "RawDumps" } else { Join-Path $PWD "RawDumps" }
     if (-not (Test-Path $DumpDir)) { New-Item -ItemType Directory -Path $DumpDir -Force | Out-Null }
     $RawLogPath = Join-Path $DumpDir "Raw_$TargetIP.txt"
@@ -66,30 +50,47 @@ function Save-RawDump {
     return $RawLogPath
 }
 
+# ssh's stderr carries no secrets, so unlike Save-RawDump this needs no redaction. Worth
+# keeping because the presence or absence of the "Permanently added ... to the list of known
+# hosts" line (expected every run under StrictHostKeyChecking=no/UserKnownHostsFile=NUL)
+# separates "reached a shell and got nothing back" from "never completed the handshake".
+function Save-RawErrDump {
+    param([string]$ErrOutput)
+    $DumpDir = if ($DebugLogPath) { Join-Path (Split-Path -Parent $DebugLogPath) "RawDumps" } else { Join-Path $PWD "RawDumps" }
+    if (-not (Test-Path $DumpDir)) { New-Item -ItemType Directory -Path $DumpDir -Force | Out-Null }
+    $RawErrLogPath = Join-Path $DumpDir "RawErr_$TargetIP.txt"
+    $ErrOutput | Out-File $RawErrLogPath -Force -Encoding utf8
+    return $RawErrLogPath
+}
+
 $Logs = [System.Collections.Generic.List[string]]::new()
+
+# Computed once, not per log call: the name depends only on $DebugLogPath, which is fixed for the
+# run, and the old per-call form allocated an MD5 provider it never disposed on every line.
+$LogMutexName = $null
+if ($DebugLogPath) {
+    $Md5 = [System.Security.Cryptography.MD5]::Create()
+    try {
+        $LogMutexName = "Global\JunosMapperLog_" + [System.BitConverter]::ToString(
+            $Md5.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($DebugLogPath))
+        ).Replace("-", "")
+    } finally { $Md5.Dispose() }
+}
+
 function Write-LogMsg {
     param([string]$msg)
     $Line = "[$TargetIP] $msg"
     $Logs.Add($Line)
     if ($DebugLogPath) {
-        # A fleet crawl runs many of these workers concurrently, all appending to the same
-        # shared $DebugLogPath - Out-File -Append takes an exclusive handle, so a same-instant
-        # write from another worker (or the orchestrator's own Write-DebugLogLocal) throws
-        # IOException and silently drops the failure line this whole feature exists to
-        # capture (measured empirically: under 8-way concurrent appends, a bare try/catch with
-        # retries still lost over half the lines). A named mutex - unique per log file path, so
-        # unrelated scans/log files don't serialize against each other - makes the append
-        # atomic instead of racing for the handle.
-        $MutexName = "Global\JunosMapperLog_" + [System.BitConverter]::ToString(
-            [System.Security.Cryptography.MD5]::Create().ComputeHash([System.Text.Encoding]::UTF8.GetBytes($DebugLogPath))
-        ).Replace("-", "")
-        $Mutex = New-Object System.Threading.Mutex($false, $MutexName)
+        # Out-File -Append takes an exclusive handle, and many workers append to this shared log
+        # concurrently: measured under 8-way concurrency, a bare try/catch with retries still
+        # lost over half the lines. The mutex name is per-log-path so unrelated scans don't
+        # serialize against each other.
+        $Mutex = New-Object System.Threading.Mutex($false, $LogMutexName)
         $Acquired = $false
         try {
-            # An AbandonedMutexException means a previous holder died mid-write without
-            # releasing - the mutex is still granted to us despite the exception, and Out-File
-            # itself is never left half-written (its own file write completes or doesn't), so
-            # it's safe to treat like a normal acquire and proceed.
+            # AbandonedMutexException still grants us the mutex, and Out-File is never left
+            # half-written, so a previous holder dying mid-write is safe to proceed through.
             try { $Acquired = $Mutex.WaitOne(5000) } catch [System.Threading.AbandonedMutexException] { $Acquired = $true }
             "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $Line" | Out-File -FilePath $DebugLogPath -Append -Encoding utf8
         } catch {
@@ -100,14 +101,45 @@ function Write-LogMsg {
     }
 }
 
-function Invoke-InteractiveBatch {
-    $TempOut = Join-Path $env:TEMP "ssh_out_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
-    $TempErr = Join-Path $env:TEMP "ssh_err_$([guid]::NewGuid().Guid.Substring(0,8)).txt"
+# ReadToEndAsync completes as soon as the child closes its end of the pipe, so a killed ssh.exe
+# resolves these immediately; the bounded wait only guards against a process that inherited the
+# handle still holding it open. .Result rethrows a faulted task as an AggregateException, hence
+# the try - a stream we could not read is reported as empty, same as an empty payload.
+function Get-StreamTaskText {
+    param($Task)
+    try {
+        if ($Task.Wait(5000)) {
+            $Text = $Task.Result
+            if ($null -ne $Text) { return $Text }
+        }
+    } catch {}
+    return ""
+}
 
+function Invoke-InteractiveBatch {
     $SshArgs = Get-JunosSshArgs -Username $Username -TargetIP $TargetIP
-    $ProcInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd.exe", "/c ssh.exe $($SshArgs -join ' ') > `"$TempOut`" 2> `"$TempErr`"")
+    # ssh.exe is started DIRECTLY, not as `cmd.exe /c ssh.exe ... > file`: Windows does not kill
+    # a child when its parent is killed, and .NET Framework 4.x (Windows PowerShell 5.1) has no
+    # Kill(entireProcessTree) overload - that arrived in .NET Core 3.0. Killing the wrapper on
+    # timeout therefore left ssh.exe alive holding the switch session and a write handle on the
+    # redirect target, whose unredacted `show configuration` text then could not be deleted.
+    # Owning the pipes here means Kill() hits the process that actually holds the data, and
+    # nothing sensitive is written to %TEMP% at all.
+    $SshExe = "ssh.exe"
+    $SshCmd = Get-Command "ssh.exe" -CommandType Application -ErrorAction SilentlyContinue
+    if ($SshCmd) { $SshExe = @($SshCmd)[0].Source }
+    # Space-joining needs no quoting: every element is either a literal option constant or
+    # "user@ip", and Get-JunosSshArgs' regexes admit no whitespace or quote character in either
+    # field. ArgumentList does not exist on .NET Framework 4.x, so .Arguments is the portable form.
+    $ProcInfo = New-Object System.Diagnostics.ProcessStartInfo($SshExe, ($SshArgs -join ' '))
     $ProcInfo.UseShellExecute = $false; $ProcInfo.CreateNoWindow = $true
     $ProcInfo.RedirectStandardInput = $true
+    $ProcInfo.RedirectStandardOutput = $true
+    $ProcInfo.RedirectStandardError = $true
+    # Junos emits UTF-8 for non-ASCII text; the default here is the console codepage, which
+    # mangles multi-byte sequences.
+    $ProcInfo.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $ProcInfo.StandardErrorEncoding = [System.Text.Encoding]::UTF8
 
     foreach ($EnvKey in $AskPass.EnvironmentVariables.Keys) { $ProcInfo.EnvironmentVariables[$EnvKey] = $AskPass.EnvironmentVariables[$EnvKey] }
 
@@ -115,13 +147,28 @@ function Invoke-InteractiveBatch {
 
     $Process = $null
     # If ssh.exe exits immediately (bad host, refused connection, askpass rejected) the pipe
-    # breaks and a WriteLine throws. Temp-file reads/cleanup stay inside this try so a throw
-    # still reaches the finally below - otherwise $TempOut/$TempErr leak across the crawl.
-    $Output = ""; $ErrText = ""; $TimedOut = $false
+    # breaks and a WriteLine throws; the finally below still tears the process down.
+    $Output = ""; $ErrText = ""; $TimedOut = $false; $ExitCode = $null
+    $Stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $Process = [System.Diagnostics.Process]::Start($ProcInfo)
+        # A missing ssh.exe throws Win32Exception "The system cannot find the file specified",
+        # which names nothing an operator can act on - hence the rethrow carrying the path.
+        try {
+            $Process = [System.Diagnostics.Process]::Start($ProcInfo)
+        } catch {
+            throw "Could not start ssh.exe ('$SshExe'): $_"
+        }
+        # Both reads start BEFORE the first command is written. Reading either stream
+        # synchronously while the child fills the other deadlocks once a pipe buffer is full,
+        # and ~20 Junos commands produce far more than one buffer's worth.
+        # https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.processstartinfo.redirectstandardoutput
+        $OutTask = $Process.StandardOutput.ReadToEndAsync()
+        $ErrTask = $Process.StandardError.ReadToEndAsync()
 
         $Process.StandardInput.WriteLine("set cli screen-length 0")
+        # A forced pty with no real terminal gets sshd's default rows/cols, and an 80-column
+        # wrap would silently corrupt parsing that assumes one logical line per record.
+        $Process.StandardInput.WriteLine("set cli screen-width 0")
         $Process.StandardInput.WriteLine("show version")
         $Process.StandardInput.WriteLine("show virtual-chassis")
         $Process.StandardInput.WriteLine("show chassis hardware")
@@ -135,16 +182,10 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.WriteLine("show vlans")
         $Process.StandardInput.WriteLine("show ethernet-switching table")
         $Process.StandardInput.WriteLine("show arp no-resolve")
-        # These five come last, after the ARP table client-IP correlation depends on, so a
-        # timeout truncates only this optional data. Within the five, smallest/most-critical
-        # output goes first and largest/most-optional goes last, so a timeout costs the
-        # least-important data first: uptime/alarms/RE-health are tiny and diagnostically
-        # valuable, so they run right after ARP; config backup is large but has
-        # truncation-tolerant parsing, so it's next; "show interfaces extensive" (feeds only
-        # the optional "Last flapped"/inactive-ports data, with no truncation-tolerant parsing
-        # of its own - an unrecognized/truncated block just leaves that field unset, so it
-        # fails safe) produces by far the largest output of anything in this batch, so it runs
-        # last of all - a timeout costs it before anything else here.
+        # ORDERING: these five run after ARP (which client-IP correlation depends on), and among
+        # themselves go smallest/most-critical first to largest/most-optional last, so a timeout
+        # costs the least valuable data first. "show interfaces extensive" is by far the largest
+        # and feeds only optional flap data, so it goes last of all.
         $Process.StandardInput.WriteLine("show system uptime")
         $Process.StandardInput.WriteLine("show chassis alarms")
         $Process.StandardInput.WriteLine("show chassis routing-engine")
@@ -154,37 +195,47 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.Close()
 
         $Process.WaitForExit(50000) | Out-Null
-        if (-not $Process.HasExited) { $Process.Kill(); $TimedOut = $true; Write-LogMsg "TIMEOUT on interactive batch." }
+        if (-not $Process.HasExited) {
+            # Targets ssh.exe itself, so the switch session and both pipes really do go away.
+            # Kill() races HasExited and throws if the process exited in between.
+            try { $Process.Kill() } catch {}
+            $TimedOut = $true
+            Write-LogMsg "TIMEOUT on interactive batch."
+            # Kill() is async: ExitCode isn't valid until teardown finishes.
+            $Process.WaitForExit()
+        }
 
-        # -Encoding UTF8 explicit: Junos emits UTF-8 for non-ASCII text, but Get-Content's
-        # no-BOM default is the system ANSI codepage, which mangles multi-byte sequences.
-        $Output = if (Test-Path $TempOut) { Get-Content $TempOut -Raw -Encoding UTF8 } else { "" }
+        $Output = Get-StreamTaskText -Task $OutTask
         # Named $ErrText, not $Error - $Error is PowerShell's automatic error-history variable.
-        $ErrText = if (Test-Path $TempErr) { Get-Content $TempErr -Raw -Encoding UTF8 } else { "" }
+        $ErrText = Get-StreamTaskText -Task $ErrTask
+        try { $ExitCode = $Process.ExitCode } catch { $ExitCode = $null }
     } finally {
-        if ($Process) { $Process.Dispose() }
-        if (Test-Path $TempOut) { Remove-Item $TempOut -Force -ErrorAction SilentlyContinue }
-        if (Test-Path $TempErr) { Remove-Item $TempErr -Force -ErrorAction SilentlyContinue }
+        if ($Process) {
+            # A WriteLine throwing on a broken pipe skips the timeout kill above; without this an
+            # ssh.exe that is merely unresponsive rather than dead would outlive the worker.
+            try { if (-not $Process.HasExited) { $Process.Kill() } } catch {}
+            $Process.Dispose()
+        }
     }
 
-    return @{ Output = $Output; Error = $ErrText; TimedOut = $TimedOut }
+    return @{
+        Output = $Output; Error = $ErrText; TimedOut = $TimedOut
+        ExitCode = $ExitCode; ElapsedSeconds = [Math]::Round($Stopwatch.Elapsed.TotalSeconds, 1)
+    }
 }
 
 $NodeData = @{
     DeviceIP = $TargetIP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
     StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
     Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
-    # Reflects only the RE that answered the CLI session (the master on a VC), not an
-    # aggregate across all members.
+    # Only the RE that answered the CLI session (the master on a VC), not a VC-wide aggregate.
     MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
     # LLDP-MED endpoints (phones, APs), kept separate from Neighbors (switch-to-switch topology).
     MedNeighbors = @()
-    # Full "show configuration | display set" text; redacted from the -Log RawDumps file
-    # (see that block below) since it contains secrets.
+    # Full "show configuration | display set" text; redacted from RawDumps since it holds secrets.
     Configuration = "Unknown"
-    # Distinguishes a real, successfully-scanned isolated leaf switch from a device that
-    # was never actually reached, so callers (e.g. FleetCrawl.ps1) can tell "empty because
-    # unreachable" apart from "empty because it genuinely has no neighbors/clients."
+    # Lets callers tell "empty because unreachable" apart from "empty because this really is an
+    # isolated leaf switch".
     ScanStatus = "Ok"; ScanError = $null
 }
 
@@ -192,40 +243,57 @@ try {
     if ($HumanReadable) { Write-Host "`nGathering node data for $TargetIP..." -ForegroundColor Cyan }
 
     $Result = Invoke-InteractiveBatch
+
     $RawOutput = $Result.Output
+    # Normalize to bare LF so no regex below has to tolerate a mix.
+    if ($RawOutput) { $RawOutput = $RawOutput -replace "`r`n", "`n" }
 
     # --- CONDITIONAL RAW LOG DUMP (config output redacted) ---
     if ($Log -and -not [string]::IsNullOrWhiteSpace($RawOutput)) {
         $RawLogPath = Save-RawDump -RawOutput $RawOutput
         Write-LogMsg "Raw payload saved to $RawLogPath (configuration output redacted)"
     } elseif ($Result.TimedOut -and -not [string]::IsNullOrWhiteSpace($RawOutput)) {
-        # A timeout is a scan failure too (the batch got killed mid-session) - whatever
-        # partial output it produced is exactly what's needed to see how far it got, so dump
-        # it unconditionally here rather than only under -Log.
+        # Partial output from a killed batch shows how far it got, so dump it even without -Log.
         $RawLogPath = Save-RawDump -RawOutput $RawOutput
         Write-LogMsg "Partial payload (session timed out) saved to $RawLogPath (configuration output redacted)"
     }
 
     if ([string]::IsNullOrWhiteSpace($RawOutput)) {
-        # ssh's stderr says WHY (timed out, permission denied, host key failure, etc). Capped
-        # (not the raw output itself, which -log dumps in full above) so a pathological stderr
-        # dump can't blow up the debug log - stderr from ssh is normally a handful of lines
-        # (auth/host-key/connect errors), so this cap is generous, not a tight truncation.
+        # ssh's stderr says WHY (timed out, permission denied, host key failure). Capped so a
+        # pathological dump can't blow up the debug log; ssh normally emits a handful of lines.
+        # The pty advisory is emitted client-side while parsing arguments, before any socket
+        # opens - it appears above even a DNS failure and is benign, but it is often the ONLY
+        # stderr line, so reporting it verbatim sent operators chasing pty problems instead of
+        # the real fault. Filtered out here; Save-RawErrDump below keeps the original. Its
+        # presence does signal one thing: this code never passes -t, so ssh_config sets RequestTTY.
+        $PtyAdvisory = 'Pseudo-terminal will not be allocated because stdin is not a terminal\.?'
+        $StderrNoise = $null -ne $Result.Error -and $Result.Error -match $PtyAdvisory
         $ErrSummary = if (-not [string]::IsNullOrWhiteSpace($Result.Error)) {
-            $Trimmed = $Result.Error.Trim()
-            if ($Trimmed.Length -gt 4000) { $Trimmed.Substring(0, 4000) + "...(truncated)" } else { $Trimmed }
+            $Trimmed = (($Result.Error -split "`r?`n" | Where-Object { $_ -notmatch $PtyAdvisory }) -join "`n").Trim()
+            if ([string]::IsNullOrWhiteSpace($Trimmed)) {
+                "(ssh reported no error; the only stderr line was the benign no-pty advisory, which means ssh_config sets RequestTTY)"
+            } elseif ($Trimmed.Length -gt 4000) { $Trimmed.Substring(0, 4000) + "...(truncated)" } else { $Trimmed }
         } else { "(no stderr output captured)" }
+        if ($StderrNoise) { $ErrSummary = "$ErrSummary [ssh_config requests a TTY]" }
+        # Distinguishes "ssh exited on its own with nothing to show" from "the session sat idle
+        # until our 50s WaitForExit killed it" - identical from ScanError alone otherwise.
+        $DiagTag = "[exit=$($Result.ExitCode) elapsed=$($Result.ElapsedSeconds)s timedOut=$($Result.TimedOut)]"
+        $ErrSummary = "$DiagTag $ErrSummary"
         if ($HumanReadable) { Write-Host "  [!] CRITICAL ERROR: Switch returned empty payload. ssh said: $ErrSummary" -ForegroundColor Red }
         Write-LogMsg "CRITICAL: Switch returned empty payload. ssh stderr: $ErrSummary"
-        # Interfaces starts as a hashtable (converted to an array later in the normal path,
-        # a step this early return skips) - force it to @() so it still serializes as JSON
-        # "[]" instead of "{}", which some consumers (e.g. CSV export) choke on.
+        if (-not [string]::IsNullOrWhiteSpace($Result.Error)) {
+            try {
+                $RawErrLogPath = Save-RawErrDump -ErrOutput $Result.Error
+                Write-LogMsg "Raw stderr saved to $RawErrLogPath"
+            } catch { Write-LogMsg "Failed to save raw stderr dump: $_" }
+        }
+        # This early return skips the hashtable-to-array conversion below, so force @() or the
+        # JSON serializes as "{}" instead of "[]" and consumers like CSV export choke.
         $NodeData.Interfaces = @()
-        # Classify the failure from ssh's stderr so a ghost node (never reached) is
-        # distinguishable from a real, successfully-scanned isolated leaf switch.
-        $NodeData.ScanStatus = if ($ErrSummary -match "(?i)permission denied|authentication failed|too many authentication failures") {
+        # Matched against $Result.Error, not $ErrSummary - the latter now has $DiagTag prefixed.
+        $NodeData.ScanStatus = if ($Result.Error -match "(?i)permission denied|authentication failed|too many authentication failures") {
             "AuthFailed"
-        } elseif ($ErrSummary -match "(?i)connection refused|no route to host|network is unreachable|operation timed out|connection timed out|could not resolve hostname|host is down|no address associated") {
+        } elseif ($Result.Error -match "(?i)connection refused|no route to host|network is unreachable|operation timed out|connection timed out|could not resolve hostname|host is down|no address associated") {
             "Unreachable"
         } else {
             "Error"
@@ -255,21 +323,34 @@ try {
         elseif ($Sec -match '^(?i)system uptime\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["UPTIME"] = $Matches.content }
         elseif ($Sec -match '^(?i)chassis alarms\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ALARMS"] = $Matches.content }
         elseif ($Sec -match '^(?i)chassis routing-engine\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["ROUTING_ENGINE"] = $Matches.content }
-        # "show interfaces extensive" follows this section in the batch above (not "quit"
-        # directly) - the split on "> show " above already separates CONFIG from that section
-        # when the batch completes normally. This regex's trailing CLI-prompt match, anchored
-        # to end-of-stream (`\z`) rather than to literal "quit", instead covers the case where
-        # the 50s timeout hits mid-config, before "show interfaces extensive" is ever sent/
-        # echoed - the prompt is flushed but "quit" not yet written. Anchoring to end-of-stream
-        # (not mid-content) avoids false-triggering on a login banner containing prompt-shaped
-        # text like "admin@example.com >". The optional `{master:N}` group absorbs a VC
-        # member's prompt prefix; bare `\z` is the fallback.
+        # The trailing prompt match is anchored to end-of-stream (`\z`), not to literal "quit":
+        # that covers a timeout hitting mid-config, where the prompt is flushed but no further
+        # command is echoed. Anchoring at end-of-stream rather than mid-content also stops a
+        # login banner containing prompt-shaped text ("admin@example.com >") from false-matching.
+        # The optional `{master:N}` group absorbs a VC member's prompt prefix.
         elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+(?:{[^}]+}[\r\n]+)?\S+@\S+[>#](?s).*)?\z') { $DataDict["CONFIG"] = $Matches.content }
     }
 
+    # A virtual chassis emits one "fpcN:" block per member for "show version" and "show system
+    # uptime", so a bare -match takes fpc0's - which is not necessarily the master. The prompt's
+    # {master:N} marker names the RE that actually answered this session, so scope both parses to
+    # that member. Matters for reboot detection: a separately-rebooted member otherwise supplies
+    # the boot time compared against the master's. Same intent as the routing-engine parse below,
+    # which already scopes via "Current state Master". Standalone switches emit neither marker
+    # nor fpcN block and fall back to the whole section, unchanged.
+    $MasterFpcId = $null
+    if ($RawOutput -match "(?m)^\{master:(?<fpc>\d+)\}") { $MasterFpcId = $Matches.fpc }
+    $VersionScope = $DataDict["VERSION"]
+    $UptimeScope = $DataDict["UPTIME"]
+    if ($null -ne $MasterFpcId) {
+        $MasterFpcBlockPattern = "(?ms)^fpc${MasterFpcId}:[^\r\n]*\r?\n(?:-+\r?\n)?(?<masterfpc>.*?)(?=^fpc\d+:|\z)"
+        if ($DataDict["VERSION"] -match $MasterFpcBlockPattern) { $VersionScope = $Matches.masterfpc }
+        if ($DataDict["UPTIME"] -match $MasterFpcBlockPattern) { $UptimeScope = $Matches.masterfpc }
+    }
+
     # --- Parse Identity ---
-    if ($DataDict["VERSION"] -match "(?i)Hostname:\s*(?<host>\S+)") { $NodeData.Hostname = $Matches.host }
-    if ($DataDict["VERSION"] -match "(?i)Junos:\s*(?<ver>\S+)") { $NodeData.JunosVersion = $Matches.ver }
+    if ($VersionScope -match "(?i)Hostname:\s*(?<host>\S+)") { $NodeData.Hostname = $Matches.host }
+    if ($VersionScope -match "(?i)Junos:\s*(?<ver>\S+)") { $NodeData.JunosVersion = $Matches.ver }
 
     # --- Parse Config Backup (stored verbatim, redacted from RawDumps - see above) ---
     if (-not [string]::IsNullOrWhiteSpace($DataDict["CONFIG"])) { $NodeData.Configuration = $DataDict["CONFIG"].Trim() }
@@ -280,10 +361,7 @@ try {
         foreach ($Line in ($DataDict["VIRTUAL_CHASSIS"] -split "`n")) {
             $Line = $Line.Trim()
             if ($Line -match "^(?<id>\d+)\s+") {
-                # Captured immediately, before any further -match calls below overwrite
-                # $Matches - otherwise reading $Matches.id later picks up whichever regex
-                # (role/serial/model) happened to match last, not the id match, leaving
-                # FPC blank.
+                # Captured before the -match calls below overwrite $Matches.
                 $fpcId = $Matches.id
 
                 $role = "Unknown"
@@ -304,8 +382,15 @@ try {
     } 
     
     if (-not $ParsedStack) {
-        if ($DataDict["CHASSIS_HARDWARE"] -match "(?i)Chassis\s+(?<serial>\S+)\s+(?<model>\S+)") {
-            $NodeData.StackMembers += [PSCustomObject]@{ FPC = "0"; Model = $Matches.model; Serial = $Matches.serial; Role = "Standalone" }
+        # The Description column is a phrase, not a token: a VC reads "Chassis <serial> Virtual
+        # Chassis", and capturing \S+ took "Virtual" as the model. This fallback runs only when
+        # the VC parse already failed - exactly when the device IS a VC - so that model was wrong
+        # every time it appeared. No model is honest here; the serial is still useful.
+        if ($DataDict["CHASSIS_HARDWARE"] -match "(?im)^Chassis\s+(?<serial>\S+)\s+(?<model>[^\r\n]+?)\s*$") {
+            $ChassisSerial = $Matches.serial
+            $ChassisModel = $Matches.model.Trim()
+            if ($ChassisModel -match "(?i)^virtual\s+chassis$") { $ChassisModel = "Unknown" }
+            $NodeData.StackMembers += [PSCustomObject]@{ FPC = "0"; Model = $ChassisModel; Serial = $ChassisSerial; Role = "Standalone" }
         }
     }
 
@@ -313,8 +398,8 @@ try {
     if ($DataDict["ROUTE"] -match "to\s+(?<gw>\b(?:\d{1,3}\.){3}\d{1,3}\b)\s+via") { $NodeData.Gateway = $Matches.gw }
 
     # --- Parse Uptime / Last Config Change (both from "show system uptime") ---
-    if ($DataDict["UPTIME"] -match "(?i)System booted:\s*(?<boot>[^\(\r\n]+)") { $NodeData.Uptime = $Matches.boot.Trim() }
-    if ($DataDict["UPTIME"] -match "(?i)Last configured:\s*(?<cfg>[^\(\r\n]+?)\s*\([^\)]*\)\s*by\s+(?<user>\S+)") {
+    if ($UptimeScope -match "(?i)System booted:\s*(?<boot>[^\(\r\n]+)") { $NodeData.Uptime = $Matches.boot.Trim() }
+    if ($UptimeScope -match "(?i)Last configured:\s*(?<cfg>[^\(\r\n]+?)\s*\([^\)]*\)\s*by\s+(?<user>\S+)") {
         $NodeData.LastConfigured = $Matches.cfg.Trim()
         $NodeData.LastConfiguredBy = $Matches.user.Trim()
     }
@@ -330,11 +415,10 @@ try {
     }
 
     # --- Parse Routing Engine Health ---
-    # On dual-RE/VC systems, slot order in "show chassis routing-engine" doesn't guarantee
-    # the master comes first, so scope the CPU/memory search to the "Current state ...
-    # Master" block specifically (not just the first match anywhere) to avoid reporting the
-    # backup's health as the master's. A standalone single-RE system has no "Current state"/
-    # "Slot N:" fields, so this pattern just won't match and the fallback searches the whole blob.
+    # Slot order in "show chassis routing-engine" doesn't put the master first on dual-RE/VC
+    # systems, so scope the search to the "Current state ... Master" block or the backup's
+    # health gets reported as the master's. A single-RE system has no such block and falls back
+    # to the whole blob.
     $MasterReBlock = $DataDict["ROUTING_ENGINE"]
     if ($DataDict["ROUTING_ENGINE"] -match "(?is)Current state\s+Master(?<masterblock>.*?)(?=Slot \d+:|\z)") {
         $MasterReBlock = $Matches.masterblock
@@ -350,9 +434,8 @@ try {
     foreach ($Line in ($DataDict["INTERFACES_TERSE"] -split "`n")) {
         $Line = $Line.Trim()
         if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?<admin>up|down)\s+(?<link>up|down)") {
-            # Strip any trailing ".N" logical-unit suffix so a port's physical line and its
-            # logical-unit line(s) (e.g. "ge-0/0/1" and "ge-0/0/1.100") collapse onto the
-            # same dict entry instead of creating duplicate interface rows.
+            # Strip the trailing ".N" logical-unit suffix so "ge-0/0/1" and "ge-0/0/1.100"
+            # collapse onto one entry instead of producing duplicate interface rows.
             $p = $Matches.port -replace "\.\d+$",""
             if (-not $NodeData.Interfaces.ContainsKey($p)) {
                 $NodeData.Interfaces[$p] = @{ Port = $p; Admin = $Matches.admin; Link = $Matches.link; Desc = "Unknown"; STP = "Unknown"; PoE = "Unknown"; LastFlappedSeconds = $null }
@@ -368,17 +451,11 @@ try {
         }
     }
 
-    # "Last flapped" duration, from "show interfaces extensive"'s per-physical-interface
-    # blocks (e.g. "Last flapped   : 2024-01-15 08:23:11 PST (5w2d 03:12:34 ago)", or
-    # "Last flapped   : Never"). Deliberately parse only the relative "(... ago)" duration,
-    # not the absolute timestamp - Junos renders that with an abbreviated local timezone
-    # name (e.g. "PST"), which .NET/JS date parsers don't reliably resolve, and the switch's
-    # own clock may not even agree with this host's. The duration needs no timezone at all.
-    # NOTE: parsed against Junos's documented "show interfaces extensive" format; not yet
-    # verified against a live device's actual output (no hardware-in-the-loop test coverage
-    # in this codebase - see AUDIT_REPORT.md's "Remaining risk"). An unrecognized format
-    # leaves LastFlappedSeconds unset rather than guessing, so it fails safe (excluded from
-    # the "longest inactive" view, not shown with a wrong duration).
+    # "Last flapped" duration, e.g. "Last flapped : 2024-01-15 08:23:11 PST (5w2d 03:12:34 ago)".
+    # Only the relative "(... ago)" part is parsed: the absolute timestamp carries an abbreviated
+    # timezone name that .NET/JS parsers don't reliably resolve, and the switch's clock may not
+    # agree with this host's. An unrecognized format leaves LastFlappedSeconds unset (excluded
+    # from the "longest inactive" view) rather than guessing a wrong duration.
     $ExtBlocks = $DataDict["INTERFACES_EXT"] -split "(?=Physical interface:)"
     foreach ($Block in $ExtBlocks) {
         if ($Block -notmatch "^Physical interface:\s*(?<port>(?:ge|xe|et|ae|mge)[^\s,]+)") { continue }
@@ -391,12 +468,9 @@ try {
             $NodeData.Interfaces[$p].LastFlappedSeconds = $null
             continue
         }
-        # Two forms: the usual "w/d/h:m:s ago" duration, and Junos's sub-minute rendering
-        # which drops straight to a bare "(N secs ago)" with no colon-delimited component at
-        # all. Anchored to a genuine "Last flapped" field label at the start of a line
-        # (multiline mode) so a coincidental match inside a free-text "Description:" value
-        # earlier in the same block can't be picked up instead - real Junos output always
-        # emits Description before Last flapped within a physical-interface block.
+        # Two forms: the usual "w/d/h:m:s ago", and Junos's sub-minute "(N secs ago)". Anchored
+        # to a line-start "Last flapped" label because Junos emits Description before it in the
+        # same block, so an unanchored match could land inside that free-text value instead.
         if ($Block -match "(?im)^\s*Last flapped\s*:[^\(]*\(\s*(?:(?<w>\d+)w)?\s*(?:(?<d>\d+)d)?\s*(?:(?<h>\d+):(?<m>\d+)(?::(?<s>\d+))?)?\s*ago\s*\)") {
             $TotalSeconds = 0
             if ($Matches.w) { $TotalSeconds += [int]$Matches.w * 604800 }
@@ -410,13 +484,10 @@ try {
         }
     }
 
-    # LACP bundle membership (physical port -> "aeN"), from "show interfaces terse"'s
-    # "<phys>.<unit>  up  up  aenet  --> aeN.<unit>" lines. LLDP runs on the physical member
-    # links of an AE bundle, never on the "aeN" logical interface itself, so a neighbor
-    # discovered there reports LocalPort as e.g. "xe-0/1/0" - the uplink-exclusion check below
-    # needs this map to also recognize "aeN" as an uplink, or every MAC learned across that
-    # trunk (every VLAN it carries, from devices this switch never directly saw) leaks into
-    # Clients as if directly attached, on port "aeN.0", almost entirely with "Unknown" IP.
+    # LACP bundle membership (physical port -> "aeN"). LLDP runs on an AE bundle's physical
+    # member links, never on the "aeN" logical interface, so a neighbor reports LocalPort as
+    # e.g. "xe-0/1/0"; without this map the uplink exclusion below misses "aeN" and every MAC
+    # learned across that trunk leaks into Clients as a fake directly-attached device.
     $AeMemberOf = @{}
     foreach ($Line in ($DataDict["INTERFACES_TERSE"] -split "`n")) {
         $Line = $Line.Trim()
@@ -425,19 +496,33 @@ try {
         }
     }
 
+    # "show spanning-tree interface" repeats a port once per VLAN, and a trunk can genuinely be
+    # BLK in some VLANs and FWD in others. The field stays a single state string (the web UI
+    # renders it as one), so the repeats are collapsed by precedence rather than last-VLAN-wins:
+    # a port blocking in ANY VLAN is the condition an operator needs to see, so BLK outranks the
+    # rest, and FWD - the state that silently masked a block before - ranks last but for DIS.
+    $StpStatePrecedence = @{ BLK = 5; LST = 4; LRN = 3; FWD = 2; DIS = 1 }
     foreach ($Line in ($DataDict["STP"] -split "`n")) {
         $Line = $Line.Trim()
         if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+.*?(?<state>FWD|BLK|DIS|LRN|LST)") {
-            # Strip any trailing ".N" (not just ".0") so this lands on the same collapsed
-            # physical-port entry the terse/desc loops above key by.
+            # Strip any trailing ".N" (not just ".0") to land on the collapsed physical-port key.
             $p = $Matches.port -replace "\.\d+$",""
-            if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].STP = $Matches.state }
+            $NewState = $Matches.state
+            if ($NodeData.Interfaces.ContainsKey($p)) {
+                $CurrentRank = 0
+                $CurrentState = $NodeData.Interfaces[$p].STP
+                if ($StpStatePrecedence.ContainsKey($CurrentState)) { $CurrentRank = $StpStatePrecedence[$CurrentState] }
+                if ($StpStatePrecedence[$NewState] -gt $CurrentRank) { $NodeData.Interfaces[$p].STP = $NewState }
+            }
         }
     }
 
     foreach ($Line in ($DataDict["POE"] -split "`n")) {
         $Line = $Line.Trim()
-        if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?<status>Enabled|Disabled)\s+(?<oper>\S+)\s+\S+\s+(?<class>\S+)\s+(?<power>\d+\.\d+W?)") {
+        # The field count between Oper and Power/Class varies by Junos version/platform (newer
+        # tables add Pair/Mode and Priority columns older EX2200/4200 ones lack), so skip a
+        # variable number of fields and anchor Power+Class as the line's last two tokens.
+        if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?<status>Enabled|Disabled)\s+(?<oper>\S+)(?:\s+\S+)*?\s+(?<power>\d+\.\d+W?)\s+(?<class>\S+)$") {
             $p = $Matches.port -replace "\.\d+$",""
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].PoE = "$($Matches.oper) ($($Matches.power))" }
         }
@@ -452,28 +537,28 @@ try {
     }
 
     # --- Parse LLDP Neighbors (switch-to-switch topology) + LLDP-MED Endpoints (phones/APs) ---
-    # Tracks every LLDP neighbor confirmed to be a switch/router by its advertised LLDP
-    # capabilities (see the $UplinkPorts comment below), even one without a usable management
-    # address - a switch neighbor that doesn't advertise one must still count as an uplink, or
-    # its downstream MAC-table entries leak into Clients. Deliberately requires a positive
-    # "Bridge"/"Router" capability signal rather than just "not recognized as a MED endpoint" -
-    # an unrecognized phone/AP/camera falling into the wrong bucket here would silently drop
-    # its real clients from the scan output, which is worse than the leak this guards against.
+    # Local ports facing a neighbor confirmed as a switch/router, including ones with no
+    # management address (see $UplinkPorts below for what this feeds).
     $LldpSwitchPorts = New-Object System.Collections.Generic.HashSet[string]
     $Blocks = $DataDict["LLDP"] -split "(?i)(?=Local Interface\s*:)"
     foreach ($Block in $Blocks) {
         $IsMedEndpoint = ($Block -match "Class III Device") -or ($Block -match "Bridge Telephone") -or ($Block -match "WLAN Access Point") -or ($Block -match "ArubaOS")
-        $IsSwitchOrRouter = ($Block -match "(?i)(?:Enabled|System)\s+Capabilities\s*:\s*[^\r\n]*(?:Bridge|Router)")
+        # Real "show lldp neighbors detail" output puts a bare "System capabilities" header line
+        # above separate "Supported:"/"Enabled  :" lines carrying the capability list - the word
+        # "Capabilities" never appears on the same line as Bridge/Router, so matching on
+        # "Enabled  :" alone is what makes this fire at all.
+        $IsSwitchOrRouter = ($Block -match "(?i)Enabled\s*:\s*[^\r\n]*(?:Bridge|Router)")
 
         $Neigh = @{ LocalPort = "Unknown"; RemotePort = "Unknown"; Hostname = "Unknown"; MacAddress = "Unknown"; ManagementIP = "Unknown"; Description = "Unknown" }
         if ($Block -match "(?i)Local Interface\s*:\s*(?<port>[^\r\n]+)") { $Neigh.LocalPort = $Matches.port.Trim() }
-        if ($Block -match "(?i)Port ID\s*:\s*(?<rport>[^\r\n]+)") { $Neigh.RemotePort = $Matches.rport.Trim() }
+        # Anchored to line start: the block opens with "Local Port ID : <ifIndex>", which an
+        # unanchored "Port ID\s*:" matches first, yielding the local ifIndex integer instead of
+        # the neighbor's remote port name.
+        if ($Block -match "(?im)^Port ID\s*:\s*(?<rport>[^\r\n]+)") { $Neigh.RemotePort = $Matches.rport.Trim() }
         if ($Block -match "(?i)System Name\s*:\s*(?<name>[^\r\n]+)") { $Neigh.Hostname = $Matches.name.Trim() }
-        # Chassis ID's LLDP subtype isn't guaranteed to be a MAC address (it can be an
-        # interface name, IP address, or locally-assigned string depending on neighbor
-        # config) - only trust it into a field named MacAddress when it actually looks
-        # like one, otherwise leave it "Unknown" rather than mislead downstream MAC-based
-        # correlation.
+        # Chassis ID's LLDP subtype isn't necessarily a MAC (it can be an interface name, IP, or
+        # locally-assigned string), so only store one that looks like a MAC - otherwise
+        # downstream MAC-based correlation is misled.
         if ($Block -match "(?i)Chassis ID\s*:\s*(?<mac>[^\r\n]+)") {
             $ChassisId = $Matches.mac.Trim()
             if ($ChassisId -match "^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$") { $Neigh.MacAddress = $ChassisId }
@@ -482,8 +567,8 @@ try {
         if ($Block -match "(?i)System Description\s*:\s*(?<desc>[^\r\n]+)") { $Neigh.Description = $Matches.desc.Trim() }
 
         if ($IsMedEndpoint) {
-            # Phones/APs rarely advertise a management address, so gate only on LocalPort
-            # (unlike Neighbors below) - it's what the visualizer's daisy-chain detection uses.
+            # Phones/APs rarely advertise a management address, so gate only on LocalPort - it's
+            # what the visualizer's daisy-chain detection uses.
             if ($Neigh.LocalPort -ne "Unknown") {
                 $NodeData.MedNeighbors += [PSCustomObject]$Neigh
             }
@@ -501,23 +586,15 @@ try {
     }
 
     # --- Parse VLANs ---
-    # "show vlans" is "VLAN name  Tag  Interfaces" on a switch with no explicit
-    # routing-instance, but gains a leading "Routing instance" column ("Routing instance
-    # VLAN name  Tag  Interfaces") on one where VLANs live under e.g. default-switch -
-    # detect which layout is present from the header rather than assuming one, or every
-    # line silently fails to match on whichever layout wasn't assumed and VLAN_Tag ends
-    # up "Unknown" for every client (VLAN_Name is unaffected - it's read straight off the
-    # MAC table, not through this lookup - so a mismatch here shows up as "VLAN_Name is
-    # right everywhere but VLAN_Tag/the VLAN filter is not").
-    # $VlanDict is keyed "<routing-instance>|<name>" when the layout has an instance column,
-    # so two different routing-instances defining the same VLAN name (e.g. "guest"=100 under
-    # one instance, "guest"=200 under another) don't collide into a single last-write-wins
-    # entry. $VlanNameTagIndex is a parallel name-only index used as a fallback at the MAC-table
-    # join below (which has no routing-instance context of its own): it holds a VLAN name's tag
-    # only while every routing-instance that defines that name agrees on the tag, and is forced
-    # to $null the moment two instances disagree - so an unambiguous name still resolves
-    # correctly, and only a genuinely colliding name falls back to "Unknown" instead of silently
-    # returning whichever instance's tag happened to be seen there.
+    # "show vlans" is "VLAN name  Tag  Interfaces", but gains a leading "Routing instance"
+    # column where VLANs live under e.g. default-switch - detect the layout from the header, or
+    # every line fails to match and VLAN_Tag is "Unknown" for every client (VLAN_Name comes
+    # straight off the MAC table, so the symptom is "names right, tags wrong").
+    # $VlanDict is keyed "<routing-instance>|<name>" in that layout so two instances defining
+    # the same VLAN name with different tags don't collide last-write-wins. $VlanNameTagIndex is
+    # a name-only fallback for the MAC-table join, which has no instance context: it holds a
+    # tag only while every instance defining that name agrees, and is nulled the moment they
+    # disagree, so only a genuinely ambiguous name degrades to "Unknown".
     $VlanDict = @{}
     $VlanNameTagIndex = @{}
     $HasRoutingInstanceColumn = $DataDict["VLANS"] -match "(?im)^\s*Routing instance\s"
@@ -533,12 +610,10 @@ try {
                 $TagForRow = $Matches.tag
                 $LastSeenInstance = $InstForRow
             } elseif ($LastSeenInstance -and $Line -match "^(?<name>\S+)\s+(?<tag>\d+)") {
-                # Defensive fallback: if Junos ever blanks the routing-instance column on a
-                # continuation row (rather than repeating it per VLAN, which is the normal
-                # rendering this regex above handles), carry forward the last instance seen
-                # rather than dropping the row's VLAN entirely. Requires a prior 3-token row
-                # in this table so a stray 2-token line (e.g. an interface-list continuation)
-                # can't fabricate a bogus instance-less entry.
+                # Defensive: if Junos ever blanks the routing-instance column on a continuation
+                # row, carry the last instance forward instead of dropping the VLAN. Gated on a
+                # prior 3-token row so a stray 2-token line (interface-list continuation) can't
+                # fabricate an entry.
                 $InstForRow = $LastSeenInstance
                 $NameForRow = $Matches.name
                 $TagForRow = $Matches.tag
@@ -558,47 +633,34 @@ try {
         }
     }
 
-    # Ports with a switch/router LLDP neighbor (not a phone/AP - those are MedNeighbors and
-    # deliberately not excluded here). A downstream switch's uplink shows up in this switch's
-    # MAC table as hundreds of unrelated client MACs; excluded so Clients only reflects
-    # devices this switch is the actual access point for. Built from $LldpSwitchPorts, which
-    # is wider than $NodeData.Neighbors (management IP required there for the topology-edge
-    # display) - it also includes a neighbor confirmed as a switch/router by its LLDP
-    # capabilities even without a management address - but never wider than "confirmed
-    # switch/router or has a management IP", so an unrecognized endpoint device can't be
-    # mistaken for an uplink and silently swallow its own clients. Defined here (rather than
-    # just above the Clients-building loop) because the MAC-table parse loop below needs it
-    # too, to prefer an access-port sighting over an uplink/interconnect one when the same
-    # MAC is seen on both.
+    # Ports facing a switch/router LLDP neighbor (phones/APs are MedNeighbors and deliberately
+    # not excluded). A downstream switch's uplink shows up here as hundreds of unrelated client
+    # MACs, so excluding these keeps Clients to devices this switch is the actual access point
+    # for. Membership requires a positive Bridge/Router capability signal or a management IP -
+    # never merely "not recognized as a MED endpoint" - because misclassifying an unrecognized
+    # phone/AP/camera as an uplink would silently drop its real clients, worse than the leak.
+    # Both this and $InterconnectPortPattern are defined here, not by the Clients loop, because
+    # the MAC-table parse below needs them to prefer an access-port sighting over an uplink one.
     $UplinkPorts = $LldpSwitchPorts
 
-    # Virtual-chassis interconnect (vcp) and management (bme/reth/me/vme) interfaces are
-    # never LLDP neighbors, so they'd never land in $UplinkPorts above - yet the MAC-table
-    # regex below deliberately still matches them (it needs to, for other VC bookkeeping),
-    # so a MAC learned on one of these must be excluded as a client (below, and at the
-    # dedup preference just below) or it leaks into Clients as a fake directly-attached
-    # device, the same failure shape as the LACP/AE trunk-VLAN leak above. Defined
-    # here (rather than just above the Clients-building loop) because the MAC-table parse
-    # loop needs it too, to prefer an access-port sighting over an uplink/interconnect one.
+    # VC interconnect (vcp) and management (bme/reth/me/vme) interfaces never appear as LLDP
+    # neighbors, so they never reach $UplinkPorts - but the MAC-table regex below matches them
+    # (needed for VC bookkeeping), so they must be excluded explicitly or MACs learned there
+    # leak into Clients, same failure shape as the AE-trunk leak above.
     $InterconnectPortPattern = "^(?:vcp|bme|reth|me|vme)"
 
     # --- Parse MAC Table ---
-    # A MAC can legitimately appear more than once in "show ethernet-switching table" - e.g.
-    # visible via both a real access port and an uplink/interconnect port. Keying $RawMacs by
-    # MAC alone means the last-parsed sighting wins; if that happens to be the uplink/
-    # interconnect one, the client is dropped entirely by the exclusion check below even
-    # though an access-port sighting for the same MAC was right there. Track whether the
-    # currently-stored sighting for a MAC is an access-port one and only let a later line
-    # overwrite it when the incumbent isn't (so an access-port sighting always wins, and among
-    # two non-access sightings the last one parsed still wins, same as before).
+    # A MAC can legitimately appear on both a real access port and an uplink/interconnect port.
+    # Keyed by MAC alone the last sighting wins, and if that's the uplink one the exclusion
+    # check below drops the client entirely - so an access-port sighting always beats a
+    # non-access incumbent, while two non-access sightings keep last-write-wins.
     $RawMacs = @{}
     $CurrentMacInstance = $null
     foreach ($Line in ($DataDict["MAC_TABLE"] -split "`n")) {
         if ($Line -match "(?i)^\s*Routing instance\s*:\s*(?<inst>\S+)") { $CurrentMacInstance = $Matches.inst; continue }
-        # Junos's documented flag legend for "show ethernet-switching table" includes the
-        # two-letter flags SE (statistics enabled) and NM (non-configured MAC) alongside the
-        # single-letter ones; matching only a single char here failed the whole line's regex
-        # and silently dropped that client. Try the two-letter tokens first.
+        # The flag legend includes two-letter flags (SE, NM) alongside single-letter ones;
+        # matching a single char only fails the whole line and silently drops that client, so
+        # the two-letter tokens must be tried first.
         if ($Line -match "(?<vlan>\S+)\s+(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<flag>SE|NM|[SDLPCNO])\s+.+?(?<interface>(?:ge|xe|et|ae|mge|vcp|bme|reth|me|vme)[a-zA-Z0-9\-\/\.]+)") {
             $VlanName = $Matches.vlan
             $VlanTag = "Unknown"
@@ -629,9 +691,8 @@ try {
         }
     }
 
-    # --- Parse local ARP Table (enriches this node's own clients; also exported raw so
-    # the orchestrator can build a network-wide MAC->IP map for downstream hosts whose ARP
-    # entry lives on the L3 gateway instead) ---
+    # --- Parse local ARP Table (also exported raw, so the orchestrator can build a
+    # network-wide MAC->IP map for hosts whose ARP entry lives on the L3 gateway) ---
     $ArpDict = @{}
     foreach ($Line in ($DataDict["ARP_TABLE"] -split "`n")) {
         if ($Line -match "(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)") {
@@ -641,8 +702,8 @@ try {
         }
     }
 
-    # --- Build Clients from the MAC table. IP comes from local ARP when available;
-    # otherwise "Unknown" until the orchestrator's global enrichment pass. ---
+    # --- Build Clients from the MAC table; IP stays "Unknown" until the orchestrator's global
+    # enrichment pass when local ARP has no entry ---
     foreach ($MacKey in $RawMacs.Keys) {
         $Entry = $RawMacs[$MacKey]
         $physPort = $Entry.Port -replace "\.\d+$",""
@@ -665,11 +726,9 @@ try {
 } catch {
     Write-LogMsg "CRITICAL EXCEPTION: $_"
     Write-LogMsg "Stack trace: $($_.ScriptStackTrace)"
-    # Reached only after a successful SSH session produced output (ssh's own connect/auth
-    # failures are handled above, before parsing starts), so $RawOutput is exactly the
-    # payload that broke the parser - the most useful thing to have on hand for debugging,
-    # so dump it unconditionally here rather than only when -Log was passed (RawOutput can
-    # be $null if Invoke-InteractiveBatch itself threw before assigning it).
+    # Reached only after a successful SSH session produced output (connect/auth failures are
+    # handled above, before parsing), so anything here is a parser fault and $RawOutput is the
+    # payload that broke it - dump it even without -Log.
     if (-not [string]::IsNullOrWhiteSpace($RawOutput)) {
         try {
             $RawLogPath = Save-RawDump -RawOutput $RawOutput
@@ -677,18 +736,15 @@ try {
         } catch { Write-LogMsg "Failed to save raw payload dump: $_" }
     }
     if ($HumanReadable) { Write-Host "`n[!] SCRIPT EXCEPTION: $_" -ForegroundColor Red }
-    # Reached only after a successful SSH session (ssh's own connect/auth failures are
-    # handled above, before parsing starts) - so any exception here is a parsing/script
-    # error, not a connectivity problem. Still worth flagging so this node isn't mistaken
-    # for a clean scan.
+    # Flagged so a parser failure isn't mistaken for a clean scan.
     $NodeData.ScanStatus = "Error"
     $NodeData.ScanError = $_.ToString()
 }
 
 $InterfaceArray = @()
 foreach ($Key in $NodeData.Interfaces.Keys) { $InterfaceArray += [PSCustomObject]$NodeData.Interfaces[$Key] }
-# Wrapped in @(...): `X | Sort-Object` alone collapses to a bare object for 1 item, or
-# $null for 0, so ConvertTo-Json would emit "{...}"/null instead of always an array.
+# Wrapped in @(...): `X | Sort-Object` collapses to a bare object for 1 item and $null for 0,
+# so ConvertTo-Json would emit "{...}"/null instead of always an array.
 $NodeData.Interfaces = @($InterfaceArray | Sort-Object Port)
 
 # ==============================================================================

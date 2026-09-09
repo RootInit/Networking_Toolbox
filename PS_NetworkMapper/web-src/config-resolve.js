@@ -2,11 +2,8 @@
 // serial first (survives IP/hostname changes/reimaging), then hostname, then DeviceIP
 // as a last resort.
 
-// Local copy of utils.js's window.asArray - this file also runs under plain Node (see the
-// dual-mode export below), where window.asArray doesn't exist. PowerShell's ConvertTo-Json
-// serializes a single-element array as a bare object, so a standalone (non-stacked) switch's
-// StackMembers - normally exactly one entry - arrives as {..} instead of [{..}] and must be
-// normalized before .forEach, or every standalone device throws here.
+// Local copy of utils.js's window.asArray (see it for the reason) - this file also runs
+// under plain Node, where window doesn't exist.
 function asArray(val) {
   if (Array.isArray(val)) return val.filter(function (item) { return item !== null && item !== undefined; });
   if (val === null || val === undefined) return [];

@@ -1,26 +1,17 @@
-// App entry point: global error handler, core cross-cutting session state, file loading
-// (incl. encrypted-file password flow), snapshot switching, and app-shell chrome.
-// Other features live in utils.js, topology-crypto.js, persistence.js, graph.js,
-// dashboard.js, search.js, drawer.js - all classic scripts sharing this global scope,
-// loaded via <script> tags in network_vis.html.
+// App entry point: global error handler, cross-cutting session state, file loading (incl.
+// the encrypted-file password flow), snapshot switching, and app-shell chrome. Every other
+// file is a classic script sharing this global scope, loaded by <script> in index.html.
 
-/**
- * Global Error Catcher
- */
-// "ResizeObserver loop completed/limit exceeded" is a benign browser warning, not a real
-// error - vis-network's ResizeObserver on #mynetwork triggers it during panel CSS width
-// transitions, and Chromium dispatches it as a window `error` event, which was popping
-// the fatal-error modal over the graph on every panel toggle. Ignore it, like every major
-// browser/framework does.
+// "ResizeObserver loop completed/limit exceeded" is a benign warning Chromium dispatches as
+// a window `error` event; vis-network's observer on #mynetwork raises it during panel width
+// transitions, which would pop the fatal-error modal on every panel toggle.
 var IGNORED_ERROR_MESSAGES = /ResizeObserver loop/;
 window.onerror = function(message, source, lineno, colno, error) {
     if (IGNORED_ERROR_MESSAGES.test(message)) return true;
 
-    // textContent (not innerHTML) - message/source/stack can embed untrusted text (e.g. a
-    // future Error thrown with a device/file-supplied string), matching the esc()/textContent
-    // convention used for every other error-rendering sink in the app. white-space: pre-line
-    // (index.html) turns the \n separators below into the same line-per-field layout the old
-    // <br>-joined innerHTML gave.
+    // textContent, not innerHTML: message/source/stack can embed device- or file-supplied
+    // text. #fatal-error-text carries white-space: pre-line so the \n separators still lay
+    // out one field per line.
     var errText = `Message: ${message}\nLine: ${lineno}:${colno}\nSource: ${source}\nStack: ${error ? error.stack : 'N/A'}`;
     var textEl = document.getElementById('fatal-error-text');
     var modalEl = document.getElementById('fatal-error-modal');
@@ -41,35 +32,24 @@ var allVlans = new Map();
 var currentSelectedNodeData = null;
 var searchHighlightQuery = "";
 
-// Multi-snapshot state. loadedSnapshots holds every snapshot from the most recent
-// "Render Topology" / "Load Folder" action; activeSnapshotIndex picks which one drives
-// the graph/drawer view (globalTopologyData/deviceByIp mirror it - see setActiveSnapshot).
-// Search spans every loaded snapshot regardless of which is active; only the rendered
-// graph is single-snapshot.
+// Only the rendered graph is single-snapshot; search spans every loaded snapshot regardless
+// of which is active.
 var loadedSnapshots = [];   // {sourceFile, scanTimestamp, topology, deviceByIp}[]
 var activeSnapshotIndex = -1;
 
-// Guards window.processSelectedFiles against two independent triggers overlapping - a
-// manual Load Folder/File click and a Scan Network completion both funnel through it, and
-// each only disabled its own button, so nothing stopped one from starting mid-flight of the
-// other. Same "claim a generation, bail if superseded" pattern as search.js's
-// goToSearchResultGeneration, applied here so a slower call can't clobber loadedSnapshots/
-// activeSnapshotIndex/deviceByIp with stale data (or report a misleading "Success") after a
-// newer call already replaced them.
+// Generation claim guarding window.processSelectedFiles: a manual Load click and a Scan
+// Network completion both funnel through it, each disabling only its own button. Every call
+// takes the next number and bails if superseded, so a slower one can't clobber
+// loadedSnapshots/activeSnapshotIndex/deviceByIp with stale data or a misleading "Success".
 var loadFilesGeneration = 0;
-// Which sidebar tab is showing (see window.switchSidebarTab).
 var activeSidebarTab = 'sidebar-tab-load';
-// Which center-panel view (Diagram / Map) is showing - see map.js's switchCenterView.
 var activeCenterView = 'diagram';
 
-// Search index, built once per file load rather than re-scanning every device on every
-// search (see search.js). deviceByIp gives O(1) drawer lookups and is reassigned (not
-// rebuilt) to whichever loadedSnapshots[i].deviceByIp is currently active.
+// Built once per file load rather than re-scanned per search. deviceByIp is reassigned, not
+// rebuilt, to whichever loadedSnapshots[i].deviceByIp is active.
 var searchIndex = [];   // {deviceIp, snapshotIndex, field, value, valueLower}[]
 var deviceByIp = new Map();
 
-// Switches which loaded snapshot drives the graph/drawer view (search still spans all
-// loaded snapshots regardless).
 window.setActiveSnapshot = async function(index) {
     if (!loadedSnapshots[index]) return;
     activeSnapshotIndex = index;
@@ -86,21 +66,15 @@ window.setActiveSnapshot = async function(index) {
     var switcher = document.getElementById('snapshotSwitcher');
     if (switcher) switcher.value = String(index);
 
-    // Map view (map.js) renders this same topology separately, so it needs its own
-    // refresh on snapshot switch. No-op if Map view was never opened (leafletMap===null).
+    // Map and Analysis render this topology separately and need their own refresh. Analysis
+    // is gated on being the visible view: its containers stay in the DOM when hidden, so its
+    // render functions would do full work for nothing - switchCenterView refreshes on
+    // activation anyway.
     window.renderMapMarkers();
 
-    // Analysis Dashboard also renders this same topology separately (Fleet Health, New
-    // Devices, Trend Chart, etc. - see dashboard.js). Its container elements exist in the
-    // DOM regardless of which centre view is showing (map.js's switchCenterView just toggles
-    // display), so the guards inside those render functions don't skip real work when it's
-    // hidden - only refresh here if Analysis is the view actually showing. switchCenterView
-    // already refreshes on activation, so a hidden dashboard is still fresh the instant the
-    // user opens it.
     if (activeCenterView === 'analysis') window.refreshAnalysisDashboard();
 };
 
-// Shows the snapshot picker only when more than one snapshot is loaded.
 window.renderSnapshotSwitcher = function() {
     var container = document.getElementById('snapshotSwitcherContainer');
     var select = document.getElementById('snapshotSwitcher');
@@ -125,9 +99,8 @@ window.onSnapshotSwitcherChange = function() {
     if (Number.isFinite(idx)) window.setActiveSnapshot(idx);
 };
 
-// Promise-based password prompt for the #password-modal in network_vis.html. Resolves
-// with the entered password on Unlock/Enter, rejects with Error('Cancelled') on
-// Cancel/Escape so callers can tell a deliberate cancel apart from a real failure.
+// Resolves with the entered password; rejects with Error('Cancelled') on Cancel/Escape so
+// callers can tell a deliberate cancel from a real failure.
 window.promptForPassword = function(errorMsg) {
     return new Promise((resolve, reject) => {
         var modal = document.getElementById('password-modal');
@@ -149,7 +122,7 @@ window.promptForPassword = function(errorMsg) {
             input.removeEventListener('keydown', onKeydown);
         }
         function onUnlock() {
-            // Capture before clearing - drops the password out of the DOM immediately.
+            // Captured before clearing, so the password leaves the DOM immediately.
             var value = input.value;
             input.value = '';
             cleanup();
@@ -167,28 +140,29 @@ window.promptForPassword = function(errorMsg) {
     });
 };
 
-// Start-NetworkMapper.ps1 already prompted for this password at the console and hands it
-// to the browser via GET /api/session-password, so callers can skip re-prompting on the
-// common path. Cached/in-flight-deduped so multiple encrypted-file loads only hit the
-// endpoint once. Resolves to '' (never rejects) when the server has nothing to offer, so
-// callers can treat a falsy result as "fall back to promptForPassword".
+// The server already prompted for this password at the console, so the common path can skip
+// re-prompting. Cached and in-flight-deduped; resolves to '' rather than rejecting, so a
+// falsy result means "fall back to promptForPassword".
 var sessionPasswordPromise = null;
 window.getSessionEncryptionPassword = function() {
     if (!sessionPasswordPromise) {
         sessionPasswordPromise = fetch('/api/session-password')
             .then(resp => resp.ok ? resp.json() : { password: '' })
             .then(json => json.password || '')
-            .catch(() => '');
+            .catch(() => {
+                // A transport failure is transient - the single-threaded server is often just
+                // busy at page load - so it must not be cached for the session. A !resp.ok
+                // answer is a real "no password" and stays cached.
+                sessionPasswordPromise = null;
+                return '';
+            });
     }
     return sessionPasswordPromise;
 };
 
 
-// Drag-resize for #side-panel. vis-network picks up the resulting #center-panel resize
-// on its own, but Leaflet does not self-observe its container, so Map view needs an
-// explicit invalidateSize() call while dragging or its tiles freeze at the pre-drag size.
-// Clamps a candidate side-panel width the same way for a live drag, a keyboard nudge, and
-// a restore-on-load - min never exceeds the viewport-relative max (responsive-1/3).
+// Shared by a live drag, a keyboard nudge and a restore-on-load, so min never exceeds the
+// viewport-relative max.
 function clampSidePanelWidth(width) {
     var maxWidth = window.innerWidth * 0.9;
     var minWidth = Math.min(320, maxWidth);
@@ -196,7 +170,7 @@ function clampSidePanelWidth(width) {
 }
 
 window.startSidePanelResize = function(e) {
-    if (e.isPrimary === false) return; // ignore a second simultaneous touch
+    if (e.isPrimary === false) return;
     e.preventDefault();
     var panel = document.getElementById('side-panel');
     var handle = document.getElementById('side-panel-handle');
@@ -206,7 +180,6 @@ window.startSidePanelResize = function(e) {
     handle.classList.add('dragging');
 
     function onMove(moveEvent) {
-        // Dragging the right edge of a left-docked panel: rightward movement grows it.
         var dx = moveEvent.clientX - startX;
         panel.style.width = clampSidePanelWidth(startWidth + dx) + 'px';
 
@@ -229,7 +202,7 @@ window.startSidePanelResize = function(e) {
     document.addEventListener('pointercancel', onUp);
 };
 
-// Arrow-key alternative to dragging #side-panel-handle (a11y-3) - same clamp as a drag.
+// Arrow-key alternative to dragging #side-panel-handle.
 window.sidePanelHandleKeydown = function(e) {
     if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
     e.preventDefault();
@@ -242,11 +215,10 @@ window.sidePanelHandleKeydown = function(e) {
     try { localStorage.setItem('sidePanelWidth', String(newWidth)); } catch (err) {}
 };
 
-// Drag the divider between the tool pane (Load File / Search / Settings) and the device
-// area. Until dragged, the pane sizes to its content (capped by CSS); after the first drag it
-// holds the dragged height (#tool-panel.sized) and remembers it across reloads.
+// Until first dragged the tool pane sizes to its content; the `sized` class switches it to
+// the dragged height, which then persists across reloads.
 window.startToolPanelResize = function(e) {
-    if (e.isPrimary === false) return; // ignore a second simultaneous touch
+    if (e.isPrimary === false) return;
     e.preventDefault();
     var pane = document.getElementById('tool-panel');
     var divider = document.getElementById('tool-divider');
@@ -274,7 +246,7 @@ window.startToolPanelResize = function(e) {
     document.addEventListener('pointercancel', onUp);
 };
 
-// Arrow-key alternative to dragging #tool-divider (a11y-3) - same clamp as a drag.
+// Arrow-key alternative to dragging #tool-divider.
 window.toolDividerKeydown = function(e) {
     if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
     e.preventDefault();
@@ -298,8 +270,7 @@ window.toolDividerKeydown = function(e) {
     } catch (err) {}
 })();
 
-// Restores a previously dragged width on load - a display preference, not part of
-// Configuration.json's saved state, so a plain localStorage read.
+// A display preference, deliberately in localStorage rather than Configuration.json.
 (function restoreSidePanelWidth() {
     try {
         var saved = parseFloat(localStorage.getItem('sidePanelWidth'));
@@ -309,13 +280,13 @@ window.toolDividerKeydown = function(e) {
     } catch (err) {}
 })();
 
-// Browser-window resize: vis-network picks this up via its own ResizeObserver, but
-// Leaflet doesn't self-observe, so Map view needs an explicit invalidateSize(). Debounced
-// since 'resize' fires continuously during an active drag.
+// vis-network self-observes via ResizeObserver, but Leaflet does not, so every path that
+// changes the map container's size must call invalidateSize() or its tiles freeze at the
+// old size. Debounced because 'resize' fires continuously during a window drag.
 var windowResizeDebounce = null;
 window.addEventListener('resize', function() {
-    // Re-clamp #side-panel immediately (not debounced) so a width saved on a wider
-    // viewport can't force overflow on a shrunk one (responsive-3).
+    // Re-clamped undebounced, so a width saved on a wider viewport can't overflow a
+    // shrunk one even momentarily.
     var panel = document.getElementById('side-panel');
     var currentWidth = panel.getBoundingClientRect().width;
     var clamped = clampSidePanelWidth(currentWidth);
@@ -327,10 +298,8 @@ window.addEventListener('resize', function() {
     }, 150);
 });
 
-// Tool tabs at the top of the left-docked side panel (Load File / Search / Settings). Panes stay in the DOM when hidden (display:none, not removed), so
-// getElementById-based reads elsewhere (getClusterThreshold, getLayoutSettings) work
-// regardless of which tab is active. (The Analysis Dashboard is a centre view, not a
-// sidebar tab - see map.js's switchCenterView.)
+// Hidden panes stay in the DOM, so getElementById reads elsewhere (getClusterThreshold,
+// getLayoutSettings) work whichever tab is active.
 window.switchSidebarTab = async function(tabId) {
     document.querySelectorAll('.sidebar-tab-content').forEach(el => el.classList.remove('active'));
     document.querySelectorAll('#tool-tabs .tab').forEach(el => { el.classList.remove('active'); el.setAttribute('aria-selected', 'false'); });
@@ -340,20 +309,18 @@ window.switchSidebarTab = async function(tabId) {
     activeSidebarTab = tabId;
 
     if (tabId === 'sidebar-tab-settings') {
-        // Immediate paint with whatever's already known, then load config (shares
-        // map.js's ensureConfigLoaded gate, so the fetch/password-prompt happens once
-        // per session regardless of which surface opens it first).
+        // Paint what's known, then repaint once the config resolves. ensureConfigLoaded is
+        // shared, so the fetch/password prompt happens once per session.
         window.populateSettingsInputs();
         await window.ensureConfigLoaded();
         window.populateSettingsInputs();
     }
 };
 
-// 1. File Loading & Parsing
-
-// Reads and (if needed) decrypts one File into a {sourceFile, scanTimestamp, topology}
-// snapshot record. Shared by forceLoadFile and forceLoadFolder.
-function readSnapshotFile(file) {
+// Reads and, if needed, decrypts one File into a {sourceFile, scanTimestamp, topology} record.
+// batch, when given, carries the last password that worked earlier in this batch, so a folder
+// of snapshots sharing one password prompts once rather than once per file.
+function readSnapshotFile(file, batch) {
     return new Promise((resolve, reject) => {
         var reader = new FileReader();
         reader.onerror = () => reject(new Error(`Browser blocked read access to "${file.name}".`));
@@ -365,21 +332,30 @@ function readSnapshotFile(file) {
                 if (data && data.format === 'PSNetworkMapper-EncryptedTopology') {
                     var decryptedText = null;
                     var errorMsg = null;
-                    // Try the session password silently first; only fall through to
-                    // promptForPassword if it's unavailable or fails to decrypt.
+                    // The session password is tried silently first; the prompt is only
+                    // reached if it is missing or fails to decrypt.
                     var sessionPassword = await window.getSessionEncryptionPassword();
                     var triedSessionPassword = false;
+                    var triedBatchPassword = false;
                     while (decryptedText === null) {
                         var password;
                         if (sessionPassword && !triedSessionPassword) {
                             password = sessionPassword;
                             triedSessionPassword = true;
+                        } else if (batch && batch.password && !triedBatchPassword) {
+                            password = batch.password;
+                            triedBatchPassword = true;
                         } else {
-                            password = await window.promptForPassword(errorMsg); // rejects on Cancel
+                            password = await window.promptForPassword(errorMsg); // rejects on Cancel, exiting the loop
                         }
                         try {
                             decryptedText = await window.TopologyCrypto.decryptEnvelope(data, password);
+                            if (batch) batch.password = password;
                         } catch (decErr) {
+                            // Only a wrong password is worth another attempt. An unsupported
+                            // version or bad envelope parameters fail identically for every
+                            // password, so re-prompting would be an unsatisfiable modal.
+                            if (!decErr.wrongPassword) throw decErr;
                             errorMsg = decErr.message;
                         }
                     }
@@ -388,7 +364,7 @@ function readSnapshotFile(file) {
 
                 if (!data.Topology) throw new Error(`"${file.name}": missing 'Topology' array.`);
 
-                // Clients arrive pre-correlated server-side; the visualizer just displays them.
+                // Clients arrive pre-correlated server-side.
                 data.Topology.forEach(device => { device.TrueClients = window.asArray(device.Clients); });
 
                 resolve({ sourceFile: file.name, scanTimestamp: data.ScanTimestamp || null, topology: data.Topology });
@@ -402,30 +378,54 @@ function readSnapshotFile(file) {
     });
 }
 
-// Startup autoload: fetches every archived snapshot from /api/snapshots and feeds them
-// through the same path a manual "Load Folder" pick uses, so the last scan is on screen
-// without a file-picker gesture. Silently does nothing (leaves manual load available) if
-// there's nothing to load, the fetch fails, or snapshots are encrypted but no session
-// password is cached yet - a surprise password prompt on page load would be worse than
-// just requiring one manual load in that case.
+// Startup autoload of the archived snapshots, through the same path a manual "Load Folder"
+// uses. Every failure is silent and leaves manual load available - in particular an
+// encrypted archive with no cached session password, where a surprise password prompt on
+// page load would be worse than one manual load.
 window.autoloadLastScan = async function() {
-    if (loadedSnapshots.length > 0) return; // already loaded by something else
-    // Snapshotted before any `await` below - if a manual Load/Scan Network starts (bumps
-    // this) or finishes (populates loadedSnapshots) while this function is still awaiting,
-    // the re-check right before processSelectedFiles bails instead of clobbering it. A plain
-    // "loadedSnapshots.length > 0" re-check alone wouldn't catch a call that's in-flight but
-    // hasn't populated loadedSnapshots yet.
+    if (loadedSnapshots.length > 0) return;
+    // Captured before any await: a competing load that has started but not yet populated
+    // loadedSnapshots is only detectable as a bumped generation.
     var myGenerationAtStart = loadFilesGeneration;
 
-    var entries;
+    var listing;
     try {
         var resp = await fetch('/api/snapshots');
         if (!resp.ok) return;
-        entries = (await resp.json()).snapshots;
+        listing = (await resp.json()).snapshots;
     } catch (err) {
         return;
     }
-    if (!Array.isArray(entries) || entries.length === 0) return;
+    if (!Array.isArray(listing) || listing.length === 0) return;
+
+    // /api/snapshots returns names and sizes only; bodies come one at a time from
+    // /api/snapshot. The server is single-threaded, so one bulk response would block it from
+    // answering anything else for minutes on a large archive - and for the same reason these
+    // are fetched sequentially, not in parallel: concurrency buys nothing and the gaps
+    // between requests are what let the server serve a scan the user starts meanwhile.
+    var entries = [];
+    for (var i = 0; i < listing.length; i++) {
+        // Re-checked every iteration because the loop yields to the server between fetches.
+        // scanNetworkPollActive is the canonical "a scan is in flight" flag: unlike
+        // loadFilesGeneration/loadedSnapshots it moves when a scan starts, not when it
+        // finishes, so it catches a crawl whose results will supersede all of this.
+        if (scanNetworkPollActive || loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0) return;
+        try {
+            var fileResp = await fetch('/api/snapshot?name=' + encodeURIComponent(listing[i].name));
+            // One unreadable snapshot (a crawl mid-write, a permissions issue) skips that
+            // file rather than abandoning the autoload.
+            if (!fileResp.ok) continue;
+            var content = await fileResp.text();
+            if (content) entries.push({ name: listing[i].name, content: content });
+        } catch (err) {
+            // Stop fetching, but keep what was already retrieved: processSelectedFiles'
+            // multi-file path tolerates a partial batch, and the check below still handles
+            // the genuinely-empty case.
+            console.warn('Autoload stopped after a transport error - continuing with the ' + entries.length + ' snapshot(s) already retrieved.', err);
+            break;
+        }
+    }
+    if (entries.length === 0) return;
 
     var encryptedEntries = entries.filter(e => {
         try { return JSON.parse(e.content).format === 'PSNetworkMapper-EncryptedTopology'; }
@@ -434,10 +434,9 @@ window.autoloadLastScan = async function() {
     if (encryptedEntries.length > 0) {
         var sessionPassword = await window.getSessionEncryptionPassword();
         if (!sessionPassword) return;
-        // Not just "a password is cached" - it must actually decrypt, or processSelectedFiles
-        // would fall through to promptForPassword, exactly the surprise prompt this is meant
-        // to avoid. Only the first encrypted entry is checked: they're all written by the same
-        // running server with the same session password, so one failure means they all would.
+        // The cached password must actually decrypt, or processSelectedFiles falls through to
+        // promptForPassword - the surprise prompt this is meant to avoid. Checking the first
+        // entry suffices: all were written by this server with the same session password.
         try {
             await window.TopologyCrypto.decryptEnvelope(JSON.parse(encryptedEntries[0].content), sessionPassword);
         } catch (err) {
@@ -445,13 +444,11 @@ window.autoloadLastScan = async function() {
         }
     }
 
-    if (loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0) return;
+    if (loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0 || scanNetworkPollActive) return;
     var files = entries.map(e => new File([e.content], e.name, { type: 'application/json' }));
-    // This is a silent background autoload, not a user-initiated action - a single corrupt/
-    // malformed archived snapshot must not surface the fatal red error state (processSelectedFiles
-    // re-throws once files.length === 1, since tolerateFailures only kicks in for multi-file
-    // batches). Swallow and log instead, matching every other documented failure mode above
-    // (nothing to load, fetch fails, encrypted-with-no-cached-password) which already fail silently.
+    // Nothing here was user-initiated, so a corrupt archived snapshot must not surface the
+    // fatal error state - which processSelectedFiles does re-throw into when files.length
+    // is 1, tolerateFailures being multi-file only.
     try {
         await window.processSelectedFiles(files);
     } catch (err) {
@@ -460,12 +457,10 @@ window.autoloadLastScan = async function() {
 };
 
 document.addEventListener('DOMContentLoaded', async function() {
-    // Reattach first, and AWAIT it before autoloading (P2SCAN-001): if a scan is already
-    // running server-side (e.g. this tab was refreshed mid-crawl), autoloadLastScan would
-    // otherwise race it and load the previous archived snapshot over the live poll, showing
-    // a false "Success!" and stale topology for the remainder of the scan. If resumeScanIfInProgress
-    // reattaches to a running scan, skip autoloadLastScan entirely - the completing scan will
-    // load its own result via pollRunningScan's own processSelectedFiles call.
+    // resumeScanIfInProgress must be awaited before autoloading: if a scan is running
+    // server-side (this tab refreshed mid-crawl), autoloadLastScan would race it and paint
+    // the previous archived snapshot plus a false "Success!" over the live poll. When it
+    // reattaches, skip the autoload entirely - the scan loads its own result on completion.
     var resumed = false;
     if (typeof window.resumeScanIfInProgress === 'function') resumed = await window.resumeScanIfInProgress().catch(function() { return false; });
     if (!resumed) window.autoloadLastScan();
@@ -486,9 +481,8 @@ window.forceLoadFolder = async function() {
         window.setStatus("Please select a folder.", "red");
         return;
     }
-    // A folder picker returns every file in the directory - filter to the actual
-    // NetworkMap_<timestamp>.json[.enc] naming convention, excluding in-progress
-    // .tmp.json(.enc) files that a mid-crawl folder pick could otherwise load as finished.
+    // A folder picker returns every file in the directory. The .tmp exclusion matters: a
+    // mid-crawl pick would otherwise load an in-progress file as a finished snapshot.
     var files = Array.from(input.files).filter(f =>
         /^NetworkMap_.*\.json(\.enc)?$/i.test(f.name) && !/\.tmp\.json(\.enc)?$/i.test(f.name)
     );
@@ -499,59 +493,52 @@ window.forceLoadFolder = async function() {
     await window.processSelectedFiles(files);
 };
 
-// Shared by forceLoadFile and forceLoadFolder - turns a list of File objects into
-// loadedSnapshots plus the active graph/search state.
+// Turns a list of File objects into loadedSnapshots plus the active graph/search state.
 window.processSelectedFiles = async function(files) {
     var myGeneration = ++loadFilesGeneration;
     var btn = document.getElementById('loadBtn');
     var folderBtn = document.getElementById('loadFolderBtn');
-    // Also locked out here (rather than only by its own click handler) so a Scan Network
-    // run in progress can't have its eventual processSelectedFiles call race this one - see
-    // loadFilesGeneration's comment.
+    // Locked out here as well as by its own handler, so a running scan's eventual call
+    // can't race this one.
     var scanBtn = document.getElementById('scanNetworkBtn');
     btn.disabled = true;
     if (folderBtn) folderBtn.disabled = true;
     if (scanBtn) scanBtn.disabled = true;
     window.closeDrawer();
-    // Reset the map's location editor too, before loadedSnapshots/deviceByIp are reassigned
-    // wholesale - left open, its editorTargetIp would point into data that no longer exists.
+    // These three all hold references into the data replaced below: the location editor's
+    // editorTargetIp, a rescan poll's captured snapshot slot, and a ping poll's drawer.
     window.closeLocationEditor();
-    // A rescan poll in flight would otherwise eventually splice its result into whichever
-    // snapshot occupies its captured array slot once loadedSnapshots is replaced below -
-    // mergeRescannedDevice's own targetSnapshot check catches that too, but there's no
-    // reason to let a now-pointless poll keep running.
     if (window.cancelPendingRescan) window.cancelPendingRescan();
-    // Same reasoning for an in-flight ping poll - its result would otherwise paint under
-    // whichever device now occupies the drawer once loadedSnapshots is replaced below.
     if (window.cancelPendingPing) window.cancelPendingPing();
 
     var newSnapshots = [];
-    var skipped = []; // {name, reason}[] - only used/reported for multi-file batches
+    var skipped = []; // {name, reason}[]
     var parseSucceeded = false;
-    // Single file: any failure aborts the whole load with no data shown. A multi-file/
-    // folder batch is more forgiving - one bad file shouldn't discard the rest.
+    // A single file's failure aborts the load; in a folder batch one bad file must not
+    // discard the rest.
     var tolerateFailures = files.length > 1;
+    // Scoped to this call, so a manually entered password is reused across the batch rather
+    // than prompted for once per encrypted file.
+    var batch = { password: null };
 
     try {
         for (var i = 0; i < files.length; i++) {
             window.setStatus(`Reading file ${i + 1} of ${files.length}: ${files[i].name}...`, "orange");
             window.showProgress(`Reading ${files[i].name}...`, Math.round((i / files.length) * 100));
-            await new Promise(r => setTimeout(r, 20)); // let the progress update actually paint
+            await new Promise(r => setTimeout(r, 20)); // let the progress update paint
 
             if (tolerateFailures) {
                 try {
-                    newSnapshots.push(await readSnapshotFile(files[i]));
+                    newSnapshots.push(await readSnapshotFile(files[i], batch));
                 } catch (fileErr) {
-                    // A cancelled password prompt aborts the whole batch rather than being
-                    // treated as "this one file is bad" - otherwise Cancel on file 1 of a
-                    // folder of encrypted files just re-prompts for file 2, file 3, ...,
-                    // forcing the user to dismiss the modal once per remaining file to
-                    // actually stop the load.
+                    // A cancelled password prompt aborts the batch instead of counting as
+                    // one bad file; otherwise Cancel just re-prompts for the next encrypted
+                    // file, once per remaining file.
                     if (fileErr && fileErr.message === 'Cancelled') throw fileErr;
                     skipped.push({ name: files[i].name, reason: fileErr.message });
                 }
             } else {
-                newSnapshots.push(await readSnapshotFile(files[i]));
+                newSnapshots.push(await readSnapshotFile(files[i], batch));
             }
             if (myGeneration !== loadFilesGeneration) return; // superseded mid-read
         }
@@ -563,25 +550,23 @@ window.processSelectedFiles = async function(files) {
         }
         parseSucceeded = true;
 
-        if (myGeneration !== loadFilesGeneration) return; // superseded while reading files
+        if (myGeneration !== loadFilesGeneration) return;
         loadedSnapshots = newSnapshots;
-        // A previously-rendered search result row carries an onclick closure over the OLD
-        // loadedSnapshots/deviceByIp - once those are replaced, that row can reopen a drawer
-        // for a device that no longer exists, or (worse) one that now resolves to a
-        // different, unrelated device at the same IP. Clear the search UI state alongside
-        // the data it was built from.
+        // Rendered result rows close over the OLD loadedSnapshots/deviceByIp, so once those
+        // are replaced a stale row can open a drawer for a device that no longer exists, or
+        // an unrelated one now at the same IP. Clear the UI with the data it was built from.
         var searchResultsEl = document.getElementById('searchResults');
         if (searchResultsEl) searchResultsEl.innerHTML = '';
         var globalSearchEl = document.getElementById('globalSearch');
         if (globalSearchEl) globalSearchEl.value = '';
-        searchHighlightQuery = ""; // matches its declared default above
+        searchHighlightQuery = "";
         window.showProgress("Indexing search data...", 100, true);
         await nextPaint();
         if (myGeneration !== loadFilesGeneration) return;
         window.buildSearchIndex();
 
-        // Active = most recently captured snapshot. Files with no ScanTimestamp fall back
-        // to selection order, preferring later ones.
+        // Most recently captured snapshot wins; files with no ScanTimestamp fall back to
+        // selection order, preferring later ones.
         var bestIndex = 0, bestTime = -Infinity;
         loadedSnapshots.forEach((s, idx) => {
             var t = window.parseTimestampMs(s.scanTimestamp);
@@ -595,7 +580,7 @@ window.processSelectedFiles = async function(files) {
         await nextPaint();
         if (myGeneration !== loadFilesGeneration) return;
         await window.setActiveSnapshot(bestIndex);
-        if (myGeneration !== loadFilesGeneration) return; // a newer load reassigned loadedSnapshots while this awaited
+        if (myGeneration !== loadFilesGeneration) return;
 
         document.getElementById('legend-group').style.display = 'block';
         var totalDevices = loadedSnapshots.reduce((sum, s) => sum + s.topology.length, 0);
@@ -609,7 +594,7 @@ window.processSelectedFiles = async function(files) {
             "green"
         );
     } catch (err) {
-        if (myGeneration !== loadFilesGeneration) return; // superseded - a newer call owns the status line now
+        if (myGeneration !== loadFilesGeneration) return; // a newer call owns the status line
         if (err && err.message === 'Cancelled') {
             window.setStatus("Decryption cancelled.", "orange");
         } else {
@@ -617,9 +602,8 @@ window.processSelectedFiles = async function(files) {
             throw err;
         }
     } finally {
-        // Only the still-current call resets the busy UI - if a newer call has since
-        // started, it owns the progress bar/buttons and this stale call must not clear
-        // state out from under it.
+        // Only the current call resets the busy UI; a newer one owns the progress bar and
+        // buttons by now.
         if (myGeneration === loadFilesGeneration) {
             window.hideProgress();
             btn.disabled = false;

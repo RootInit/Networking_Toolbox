@@ -188,3 +188,61 @@ test('decryptEnvelope rejects a non-integer iterations value', async () => {
     /Iteration count out of range: 1000\.5/
   );
 });
+
+// Fixed cross-runtime vector, produced by lib/TopologyCrypto.ps1's Protect-TopologyPayload.
+// Run-Tests.ps1 decrypts this same envelope from its own copy of the literal. The two
+// implementations must stay byte-compatible - the browser decrypts what the crawler wrote -
+// and every existing test here builds its envelope with the SAME Web Crypto code it then
+// verifies, so none of them would notice the two drifting apart. If they do, exactly one of
+// the two suites goes red.
+//
+// Non-ASCII in both the password (incl. a non-BMP emoji, i.e. a surrogate pair) and the
+// plaintext, because that is where PBKDF2 password encoding and UTF-8 decoding differ if
+// either side gets it wrong.
+const PS_INTEROP_ENVELOPE = {
+  format: 'PSNetworkMapper-EncryptedTopology', version: 1, kdf: 'PBKDF2-SHA256', iterations: 1000,
+  cipher: 'AES-256-CBC', macAlgorithm: 'HMAC-SHA256',
+  salt: 'AQIDBAUGBwgJCgsMDQ4PEA==',
+  iv: 'b+iBnE7OTNxUHdbMJLgqNA==',
+  mac: 'ZPIp4GkNDGJeBU0QZ1VLLci2HQGC482oBvInAG1G5tw=',
+  ciphertext: 'k1v8NbYk+p0Qm04nui5MVixuNLLTPAxZyxnlc0vwyvgCnckpR+qhdOu9xhXCE2L2sDIZVf75RyOZ3oE2RdLWeJtbJjgk7Ub+lA/5hzA+HJPzSFNulBOHlKPCTVbyGEknwmUyA+7tu8l4JHNBkwk6cw==',
+};
+const PS_INTEROP_PASSWORD = 'Correct Horse Battery Stapleäöü😀';
+const PS_INTEROP_PLAINTEXT = '{"Topology":[{"DeviceIP":"10.55.1.1","Hostname":"swutch-e"}],"ScanTimestamp":"2026-01-01T00:00:00Z"}';
+
+test('decrypts a fixed envelope produced by the PowerShell implementation (interop)', async () => {
+  const plain = await TopologyCrypto.decryptEnvelope(PS_INTEROP_ENVELOPE, PS_INTEROP_PASSWORD);
+  assert.equal(plain, PS_INTEROP_PLAINTEXT);
+});
+
+test('rejects the PowerShell interop envelope under the wrong password', async () => {
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(PS_INTEROP_ENVELOPE, 'not the password'),
+    /Incorrect password, or the file is corrupted/
+  );
+});
+
+const base = {
+  format: 'PSNetworkMapper-EncryptedTopology', version: 1, kdf: 'PBKDF2-SHA256',
+  cipher: 'AES-256-CBC', macAlgorithm: 'HMAC-SHA256', iterations: ITERATIONS,
+  salt: b64(new Uint8Array(16)), iv: b64(new Uint8Array(16)),
+  ciphertext: b64(new Uint8Array(32)), mac: b64(new Uint8Array(32)),
+};
+async function rejectionOf(env) {
+  try { await TopologyCrypto.decryptEnvelope(env, 'pw'); assert.fail('should have rejected'); }
+  catch (err) { return err; }
+}
+
+// The re-prompt loops in app.js/map.js gate on this flag: an untagged rejection must exit
+// through the normal error path, since no password could ever satisfy it.
+test('decryptEnvelope tags only the retryable wrong-password/corrupt failure', async () => {
+  assert.equal((await rejectionOf(base)).wrongPassword, true);
+  assert.equal((await rejectionOf({ ...base, salt: '!!!not base64!!!' })).wrongPassword, true);
+});
+
+test('decryptEnvelope leaves password-independent structural failures untagged', async () => {
+  for (const env of [{ ...base, version: 2 }, { ...base, cipher: 'AES-128-GCM' }, { ...base, iterations: 5 }]) {
+    assert.equal((await rejectionOf(env)).wrongPassword, undefined);
+  }
+});
+

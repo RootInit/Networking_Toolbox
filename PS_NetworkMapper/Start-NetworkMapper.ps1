@@ -8,9 +8,8 @@ param (
     [ValidateRange(1, 64)]
     [int]$MaxConcurrent = 10,
     [switch]$Log,
-    # Encryption is on by default. Disables it entirely: topology written as plain .json,
-    # credentials/settings read from and saved to plaintext Configuration.json instead of
-    # Configuration.json.enc (an existing .enc is simply ignored, not migrated).
+    # Encryption is on by default. Disabling it writes plain .json topology and reads/saves a
+    # plaintext Configuration.json; an existing .enc is ignored, not migrated.
     [switch]$NoEncryption,
 
     # Bound to localhost only - see WebServer.ps1's header comment.
@@ -21,43 +20,44 @@ $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 $WorkerPath = Join-Path $ScriptDir "lib\Get-JunosNodeData.ps1"
 $ConnectScriptPath = Join-Path $ScriptDir "lib\Connect-Switch.ps1"
 # web-src/ (multi-file visualizer source) is a dev-only sibling; a release ships only this
-# script + lib/ (including the built Network_Visualizer.html below).
+# script + lib/, including the built Network_Visualizer.html preferred below.
 $VisualizerRoot = Join-Path $ScriptDir "web-src"
-# Prefer the built single-file visualizer if present (a real release); otherwise fall back to
-# the multi-file $VisualizerRoot for a dev checkout. Served scoped to this one path, never by
-# widening $VisualizerRoot to $ScriptDir, which would expose lib/'s *.ps1 source and logs too.
+# Served scoped to this one path - never widen $VisualizerRoot to $ScriptDir, which would
+# expose lib/'s *.ps1 source and logs too.
 $SingleFileVisualizerPath = Join-Path $ScriptDir "lib\Network_Visualizer.html"
 if (Test-Path $SingleFileVisualizerPath -PathType Leaf) {
     Write-Host "Using portable single-file visualizer: $SingleFileVisualizerPath" -ForegroundColor Cyan
 } else {
     $SingleFileVisualizerPath = $null
 }
-# Configuration.json.enc normally, or plaintext Configuration.json under -NoEncryption -
-# distinct filenames so the two modes never collide or silently migrate into each other.
+# Distinct filenames per mode so the two never collide or silently migrate into each other.
 $ConfigPath = Join-Path $ScriptDir $(if ($NoEncryption) { "Configuration.json" } else { "Configuration.json.enc" })
 . (Join-Path $ScriptDir "lib\WebServer.ps1")
 . (Join-Path $ScriptDir "lib\TopologyCrypto.ps1")
 $DebugLog = Join-Path $ScriptDir "Mapper_Debug.log"
-# Snapshots live in the sibling Network_Maps/ folder.
 $SnapshotDir = Join-Path $ScriptDir "Network_Maps"
 if (-not (Test-Path $SnapshotDir)) { New-Item -ItemType Directory -Path $SnapshotDir -Force | Out-Null }
 
-# Converts a SecureString to plaintext - works identically on Windows PowerShell 5.1 and
-# pwsh 7+, unlike manually marshaling the BSTR (which needs its own ZeroFreeBSTR cleanup).
+# Works identically on Windows PowerShell 5.1 and pwsh 7+, unlike manually marshaling the
+# BSTR (which needs its own ZeroFreeBSTR cleanup).
 function ConvertFrom-SecurePassword {
     param([Parameter(Mandatory=$true)][securestring]$SecureString)
     return [System.Net.NetworkCredential]::new('', $SecureString).Password
 }
 
 $EncryptionPassword = $null
+# Normally the same string as $EncryptionPassword. Kept separate because the two protect
+# different things: $EncryptionPassword also gates rewriting Configuration.json.enc, so the
+# decrypt-failure path below has to blank that one while snapshot encryption stays on.
+$SnapshotEncryptionPassword = $null
 $JunosUsername = $null
 $JunosPassword = $null
 
 if ($NoEncryption) {
     if (Test-Path $ConfigPath) {
         try {
-            # -Encoding UTF8 explicit: Get-Content -Raw with no -Encoding falls back to the
-            # system ANSI codepage on a BOM-less file, corrupting non-ASCII text.
+            # -Encoding UTF8 explicit: Get-Content -Raw without it falls back to the system
+            # ANSI codepage on a BOM-less file, corrupting non-ASCII text.
             $ConfigParsed = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($ConfigParsed.credentials) {
                 $JunosUsername = $ConfigParsed.credentials.username
@@ -68,11 +68,15 @@ if ($NoEncryption) {
         }
     }
 } else {
+    # Before the prompt, so an unsupported runtime says so once instead of failing key
+    # derivation after the operator has typed a password.
+    Assert-TopologyCryptoRuntime
+
     # Always interactively entered, in both crawl and server-only modes - there is no
     # file-based fallback.
     Write-Host ""
-    # Re-prompt on empty input - Read-Host -AsSecureString happily accepts a bare Enter,
-    # and an empty password breaks downstream key derivation with an unreadable error.
+    # Read-Host -AsSecureString accepts a bare Enter, and an empty password breaks downstream
+    # key derivation with an unreadable error.
     do {
         $EncryptionPassword = ConvertFrom-SecurePassword -SecureString (Read-Host -Prompt "Enter encryption password" -AsSecureString)
         if ([string]::IsNullOrEmpty($EncryptionPassword)) { Write-Host "Password cannot be empty." -ForegroundColor Red }
@@ -84,7 +88,6 @@ if ($NoEncryption) {
         while ($null -eq $DecryptedConfigJson -and $Attempts -lt 3) {
             $Attempts++
             try {
-                # -Encoding UTF8 explicit for consistency, same as the -NoEncryption branch.
                 $Envelope = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
                 $DecryptedConfigJson = Unprotect-TopologyPayload -Envelope $Envelope -Password $EncryptionPassword -ExpectedFormats @("PSNetworkMapper-EncryptedConfig")
             } catch {
@@ -109,37 +112,52 @@ if ($NoEncryption) {
             # Blank the password so it can't silently rewrite the file on the next
             # /api/save-config call; Invoke-SaveConfigAction refuses to save when this is empty.
             $EncryptionPassword = $null
+
+            # Snapshot encryption gets its own password instead of inheriting the blanking.
+            # Otherwise no key material is derived, Invoke-FleetCrawl sees no -EncKey and writes
+            # snapshots - every device's full unredacted "show configuration | display set",
+            # RADIUS/TACACS+/SNMP secrets included - as plaintext, which is not what the operator
+            # consented to by giving up server-side credentials.
+            Write-Host "Configuration.json.enc will be left untouched. New snapshots are still encrypted, but with a separate password the viewer will prompt you for." -ForegroundColor Yellow
+            do {
+                $SnapshotEncryptionPassword = ConvertFrom-SecurePassword -SecureString (Read-Host -Prompt "Enter a password to encrypt new snapshots with" -AsSecureString)
+                if ([string]::IsNullOrEmpty($SnapshotEncryptionPassword)) { Write-Host "Password cannot be empty." -ForegroundColor Red }
+            } while ([string]::IsNullOrEmpty($SnapshotEncryptionPassword))
         }
     }
 }
 
 # --- Output Encryption (AES-256-CBC, encrypt-then-MAC with HMAC-SHA256) ---
-# Avoids AesGcm (.NET Core/5+ only) since this must also run under Windows PowerShell 5.1
-# (.NET Framework). CBC+HMAC works on both runtimes and is natively available in the
-# browser's Web Crypto API on the Network_Visualizer side that decrypts this format.
-# Runs unconditionally (crawl and server-only modes) so a browser-triggered scan from
-# server-only mode also has key material for Invoke-FleetCrawl. Guarded on
-# $EncryptionPassword being non-empty (not just -NoEncryption) since the decrypt-failure
-# path above can leave it $null, and Get-TopologyKeyMaterial's -Password is Mandatory.
+# AesGcm is .NET Core/5+ only; this must also run under Windows PowerShell 5.1 (.NET
+# Framework). CBC+HMAC works on both runtimes and on the browser's Web Crypto API, which
+# decrypts this format on the Network_Visualizer side.
+# Runs in server-only mode too, so a browser-triggered scan has key material for
+# Invoke-FleetCrawl.
 $PBKDF2_ITERATIONS = Get-TopologyPbkdf2Iterations
 $EncKeyBytes = $null; $MacKeyBytes = $null; $SaltBytes = $null
 
-if (-not $NoEncryption -and $EncryptionPassword) {
-    Write-Host "Output encryption enabled - the viewer will use this password automatically while this server is running; opening the file elsewhere (or after a restart) will prompt for it." -ForegroundColor Yellow
+if (-not $NoEncryption -and -not $SnapshotEncryptionPassword) { $SnapshotEncryptionPassword = $EncryptionPassword }
+if (-not $NoEncryption -and $SnapshotEncryptionPassword) {
+    # Only $EncryptionPassword reaches /api/session-password, so on the config-decrypt-failure
+    # path (where it is blanked) the viewer has to prompt even in this session.
+    if ($EncryptionPassword) {
+        Write-Host "Output encryption enabled - the viewer will use this password automatically while this server is running; opening the file elsewhere (or after a restart) will prompt for it." -ForegroundColor Yellow
+    } else {
+        Write-Host "Output encryption enabled - the viewer will prompt for this password when opening a snapshot." -ForegroundColor Yellow
+    }
 
     $SaltBytes = [byte[]]::new(16)
     $Rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
     $Rng.GetBytes($SaltBytes)
     $Rng.Dispose()
 
-    $KeyMaterial = Get-TopologyKeyMaterial -Password $EncryptionPassword -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
+    $KeyMaterial = Get-TopologyKeyMaterial -Password $SnapshotEncryptionPassword -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS
     $EncKeyBytes = $KeyMaterial.EncKey
     $MacKeyBytes = $KeyMaterial.MacKey
 }
 
-# Server-only launch: no -SwitchIP means "just show me the viewer". Proceeds regardless of
-# credentials - browsing snapshots needs none, and Invoke-ConnectAction/Invoke-RescanAction
-# fail cleanly pointing at the Settings tab if the browser tries an action that needs them.
+# Server-only launch. Proceeds regardless of credentials - browsing snapshots needs none, and
+# the actions that do need them fail cleanly pointing at the Settings tab.
 if (-not $SwitchIP) {
     Start-MapperWebServer -NoEncryption:$NoEncryption -VisualizerRoot $VisualizerRoot -SingleFileVisualizerPath $SingleFileVisualizerPath -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS -DebugLogPath $DebugLog
     return
@@ -156,17 +174,23 @@ if ($Log) { Write-Host "[LOGGING ENABLED] Raw payloads will be saved to .\RawDum
 
 . (Join-Path $ScriptDir "lib\FleetCrawl.ps1")
 
-# AllowedScopes is enforced on every crawl-discovered neighbor IP (FleetCrawl.ps1's
-# Test-IpInAllowedScopes) and on the web UI's manual-entry equivalents (WebServer.ps1's
-# /api/scan-network and /api/rescan) - this CLI entry point must be held to the same fence,
-# or a typo'd/out-of-scope -SwitchIP would reach an SSH login with saved credentials before
-# the crawl ever gets a chance to apply scope filtering.
+# Same fence the crawl and the web UI's manual-entry paths apply: without it a typo'd
+# out-of-scope -SwitchIP reaches an SSH login with saved credentials before the crawl ever
+# gets a chance to filter it.
 if (-not (Test-IpInAllowedScopes -IP $SwitchIP -AllowedScopes $AllowedScopes)) {
     Write-Host "SwitchIP '$SwitchIP' is outside the configured AllowedScopes ($($AllowedScopes -join ', ')). Adjust -AllowedScopes if this IP should be permitted." -ForegroundColor Red
     exit 1
 }
 
-if (-not (Test-Path $WorkerPath)) { Write-Host "Worker script missing at $WorkerPath!" -ForegroundColor Red; exit }
+if (-not (Test-Path $WorkerPath)) { Write-Host "Worker script missing at $WorkerPath!" -ForegroundColor Red; exit 1 }
+
+# Fail closed rather than downgrading: Invoke-FleetCrawl treats absent key material as "write
+# plaintext", so reaching it without keys but also without -NoEncryption would dump every
+# device's full configuration unencrypted. Only -NoEncryption may do that, and it must be
+# asked for explicitly.
+if (-not $NoEncryption -and -not $EncKeyBytes) {
+    throw "Refusing to crawl: snapshot encryption was requested but no key material could be derived. Re-run and supply an encryption password, or pass -NoEncryption to write plaintext snapshots deliberately."
+}
 
 $CrawlProgress = @{}  # unused by the CLI path - passed only because Invoke-FleetCrawl requires it
 $CrawlResult = Invoke-FleetCrawl -StartIP $SwitchIP -AllowedScopes $AllowedScopes -MaxConcurrent $MaxConcurrent `
@@ -175,6 +199,5 @@ $CrawlResult = Invoke-FleetCrawl -StartIP $SwitchIP -AllowedScopes $AllowedScope
     -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS `
     -DebugLogPath $DebugLog -Log:$Log
 
-# Launch the viewer after the crawl so the freshly-written snapshot is immediately
-# available; blocks serving requests until Ctrl+C.
+# Blocks serving requests until Ctrl+C.
 Start-MapperWebServer -NoEncryption:$NoEncryption -VisualizerRoot $VisualizerRoot -SingleFileVisualizerPath $SingleFileVisualizerPath -ConnectScriptPath $ConnectScriptPath -WorkerPath $WorkerPath -Port $WebPort -ConfigPath $ConfigPath -EncryptionPassword $EncryptionPassword -JunosUsername $JunosUsername -JunosPassword $JunosPassword -MaxConcurrent $MaxConcurrent -AllowedScopes $AllowedScopes -SnapshotDir $SnapshotDir -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS -DebugLogPath $DebugLog

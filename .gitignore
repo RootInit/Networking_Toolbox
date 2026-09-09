@@ -15,9 +15,31 @@ PS_NetworkMapper/Network_Maps/NetworkMap_*.json
 PS_NetworkMapper/Network_Maps/NetworkMap_*.json.enc
 !PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-13_091500.json
 !PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-20_143207.json
-!PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-20_143207.json.enc
 PS_NetworkMapper/Mapper_Debug.log
 PS_NetworkMapper/RawDumps/
 
 # Local git worktrees used for isolated feature-plan execution (superpowers:using-git-worktrees).
 .worktrees/
+
+# Claude Code working directory: per-session audit notes and runtime state, not source.
+.claude/
+
+# Raw switch session captures used as parsing ground truth while debugging. Real device
+# output (hostnames, IPs, MACs), same sensitivity as Network_Maps/ above.
+PS_NetworkMapper/Raw_*.txt
+
+# Atomic-write temps from lib/FileHelpers.ps1 (<dest>.<pid>.<guid>.tmp). A crash between the
+# write and the rename leaves one behind, and under -NoEncryption the Configuration.json temp
+# is plaintext SSH credentials - the exact-name rule above does not match it.
+PS_NetworkMapper/**/*.tmp
+
+# Runtime debug logs. Mapper_Debug.log is covered by name above, but WebServer.ps1 writes
+# Network_Maps/ScanNetwork_Debug.log on every browser-triggered scan.
+PS_NetworkMapper/**/*.log
+
+# Get-JunosNodeData.ps1 derives RawDumps/ from the debug-log directory, so it does not always
+# land at PS_NetworkMapper/RawDumps/. Unanchored to cover Network_Maps/RawDumps/ too.
+PS_NetworkMapper/**/RawDumps/
+
+# Protect-MapperFile.ps1's derived decrypt output - plaintext credentials.
+PS_NetworkMapper/**/*.decrypted.json

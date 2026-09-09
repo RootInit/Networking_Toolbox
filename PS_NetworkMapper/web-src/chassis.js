@@ -1,19 +1,17 @@
-// Front-panel drawing for the device drawer's Interfaces tab: one SVG per stack member,
-// drawn in millimetres from Juniper's own front-view photos, with two LED lenses per port
-// bound to that port's Interfaces row (left = link, right = recent activity). Two-tone line
-// art only - fills/strokes come from --chassis-bg/--chassis-fg so it inverts with the theme.
+// Front-panel drawing for the drawer's Interfaces tab: one SVG per stack member, drawn in
+// millimetres from Juniper's front-view photos, with two LED lenses per port (left = link,
+// right = recent activity). Two-tone line art only - fills/strokes come from
+// --chassis-bg/--chassis-fg so it inverts with the theme.
 //
-// Three parameterised families cover every Juniper fixed-config switch style; a model is a
-// MODELS entry that picks a family and passes measured positions. A model string the
-// catalogue doesn't know is first normalised (case, T/P/MP suffix, -AFI/-DC style trailers)
-// and, failing that, drawn generically from the interface names it actually reports, so a
-// new SKU still gets a usable panel instead of nothing. Modular chassis (EX8200/9200, EX6200,
-// QFX10000, MX, PTX, 4-digit SRX) have vertical line cards and no meaningful 1U front - they
-// render a one-line note.
+// Three parameterised families cover every fixed-config switch style; a MODELS entry picks a
+// family and passes measured positions. An unknown model string is normalised (case, port
+// suffix, -AFI/-DC style trailers) and, failing that, drawn generically from the interface
+// names the device reports, so a new SKU still gets a usable panel. Modular chassis have
+// vertical line cards and no meaningful 1U front, so they render a one-line note.
 //
-// Dual-mode like graph-layout.js: node:test imports the pure string builders through
-// module.exports; the browser loads it as a classic <script> and gets window.Chassis plus the
-// DOM-facing window.renderChassisView / window.highlightChassisPort used by drawer.js.
+// Dual-mode like graph-layout.js: node:test gets the pure string builders through
+// module.exports, the browser gets window.Chassis plus the DOM-facing render/highlight entry
+// points drawer.js calls.
 
 (function () {
 'use strict';
@@ -61,8 +59,8 @@ function wordmark(x, y, opts) {
         (opts.model ? '<text class="model-text' + (opts.big ? ' big' : '') + '" x="' + f(opts.modelX == null ? 0 : opts.modelX) + '" y="' + f(opts.modelY == null ? 5.2 : opts.modelY) + '">' + escHtml(opts.model) + '</text>' : '') + '</g>';
 }
 var junosMark = function (x, y) { return '<g transform="translate(' + f(x) + ',' + f(y) + ')"><circle cx="1.8" cy="-1.2" r="1.6" fill="var(--chassis-fg)"></circle><text class="junos-sub" x="4.2" y="-2.2">RUNNING</text><text class="junos-text" x="4.2" y="0.4">JUNOS</text></g>'; };
-// Current unit while drawing - the glow filter id is per-SVG so two stacked members never
-// share a <defs> reference that only the first SVG in the document defines.
+// The glow filter id is per-SVG, so two stacked members never share a <defs> reference that
+// only the first SVG in the document defines.
 var curUid = 'u';
 function lens(x, y, w, h, key, role) {
     var bind = key ? ' data-lightfor="' + escHtml(key) + '" data-role="' + role + '"' : '';
@@ -78,25 +76,23 @@ function dot(cx, cy, r, key, role, state) {
         '<circle class="light-base" cx="0" cy="0" r="' + f(r) + '"></circle>' +
         '<circle class="light-core" cx="0" cy="0" r="' + f(r * .55) + '"></circle></g>';
 }
-// Port groups carry data-port (the bare Junos interface name) for click selection, plus a
-// data-tip detail string (see portTitle below) when the unit knows the interface; ports the
-// artwork has but the device didn't report get .port-absent so they read as physically
-// present but not in the data.
+// Port groups carry data-port for click selection plus a data-tip detail string. A port the
+// artwork has but the device never reported gets .port-absent, so it reads as physically
+// present but missing from the data.
 function portBind(unit, key, kind) {
     if (!key) return '';
     var known = unit && unit.hasPort ? unit.hasPort(key) : true;
     return ' class="port-el' + (known ? '' : ' port-absent') + '" data-port="' + escHtml(key) + '" data-kind="' + kind + '"';
 }
-// Tooltip detail (state and description) as a data attribute; the browser side pairs it with
-// data-port in a custom hover tooltip (window.renderChassisView) - the native SVG <title>
-// tooltip was too slow to appear and too easy to miss on a 10px jack.
+// Carried as a data attribute for the custom hover tooltip: the native SVG <title> tooltip
+// is too slow to appear and too easy to miss on a 10px jack.
 function portTitle(unit, key) {
     var t = key && unit && unit.title ? unit.title(key) : '';
     return t ? ' data-tip="' + escHtml(t) + '"' : '';
 }
-// Keyboard/screen-reader access for the same jack a mouse can click - tabindex, a button role
-// and a name are all a non-native SVG element needs; activation is wired up on the delegated
-// keydown listener in window.renderChassisView, alongside the existing delegated click one.
+// Keyboard/screen-reader access for a jack: tabindex, role and a name are all a non-native
+// SVG element needs. Activation is wired to the delegated keydown listener in
+// window.renderChassisView.
 function portA11y(key) {
     return key ? ' tabindex="0" role="button" aria-label="Port ' + escHtml(key) + '"' : '';
 }
@@ -121,8 +117,7 @@ function rj45Block(x, y, cols, pitch, firstN, unit, opts) {
     opts = opts || {};
     var g = JACK, H = JACK_H, pic = opts.pic || 0;
     // opts.prefix is usually a fixed string, but inferModel() passes a per-port function so a
-    // mixed mge/ge block (mgig ports that don't fall on a 12-port boundary) names each jack
-    // from its own actual interface, not the whole block's.
+    // block mixing mge and ge ports names each jack from its own interface.
     var prefixOf = typeof opts.prefix === 'function' ? opts.prefix : function () { return opts.prefix || 'ge'; };
     var out = '';
     for (var c = 0; c < cols; c++) {
@@ -466,21 +461,21 @@ var STYLE_GEN = { rj45: rj45Rack, sfp: sfpRack, compact: compact };
 // Modular / chassis-based platforms: vertical line cards, no 1U front to draw.
 var MODULAR_RE = /^(EX92|EX82|EX62|QFX10|MX|PTX|SRX[1-9]\d{3})/;
 
-// Maps whatever Junos reports (`show virtual-chassis` gives lower-case "ex2300-24t",
-// `show chassis hardware` gives "EX4300-48P"; both may carry ordering trailers such as
-// -AFI/-AFO/-DC/-TAA) onto a catalogue key. Returns { key, model } or null.
+// Maps whatever Junos reports onto a catalogue key. `show virtual-chassis` gives lower-case
+// ("ex2300-24t") while `show chassis hardware` gives upper ("EX4300-48P"), and either may
+// carry an ordering trailer. Returns { key, model } or null.
 function resolveModel(modelStr) {
     if (!modelStr) return null;
     var m = String(modelStr).trim().toUpperCase();
     if (MODELS[m]) return { key: m, model: MODELS[m] };
-    // Strip ordering/airflow/power trailers one at a time: EX4300-48P-AFI, QFX5100-48S-DC-AFO, EX4400-48P-TAA
+    // One at a time, since a model can carry several: QFX5100-48S-DC-AFO
     var parts = m.split('-');
     while (parts.length > 2) {
         parts.pop();
         var cand = parts.join('-');
         if (MODELS[cand]) return { key: cand, model: MODELS[cand] };
     }
-    // Same chassis with a different port option letter we haven't measured separately: draw the sibling.
+    // Same chassis, a port option letter that wasn't measured separately: draw the sibling.
     var sib = m.match(/^([A-Z]+\d{4}(?:-[A-Z])?-\d{2})([A-Z]+)/);
     if (sib) {
         var candidates = ['P', 'T', 'MP', 'S', 'Y', 'F'].map(function (sfx) { return sib[1] + sfx; });
@@ -495,11 +490,10 @@ function parsePort(name) {
     return m ? { prefix: m[1], fpc: +m[2], pic: +m[3], n: +m[4] } : null;
 }
 
-// Fallback for a fixed-config model the catalogue doesn't know: infer the panel from the
-// interfaces this member actually reports. Copper (ge/mge) access on PIC 0 -> the 2x6 RJ45
-// rack family in 12-port blocks, with the LCD-style right section if PIC 2 has uplinks or
-// the plain EX2300-style one otherwise; fibre access -> plain SFP columns. Returns a
-// spec-bearing model like a catalogue entry, or null if nothing parseable belongs to this FPC.
+// Fallback for a model the catalogue doesn't know: infer the panel from the interfaces this
+// member reports. Copper access on PIC 0 gives the 2x6 RJ45 rack in 12-port blocks (LCD-style
+// right section when PIC 2 has uplinks, plain otherwise); fibre access gives SFP columns.
+// Returns a spec-bearing model like a catalogue entry, or null.
 function inferModel(modelStr, fpc, interfaces) {
     var access = [], uplinkPics = {};
     (interfaces || []).forEach(function (intf) {
@@ -513,9 +507,8 @@ function inferModel(modelStr, fpc, interfaces) {
     var text = String(modelStr || '').toUpperCase() || 'JUNIPER';
     if (copper) {
         var nBlocks = Math.min(4, Math.max(1, Math.ceil((maxN + 1) / 12)));
-        // Per-port, not per-block: a device can report mge ports that don't align to a
-        // 12-port block boundary, and flagging the whole block would mislabel the ge ports
-        // sharing it (or hide a live mge port outside the flagged block).
+        // Per-port, not per-block: mge ports need not align to a 12-port boundary, so
+        // flagging a whole block would mislabel the ge ports sharing it.
         var mgigPorts = {};
         access.forEach(function (p) { if (p.prefix === 'mge') mgigPorts[p.n] = true; });
         var prefixOf = function (n) { return mgigPorts[n] ? 'mge' : 'ge'; };
@@ -534,14 +527,10 @@ function inferModel(modelStr, fpc, interfaces) {
         spec: { groups: groups, vents: 'holesBands', left: 'esd', prefix: access[0].prefix } };
 }
 
-// Activity lens: green = carrying traffic now or flapped within 72 h, amber = last change
-// between 72 h and 6 months ago, 'off' = older than that, never, or unknown (null
-// LastFlappedSeconds - pre-dates the field, or Junos reported "Never").
-// LastFlappedSeconds is captured once, as of the snapshot's own scan (drawer.js's CSV export
-// notes the same thing) - it does not keep counting up while the snapshot sits loaded. A port
-// that flapped 70h before an since-then-2-months-old scan is not "recently active" now; ageSec
-// (seconds elapsed since that scan, 0 for a live/unknown snapshot) is added before thresholding
-// so a stale snapshot ages out of 'green' the same way live data would.
+// Activity lens: green = traffic now or a flap within 72h, amber = 72h to 6 months, off =
+// older, never, or unknown. LastFlappedSeconds is frozen at the snapshot's scan time and does
+// not keep counting while the snapshot sits loaded, so ageSec (elapsed since that scan) is
+// added before thresholding - otherwise a two-month-old snapshot still shows green.
 var H72_S = 72 * 3600, H6MO_S = 182 * 24 * 3600;
 function activityState(intf, ageSec) {
     if (!intf) return 'off';
@@ -553,51 +542,51 @@ function activityState(intf, ageSec) {
     if (elapsed <= H6MO_S) return 'amber';
     return 'off';
 }
-// 'red' mirrors the down badge the Interfaces table shows for this same intf.Link check
-// (drawer.js renderInterfaces); 'off' stays reserved for a port the artwork has but the
-// device didn't report at all (no intf, so lightStates() never calls this for it).
+// 'red' mirrors the down badge the Interfaces table shows for the same intf.Link check;
+// 'off' stays reserved for a port the device never reported.
 function linkState(intf) {
     if (!intf) return 'off';
     return String(intf.Link).toLowerCase() === 'up' ? 'green' : 'red';
 }
 
-// Builds the members of one device: [{fpc, role, model, master, multi, catalogueKey,
-// inferred, label, html} | {..., note}] in FPC order. Pure - no DOM. `device` is a topology
-// record (StackMembers, Interfaces).
+// Builds one device's members in FPC order: [{fpc, role, model, master, multi, catalogueKey,
+// inferred, label, html} | {..., note}]. Pure - no DOM.
 function buildMembers(device) {
     var asArr = function (v) { return Array.isArray(v) ? v.filter(function (item) { return item !== null && item !== undefined; }) : (v === null || v === undefined ? [] : [v]); };
     var interfaces = asArr(device && device.Interfaces);
-    // Chassis Alarms are device-wide (drawer.js's Summary/Alarms tabs use this same truthy
-    // check), not per stack member - every member's ALM LED reflects the same device state.
+    // Alarms are device-wide, not per stack member, so every member's ALM LED shows the same.
     var hasAlarm = asArr(device && device.Alarms).length > 0;
     var byPort = new Map();
     interfaces.forEach(function (intf) { if (intf && intf.Port) byPort.set(String(intf.Port), intf); });
     var members = asArr(device && device.StackMembers).map(function (sm) {
         return { fpc: parseInt(sm.FPC, 10), fpcRaw: sm.FPC, model: sm.Model, role: sm.Role, serial: sm.Serial };
     }).filter(function (m) { return !isNaN(m.fpc); });
-    // No hardware record at all - fall back to whichever FPC numbers the interface names carry.
+    // No hardware record - fall back to the FPC numbers the interface names carry.
     if (!members.length) {
         var seen = {};
         interfaces.forEach(function (intf) { var p = parsePort(intf.Port); if (p && !seen[p.fpc]) { seen[p.fpc] = true; members.push({ fpc: p.fpc, fpcRaw: String(p.fpc), model: 'Unknown', role: '' }); } });
     }
     members.sort(function (a, b) { return a.fpc - b.fpc; });
     var multi = members.length > 1;
-    return members.map(function (m) {
+    // Drafted first, then judged, because the "does the catalogue art fit reality?" ratio
+    // below is pooled across the device rather than decided per member: device.Interfaces is a
+    // filtered subset, so one member of a stack can report a handful of port names the art has
+    // no jacks for while its identical sibling reports none at all.
+    var drafts = members.map(function (m) {
         var out = { fpc: m.fpc, role: m.role || '', model: m.model || 'Unknown', master: multi ? /master/i.test(m.role || '') : true, multi: multi };
+        var draft = { out: out, m: m };
         var upper = String(m.model || '').toUpperCase();
-        if (MODULAR_RE.test(upper)) { out.note = 'Modular chassis (' + m.model + ') - no front-panel drawing.'; return out; }
+        if (MODULAR_RE.test(upper)) { out.note = 'Modular chassis (' + m.model + ') - no front-panel drawing.'; return draft; }
         var res = resolveModel(m.model);
         var model = res ? res.model : inferModel(m.model, m.fpc, interfaces);
-        if (!model) { out.note = 'No front-panel drawing for ' + (m.model || 'this model') + '.'; return out; }
-        // Physical ports the device reports on this member - used to check the catalogue art
-        // actually fits them (below).
+        if (!model) { out.note = 'No front-panel drawing for ' + (m.model || 'this model') + '.'; return draft; }
         var reported = interfaces.filter(function (intf) { var p = parsePort(intf && intf.Port); return p && p.fpc === m.fpc; }).map(function (intf) { return String(intf.Port); });
         var bound = {};
         var makeUnit = function (mdl) { return {
             id: 'fpc' + m.fpc, fpc: m.fpc, model: out.model, master: out.master, poe: mdl.poe, alarm: hasAlarm, spec: mdl.spec,
             key: function (ifname) { bound[ifname] = true; return ifname; },
             hasPort: function (ifname) { return byPort.has(ifname); },
-            // Detail line only - the tooltip prints the interface name itself from data-port.
+            // Detail line only: the tooltip prints the interface name from data-port.
             title: function (ifname) {
                 var intf = byPort.get(ifname);
                 if (!intf) return 'not in scan data';
@@ -607,16 +596,47 @@ function buildMembers(device) {
             },
         }; };
         curUid = 'fpc' + m.fpc;
-        var html = STYLE_GEN[model.style](makeUnit(model));
-        // A catalogue match whose artwork covers under half of the ports this member actually
-        // reports (a naming scheme the measured SKU doesn't use, a wrongly identified model)
-        // would light almost nothing - the interface-derived layout is the more honest picture.
-        if (res && reported.length) {
-            var covered = reported.filter(function (p) { return bound[p]; }).length;
-            if (covered / reported.length < 0.5) {
-                var inferred = inferModel(m.model, m.fpc, interfaces);
-                if (inferred) { bound = {}; res = null; model = inferred; html = STYLE_GEN[model.style](makeUnit(model)); }
-            }
+        draft.res = res;
+        draft.model = model;
+        draft.html = STYLE_GEN[model.style](makeUnit(model));
+        draft.reported = reported;
+        draft.covered = reported.filter(function (p) { return bound[p]; }).length;
+        // A member with no reported ports has nothing to infer a layout from, so it cannot be
+        // demoted at all - which is what the verdict below has to know before demoting anyone.
+        draft.fallback = res ? inferModel(m.model, m.fpc, interfaces) : null;
+        draft.render = function (mdl) { bound = {}; curUid = 'fpc' + m.fpc; return STYLE_GEN[mdl.style](makeUnit(mdl)); };
+        return draft;
+    });
+
+    // Pooled per catalogue key, not per device, so a mixed stack's bad fit for one model
+    // cannot condemn another model's good art.
+    var pools = {};
+    drafts.forEach(function (d) {
+        if (!d.res) return;
+        var p = pools[d.res.key] || (pools[d.res.key] = { reported: 0, covered: 0, allInferable: true });
+        p.reported += d.reported.length;
+        p.covered += d.covered;
+        if (!d.fallback) p.allInferable = false;
+    });
+    Object.keys(pools).forEach(function (k) {
+        var p = pools[k];
+        // Artwork covering under half the reported ports (a misidentified model, or a naming
+        // scheme the measured SKU doesn't use) would light almost nothing; the
+        // interface-derived layout is the more honest picture. Sample size matters as much as
+        // the ratio - a couple of uplink names say nothing about a 48-port panel - and
+        // allInferable keeps it all-or-nothing, since demoting only the members that happen to
+        // have interfaces to infer from is what made one chassis render as two switches.
+        p.demote = p.allInferable && p.reported >= 8 && (p.covered / p.reported) < 0.5;
+    });
+
+    return drafts.map(function (d) {
+        var out = d.out;
+        if (out.note) return out;
+        var res = d.res;
+        var model = d.model;
+        var html = d.html;
+        if (res && pools[res.key] && pools[res.key].demote) {
+            res = null; model = d.fallback; html = d.render(d.fallback);
         }
         out.catalogueKey = res ? res.key : null;
         out.inferred = !res;
@@ -652,12 +672,10 @@ if (typeof module !== 'undefined' && module.exports) {
     var renderedFor = null;   // the device object the current SVGs were built from
     var zoomed = false;       // double-width panels in a sideways-scrolling strip (session only)
 
-    // Seconds elapsed since the LastFlappedSeconds fields on `device` were captured. A live
-    // rescan (drawer.js mergeRescanResult) stamps device.RescannedAt with a fresh timestamp
-    // without touching the loaded snapshot's own scanTimestamp, so that per-device stamp wins
-    // when present; otherwise fall back to the active snapshot's capture time. app.js/drawer.js
-    // load after chassis.js, so these globals only need to exist by the time this actually
-    // runs (a user interaction), not at script-load time.
+    // Seconds since this device's LastFlappedSeconds fields were captured. A rescan stamps
+    // device.RescannedAt without touching the snapshot's own scanTimestamp, so that per-device
+    // stamp wins when present. The globals it reads load after this file, but this only runs
+    // on user interaction.
     function snapshotAgeSeconds(device) {
         try {
             var ts = (device && device.RescannedAt) || (window.loadedSnapshots && window.loadedSnapshots[window.activeSnapshotIndex] && window.loadedSnapshots[window.activeSnapshotIndex].scanTimestamp);
@@ -675,10 +693,8 @@ if (typeof module !== 'undefined' && module.exports) {
         if (btn) btn.textContent = zoomed ? 'Fit' : 'Zoom';
     };
 
-    // Draws (or, for the same device object, just re-lights) the front panels into
-    // #chassis-view. Called from drawer.js's renderInterfaces so sort clicks and the
-    // hide-down toggle re-light without rebuilding, while a rescan merge (new device object)
-    // rebuilds. selectedPort (bare ifname or null) gets the .selected highlight.
+    // Draws the front panels into #chassis-view, or just re-lights them when handed the same
+    // device object - so a sort click re-lights while a rescan merge (a new object) rebuilds.
     window.renderChassisView = function (device, selectedPort) {
         var root = document.getElementById('chassis-view');
         if (!root) return;
@@ -728,10 +744,9 @@ if (typeof module !== 'undefined' && module.exports) {
         if (body) body.classList.add('selected');
     };
 
-    // Click a jack/cage -> drawer.js's selectInterfacePort; hover -> tooltip with the
-    // interface name and its state. Delegated once; the SVGs are rebuilt per device but
-    // #chassis-view itself is permanent. The tooltip is one fixed-position element appended
-    // to <body> so the drawer's overflow can't clip it.
+    // Delegated once: the SVGs are rebuilt per device but #chassis-view is permanent. The
+    // tooltip is a single fixed-position element on <body>, so the drawer's overflow can't
+    // clip it.
     document.addEventListener('DOMContentLoaded', function () {
         var root = document.getElementById('chassis-view');
         if (!root) return;
@@ -743,7 +758,7 @@ if (typeof module !== 'undefined' && module.exports) {
         var place = function (ev) {
             var pad = 12, w = tip.offsetWidth, h = tip.offsetHeight;
             var x = ev.clientX + pad, y = ev.clientY + pad;
-            if (x + w > window.innerWidth - 4) x = ev.clientX - w - pad;   // flip left near the right edge (the drawer lives there)
+            if (x + w > window.innerWidth - 4) x = ev.clientX - w - pad;   // flip left near the right edge
             if (y + h > window.innerHeight - 4) y = ev.clientY - h - pad;
             tip.style.left = x + 'px';
             tip.style.top = y + 'px';
@@ -762,14 +777,14 @@ if (typeof module !== 'undefined' && module.exports) {
         root.addEventListener('mousemove', function (ev) { if (!tip.hidden) place(ev); });
         root.addEventListener('mouseout', function (ev) {
             var g = portOf(ev);
-            // Leaving one jack for a sibling fires mouseover for the new one right after; only
-            // hide when the pointer actually left a jack for something that isn't one.
+            // Moving between sibling jacks fires mouseover for the new one immediately after,
+            // so only hide when the pointer left for something that isn't a jack.
             if (g && !(ev.relatedTarget && ev.relatedTarget.closest && ev.relatedTarget.closest('.port-el[data-port]') === g)) tip.hidden = true;
         });
-        // While a mouse button is held, Chromium keeps delivering mouse events to the element
-        // the press started on and never fires mouseout for it - so dragging off a jack (or
-        // starting a drag on one) left the tooltip stranded. Hide on press, and on any move
-        // anywhere that isn't over a jack, which also covers releasing outside the panel.
+        // While a button is held, Chromium keeps delivering events to the element the press
+        // started on and never fires mouseout for it, stranding the tooltip on a drag off a
+        // jack. Hiding on press and on any move not over a jack also covers a release
+        // outside the panel.
         root.addEventListener('mousedown', function () { tip.hidden = true; });
         document.addEventListener('mousemove', function (ev) {
             if (tip.hidden) return;
@@ -782,9 +797,7 @@ if (typeof module !== 'undefined' && module.exports) {
             if (!g || g.classList.contains('port-absent')) return;
             if (typeof window.selectInterfacePort === 'function') window.selectInterfacePort(g.getAttribute('data-port'), { source: 'chassis' });
         });
-        // Same selection a click makes, from the keyboard - each jack carries tabindex="0" +
-        // role="button" (portA11y) so it's reachable by Tab; window.activateOnKey is the same
-        // Enter/Space activation helper index.html and drawer.js already use for this.
+        // Keyboard equivalent of the click above; portA11y makes each jack Tab-reachable.
         root.addEventListener('keydown', function (ev) {
             var g = portOf(ev);
             if (!g || g.classList.contains('port-absent')) return;
