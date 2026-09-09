@@ -25,8 +25,13 @@ PS_NetworkMapper/RawDumps/
 .claude/
 
 # Raw switch session captures used as parsing ground truth while debugging. Real device
-# output (hostnames, IPs, MACs), same sensitivity as Network_Maps/ above.
+# output (hostnames, IPs, MACs), same sensitivity as Network_Maps/ above. The archive
+# extensions are listed because the .txt rule alone let a Raw_compressed.tar through once.
 PS_NetworkMapper/Raw_*.txt
+PS_NetworkMapper/Raw_*.tar
+PS_NetworkMapper/Raw_*.tar.*
+PS_NetworkMapper/Raw_*.zip
+PS_NetworkMapper/Raw_*.7z
 
 # Atomic-write temps from lib/FileHelpers.ps1 (<dest>.<pid>.<guid>.tmp). A crash between the
 # write and the rename leaves one behind, and under -NoEncryption the Configuration.json temp
