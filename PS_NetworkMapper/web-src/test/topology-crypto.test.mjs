@@ -221,3 +221,28 @@ test('rejects the PowerShell interop envelope under the wrong password', async (
     /Incorrect password, or the file is corrupted/
   );
 });
+
+const base = {
+  format: 'PSNetworkMapper-EncryptedTopology', version: 1, kdf: 'PBKDF2-SHA256',
+  cipher: 'AES-256-CBC', macAlgorithm: 'HMAC-SHA256', iterations: ITERATIONS,
+  salt: b64(new Uint8Array(16)), iv: b64(new Uint8Array(16)),
+  ciphertext: b64(new Uint8Array(32)), mac: b64(new Uint8Array(32)),
+};
+async function rejectionOf(env) {
+  try { await TopologyCrypto.decryptEnvelope(env, 'pw'); assert.fail('should have rejected'); }
+  catch (err) { return err; }
+}
+
+// The re-prompt loops in app.js/map.js gate on this flag: an untagged rejection must exit
+// through the normal error path, since no password could ever satisfy it.
+test('decryptEnvelope tags only the retryable wrong-password/corrupt failure', async () => {
+  assert.equal((await rejectionOf(base)).wrongPassword, true);
+  assert.equal((await rejectionOf({ ...base, salt: '!!!not base64!!!' })).wrongPassword, true);
+});
+
+test('decryptEnvelope leaves password-independent structural failures untagged', async () => {
+  for (const env of [{ ...base, version: 2 }, { ...base, cipher: 'AES-128-GCM' }, { ...base, iterations: 5 }]) {
+    assert.equal((await rejectionOf(env)).wrongPassword, undefined);
+  }
+});
+

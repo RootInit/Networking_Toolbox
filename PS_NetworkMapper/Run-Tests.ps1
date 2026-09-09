@@ -182,6 +182,24 @@ Test-Case "ssh keepalive budget stays longer than the worker's per-batch timeout
     }
     $true
 }
+
+# Same coupling one layer up: the orchestrator's abandon deadline has to outlast a worker that
+# is legitimately sitting on its full batch timeout, or slow-but-healthy switches get dropped
+# from the crawl with "job abandoned".
+Test-Case "orchestrator job-abandon deadline stays longer than the worker's per-batch timeout" {
+    $WorkerSrc = Get-Content -LiteralPath (Join-Path $LibDir 'Get-JunosNodeData.ps1') -Raw
+    if ($WorkerSrc -notmatch 'WaitForExit\((?<ms>\d+)\)') { throw "Could not find WaitForExit(<ms>) in Get-JunosNodeData.ps1" }
+    $BatchTimeoutSec = [int]$Matches.ms / 1000
+
+    $CrawlSrc = Get-Content -LiteralPath (Join-Path $LibDir 'FleetCrawl.ps1') -Raw
+    if ($CrawlSrc -notmatch '\$JobAbandonSeconds\s*=\s*(?<sec>\d+)') { throw "Could not find `$JobAbandonSeconds in FleetCrawl.ps1" }
+    $AbandonSec = [int]$Matches.sec
+
+    if ($AbandonSec -le $BatchTimeoutSec) {
+        throw "job-abandon deadline ${AbandonSec}s must exceed the ${BatchTimeoutSec}s batch timeout, or the orchestrator discards workers that were still going to succeed"
+    }
+    $true
+}
 Test-Case "username with a leading dash is rejected (would be parsed as an ssh flag)" {
     Get-JunosSshArgs -Username "-oProxyCommand=evil" -TargetIP "10.1.2.3"
 } -ExpectThrowMatch 'Invalid Junos username'
@@ -287,7 +305,7 @@ Write-Host "(comparison) logic exists to test here - not forcing an inapplicable
 # extracted from source the same way as item 1 above.
 $UptimeMatch = [regex]::Match(
     $JunosNodeDataSrc,
-    "(?s)if\s*\(\`$DataDict\[`"UPTIME`"\]\s*-match\s*`"([^`"]*)`"\)"
+    "(?s)if\s*\(\`$UptimeScope\s*-match\s*`"([^`"]*)`"\)"
 )
 if (-not $UptimeMatch.Success) {
     Write-Host "[FAIL] Could not locate the Uptime 'System booted:' parsing regex in Get-JunosNodeData.ps1 - has it moved? (skipping bonus case)" -ForegroundColor Red
@@ -452,6 +470,226 @@ if (-not $PoeMatch.Success) {
     }
 }
 
+# --- multi-VLAN spanning-tree collapse ---
+# "show spanning-tree interface" repeats a port once per VLAN. The loop used to overwrite .STP
+# on every repeat, so a trunk BLK in one VLAN and FWD in another reported whichever VLAN came
+# last - on a real capture two uplinks disagreed across VLANs and both reported FWD. The field
+# is still one state string; repeats are now collapsed by precedence, BLK highest.
+$StpLineMatch = [regex]::Match($JunosNodeDataSrc, '\$Line\s+-match\s+"((?:[^"\\]|\\.)*\(\?<state>FWD(?:[^"\\]|\\.)*)"')
+$StpPrecMatch = [regex]::Match($JunosNodeDataSrc, '\$StpStatePrecedence\s*=\s*(@\{[^}]*\})')
+if (-not ($StpLineMatch.Success -and $StpPrecMatch.Success)) {
+    Write-Host "[FAIL] Could not locate the spanning-tree line regex or precedence table in Get-JunosNodeData.ps1" -ForegroundColor Red
+    $script:Total++
+} else {
+    $StpPattern = $StpLineMatch.Groups[1].Value
+    $StpPrecedence = Invoke-Expression $StpPrecMatch.Groups[1].Value
+    # Real layout: the same three ports repeated per STP instance, ge-0/2/0 and ae0 blocking
+    # only in instance 100.
+    $StpText = @"
+Spanning tree interface parameters for instance 0
+
+Interface    Port ID    Designated       Designated         Port    State  Role
+                         port ID           bridge ID         Cost
+ge-0/2/0     128:513    128:513   32768.0019e2b0c380         20000  FWD    DESG
+ae0          128:600    128:600   32768.0019e2b0c380         20000  FWD    DESG
+ge-0/0/5     128:518    128:518   32768.0019e2b0c380         20000  FWD    DESG
+
+Spanning tree interface parameters for instance 100
+
+ge-0/2/0     128:513    128:513   32768.0019e2b0c380         20000  BLK    ALT
+ae0          128:600    128:600   32768.0019e2b0c380         20000  BLK    ALT
+ge-0/0/5     128:518    128:518   32768.0019e2b0c380         20000  FWD    DESG
+
+Spanning tree interface parameters for instance 200
+
+ge-0/2/0     128:513    128:513   32768.0019e2b0c380         20000  FWD    DESG
+ae0          128:600    128:600   32768.0019e2b0c380         20000  FWD    DESG
+ge-0/0/5     128:518    128:518   32768.0019e2b0c380         20000  FWD    DESG
+"@
+    # Mirrors the shipped collapse using the shipped pattern and the shipped precedence table.
+    $StpCollapsed = @{}
+    foreach ($Line in ($StpText -split "`n")) {
+        $Line = $Line.Trim()
+        if ($Line -match $StpPattern) {
+            $StpPort = $Matches.port -replace "\.\d+$",""
+            $StpNew = $Matches.state
+            $StpRank = 0
+            if ($StpCollapsed.ContainsKey($StpPort) -and $StpPrecedence.ContainsKey($StpCollapsed[$StpPort])) { $StpRank = $StpPrecedence[$StpCollapsed[$StpPort]] }
+            if ($StpPrecedence[$StpNew] -gt $StpRank) { $StpCollapsed[$StpPort] = $StpNew }
+        }
+    }
+    Test-Case "STP: a port blocking in one VLAN and forwarding in later ones reports BLK, not the last VLAN's FWD" {
+        $StpCollapsed['ge-0/2/0'] -eq 'BLK'
+    }
+    Test-Case "STP: an AE bundle blocking in one VLAN reports BLK too (both real-capture uplinks)" {
+        $StpCollapsed['ae0'] -eq 'BLK'
+    }
+    Test-Case "STP: a port forwarding in every VLAN still reports FWD" {
+        $StpCollapsed['ge-0/0/5'] -eq 'FWD'
+    }
+    Test-Case "STP: BLK outranks every other state in the shipped precedence table" {
+        $Others = @('LST','LRN','FWD','DIS') | Where-Object { $StpPrecedence[$_] -ge $StpPrecedence['BLK'] }
+        $Others.Count -eq 0
+    }
+    Test-Case "STP: the collapsed value is still a single state string, not a per-VLAN collection" {
+        $StpCollapsed['ge-0/2/0'] -is [string]
+    }
+}
+
+# --- virtual-chassis master RE scoping (show version / show system uptime) ---
+# Both commands emit one "fpcN:" block per VC member and a bare -match takes fpc0's. On the real
+# capture the prompt was {master:1} while the parsed boot time was fpc0's, so reboot detection
+# compared a member that is not the RE that answered.
+$MasterBlockMatch = [regex]::Match($JunosNodeDataSrc, '\$MasterFpcBlockPattern\s*=\s*"((?:[^"\\]|\\.)*)"')
+$MasterPromptMatch = [regex]::Match($JunosNodeDataSrc, '\$RawOutput\s+-match\s+"((?:[^"\\]|\\.)*\(\?<fpc>(?:[^"\\]|\\.)*)"')
+$UptimeScopeMatch = [regex]::Match($JunosNodeDataSrc, '\$UptimeScope\s+-match\s+"((?:[^"\\]|\\.)*\(\?<boot>(?:[^"\\]|\\.)*)"')
+$VersionScopeMatch = [regex]::Match($JunosNodeDataSrc, '\$VersionScope\s+-match\s+"((?:[^"\\]|\\.)*\(\?<ver>(?:[^"\\]|\\.)*)"')
+if (-not ($MasterBlockMatch.Success -and $MasterPromptMatch.Success -and $UptimeScopeMatch.Success -and $VersionScopeMatch.Success)) {
+    Write-Host "[FAIL] Could not locate the master-RE scoping regexes in Get-JunosNodeData.ps1" -ForegroundColor Red
+    $script:Total++
+} else {
+    $MasterPromptPattern = $MasterPromptMatch.Groups[1].Value
+    $UptimePattern = $UptimeScopeMatch.Groups[1].Value
+    $VersionPattern = $VersionScopeMatch.Groups[1].Value
+    $VcVersion = @"
+fpc0:
+--------------------------------------------------------------------------
+Hostname: SW-EDGE-01
+Model: ex4300-48t
+Junos: 18.4R3-S9.2
+
+fpc1:
+--------------------------------------------------------------------------
+Hostname: SW-EDGE-02
+Model: ex4300-48t
+Junos: 20.4R3-S4.8
+"@
+    $VcUptime = @"
+fpc0:
+--------------------------------------------------------------------------
+Current time: 2026-08-28 09:15:22 UTC
+System booted: 2026-01-04 02:11:07 UTC (33w4d 07:04 ago)
+Last configured: 2026-08-01 12:00:00 UTC (4w0d 00:00 ago) by admin
+
+fpc1:
+--------------------------------------------------------------------------
+Current time: 2026-08-28 09:15:22 UTC
+System booted: 2026-08-20 18:44:31 UTC (1w0d 14:30 ago)
+Last configured: 2026-08-01 12:00:00 UTC (4w0d 00:00 ago) by admin
+"@
+    # fpc1 is master here, exactly as on the real capture's {master:1} prompt.
+    $VcRaw = "{master:1}`nadmin@SW-EDGE-01> show system uptime`n"
+    $MasterFpcId = $null
+    if ($VcRaw -match $MasterPromptPattern) { $MasterFpcId = $Matches.fpc }
+    # ${MasterFpcId} is substituted the same way the shipped string interpolation does.
+    $MasterPattern = $MasterBlockMatch.Groups[1].Value -replace '\$\{MasterFpcId\}', $MasterFpcId
+
+    Test-Case "master RE is taken from the {master:N} prompt, not assumed to be fpc0" {
+        $MasterFpcId -eq '1'
+    }
+    Test-Case "Uptime comes from the master member's block, not fpc0's" {
+        $Scope = $VcUptime; if ($VcUptime -match $MasterPattern) { $Scope = $Matches.masterfpc }
+        ($Scope -match $UptimePattern) -and $Matches.boot.Trim() -eq '2026-08-20 18:44:31 UTC'
+    }
+    Test-Case "the separately-rebooted non-master member's boot time is not what gets reported" {
+        $Scope = $VcUptime; if ($VcUptime -match $MasterPattern) { $Scope = $Matches.masterfpc }
+        ($Scope -match $UptimePattern) -and $Matches.boot.Trim() -ne '2026-01-04 02:11:07 UTC'
+    }
+    Test-Case "JunosVersion comes from the master member's 'show version' block too" {
+        $Scope = $VcVersion; if ($VcVersion -match $MasterPattern) { $Scope = $Matches.masterfpc }
+        ($Scope -match $VersionPattern) -and $Matches.ver -eq '20.4R3-S4.8'
+    }
+    Test-Case "the master block stops at the next fpcN: header (no bleed into other members)" {
+        ($VcUptime -match $MasterPattern) -and $Matches.masterfpc -notmatch '2026-01-04'
+    }
+    Test-Case "a standalone switch (no fpcN blocks) falls back to the whole section unchanged" {
+        $Standalone = "Hostname: SW-STANDALONE`nModel: ex2300-c-12p`nJunos: 18.2R3-S8`n"
+        $Scope = $Standalone; if ($Standalone -match $MasterPattern) { $Scope = $Matches.masterfpc }
+        ($Scope -eq $Standalone) -and ($Scope -match $VersionPattern) -and $Matches.ver -eq '18.2R3-S8'
+    }
+}
+
+# --- chassis-hardware fallback model ---
+# The fallback runs only when the virtual-chassis parse failed, i.e. exactly when the device IS a
+# VC - and "Chassis <serial> Virtual Chassis" with a \S+ model capture reported Model = "Virtual".
+$ChassisMatch = [regex]::Match($JunosNodeDataSrc, '\$DataDict\["CHASSIS_HARDWARE"\]\s+-match\s+"((?:[^"\\]|\\.)*)"')
+if (-not $ChassisMatch.Success) {
+    Write-Host "[FAIL] Could not locate the chassis-hardware fallback regex in Get-JunosNodeData.ps1" -ForegroundColor Red
+    $script:Total++
+} else {
+    $ChassisPattern = $ChassisMatch.Groups[1].Value
+    $VcChassis = @"
+Hardware inventory:
+Item             Version  Part number  Serial number     Description
+Chassis                                NW0217450140      Virtual Chassis
+Routing Engine 0          BUILTIN      BUILTIN           EX4300-48T
+"@
+    $StandaloneChassis = @"
+Hardware inventory:
+Item             Version  Part number  Serial number     Description
+Chassis                                JN11D2E7CAFB      EX3400-48P
+"@
+    Test-Case "chassis fallback does not report 'Virtual' as the model of a virtual chassis" {
+        $Ok = $VcChassis -match $ChassisPattern
+        $Model = if ($Ok) { $Matches.model.Trim() } else { '' }
+        $Ok -and $Model -notmatch '(?i)^virtual$'
+    }
+    Test-Case "chassis fallback recognises the whole 'Virtual Chassis' description, not its first token" {
+        ($VcChassis -match $ChassisPattern) -and $Matches.model.Trim() -match '(?i)^virtual\s+chassis$'
+    }
+    Test-Case "chassis fallback still captures the serial on a virtual chassis" {
+        ($VcChassis -match $ChassisPattern) -and $Matches.serial -eq 'NW0217450140'
+    }
+    Test-Case "chassis fallback still reads a real standalone model unchanged" {
+        ($StandaloneChassis -match $ChassisPattern) -and $Matches.model.Trim() -eq 'EX3400-48P' -and $Matches.serial -eq 'JN11D2E7CAFB'
+    }
+    Test-Case "the chassis-hardware header row is not mistaken for the Chassis row" {
+        $Header = "Item             Version  Part number  Serial number     Description"
+        -not ($Header -match $ChassisPattern)
+    }
+}
+
+# --- ssh.exe process ownership (unredacted-temp-file leak) ---
+# The batch used to run `cmd.exe /c ssh.exe ... > %TEMP%\ssh_out_*.txt`. On timeout it killed the
+# cmd.exe wrapper; Windows does not kill children with their parent and .NET Framework 4.x (the
+# 5.1 runtime) has no Kill(entireProcessTree) overload, so ssh.exe survived holding a write
+# handle on ssh_out_ - the raw, unredacted `show configuration | display set` output. These are
+# source-shape assertions: the real behaviour needs a Windows host with a live switch.
+Test-Case "the SSH batch no longer routes through a cmd.exe wrapper it cannot kill through" {
+    # The word may still appear in the comment explaining why; only an actual invocation counts.
+    $JunosNodeDataSrc -notmatch 'ProcessStartInfo\(\s*"cmd\.exe"'
+}
+Test-Case "no unredacted ssh_out_/ssh_err_ temp file is written to %TEMP% any more" {
+    $JunosNodeDataSrc -notmatch 'ssh_out_\$|ssh_err_\$'
+}
+Test-Case "stdout and stderr are owned by the worker (redirected), so Kill() targets ssh.exe itself" {
+    ($JunosNodeDataSrc -match '\$ProcInfo\.RedirectStandardOutput\s*=\s*\$true') -and
+    ($JunosNodeDataSrc -match '\$ProcInfo\.RedirectStandardError\s*=\s*\$true')
+}
+Test-Case "both redirected streams are read asynchronously, before any command is written (deadlock guard)" {
+    $StartIdx = $JunosNodeDataSrc.IndexOf('Process]::Start($ProcInfo)')
+    $WriteIdx = $JunosNodeDataSrc.IndexOf('WriteLine("set cli screen-length 0")')
+    $Between = $JunosNodeDataSrc.Substring($StartIdx, $WriteIdx - $StartIdx)
+    ($Between -match 'StandardOutput\.ReadToEndAsync\(\)') -and ($Between -match 'StandardError\.ReadToEndAsync\(\)')
+}
+Test-Case "no Kill(entireProcessTree) overload is used (it does not exist on .NET Framework 4.x / PS 5.1)" {
+    $JunosNodeDataSrc -notmatch 'Kill\(\s*\$(true|false)\s*\)'
+}
+Test-Case "the redirected streams are decoded as UTF-8, not the console codepage" {
+    ($JunosNodeDataSrc -match 'StandardOutputEncoding\s*=\s*\[System\.Text\.Encoding\]::UTF8') -and
+    ($JunosNodeDataSrc -match 'StandardErrorEncoding\s*=\s*\[System\.Text\.Encoding\]::UTF8')
+}
+
+# --- log mutex name ---
+Test-Case "the log mutex name is computed once per run, not per log line (leaked an MD5 provider)" {
+    $WriteLogIdx = $JunosNodeDataSrc.IndexOf('function Write-LogMsg')
+    $Body = $JunosNodeDataSrc.Substring($WriteLogIdx)
+    $Body -notmatch 'Cryptography\.MD5\]::Create'
+}
+Test-Case "the hoisted MD5 provider is disposed" {
+    $JunosNodeDataSrc -match '(?s)Cryptography\.MD5\]::Create\(\).*?\$Md5\.Dispose\(\)'
+}
+
 # =========================================================================================
 # 8. WebServer.ps1 endpoint payload shapes (accept-loop blocking guards)
 # =========================================================================================
@@ -534,6 +772,311 @@ Test-Case "/api/scan-network/status does not carry the topology in its completed
 }
 Test-Case "/api/scan-network/status still reports the output file the client fetches instead" {
     $WebServerSrc -match 'outputFile\s*=\s*\(Split-Path\s+\$Payload\.OutputFile'
+}
+
+# --- fix 1: a rejected /api/scan-network must change no server state -------------------
+# Collected=$true so the seeded job needs no real EndInvoke/Dispose.
+$PriorScan = [PSCustomObject]@{
+    Handle = [PSCustomObject]@{ IsCompleted = $true }; Collected = $true
+    StartIP = '10.0.0.1'; Outcome = @{ status = 'complete'; ok = $true }
+}
+$ScanTmpDir = [System.IO.Path]::GetTempPath()
+
+$script:PendingScanNetwork = $PriorScan
+$BadIpResponse = New-MockResponse
+Invoke-ScanNetworkAction -Response $BadIpResponse -Body '{"startIp":"not-an-ip"}' -WorkerPath 'x' `
+    -JunosUsername 'u' -JunosPassword 'p' -MaxConcurrent '4' -AllowedScopes @('10.0.0.0/8') -SnapshotDir $ScanTmpDir
+Test-Case "/api/scan-network rejects a malformed start IP" {
+    $BadIpResponse.StatusCode -eq 400
+}
+# The reap that clears this slot must sit BELOW validation: a typo'd IP used to discard the
+# previous scan's result, after which every status poll 404'd.
+Test-Case "a malformed start IP does not discard the previous scan's pollable result" {
+    $null -ne $script:PendingScanNetwork
+}
+
+$script:PendingScanNetwork = $PriorScan
+$OutOfScopeResponse = New-MockResponse
+Invoke-ScanNetworkAction -Response $OutOfScopeResponse -Body '{"startIp":"192.168.1.1"}' -WorkerPath 'x' `
+    -JunosUsername 'u' -JunosPassword 'p' -MaxConcurrent '4' -AllowedScopes @('10.0.0.0/8') -SnapshotDir $ScanTmpDir
+Test-Case "/api/scan-network refuses a start IP outside AllowedScopes" {
+    $OutOfScopeResponse.StatusCode -eq 400
+}
+Test-Case "an out-of-scope start IP does not discard the previous scan's pollable result" {
+    $null -ne $script:PendingScanNetwork
+}
+# The symptom the operator actually saw.
+$PollResponse = New-MockResponse
+Invoke-ScanNetworkStatusAction -Response $PollResponse
+Test-Case "the previous scan's result is still pollable after a rejected new-scan request" {
+    $PollResponse.StatusCode -eq 200
+}
+$script:PendingScanNetwork = $null
+
+# --- fix 2: engine resolution, not host resolution -------------------------------------
+$EnginePath = Get-PowerShellEnginePath
+Test-Case "Get-PowerShellEnginePath resolves an executable that exists on disk" {
+    [System.IO.File]::Exists($EnginePath)
+}
+# The ISE hosts the engine in-process, so MainModule.FileName yields powershell_ise.exe -
+# which cannot run -File/-NoExit, yet Start-Process succeeds and leaks the credential file.
+Test-Case "Get-PowerShellEnginePath never returns the ISE host" {
+    [System.IO.Path]::GetFileName($EnginePath) -ne 'powershell_ise.exe'
+}
+Test-Case "Get-PowerShellEnginePath returns the engine matching this edition" {
+    $EngineLeaf = [System.IO.Path]::GetFileName($EnginePath)
+    if ($PSVersionTable.PSVersion.Major -ge 6) { $EngineLeaf -like 'pwsh*' } else { $EngineLeaf -eq 'powershell.exe' }
+}
+
+# --- fix 4: static filenames are literal paths, not wildcards --------------------------
+$StaticRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("pnm_static_" + [guid]::NewGuid().Guid.Substring(0, 8))
+New-Item -ItemType Directory -Path $StaticRoot -Force | Out-Null
+try {
+    # [IO.File]::WriteAllText, not Set-Content: Set-Content -Path would itself glob the "[1]".
+    [System.IO.File]::WriteAllText((Join-Path $StaticRoot 'chart[1].js'), 'BRACKET-CONTENT')
+    [System.IO.File]::WriteAllText((Join-Path $StaticRoot 'a1.js'), 'A1')
+
+    $BracketResponse = New-MockResponse
+    Invoke-StaticFile -Response $BracketResponse -AbsolutePath '/chart[1].js' -VisualizerRoot $StaticRoot
+    Test-Case "a static file whose name contains [ ] is served, not wildcard-matched into a 404" {
+        $BracketResponse.StatusCode -eq 200 -and (Get-MockResponseText -Response $BracketResponse) -eq 'BRACKET-CONTENT'
+    }
+} finally { Remove-Item -LiteralPath $StaticRoot -Recurse -Force -ErrorAction SilentlyContinue }
+
+# --- fix 6: one batched write, per-line timestamps preserved ---------------------------
+$SavedDebugLogPath = $script:DebugLogPath
+$BatchLogPath = Join-Path ([System.IO.Path]::GetTempPath()) ("pnm_clienterr_" + [guid]::NewGuid().Guid.Substring(0, 8) + ".log")
+$script:DebugLogPath = $BatchLogPath
+$script:ClientErrorRateLimitCount = 0
+$script:ClientErrorRateLimitWindowStart = Get-Date
+try {
+    $StackFrames = (1..5 | ForEach-Object { "    at fn$_ (http://localhost:8787/app.js:$($_):1)" }) -join "`n"
+    $ClientErrBody = @{ message = 'boom'; source = 'window.onerror'; url = 'http://localhost:8787/'; stack = $StackFrames } | ConvertTo-Json -Compress
+    Invoke-ClientErrorAction -Response (New-MockResponse) -Body $ClientErrBody
+    $ErrLines = @(Get-Content -LiteralPath $BatchLogPath)
+
+    Test-Case "a client error report logs its header plus one line per stack frame" {
+        $ErrLines.Count -eq 6
+    }
+    # Batching must not cost the per-line "[timestamp] " prefix - that prefix is what stops a
+    # stack frame from forging what looks like a separate log entry.
+    Test-Case "every batched client-error log line keeps its own real timestamp prefix" {
+        @($ErrLines | Where-Object { $_ -notmatch '^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] ' }).Count -eq 0
+    }
+
+    $script:ClientErrorRateLimitCount = 0
+    Invoke-ClientErrorAction -Response (New-MockResponse) `
+        -Body (@{ message = "ok`n[2020-01-01 00:00:00] FORGED"; source = 'x' } | ConvertTo-Json -Compress)
+    Test-Case "a CR/LF in a client error message still cannot forge a timestamped entry" {
+        @(Get-Content -LiteralPath $BatchLogPath | Where-Object { $_ -match '^\[2020-01-01' }).Count -eq 0
+    }
+} finally {
+    Remove-Item -LiteralPath $BatchLogPath -Force -ErrorAction SilentlyContinue
+    $script:DebugLogPath = $SavedDebugLogPath
+}
+
+# --- fix 7: a mid-write disconnect logs once instead of throwing three times ------------
+# Uses the REAL Send-WebResponse; the pre-disposed stream is what fails, exactly as a
+# vanished client does. Headers are set before the write, so the handler's catch runs with
+# $script:WebResponseStarted already true.
+$DeadSnapDir = Join-Path ([System.IO.Path]::GetTempPath()) ("pnm_dead_" + [guid]::NewGuid().Guid.Substring(0, 8))
+New-Item -ItemType Directory -Path $DeadSnapDir -Force | Out-Null
+try {
+    [System.IO.File]::WriteAllText((Join-Path $DeadSnapDir 'NetworkMap_2026-01-01_000000.json'), '{"Topology":[]}')
+    $script:WebResponseStarted = $false   # no dispatcher here to reset it
+    $DeadResponse = New-MockResponse
+    $DeadResponse.OutputStream.Dispose()
+    $EscapedError = $null
+    try {
+        Invoke-GetSnapshotAction -Response $DeadResponse -SnapshotDir $DeadSnapDir -Name 'NetworkMap_2026-01-01_000000.json'
+    } catch { $EscapedError = $_ }
+
+    # StatusCode still 200 proves the 500 send was never attempted; no escaped error proves
+    # the dispatcher is not handed a third send.
+    Test-Case "a mid-write client disconnect is logged, not answered with a second throwing send" {
+        $null -eq $EscapedError -and $DeadResponse.StatusCode -eq 200
+    }
+} finally {
+    Remove-Item -LiteralPath $DeadSnapDir -Recurse -Force -ErrorAction SilentlyContinue
+    $script:WebResponseStarted = $false
+}
+
+# --- fix 5: shutdown cleanup must skip already-Collected jobs -------------------------
+# The status actions dispose PS and reap the grandchildren on first collection, but leave the
+# slot populated. Re-running that at shutdown double-Disposes, and re-reaps an "@<IP>" that
+# may by then belong to an unrelated interactive session.
+$ShutdownSrc = $WebServerSrc.Substring($WebServerSrc.IndexOf('SERVER SHUTDOWN (IsListening='))
+Test-Case "shutdown cleanup skips an already-Collected rescan job" {
+    $ShutdownSrc -match '\$script:PendingScan\s+-and\s+-not\s+\$script:PendingScan\.Collected'
+}
+Test-Case "shutdown cleanup skips an already-Collected ping job" {
+    $ShutdownSrc -match '\$script:PendingPing\s+-and\s+-not\s+\$script:PendingPing\.Collected'
+}
+
+# =========================================================================================
+# 9. Placeholder-node parity + crawl-abort behavior (FleetCrawl.ps1)
+# =========================================================================================
+Write-Host "`n--- 9. Placeholder nodes and crawl abort (FleetCrawl.ps1) ---" -ForegroundColor Cyan
+
+# Item 4 was a placeholder that had silently drifted from the real initializer, so compare the
+# two key sets from source rather than trusting a comment that says they match.
+$NodeDataSrc = Get-Content -LiteralPath (Join-Path $LibDir 'Get-JunosNodeData.ps1') -Raw
+$FleetCrawlSrc = Get-Content -LiteralPath (Join-Path $LibDir 'FleetCrawl.ps1') -Raw
+
+$RealInitMatch = [regex]::Match($NodeDataSrc, '(?s)\$NodeData\s*=\s*@\{(.*?)\n\}')
+$PlaceholderMatch = [regex]::Match($FleetCrawlSrc, '(?s)function New-PlaceholderNodeLocal\s*\{(.*?)\n    \}')
+
+if (-not $RealInitMatch.Success -or -not $PlaceholderMatch.Success) {
+    Write-Host "[FAIL] Could not locate the \$NodeData initializer and/or New-PlaceholderNodeLocal - have they moved or been rewritten? (skipping parity test cases)" -ForegroundColor Red
+    $script:Total++
+} else {
+    $KeyRegex = [regex]'(?m)(?:^|;)\s*([A-Za-z][A-Za-z0-9]*)\s*='
+    $RealKeys = @($KeyRegex.Matches($RealInitMatch.Groups[1].Value) | ForEach-Object { $_.Groups[1].Value }) | Sort-Object -Unique
+    $PlaceholderKeys = @($KeyRegex.Matches($PlaceholderMatch.Groups[1].Value) | ForEach-Object { $_.Groups[1].Value }) |
+        Where-Object { $_ -notin @('IP', 'Status', 'ScanErrorText') } | Sort-Object -Unique
+
+    Test-Case "placeholder node carries every key Get-JunosNodeData's real node initializer does" {
+        ($RealKeys -join ',') -eq ($PlaceholderKeys -join ',')
+    }
+    Test-Case "placeholder node initializes Interfaces as a hashtable, not an array (no 'Interfaces = @()' in FleetCrawl.ps1)" {
+        $FleetCrawlSrc -notmatch 'Interfaces\s*=\s*@\(\)'
+    }
+}
+
+# End-to-end: the circuit breaker used to BeginStop in-flight jobs and drop them, leaving
+# devices in $Visited with no node anywhere in the output. Takes ~8s (the fake worker
+# deliberately wedges two jobs so the abort path has something in flight to synthesize for).
+$CrawlDir = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_crawl_$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $CrawlDir -Force | Out-Null
+try {
+    $FakeWorker = Join-Path $CrawlDir 'FakeWorker.ps1'
+    Set-Content -LiteralPath $FakeWorker -Encoding utf8 -Value @'
+param([string]$TargetIP, [string]$Username, [string]$Password, [switch]$Log, [string]$DebugLogPath)
+$Base = @{
+    DeviceIP = $TargetIP; Hostname = "sw-$TargetIP"; JunosVersion = "x"; Gateway = "x";
+    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+    Uptime = "x"; LastConfigured = "x"; LastConfiguredBy = "x"; Alarms = @();
+    MasterCpuUtilization = "x"; MasterMemoryUtilization = "x"; MedNeighbors = @();
+    Configuration = "x"; ScanStatus = "Ok"; ScanError = $null
+}
+switch -Regex ($TargetIP) {
+    '10\.0\.0\.1$'     { $Base.Neighbors = @(2,3,4,5,6 | ForEach-Object { @{ ManagementIP = "10.0.0.$_" } }) }
+    '10\.0\.0\.[234]$' { $Base.ScanStatus = "AuthFailed"; $Base.ScanError = "bad creds" }
+    '10\.0\.0\.[56]$'  { [System.Threading.Thread]::Sleep(15000) }
+}
+return @{ Node = $Base; Logs = @() }
+'@
+
+    $CrawlProgress = @{}
+    $CrawlClock = [System.Diagnostics.Stopwatch]::StartNew()
+    # 3> suppresses the Protect-JunosSensitiveFileAcl warnings on non-Windows runtimes.
+    $CrawlResult = Invoke-FleetCrawl -StartIP '10.0.0.1' -AllowedScopes @('10.0.0.') -MaxConcurrent 6 `
+        -WorkerPath $FakeWorker -Username 'u' -Password 'p' `
+        -SnapshotDir $CrawlDir -ProgressTable $CrawlProgress 3>$null
+    $CrawlClock.Stop()
+
+    Test-Case "circuit breaker aborts the crawl on repeated auth failures" { $CrawlResult.Aborted -eq $true }
+    Test-Case "no device visited during an aborted crawl is silently dropped from the topology" {
+        $CrawlResult.Topology.Count -eq $CrawlResult.VisitedCount
+    }
+    Test-Case "jobs killed in flight by the circuit breaker get a ScanStatus='Aborted' node" {
+        @($CrawlResult.Topology | Where-Object { $_.ScanStatus -eq 'Aborted' }).Count -eq 2
+    }
+    Test-Case "an Aborted placeholder's Interfaces is a hashtable (serializes as {}, not [])" {
+        $AbortedNode = @($CrawlResult.Topology | Where-Object { $_.ScanStatus -eq 'Aborted' })[0]
+        $AbortedNode.Interfaces -is [hashtable]
+    }
+    Test-Case "the aborted devices reach the on-disk snapshot, not just the in-memory result" {
+        $SnapFile = Get-ChildItem -LiteralPath $CrawlDir -Filter 'NetworkMap_*.json' | Select-Object -First 1
+        $OnDisk = (Get-Content -LiteralPath $SnapFile.FullName -Raw | ConvertFrom-Json).Topology
+        $OnDisk.Count -eq $CrawlResult.VisitedCount
+    }
+    # The abort path used to block on Dispose()/RunspacePool.Close() for as long as the wedged
+    # worker ran (measured 16s against a 15s sleep; up to ~50s against a real
+    # Process.WaitForExit). Both waits are now bounded, so this must finish well under the sleep. The
+    # bound is 14s rather than a tighter number so a slow runspace-pool start on 5.1 cannot
+    # flake it - the old blocking behaviour measured 16.0s, so it still discriminates.
+    Test-Case "aborting does not block the orchestrator until the wedged worker finishes" {
+        $CrawlClock.Elapsed.TotalSeconds -lt 14
+    }
+} finally {
+    Remove-Item -LiteralPath $CrawlDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# =========================================================================================
+# 10. Resolve-PathForDotNetIo (FileHelpers.ps1)
+# =========================================================================================
+Write-Host "`n--- 10. Resolve-PathForDotNetIo (FileHelpers.ps1) ---" -ForegroundColor Cyan
+
+# [Environment]::CurrentDirectory is NOT kept in step with $PWD, so a raw [System.IO.File]
+# call given a relative path writes to a different directory than the caller expects.
+$SavedNetCwd = [Environment]::CurrentDirectory
+$SavedLocation = Get-Location
+$IoDir = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_io_$([guid]::NewGuid().ToString('N'))"
+$IoDecoy = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_decoy_$([guid]::NewGuid().ToString('N'))"
+try {
+    New-Item -ItemType Directory -Path $IoDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $IoDecoy -Force | Out-Null
+    Set-Location -LiteralPath $IoDir
+    [Environment]::CurrentDirectory = $IoDecoy
+
+    Test-Case "Resolve-PathForDotNetIo resolves a bare filename against `$PWD, not [Environment]::CurrentDirectory" {
+        (Resolve-PathForDotNetIo -Path 'snapshot.json') -eq (Join-Path (Convert-Path -LiteralPath $IoDir) 'snapshot.json')
+    }
+    Test-Case "Resolve-PathForDotNetIo resolves a path whose file does not exist yet (parent resolved, leaf rejoined)" {
+        $Resolved = Resolve-PathForDotNetIo -Path 'not-created-yet.json'
+        (-not (Test-Path -LiteralPath $Resolved)) -and [System.IO.Path]::IsPathRooted($Resolved)
+    }
+    Test-Case "Resolve-PathForDotNetIo leaves an already-absolute path pointing at the same file" {
+        $Absolute = Join-Path (Convert-Path -LiteralPath $IoDir) 'abs.json'
+        (Resolve-PathForDotNetIo -Path $Absolute) -eq $Absolute
+    }
+} finally {
+    # Restore in a finally, or every later test case inherits the $PWD/CurrentDirectory mismatch.
+    Set-Location $SavedLocation
+    [Environment]::CurrentDirectory = $SavedNetCwd
+    Remove-Item -LiteralPath $IoDir -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $IoDecoy -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# =========================================================================================
+# 11. Runtime floor + Protect-MapperFile -WhatIf
+# =========================================================================================
+Write-Host "`n--- 11. Crypto runtime floor and -WhatIf preview ---" -ForegroundColor Cyan
+
+# Rfc2898DeriveBytes(String, Byte[], Int32, HashAlgorithmName) needs .NET Framework 4.7.2+;
+# Windows Server 2016 ships 4.6.2 by default. On such a box this fails here with a clear
+# message instead of deep inside key derivation, behind a password prompt.
+Test-Case "Assert-TopologyCryptoRuntime accepts the runtime running these tests" {
+    Assert-TopologyCryptoRuntime
+    $true
+}
+
+$WhatIfDir = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_whatif_$([guid]::NewGuid().ToString('N'))"
+try {
+    New-Item -ItemType Directory -Path $WhatIfDir -Force | Out-Null
+    $WhatIfInput = Join-Path $WhatIfDir 'sample.json'
+    Set-Content -LiteralPath $WhatIfInput -Value '{"a":1}' -Encoding utf8 -NoNewline
+    $ProtectScript = Join-Path $LibDir 'Protect-MapperFile.ps1'
+    $WhatIfPassword = ConvertTo-SecureString 'test-password' -AsPlainText -Force
+
+    # Set-FileContentAtomic isn't ShouldProcess-aware: -WhatIf reaching it makes Set-Content
+    # write nothing, then Move-FileAtomic throws Convert-Paths'ing a temp file that never
+    # existed. The whole write has to sit behind one ShouldProcess in the script itself.
+    Test-Case "Protect-MapperFile -WhatIf previews instead of throwing" {
+        & $ProtectScript -InputFile $WhatIfInput -Password $WhatIfPassword -WhatIf | Out-Null
+        $true
+    }
+    Test-Case "Protect-MapperFile -WhatIf writes no output file" {
+        -not (Test-Path -LiteralPath "$WhatIfInput.enc")
+    }
+    Test-Case "Protect-MapperFile without -WhatIf still writes the envelope (round-trip intact)" {
+        & $ProtectScript -InputFile $WhatIfInput -Password $WhatIfPassword -Force | Out-Null
+        $Envelope = Get-Content -LiteralPath "$WhatIfInput.enc" -Raw -Encoding UTF8 | ConvertFrom-Json
+        (Unprotect-TopologyPayload -Envelope $Envelope -Password 'test-password') -eq '{"a":1}'
+    }
+} finally {
+    Remove-Item -LiteralPath $WhatIfDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # --- summary ---------------------------------------------------------------------------
