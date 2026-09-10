@@ -15,6 +15,12 @@ PS_NetworkMapper/Network_Maps/NetworkMap_*.json
 PS_NetworkMapper/Network_Maps/NetworkMap_*.json.enc
 !PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-13_091500.json
 !PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-20_143207.json
+
+# web-src/tools/generate-fixture.mjs writes its synthetic maps as NetworkMap_*.fixture.json
+# (already ignored by the rule above) alongside the device placements they need. Generated
+# output, regenerable from --seed, and never the real Configuration.json.
+PS_NetworkMapper/**/Configuration.fixture.json
+
 PS_NetworkMapper/Mapper_Debug.log
 PS_NetworkMapper/RawDumps/
 

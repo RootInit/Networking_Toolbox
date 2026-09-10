@@ -16,7 +16,7 @@ function generate(args) {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_fixture_'));
     execFileSync(process.execPath, [GENERATOR, '--out', out, ...args], { stdio: ['ignore', 'ignore', 'ignore'] });
     // Sorted by name, which for NetworkMap_<iso-ish> is chronological order.
-    const names = fs.readdirSync(out).filter(f => /^NetworkMap_.*\.json$/.test(f)).sort();
+    const names = fs.readdirSync(out).filter(f => /^NetworkMap_.*\.fixture\.json$/.test(f)).sort();
     const snapshots = names.map(n => JSON.parse(fs.readFileSync(path.join(out, n), 'utf8')));
     return {
         dir: out, names, snapshots,
@@ -35,6 +35,10 @@ const topology = fixture.map.Topology;
 test('the fixture is a snapshot the app can load', () => {
     assert.equal(topology.length, 120);
     assert.ok(fixture.map.ScanTimestamp, 'ScanTimestamp is what the crawl-age badge reads');
+    // The server and the folder loader both match on NetworkMap_*.json and exclude *.tmp.json.
+    for (const name of fixture.names) {
+        assert.ok(/^NetworkMap_.*\.json$/.test(name) && !/\.tmp\.json$/.test(name), `${name} would not be picked up`);
+    }
 });
 
 // The whole point of scraping port lists out of the artwork: if a generated device ever falls
@@ -208,6 +212,13 @@ test('successive daily snapshots differ the way a fleet does between crawls', ()
     const configOf = t => new Map(t.map(d => [String(d.DeviceIP), d.Configuration]));
     const [firstCfg, lastCfg] = [configOf(first), configOf(last)];
     assert.ok([...lastCfg].some(([ip, cfg]) => firstCfg.has(ip) && firstCfg.get(ip) !== cfg), 'no configuration changed');
+
+    // Reboot detection compares a device's boot timestamp against the previous snapshot's, so a
+    // fleet whose Uptime never moves reports none however many snapshots are loaded.
+    const bootOf = t => new Map(t.map(d => [String(d.DeviceIP), d.Uptime]));
+    const [firstBoot, lastBoot] = [bootOf(first), bootOf(last)];
+    assert.ok([...lastBoot].some(([ip, up]) => firstBoot.has(ip) && firstBoot.get(ip) !== up && up !== 'Unknown'),
+        'no device rebooted between the first and last snapshot');
 });
 
 // A placeholder has no StackMembers, so its cross-snapshot identity falls back from serial to

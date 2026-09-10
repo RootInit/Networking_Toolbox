@@ -507,6 +507,10 @@ function ageFleet(days) {
         node.MasterCpuUtilization = cpuValue();
         node.MasterMemoryUtilization = memValue();
     }
+    // Reboots are detected by comparing a device's boot timestamp against the previous
+    // snapshot's, so a fleet whose Uptime never moves reports none - and the trend charts'
+    // reboot markers stay empty however many snapshots are loaded.
+    for (const node of shuffled(topology).slice(0, int(2, 5))) node.Uptime = iso(daysAgo(rnd() * days));
     for (const node of shuffled(topology).slice(0, Math.max(2, Math.round(topology.length * 0.04)))) {
         node.Configuration += `\nset system syslog file interactive-commands interactive-commands any\nset snmp trap-group audit targets 10.${node.site.idx}.0.4${days}`;
         node.LastConfigured = iso(daysAgo(rnd() * days));
@@ -575,7 +579,9 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     if (i > 0) ageFleet(daysBack + 1);
     const scanTime = new Date(SCAN_DATE.getTime() - daysBack * 86400000);
     const stamp = scanTime.toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '');
-    const mapPath = path.join(OUT_DIR, `NetworkMap_${stamp}.json`);
+    // NetworkMap_* so the server and the folder loader pick it up, .fixture.json so a generated
+    // map can be gitignored without also ignoring a real crawl's output sitting beside it.
+    const mapPath = path.join(OUT_DIR, `NetworkMap_${stamp}.fixture.json`);
     const fleet = withFailures(topology, i);
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));
     written.push({ mapPath, fleet });
