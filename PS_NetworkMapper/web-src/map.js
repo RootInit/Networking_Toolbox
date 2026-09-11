@@ -80,7 +80,11 @@ window.initMapView = async function() {
     // Keyless standard OSM tiles - CARTO's free tier now requires registration and watermarks
     // otherwise. No {r} retina placeholder: the OSM tile server doesn't serve @2x tiles.
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19,
+        // OSM has no tiles past z19, so beyond maxNativeZoom Leaflet upscales the z19 image
+        // rather than requesting a 404. The imagery gets blurry, but closets in one building
+        // sit metres apart and need the extra separation to be clickable at all.
+        maxNativeZoom: 19,
+        maxZoom: MAX_MAP_ZOOM,
         attribution: '&copy; OpenStreetMap contributors'
     }).addTo(leafletMap);
 
@@ -268,10 +272,14 @@ function iconForClassification(meta, dimmedByVlan, selected) {
     return L.divIcon({ className: '', html: html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
 
+// Two levels past OSM's last real tile. Each level doubles the scale, so this is 4x the
+// separation z19 gives between two closets in the same building.
+var MAX_MAP_ZOOM = 21;
+
 // Hostname labels are permanent tooltips, so on a campus-sized fleet the whole map is covered
 // in text at the zoom the initial fit lands on. Below this they are hidden and the markers
 // alone carry position; a device is still identified by clicking it.
-var LABEL_MIN_ZOOM = 17;
+var LABEL_MIN_ZOOM = 18;
 // Below this many placed devices there is nothing to declutter - a handful of markers never
 // overlap - and hiding their names would only make the map less useful.
 var LABEL_ALWAYS_BELOW = 20;
@@ -504,7 +512,8 @@ window.renderMapMarkers = function() {
 window.revealDeviceOnMap = function(ip) {
     var marker = mapMarkersByIp.get(String(ip));
     if (!marker) return false;
-    leafletMap.setView(marker.getLatLng(), Math.max(leafletMap.getZoom(), 17), { animate: true });
+    // LABEL_MIN_ZOOM, so the device this reveals arrives with its name showing.
+    leafletMap.setView(marker.getLatLng(), Math.max(leafletMap.getZoom(), LABEL_MIN_ZOOM), { animate: true });
     return true;
 };
 

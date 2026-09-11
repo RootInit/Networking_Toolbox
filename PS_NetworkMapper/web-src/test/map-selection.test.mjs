@@ -164,3 +164,28 @@ test('a handful of markers keep their labels at every zoom', () => {
   assert.match(src, /var LABEL_ALWAYS_BELOW = \d+;/);
   assert.match(src, /mapMarkersByIp\.size >= LABEL_ALWAYS_BELOW/);
 });
+
+const num = (re) => Number(src.match(re)[1]);
+
+test('the map zooms past the last real OSM tile', () => {
+  // Leaflet requests tiles up to maxNativeZoom and upscales beyond it. Without maxNativeZoom
+  // every tile past 19 would 404 and the map would go blank instead of zooming further.
+  const maxZoom = num(/var MAX_MAP_ZOOM = (\d+);/);
+  const native = num(/maxNativeZoom: (\d+),/);
+  assert.equal(native, 19, "OSM's last served zoom level");
+  assert.ok(maxZoom > native, `maxZoom ${maxZoom} must exceed maxNativeZoom ${native}`);
+  assert.match(src, /maxZoom: MAX_MAP_ZOOM,/);
+});
+
+test('labels become reachable before the map runs out of zoom', () => {
+  const maxZoom = num(/var MAX_MAP_ZOOM = (\d+);/);
+  const labelZoom = num(/var LABEL_MIN_ZOOM = (\d+);/);
+  assert.ok(labelZoom <= maxZoom, `labels at ${labelZoom} are unreachable below maxZoom ${maxZoom}`);
+});
+
+test('revealing a device zooms in far enough to show its name', () => {
+  // A search result that reveals a marker with its label suppressed would look like the map
+  // had jumped to an unnamed dot.
+  const fn = src.match(/window\.revealDeviceOnMap = function[\s\S]*?\n\};/)[0];
+  assert.match(fn, /Math\.max\(leafletMap\.getZoom\(\), LABEL_MIN_ZOOM\)/);
+});
