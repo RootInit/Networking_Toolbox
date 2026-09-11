@@ -185,11 +185,16 @@ async function doRenderVisibleGraph() {
 
         nodesDataset.clear(); edgesDataset.clear();
 
+        // Accumulated and added in one call each. vis-network redraws the whole canvas
+        // synchronously on every dataset change *and* queues a repeat via rAF, so adding
+        // n items one at a time costs ~2n full repaints - seconds of frozen UI at fleet scale.
+        var nodeRows = [], edgeRows = [];
+
         visible.visibleNodeIds.forEach(id => {
             var pos = positions.get(id) || { x: 0, y: 0 };
             var meta = allNodeMeta.get(id);
             if (meta) {
-                nodesDataset.add({
+                nodeRows.push({
                     id: id, label: meta.label, shape: meta.shape, isStack: meta.isStack,
                     color: meta.scanned
                         ? (meta.isStack ? { background: '#D2E5FF', border: '#2B7CE9' } : { background: '#97C2FC', border: '#2B7CE9' })
@@ -200,7 +205,7 @@ async function doRenderVisibleGraph() {
                 });
             } else {
                 var cluster = visible.clusters.get(id);
-                nodesDataset.add({
+                nodeRows.push({
                     id: id, label: `+${cluster.memberIds.length} devices`, shape: 'box', isCluster: true,
                     // Keeps its own amber when selected: the green means "this device's drawer
                     // is open", and a cluster is a group, not a device.
@@ -216,7 +221,7 @@ async function doRenderVisibleGraph() {
         // a primary edge already drew can be recognised as a visual duplicate.
         var primaryPairs = new Set();
         visible.visibleEdges.forEach((e, i) => {
-            edgesDataset.add({ id: `primary-${i}`, from: e.from, to: e.to, width: 2, color: '#848484', dashes: false });
+            edgeRows.push({ id: `primary-${i}`, from: e.from, to: e.to, width: 2, color: '#848484', dashes: false });
             var pKey = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from;
             primaryPairs.add(pKey);
         });
@@ -235,8 +240,11 @@ async function doRenderVisibleGraph() {
             var key = from < to ? from + '|' + to : to + '|' + from;
             if (seenSecondary.has(key) || primaryPairs.has(key)) return;
             seenSecondary.add(key);
-            edgesDataset.add({ id: `secondary-${i}`, from: from, to: to, width: 1, color: '#c0c0c0', dashes: [4, 4] });
+            edgeRows.push({ id: `secondary-${i}`, from: from, to: to, width: 1, color: '#c0c0c0', dashes: [4, 4] });
         });
+
+        nodesDataset.add(nodeRows);
+        edgesDataset.add(edgeRows);
 
         var vlanFilterEl = document.getElementById('vlanFilter');
         if (vlanFilterEl && vlanFilterEl.value !== 'ALL') { window.applyVlanFilter(); }

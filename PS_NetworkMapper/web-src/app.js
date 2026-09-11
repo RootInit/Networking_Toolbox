@@ -428,6 +428,10 @@ window.autoloadLastScan = async function() {
     if (entries.length === 0) return;
 
     var encryptedEntries = entries.filter(e => {
+        // The marker has to appear verbatim in the JSON text, so its absence rules out an
+        // envelope without parsing megabytes of plaintext topology that is then discarded.
+        // Key order is not guaranteed, so a substring hit still has to be confirmed.
+        if (e.content.indexOf('PSNetworkMapper-EncryptedTopology') === -1) return false;
         try { return JSON.parse(e.content).format === 'PSNetworkMapper-EncryptedTopology'; }
         catch (err) { return false; }
     });
