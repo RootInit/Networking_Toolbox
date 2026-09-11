@@ -102,6 +102,13 @@ test('the graph is connected and carries redundant links, not just a tree', () =
     const scanned = topology.filter(d => d.ScanStatus === 'Ok').length;
     assert.ok(seen.size >= scanned * 0.95, `only ${seen.size} of ${topology.length} devices are reachable`);
     assert.ok(edges.length > topology.length, 'a pure tree never reaches the secondary-edge rendering');
+
+    // A switch that never got patched is not a visible failure - it becomes an orphan node in a
+    // row beside the diagram, which reads as a layout quirk rather than as missing data. This
+    // happens the moment the distribution frames run out of uplink cages. A placeholder is
+    // exempt: the crawler could not read the device, so of course it reports no neighbours.
+    const orphans = topology.filter(d => d.ScanStatus === 'Ok' && d.Neighbors.length === 0);
+    assert.deepEqual(orphans.map(d => d.Hostname), [], 'scanned devices with no neighbours at all');
 });
 
 test('interface rows carry the fields the table, faceplate and sort all read', () => {
@@ -194,6 +201,153 @@ test('placed devices are keyed by serial so the Map can find them', () => {
     const placedCount = scanned.filter(d => d.StackMembers.some(m => placedKeys.has(m.Serial))).length;
     assert.ok(placedCount > scanned.length * 0.9, `only ${placedCount} of ${scanned.length} scanned devices are placed`);
     assert.ok(placedCount < scanned.length, 'an entirely placed fleet never shows the unplaced-devices panel');
+});
+
+/* ---- geography ----
+   The fleet is modelled on the UW Seattle campus, and the topology is supposed to follow the
+   buildings: a closet uplinks to the distribution frame nearest it, a closet fed from another
+   closet is on another floor of the same building, and nothing reaches across campus. These
+   read the placements back out of the generated config, so they check the geometry itself
+   rather than the constants that produced it. */
+
+const metres = (a, b) => {
+    const dLat = (a.lat - b.lat) * 111320;
+    const dLng = (a.lng - b.lng) * 111320 * Math.cos(a.lat * Math.PI / 180);
+    return Math.sqrt(dLat * dLat + dLng * dLng);
+};
+const placedBySerial = () => new Map(fixture.config.devices.map(d => [d.key, d]));
+const pinOf = (device, placed) => {
+    for (const m of device.StackMembers || []) if (placed.has(m.Serial)) return placed.get(m.Serial);
+    return null;   // a device the crawler could not read has no serial, so no pin
+};
+const roleOf = (device) => (/-core\d/.test(device.Hostname) ? 'CORE' : /-dist\d/.test(device.Hostname) ? 'DIST' : 'ACC');
+
+test('every pin sits on the UW Seattle campus', () => {
+    for (const placed of fixture.config.devices) {
+        assert.ok(placed.lat > 47.646 && placed.lat < 47.665, `${placed.key} at lat ${placed.lat}`);
+        assert.ok(placed.lng > -122.322 && placed.lng < -122.296, `${placed.key} at lng ${placed.lng}`);
+        assert.match(placed.building, /\(([A-Z]{2,4})\)$/, 'a building name should carry its UW abbreviation');
+    }
+    const buildings = new Set(fixture.config.devices.map(d => d.building));
+    assert.ok(buildings.size >= 20, `only ${buildings.size} distinct buildings`);
+});
+
+test('a stack is in one room, not spread across campus', () => {
+    const placed = placedBySerial();
+    for (const device of topology) {
+        const pins = (device.StackMembers || []).map(m => placed.get(m.Serial)).filter(Boolean);
+        for (const pin of pins) assert.ok(metres(pins[0], pin) < 150, `${device.Hostname} members are ${Math.round(metres(pins[0], pin))} m apart`);
+    }
+});
+
+// The rule the campus model implements is zone first, distance second - fibre follows the
+// campus zones, so a building is fed from its own zone's frame even where another zone's frame
+// happens to be physically nearer (Fishery Sciences is the honest example). Within the zone,
+// the nearest frame wins. The zone is the leading clause of each placement's notes.
+const zoneOfPin = (pin) => String(pin.notes).split(' - ')[0];
+
+// Which campus zones share a border, stated here rather than imported so that widening the
+// generator's fibre plant has to be a deliberate edit to the spec as well as to the code.
+const ADJACENT = {
+    'West Campus': ['Central Campus', 'North Campus'],
+    'Central Campus': ['West Campus', 'North Campus', 'South Campus', 'East Campus'],
+    'South Campus': ['Central Campus', 'East Campus'],
+    'North Campus': ['Central Campus', 'West Campus'],
+    'East Campus': ['Central Campus', 'South Campus'],
+};
+
+test('an access switch uplinks to the nearest frame in its own zone', () => {
+    const placed = placedBySerial();
+    const frames = topology.filter(d => roleOf(d) === 'DIST')
+        .map(d => ({ ip: String(d.DeviceIP), pin: pinOf(d, placed) })).filter(f => f.pin);
+    assert.ok(frames.length >= 4, 'campus needs several distribution frames for this to mean anything');
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+
+    // Pins are jittered by about a building's footprint so a stack does not collapse into one
+    // dot, and two frames can sit closer together than that jitter. Comparing exact rankings
+    // would be more precise than the data: the assertion is that nothing is patched appreciably
+    // further than the nearest candidate, not that ties break a particular way.
+    const TIE_M = 120;
+    const nearestOf = (pin, candidates) => Math.min(...candidates.map(f => metres(pin, f.pin)));
+
+    let primaries = 0, secondaries = 0;
+    for (const device of topology) {
+        if (roleOf(device) !== 'ACC') continue;
+        const pin = pinOf(device, placed);
+        if (!pin) continue;
+        const zone = zoneOfPin(pin);
+        const inZone = frames.filter(f => zoneOfPin(f.pin) === zone);
+
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            if (!peer || roleOf(peer) !== 'DIST') continue;
+            const peerZone = zoneOfPin(pinOf(peer, placed));
+            const chosen = metres(pin, pinOf(peer, placed));
+
+            if (peerZone === zone) {
+                primaries++;
+                assert.ok(chosen <= nearestOf(pin, inZone) + TIE_M,
+                    `${device.Hostname} is patched to ${peer.Hostname} at ${Math.round(chosen)} m when its zone has one at ${Math.round(nearestOf(pin, inZone))} m`);
+                continue;
+            }
+            // The only uplink out of the zone is the deliberate dual-homing, and it must go to
+            // the nearest frame in a bordering zone - never a haul across campus.
+            secondaries++;
+            assert.ok(ADJACENT[zone].includes(peerZone),
+                `${device.Hostname} (${zone}) dual-homes to ${peer.Hostname} in ${peerZone}, which does not border it`);
+            const bordering = frames.filter(f => ADJACENT[zone].includes(zoneOfPin(f.pin)));
+            assert.ok(chosen <= nearestOf(pin, bordering) + TIE_M,
+                `${device.Hostname} dual-homes to ${peer.Hostname} at ${Math.round(chosen)} m when a bordering zone has one at ${Math.round(nearestOf(pin, bordering))} m`);
+        }
+    }
+    assert.ok(primaries > 20, `only ${primaries} primary uplinks checked`);
+    assert.ok(secondaries > 0, 'no dual-homed closets, so the secondary-edge rendering is untested');
+});
+
+test('a switch fed from another switch is in the same building', () => {
+    const placed = placedBySerial();
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+    let daisies = 0;
+    for (const device of topology) {
+        if (roleOf(device) !== 'ACC') continue;
+        const pin = pinOf(device, placed);
+        if (!pin) continue;
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            if (!peer || roleOf(peer) !== 'ACC') continue;
+            const peerPin = pinOf(peer, placed);
+            if (!peerPin) continue;
+            daisies++;
+            assert.equal(peerPin.building, pin.building, `${device.Hostname} is daisy-chained to ${peer.Hostname} in another building`);
+        }
+    }
+    assert.ok(daisies > 0, 'no daisy chains to check');
+});
+
+test('links are campus-length, not wishful', () => {
+    const placed = placedBySerial();
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+    const seen = new Set();
+    const lengths = [];
+    for (const device of topology) {
+        const pin = pinOf(device, placed);
+        if (!pin) continue;
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            const peerPin = peer && pinOf(peer, placed);
+            if (!peerPin) continue;
+            const key = [String(device.DeviceIP), String(neighbor.ManagementIP)].sort().join('|');
+            if (seen.has(key)) continue;
+            seen.add(key);
+            lengths.push(metres(pin, peerPin));
+        }
+    }
+    lengths.sort((a, b) => a - b);
+    assert.ok(lengths.length > 50);
+    // The campus is about 1.5 km corner to corner, so nothing can legitimately exceed that, and
+    // a median in the hundreds of metres means most links stay inside a building or its block.
+    assert.ok(lengths[lengths.length - 1] < 2000, `longest link is ${Math.round(lengths[lengths.length - 1])} m`);
+    assert.ok(lengths[Math.floor(lengths.length / 2)] < 400, `median link is ${Math.round(lengths[Math.floor(lengths.length / 2)])} m`);
 });
 
 // Trends, New Devices, Topology Diff and Config Changed are all comparisons between snapshots,

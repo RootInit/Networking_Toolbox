@@ -128,11 +128,86 @@ const ACCESS_MODELS = [
 // in production.
 const MODULAR_MODEL = 'EX9200-32XS';
 
-const SITES = [
-    { name: 'Harborview Campus', short: 'HBV', lat: 47.65335, lng: -122.30687, buildings: ['Admin', 'Library', 'Science Hall'] },
-    { name: 'Ridgeway Plant', short: 'RDG', lat: 47.5301, lng: -122.0326, buildings: ['Fabrication', 'Warehouse'] },
-    { name: 'Eastgate Annex', short: 'EGA', lat: 47.5817, lng: -122.1435, buildings: ['Annex North', 'Annex South'] },
-    { name: 'Northbend Depot', short: 'NBD', lat: 47.8107, lng: -122.2, buildings: ['Depot'] },
+// University of Washington, Seattle campus, in the five zones the university itself uses.
+// Coordinates are approximate building positions (good to roughly a building's own width) -
+// enough for pin placement, clustering and distance comparisons, not a survey. `closets` is how
+// many wiring closets a building rates, which is what makes a medical centre carry more
+// switches than a residence hall. `hub` marks the building whose main distribution frame feeds
+// the zone.
+const CAMPUS = [
+    {
+        name: 'West Campus', short: 'WEST', net: 20, adjacent: ['CENTRAL', 'NORTH'],
+        buildings: [
+            { abbr: 'UWT', name: 'UW Tower', lat: 47.6609, lng: -122.3145, closets: 8, hub: true },
+            { abbr: 'CDH', name: 'Condon Hall', lat: 47.6570, lng: -122.3172, closets: 3 },
+            { abbr: 'FSH', name: 'Fishery Sciences Building', lat: 47.6531, lng: -122.3160, closets: 3 },
+            { abbr: 'ELM', name: 'Elm Hall', lat: 47.6562, lng: -122.3167, closets: 2 },
+            { abbr: 'ALD', name: 'Alder Hall', lat: 47.6545, lng: -122.3163, closets: 2 },
+            { abbr: 'LAN', name: 'Lander Hall', lat: 47.6558, lng: -122.3153, closets: 2 },
+            { abbr: 'TRY', name: 'Terry Hall', lat: 47.6562, lng: -122.3146, closets: 2 },
+        ],
+    },
+    {
+        name: 'Central Campus', short: 'CENTRAL', net: 30, adjacent: ['WEST', 'NORTH', 'SOUTH', 'EAST'],
+        buildings: [
+            { abbr: 'CMU', name: 'Communications Building', lat: 47.6570, lng: -122.3052, closets: 6, hub: true },
+            { abbr: 'SUZ', name: 'Suzzallo Library', lat: 47.6557, lng: -122.3080, closets: 5 },
+            { abbr: 'ALB', name: 'Allen Library', lat: 47.6552, lng: -122.3075, closets: 4 },
+            { abbr: 'ODE', name: 'Odegaard Undergraduate Library', lat: 47.6566, lng: -122.3107, closets: 4 },
+            { abbr: 'KNE', name: 'Kane Hall', lat: 47.6566, lng: -122.3092, closets: 3 },
+            { abbr: 'MGH', name: 'Mary Gates Hall', lat: 47.6547, lng: -122.3079, closets: 4 },
+            { abbr: 'GRB', name: 'Gerberding Hall', lat: 47.6553, lng: -122.3092, closets: 2 },
+            { abbr: 'SAV', name: 'Savery Hall', lat: 47.6570, lng: -122.3079, closets: 3 },
+            { abbr: 'SMI', name: 'Smith Hall', lat: 47.6573, lng: -122.3072, closets: 2 },
+            { abbr: 'MLR', name: 'Miller Hall', lat: 47.6577, lng: -122.3068, closets: 2 },
+            { abbr: 'DEN', name: 'Denny Hall', lat: 47.6585, lng: -122.3092, closets: 2 },
+            { abbr: 'BAG', name: 'Bagley Hall', lat: 47.6540, lng: -122.3090, closets: 3 },
+            { abbr: 'JHN', name: 'Johnson Hall', lat: 47.6550, lng: -122.3096, closets: 2 },
+            { abbr: 'PAA', name: 'Physics/Astronomy Building', lat: 47.6535, lng: -122.3110, closets: 3 },
+            { abbr: 'HUB', name: 'Husky Union Building', lat: 47.6553, lng: -122.3050, closets: 4 },
+            { abbr: 'MEA', name: 'Meany Hall', lat: 47.6563, lng: -122.3116, closets: 2 },
+            { abbr: 'CSE', name: 'Paul G. Allen Center', lat: 47.6531, lng: -122.3057, closets: 5 },
+            { abbr: 'EEB', name: 'Electrical & Computer Engineering', lat: 47.6537, lng: -122.3050, closets: 3 },
+            { abbr: 'GUG', name: 'Guggenheim Hall', lat: 47.6540, lng: -122.3057, closets: 2 },
+            { abbr: 'MOR', name: 'More Hall', lat: 47.6535, lng: -122.3050, closets: 2 },
+            { abbr: 'SIG', name: 'Sieg Hall', lat: 47.6540, lng: -122.3062, closets: 2 },
+        ],
+    },
+    {
+        name: 'South Campus', short: 'SOUTH', net: 40, adjacent: ['CENTRAL', 'EAST'],
+        buildings: [
+            { abbr: 'HSB', name: 'Health Sciences Building', lat: 47.6510, lng: -122.3082, closets: 10, hub: true },
+            { abbr: 'UWMC', name: 'UW Medical Center', lat: 47.6497, lng: -122.3072, closets: 9 },
+            { abbr: 'FOE', name: 'William H. Foege Building', lat: 47.6521, lng: -122.3130, closets: 4 },
+            { abbr: 'HIT', name: 'Hitchcock Hall', lat: 47.6528, lng: -122.3112, closets: 2 },
+            { abbr: 'OSB', name: 'Ocean Sciences Building', lat: 47.6497, lng: -122.3122, closets: 2 },
+            { abbr: 'MSB', name: 'Marine Sciences Building', lat: 47.6494, lng: -122.3116, closets: 2 },
+            { abbr: 'SOCC', name: 'South Campus Center', lat: 47.6503, lng: -122.3100, closets: 2 },
+        ],
+    },
+    {
+        name: 'North Campus', short: 'NORTH', net: 50, adjacent: ['CENTRAL', 'WEST'],
+        buildings: [
+            { abbr: 'MCM', name: 'McMahon Hall', lat: 47.6602, lng: -122.3040, closets: 5, hub: true },
+            { abbr: 'HGG', name: 'Haggett Hall', lat: 47.6606, lng: -122.3050, closets: 3 },
+            { abbr: 'MCC', name: 'McCarty Hall', lat: 47.6616, lng: -122.3041, closets: 3 },
+            { abbr: 'MDR', name: 'Madrona Hall', lat: 47.6611, lng: -122.3053, closets: 2 },
+            { abbr: 'WIL', name: 'Willow Hall', lat: 47.6613, lng: -122.3060, closets: 2 },
+            { abbr: 'OAK', name: 'Oak Hall', lat: 47.6600, lng: -122.3061, closets: 2 },
+            { abbr: 'HNS', name: 'Hansee Hall', lat: 47.6600, lng: -122.3096, closets: 2 },
+            { abbr: 'PDL', name: 'Padelford Hall', lat: 47.6570, lng: -122.3038, closets: 4 },
+        ],
+    },
+    {
+        name: 'East Campus', short: 'EAST', net: 60, adjacent: ['CENTRAL', 'SOUTH'],
+        buildings: [
+            { abbr: 'IMA', name: 'Intramural Activities Building', lat: 47.6535, lng: -122.3006, closets: 4, hub: true },
+            { abbr: 'HEC', name: 'Alaska Airlines Arena at Hec Edmundson Pavilion', lat: 47.6520, lng: -122.3013, closets: 3 },
+            { abbr: 'HSTD', name: 'Husky Stadium', lat: 47.6503, lng: -122.3016, closets: 4 },
+            { abbr: 'DEM', name: 'Dempsey Indoor Center', lat: 47.6520, lng: -122.2995, closets: 2 },
+            { abbr: 'CSH', name: 'Conibear Shellhouse', lat: 47.6532, lng: -122.2992, closets: 2 },
+        ],
+    },
 ];
 
 const VLANS = [
@@ -174,16 +249,16 @@ const memValue = () => (chance(0.05) ? int(91, 98) : chance(0.18) ? int(76, 89) 
 
 const CONFIG_USERS = ['svc-automation', 'jchen', 'root', 'netops', 'aparker'];
 
-function configText(host, site, vlanTags, extraLines) {
+function configText(host, zone, bldg, vlanTags, extraLines) {
     const lines = [
         `set system host-name ${host}`,
         'set system login user admin class super-user',
         'set system authentication-order [ radius password ]',
-        `set system radius-server 10.${site.idx}.0.20 secret "$9$REDACTED"`,
+        `set system radius-server 10.${zone.net}.0.20 secret "$9$REDACTED"`,
         'set system services ssh protocol-version v2',
-        `set system ntp server 10.${site.idx}.0.30`,
+        `set system ntp server 10.${zone.net}.0.30`,
         `set snmp community "$9$REDACTED" authorization read-only`,
-        `set snmp location "${site.name}"`,
+        `set snmp location "${bldg.name}, ${zone.name}, University of Washington"`,
         'set protocols lldp interface all',
         'set protocols rstp bridge-priority 32k',
         ...vlanTags.map(t => `set vlans ${VLANS.find(v => v.tag === t).name} vlan-id ${t}`),
@@ -197,7 +272,26 @@ function configText(host, site, vlanTags, extraLines) {
 let serialCounter = 10000;
 const nextSerial = () => `SYN${++serialCounter}`;
 
-const ip = (site, host) => `10.${site.idx}.${Math.floor(host / 250)}.${(host % 250) + 1}`;
+// A /24 per building inside a /16 per zone, which is how a campus of this size is actually
+// addressed - and it gives the IP Space tab subnets that mean something geographically.
+const ipFor = (bldg, host) => `10.${bldg.zone.net}.${bldg.idx}.${host}`;
+
+// Metres between two campus buildings, near enough at this latitude. Used to attach a closet to
+// the distribution frame it would really be patched to - the nearest one - rather than to
+// whichever switch came next in a loop.
+function metresBetween(a, b) {
+    const dLat = (a.lat - b.lat) * 111320;
+    const dLng = (a.lng - b.lng) * 111320 * Math.cos(a.lat * Math.PI / 180);
+    return Math.sqrt(dLat * dLat + dLng * dLng);
+}
+const nearest = (bldg, candidates) =>
+    candidates.reduce((best, d) => (metresBetween(bldg, d.bldg) < metresBetween(bldg, best.bldg) ? d : best));
+// You patch to the nearest frame that still has a port free; a full one is simply not a
+// candidate, however close it is.
+const nearestWithPort = (bldg, candidates) => {
+    const free = candidates.filter(d => freeUplinks(d).length > 0);
+    return free.length ? nearest(bldg, free) : null;
+};
 
 // The full key set of Get-JunosNodeData.ps1's $NodeData initializer. A device missing one of
 // these reaches the UI as `undefined` rather than as the "Unknown" the crawler would have
@@ -259,9 +353,11 @@ function accessRow(port, poe, isCage) {
     return row;
 }
 
-function makeDevice({ deviceIp, host, site, building, models, role, gateway }) {
+function makeDevice({ deviceIp, bldg, seq, models, role, gateway }) {
     const node = blankNode(deviceIp);
-    node.Hostname = `${site.short}-${role}-${String(host).padStart(3, '0')}.local`;
+    // Building abbreviation first, the way campus network gear is normally named: the hostname
+    // alone tells you which closet to walk to.
+    node.Hostname = `uw-${bldg.abbr.toLowerCase()}-${role.toLowerCase()}${String(seq).padStart(2, '0')}.washington.edu`;
     node.JunosVersion = pick(JUNOS_VERSIONS);
     node.Gateway = gateway;
     node.StackMembers = models.map((model, i) => ({
@@ -285,8 +381,8 @@ function makeDevice({ deviceIp, host, site, building, models, role, gateway }) {
         ])];
     }
     buildInterfaces(node, node.StackMembers);
-    node.site = site;
-    node.building = building;
+    node.bldg = bldg;
+    node.zone = bldg.zone;
     node.role = role;
     return node;
 }
@@ -349,7 +445,7 @@ function addClients(node, gatewayNode, vlanTags) {
         if (isPhone || isAp) {
             node.MedNeighbors.push({
                 LocalPort: row.Port, Hostname: row.Desc, MacAddress: first.MAC,
-                ManagementIP: first.IP === 'Unknown' ? `10.${node.site.idx}.${int(100, 240)}.${int(2, 250)}` : first.IP,
+                ManagementIP: first.IP === 'Unknown' ? `10.${node.zone.net}.${int(100, 240)}.${int(2, 250)}` : first.IP,
                 Description: isAp ? 'Wireless Access Point' : 'IP Phone',
                 Class: isAp ? 'Class III' : 'Class II',
             });
@@ -372,7 +468,7 @@ const DOT1X_FAILURES = ['Held', 'Connecting', 'Failed', 'Force-Unauthorized'];
 function addClient(node, gatewayNode, row, tag) {
     const vlan = VLANS.find(v => v.tag === tag);
     const mac = clientMac();
-    const clientIp = `10.${node.site.idx}.${int(100, 240)}.${int(2, 250)}`;
+    const clientIp = `10.${node.zone.net}.${int(100, 240)}.${int(2, 250)}`;
     const dot1x = chance(0.35);
     const client = {
         // Left unresolved more often than not: a client's ARP entry usually lives on the L3
@@ -395,74 +491,150 @@ function addClient(node, gatewayNode, row, tag) {
 
 /* ---------------- assemble the fleet ---------------- */
 
-SITES.forEach((s, i) => { s.idx = 55 + i; });
+// Back-references, so a building alone is enough to address and place a device.
+const ZONES = new Map(CAMPUS.map(z => [z.short, z]));
+const ALL_BUILDINGS = [];
+for (const zone of CAMPUS) {
+    zone.buildings.forEach((b, i) => { b.zone = zone; b.idx = i; b.hostCounter = 10; ALL_BUILDINGS.push(b); });
+}
+const hubOf = (zone) => zone.buildings.find(b => b.hub);
 
 const topology = [];
 const configDevices = [];
-let hostCounter = 0;
+const seqIn = new Map();
+// Per-building sequence, so uw-hsb-acc01..07 are the seven closets in that one building rather
+// than an arbitrary slice of a fleet-wide counter.
+const nextSeq = (bldg, role) => {
+    const key = bldg.abbr + role;
+    const n = (seqIn.get(key) || 0) + 1;
+    seqIn.set(key, n);
+    return n;
+};
+const place = (bldg, role, models, gateway) => makeDevice({
+    deviceIp: ipFor(bldg, bldg.hostCounter++), bldg, seq: nextSeq(bldg, role), models, role, gateway,
+});
 
-const coreCount = 2;
-const distCount = Math.max(SITES.length, Math.min(12, Math.round(DEVICE_COUNT / 40)));
-const accessCount = Math.max(1, DEVICE_COUNT - coreCount - distCount);
-
-const cores = [];
-for (let i = 0; i < coreCount; i++) {
-    const site = SITES[0];
-    const deviceIp = ip(site, hostCounter);
-    cores.push(makeDevice({
-        deviceIp, host: hostCounter++, site, building: site.buildings[0],
-        // The second core is the modular chassis, so both the drawn and the undrawable paths
-        // appear on a device that matters rather than on an obscure leaf.
-        models: [i === 1 ? MODULAR_MODEL : CORE_MODELS[i % CORE_MODELS.length]],
-        role: 'CORE', gateway: ip(site, 0),
-    }));
-}
+// Two cores in two buildings on opposite sides of campus, which is the point of having two.
+const coreBuildings = [hubOf(ZONES.get('CENTRAL')), hubOf(ZONES.get('WEST'))];
+const cores = coreBuildings.map((bldg, i) => place(
+    bldg, 'CORE',
+    // The second core is the modular chassis, so both the drawn and the undrawable paths appear
+    // on a device that matters rather than on an obscure leaf.
+    [i === 1 ? MODULAR_MODEL : CORE_MODELS[i % CORE_MODELS.length]],
+    ipFor(coreBuildings[0], 1),
+));
 linkDevices(cores[0], cores[1], 'ICL');
 
+// A distribution switch has a finite number of uplink cages, and a frame that runs out simply
+// leaves the next closet unpatched - so the frame count has to follow the fleet size. Well under
+// the ~44 cages on the smallest frame model, leaving headroom for the two core trunks, the
+// dual-homed closets from the zone next door, and a stack member's share of the pool.
+const UPLINKS_PER_FRAME = 20;
+const totalClosets = ALL_BUILDINGS.reduce((sum, b) => sum + b.closets, 0);
+const zoneShare = (zone) => zone.buildings.reduce((sum, b) => sum + b.closets, 0) / totalClosets;
+// Frames displace access switches from the budget, so the split is settled once up front rather
+// than left to depend on itself.
+const framesFor = (zone) => Math.max(1, Math.ceil((DEVICE_COUNT - cores.length) * zoneShare(zone) / UPLINKS_PER_FRAME));
+const frameCount = CAMPUS.reduce((sum, z) => sum + framesFor(z), 0);
+
 const dists = [];
-for (let i = 0; i < distCount; i++) {
-    const site = SITES[i % SITES.length];
-    const deviceIp = ip(site, hostCounter);
-    const models = chance(0.35) ? [pick(DIST_MODELS), pick(DIST_MODELS)] : [pick(DIST_MODELS)];
-    const d = makeDevice({
-        deviceIp, host: hostCounter++, site, building: pick(site.buildings),
-        models, role: 'DIST', gateway: cores[0].DeviceIP,
-    });
-    dists.push(d);
-    for (const core of cores) linkDevices(d, core, 'TRUNK');
+for (const zone of CAMPUS) {
+    // The hub takes the first frame; the rest go to the biggest buildings. Dealt round-robin
+    // rather than one-per-building, because a zone can need more frames than it has buildings -
+    // a medical centre runs several, and capping at one would leave closets unpatched.
+    const order = [hubOf(zone), ...zone.buildings.filter(b => !b.hub).sort((a, b) => b.closets - a.closets)];
+    const want = framesFor(zone);
+    const sites = Array.from({ length: want }, (_, i) => order[i % order.length]);
+    const inThisZone = [];
+    for (const bldg of sites) {
+        const models = chance(0.35) ? [pick(DIST_MODELS), pick(DIST_MODELS)] : [pick(DIST_MODELS)];
+        const d = place(bldg, 'DIST', models, cores[0].DeviceIP);
+        dists.push(d);
+        inThisZone.push(d);
+        // Only the zone's own frame homes to the core. The rest hang off it, because two core
+        // switches do not have enough cages to terminate every building frame on campus - which
+        // is exactly why a campus this size has a zone tier in the first place.
+        if (inThisZone.length === 1) {
+            for (const core of cores) linkDevices(d, core, 'TRUNK');
+        } else {
+            const upstream = nearestWithPort(bldg, inThisZone.slice(0, -1));
+            if (!upstream) throw new Error(`No frame left in ${zone.name} to home ${d.Hostname} to - lower UPLINKS_PER_FRAME (currently ${UPLINKS_PER_FRAME}).`);
+            linkDevices(d, upstream, 'TRUNK');
+        }
+    }
+}
+const distsInZone = (short) => dists.filter(d => d.zone.short === short);
+
+// Access switches are handed out in proportion to each building's closet count, so the fleet
+// thickens where the campus actually does.
+const accessBudget = Math.max(1, DEVICE_COUNT - cores.length - frameCount);
+const access = [];
+const inBuilding = new Map(ALL_BUILDINGS.map(b => [b.abbr, []]));
+
+// Largest-remainder apportionment: rounding each building's share independently drifts by a
+// dozen devices over 48 buildings, and --devices 500 has to mean 500.
+const quotas = ALL_BUILDINGS.map(b => ({ bldg: b, exact: accessBudget * (b.closets / totalClosets) }));
+quotas.forEach(q => { q.n = Math.max(1, Math.floor(q.exact)); });
+let shortfall = accessBudget - quotas.reduce((sum, q) => sum + q.n, 0);
+for (const q of quotas.slice().sort((a, b) => (b.exact % 1) - (a.exact % 1))) {
+    if (shortfall <= 0) break;
+    q.n++; shortfall--;
+}
+for (const q of quotas.slice().sort((a, b) => a.exact - b.exact)) {
+    if (shortfall >= 0) break;
+    if (q.n > 1) { q.n--; shortfall++; }
 }
 
-const accessByDist = dists.map(() => []);
-for (let i = 0; i < accessCount; i++) {
-    const distIdx = i % dists.length;
-    const parent = dists[distIdx];
-    const site = parent.site;
-    const deviceIp = ip(site, hostCounter);
-    // Virtual Chassis is the norm on access floors, and a multi-member stack is where the
-    // faceplate view does its most fragile work (per-member FPC numbering, master/backup LEDs).
-    const stackSize = chance(0.3) ? int(2, 5) : 1;
-    const stackModel = pick(ACCESS_MODELS);
-    const models = Array.from({ length: stackSize }, () => (stackSize > 1 && chance(0.15) ? pick(ACCESS_MODELS) : stackModel));
-    const a = makeDevice({
-        deviceIp, host: hostCounter++, site, building: pick(site.buildings),
-        models, role: 'ACC', gateway: parent.DeviceIP,
-    });
-    accessByDist[distIdx].push(a);
-    linkDevices(a, parent, 'UPLINK');
-    // Some closets are dual-homed to a second distribution switch: without a few of these the
-    // graph is a pure tree and the secondary-edge rendering is never reached.
-    if (chance(0.08) && dists.length > 1) linkDevices(a, dists[(distIdx + 1) % dists.length], 'UPLINK');
+for (const { bldg, n: count } of quotas) {
+    for (let i = 0; i < count && access.length < accessBudget; i++) {
+        // Virtual Chassis is the norm on access floors, and a multi-member stack is where the
+        // faceplate view does its most fragile work (per-member FPC numbering, master/backup LEDs).
+        const stackSize = chance(0.3) ? int(2, 5) : 1;
+        const stackModel = pick(ACCESS_MODELS);
+        const models = Array.from({ length: stackSize }, () => (stackSize > 1 && chance(0.15) ? pick(ACCESS_MODELS) : stackModel));
+        const parent = nearestWithPort(bldg, distsInZone(bldg.zone.short));
+        if (!parent) throw new Error(`Every distribution frame in ${bldg.zone.name} is full - lower UPLINKS_PER_FRAME (currently ${UPLINKS_PER_FRAME}).`);
+        const a = place(bldg, 'ACC', models, parent.DeviceIP);
+        linkDevices(a, parent, 'UPLINK');
+        // A closet dual-homed for resilience goes to the nearest frame in a NEIGHBOURING zone -
+        // there is no fibre to the far side of campus, and a redundant path back into the same
+        // building it already depends on would not be redundant.
+        if (chance(0.08)) {
+            const neighbours = bldg.zone.adjacent.flatMap(distsInZone);
+            const spare = nearestWithPort(bldg, neighbours);
+            if (spare) linkDevices(a, spare, 'UPLINK');
+        }
+        access.push(a);
+        inBuilding.get(bldg.abbr).push(a);
+    }
 }
 
-const access = accessByDist.flat();
-// A daisy-chained closet switch hanging off another access switch, which is where the
-// primary-tree depth calculation stops being trivial.
-for (const a of shuffled(access).slice(0, Math.floor(access.length * 0.06))) {
-    const leaf = pick(access);
-    if (leaf !== a && !leaf.Neighbors.some(n => n.ManagementIP === a.DeviceIP)) linkDevices(a, leaf, 'DAISY');
+// A closet fed from another closet rather than from the frame - common in an older building,
+// and where the primary-tree depth calculation stops being trivial. Always within one building:
+// this is a patch between floors, not a campus link.
+for (const [, switches] of inBuilding) {
+    if (switches.length < 3) continue;
+    for (const a of shuffled(switches).slice(0, Math.floor(switches.length * 0.2))) {
+        const leaf = pick(switches);
+        if (leaf !== a && !leaf.Neighbors.some(n => n.ManagementIP === a.DeviceIP)) linkDevices(a, leaf, 'DAISY');
+    }
 }
 
 for (const node of [...cores, ...dists, ...access]) topology.push(node);
+
+// linkDevices returns false when either end has run out of uplink cages, and an unlinked switch
+// is invisible in the fixture: it just becomes an orphan node in a row off to one side of the
+// diagram. Silent for one run and easy to mistake for a layout quirk, so it is fatal here.
+function assertNothingOrphaned(fleet) {
+    const orphans = fleet.filter(d => d.Neighbors.length === 0);
+    if (!orphans.length) return;
+    throw new Error(
+        `${orphans.length} device(s) could not be patched to anything (e.g. ${orphans.slice(0, 3).map(d => d.Hostname).join(', ')}).\n` +
+        `  ${access.length} access switches over ${dists.length} frames is ${(access.length / dists.length).toFixed(1)} uplinks each; ` +
+        `lower UPLINKS_PER_FRAME (currently ${UPLINKS_PER_FRAME}).`
+    );
+}
+assertNothingOrphaned(topology);
 
 /* ---------------- endpoints, configuration, failures ---------------- */
 
@@ -474,8 +646,8 @@ for (const node of topology) {
     const extra = [];
     if (node.role !== 'ACC') extra.push(`set protocols rstp bridge-priority ${node.role === 'CORE' ? '4k' : '8k'}`);
     if (chance(0.3)) extra.push('set system services netconf ssh');
-    if (chance(0.2)) extra.push(`set interfaces ${node.Interfaces[0].Port} description "${node.building} patch"`);
-    node.Configuration = configText(node.Hostname, node.site, vlanTags, extra);
+    if (chance(0.2)) extra.push(`set interfaces ${node.Interfaces[0].Port} description "${node.bldg.abbr} patch"`);
+    node.Configuration = configText(node.Hostname, node.zone, node.bldg, vlanTags, extra);
 }
 
 // Serial-keyed so a device that is re-homed or renumbered keeps its map pin, which is how the
@@ -483,15 +655,17 @@ for (const node of topology) {
 for (const node of topology) {
     for (const m of node.StackMembers) {
         if (!m.Serial) continue;
-        const site = node.site;
+        const bldg = node.bldg;
         configDevices.push({
             key: m.Serial, keyType: 'serial',
-            // Jittered around the site so pins in one building do not stack into one dot, and
-            // so clusterThreshold has clusters to form.
-            lat: +(site.lat + (rnd() - 0.5) * 0.004).toFixed(6),
-            lng: +(site.lng + (rnd() - 0.5) * 0.004).toFixed(6),
-            building: node.building, room: `Rm ${int(100, 480)}`,
-            notes: `Synthetic fixture device (seed ${SEED})`,
+            // Jittered by about a building's own footprint, so members of one stack and closets
+            // on different floors do not stack into a single unclickable dot, while every pin
+            // stays on the building it belongs to.
+            lat: +(bldg.lat + (rnd() - 0.5) * 0.0004).toFixed(6),
+            lng: +(bldg.lng + (rnd() - 0.5) * 0.0006).toFixed(6),
+            building: `${bldg.name} (${bldg.abbr})`,
+            room: `${bldg.abbr} ${int(1, 5)}${String(int(1, 40)).padStart(2, '0')}${pick(['', '', 'A', 'B'])}`,
+            notes: `${node.zone.name} - synthetic fixture device (seed ${SEED})`,
         });
     }
 }
@@ -512,7 +686,7 @@ function ageFleet(days) {
     // reboot markers stay empty however many snapshots are loaded.
     for (const node of shuffled(topology).slice(0, int(2, 5))) node.Uptime = iso(daysAgo(rnd() * days));
     for (const node of shuffled(topology).slice(0, Math.max(2, Math.round(topology.length * 0.04)))) {
-        node.Configuration += `\nset system syslog file interactive-commands interactive-commands any\nset snmp trap-group audit targets 10.${node.site.idx}.0.4${days}`;
+        node.Configuration += `\nset system syslog file interactive-commands interactive-commands any\nset snmp trap-group audit targets 10.${node.zone.net}.0.4${days}`;
         node.LastConfigured = iso(daysAgo(rnd() * days));
         node.LastConfiguredBy = pick(CONFIG_USERS);
     }
@@ -528,14 +702,15 @@ function ageFleet(days) {
     const retired = pick(topology.filter(d => d.role === 'ACC'));
     topology.splice(topology.indexOf(retired), 1);
     for (const node of topology) node.Neighbors = node.Neighbors.filter(n => n.ManagementIP !== retired.DeviceIP);
-    const site = SITES[0];
-    const arrival = makeDevice({
-        deviceIp: ip(site, hostCounter), host: hostCounter++, site, building: pick(site.buildings),
-        models: [pick(ACCESS_MODELS)], role: 'ACC', gateway: dists[0].DeviceIP,
-    });
-    arrival.Configuration = configText(arrival.Hostname, site, shuffled(VLANS.map(v => v.tag)).slice(0, 3), []);
-    addClients(arrival, dists[0], shuffled(VLANS.map(v => v.tag)).slice(0, 3));
-    linkDevices(arrival, dists[0], 'UPLINK');
+    // Only a building whose zone still has a spare port can take a new closet - the arrival must
+    // end up patched to something, or the snapshot gains a device that is invisible in the graph.
+    const bldg = pick(ALL_BUILDINGS.filter(b => nearestWithPort(b, distsInZone(b.zone.short))));
+    const parent = nearestWithPort(bldg, distsInZone(bldg.zone.short));
+    const arrival = place(bldg, 'ACC', [pick(ACCESS_MODELS)], parent.DeviceIP);
+    const arrivalVlans = shuffled(VLANS.map(v => v.tag)).slice(0, 3);
+    arrival.Configuration = configText(arrival.Hostname, bldg.zone, bldg, arrivalVlans, []);
+    addClients(arrival, parent, arrivalVlans);
+    linkDevices(arrival, parent, 'UPLINK');
     topology.push(arrival);
 }
 
@@ -554,8 +729,11 @@ function withFailures(fleet, snapshotIndex) {
         const stillUp = fleet.filter(d => d.role === 'ACC' && !failing.has(d.DeviceIP));
         failing.add(stillUp[(snapshotIndex * 97) % stillUp.length].DeviceIP);            // newly down
     }
+    // Dropped before the clone, not after: bldg.zone.buildings points back at bldg, and a
+    // structuredClone/JSON round-trip of a node still carrying those would recurse.
+    const SCRATCH = ['zone', 'bldg', 'role', '_freeUplinks', '_byPort'];
     return fleet.map(node => {
-        const copy = JSON.parse(JSON.stringify(node));
+        const copy = JSON.parse(JSON.stringify(node, (key, value) => (SCRATCH.includes(key) ? undefined : value)));
         if (failing.has(node.DeviceIP)) {
             const status = pick(FAILURE_STATUSES);
             const blank = blankNode(node.DeviceIP);
@@ -564,7 +742,6 @@ function withFailures(fleet, snapshotIndex) {
             blank.Hostname = node.Hostname;
             Object.assign(copy, blank);
         }
-        for (const key of ['site', 'building', 'role', '_freeUplinks', '_byPort']) delete copy[key];
         return copy;
     });
 }
@@ -576,7 +753,7 @@ const written = [];
 for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     // Oldest first, so each snapshot is written from the fleet as the previous one left it.
     const daysBack = SNAPSHOT_COUNT - 1 - i;
-    if (i > 0) ageFleet(daysBack + 1);
+    if (i > 0) { ageFleet(daysBack + 1); assertNothingOrphaned(topology); }
     const scanTime = new Date(SCAN_DATE.getTime() - daysBack * 86400000);
     const stamp = scanTime.toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '');
     // NetworkMap_* so the server and the folder loader pick it up, .fixture.json so a generated
@@ -615,4 +792,7 @@ for (const { mapPath, fleet } of written) {
         `  ${(fs.statSync(mapPath).size / 1048576).toFixed(1)} MiB\n`
     );
 }
-process.stderr.write(`${configPath}\n  ${configDevices.length} placed devices across ${SITES.length} sites, seed ${SEED}\n`);
+process.stderr.write(
+    `${configPath}\n  ${configDevices.length} placed devices in ${ALL_BUILDINGS.length} buildings ` +
+    `across ${CAMPUS.length} campus zones, seed ${SEED}\n`
+);
