@@ -296,7 +296,10 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     const n = extents.length;
     if (n === 0) return { radii: [], angles: [] };
     const naturalMinByOriginalIndex = extents.map(e => minRadius + e);
-    if (n === 1) return { radii: naturalMinByOriginalIndex, angles: computeChildAngles(naturalMinByOriginalIndex) };
+    if (n === 1) {
+      const soleAngle = computeChildAngles(naturalMinByOriginalIndex);
+      return { radii: [minRadius + reachToward(kids[0], soleAngle[0] + Math.PI)], angles: soleAngle };
+    }
 
     // Everything below runs in spreadBySize's POSITION order, mapped back before return.
     const posOf = spreadBySize(extents);
@@ -309,7 +312,14 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     const naturalMin = orderedExtents.map(e => minRadius + e);
     const angles = computeChildAngles(naturalMin);
 
-    const radii = naturalMin.slice();
+    // The floor only has to keep a child's descendants off the PARENT, so it charges for the
+    // reach back along the child's own spoke, not for extent's omnidirectional worst case.
+    // Angles still come from extent (a child's total size is what earns it angular room);
+    // sibling clearance is the pair sweep's job below, and it measures directionally too.
+    // Paying the omnidirectional price here compounded: each level's radius covered the whole
+    // subtree beneath it, so radii roughly doubled per level and a 6-deep tree spent 32x the
+    // space it needed.
+    const radii = orderedKids.map((k, i) => minRadius + reachToward(k, angles[i] + Math.PI));
 
     // Leaf/leaf pairs have reachToward == 0, so requiredDist collapses to plain `spacing`
     // and the vector math can be skipped. They dominate on real networks: without this fast

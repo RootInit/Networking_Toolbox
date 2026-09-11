@@ -639,3 +639,48 @@ test('computeRecursiveRadialLayout places equal-extent leaves in childrenOf orde
   norm.forEach((a, i) => assert.ok(Math.abs(a - (2 * Math.PI * i) / 8) < 1e-9, `child ${i} at ${a}`));
 });
 
+
+test('a deep chain does not compound its radius per level: the parent link is charged for the reach back toward the parent, not the subtree\'s omnidirectional size', () => {
+  // root -> c1 -> c2 -> c3 -> c4, each cN also carrying 5 leaves. Charging each parent link
+  // for extent() - the worst case in ANY direction - made every level's radius cover the
+  // whole subtree beneath it, so radii roughly doubled per level and a 6-deep campus needed
+  // ~32x the space. The subtree only ever reaches back toward its parent along one spoke.
+  const SPACING = 250;
+  const childrenOf = new Map();
+  const chain = ['root', 'c1', 'c2', 'c3', 'c4'];
+  chain.forEach((id, i) => {
+    const kids = Array.from({ length: 5 }, (_, k) => `${id}_leaf${k}`);
+    if (i + 1 < chain.length) kids.unshift(chain[i + 1]);
+    childrenOf.set(id, kids);
+  });
+
+  const result = computeRecursiveRadialLayout('root', childrenOf, {
+    nodeSpacing: SPACING, leafSpacing: SPACING, minRadius: SPACING,
+  });
+
+  const rootPos = result.get('root');
+  const radiusOf = (id) => Math.hypot(result.get(id).x - rootPos.x, result.get(id).y - rootPos.y);
+
+  // Per-level doubling puts c1 beyond 4000 for this shape; the directional floor keeps every
+  // level's step bounded by what actually points back at the parent.
+  assert.ok(radiusOf('c1') < 2500, `c1 sat at ${radiusOf('c1').toFixed(0)} - the chain is compounding again`);
+
+  // Steps must not grow going up the chain, which is the signature of the old behaviour.
+  const steps = [];
+  for (let i = 0; i + 1 < chain.length; i++) {
+    const a = result.get(chain[i]), b = result.get(chain[i + 1]);
+    steps.push(Math.hypot(a.x - b.x, a.y - b.y));
+  }
+  for (let i = 1; i < steps.length; i++) {
+    assert.ok(steps[i - 1] <= steps[i] * 1.5 + 1,
+      `step ${i - 1} (${steps[i - 1].toFixed(0)}) dwarfs step ${i} (${steps[i].toFixed(0)})`);
+  }
+
+  // The test must not be satisfiable by simply collapsing everything together.
+  const all = [...result.values()];
+  let minD = Infinity;
+  for (let i = 0; i < all.length; i++) for (let j = i + 1; j < all.length; j++) {
+    minD = Math.min(minD, Math.hypot(all[i].x - all[j].x, all[i].y - all[j].y));
+  }
+  assert.ok(minD >= SPACING - 0.01, `two nodes ended up ${minD.toFixed(1)} apart, closer than the ${SPACING} spacing`);
+});
