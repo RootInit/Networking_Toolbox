@@ -1,24 +1,20 @@
-# Real device-location data - only Configuration.example.json (placeholder template) is
-# tracked. Written by /api/save-config (Start-WebServer.ps1). Configuration.json is the
-# -NoEncryption-mode plaintext equivalent - same sensitivity, ignored for the same reason.
+# Real device-location data. Written by /api/save-config (Start-WebServer.ps1).
+# Configuration.json is the -NoEncryption-mode plaintext equivalent - same sensitivity,
+# ignored for the same reason.
 PS_NetworkMapper/Configuration.json.enc
 PS_NetworkMapper/Configuration.json
 
-# Scraper output - contains real internal topology/IP data, not fixtures. Every real crawl
-# writes into the Network_Maps/ folder (see Start-NetworkMapper.ps1's $SnapshotDir), named
-# NetworkMap_<timestamp>.json(.enc) or ...tmp... while a write is in progress. The two
-# shipped sample snapshots happen to follow that same naming convention on purpose (so
-# "Load Folder of Snapshots" can load them together to demo the multi-snapshot/diff
-# features) - the explicit `!` exceptions below are the only tracked files matching the
-# pattern; any OTHER NetworkMap_*.json(.enc) is real crawl output and stays ignored.
+# Scraper output - contains real internal topology/IP data. Every real crawl writes into the
+# Network_Maps/ folder (see Start-NetworkMapper.ps1's $SnapshotDir), named
+# NetworkMap_<timestamp>.json(.enc), or ...tmp... while a write is in progress. Nothing
+# matching this pattern is tracked: a demo fleet comes from web-src/tools/generate-fixture.mjs
+# rather than from checked-in snapshots.
 PS_NetworkMapper/Network_Maps/NetworkMap_*.json
 PS_NetworkMapper/Network_Maps/NetworkMap_*.json.enc
-!PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-13_091500.json
-!PS_NetworkMapper/Network_Maps/NetworkMap_2026-08-20_143207.json
 
-# web-src/tools/generate-fixture.mjs writes its synthetic maps as NetworkMap_*.fixture.json
-# (already ignored by the rule above) alongside the device placements they need. Generated
-# output, regenerable from --seed, and never the real Configuration.json.
+# generate-fixture.mjs writes its synthetic maps as NetworkMap_*.fixture.json (already ignored
+# by the rule above) alongside the device placements they need. Generated output, regenerable
+# from --seed, and never the real Configuration.json.
 PS_NetworkMapper/**/Configuration.fixture.json
 
 PS_NetworkMapper/Mapper_Debug.log
