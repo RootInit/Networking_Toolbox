@@ -617,6 +617,9 @@
            label matters: on a dense map it, not the 22px circle, carries the visual signal,
            so fading only the circle made the filter look barely applied. */
         .map-marker-label.vlan-dimmed { color: #bbbbbb; background: rgba(255,255,255,0.6); }
+        /* Set by map.js below its zoom threshold. A permanent tooltip per marker buries a
+           campus-sized fleet under its own labels at the zoom the initial fit lands on. */
+        .hide-marker-labels .map-marker-label { display: none; }
     </style>
 </head>
 <body>

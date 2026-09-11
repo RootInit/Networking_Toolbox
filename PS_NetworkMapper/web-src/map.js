@@ -76,6 +76,7 @@ window.switchCenterView = function(view) {
 
 window.initMapView = async function() {
     leafletMap = L.map('mapview', { zoomControl: true }).setView([0, 0], 2);
+    leafletMap.on('zoomend', applyLabelVisibility);
     // Keyless standard OSM tiles - CARTO's free tier now requires registration and watermarks
     // otherwise. No {r} retina placeholder: the OSM tile server doesn't serve @2x tiles.
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
@@ -265,6 +266,23 @@ function iconForClassification(meta, dimmedByVlan, selected) {
         ';background:' + colors.background + ';border:2px solid ' + colors.border +
         ';box-shadow:0 1px 3px rgba(0,0,0,0.4);box-sizing:border-box;"></div>';
     return L.divIcon({ className: '', html: html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
+}
+
+// Hostname labels are permanent tooltips, so on a campus-sized fleet the whole map is covered
+// in text at the zoom the initial fit lands on. Below this they are hidden and the markers
+// alone carry position; a device is still identified by clicking it.
+var LABEL_MIN_ZOOM = 17;
+// Below this many placed devices there is nothing to declutter - a handful of markers never
+// overlap - and hiding their names would only make the map less useful.
+var LABEL_ALWAYS_BELOW = 20;
+
+// Toggles one class on the map container rather than opening and closing each tooltip:
+// hundreds of Leaflet tooltip layers cannot be rebound fast enough to keep up with a pinch,
+// and the browser hides them in CSS for free.
+function applyLabelVisibility() {
+    if (!leafletMap) return;
+    var hide = mapMarkersByIp.size >= LABEL_ALWAYS_BELOW && leafletMap.getZoom() < LABEL_MIN_ZOOM;
+    leafletMap.getContainer().classList.toggle('hide-marker-labels', hide);
 }
 
 // Defers rather than fitting against the 0x0 Leaflet reads from a hidden container;
@@ -474,6 +492,9 @@ window.renderMapMarkers = function() {
     window.mapEdgeLayer = L.layerGroup(lines).addTo(leafletMap);
 
     maybeFitBoundsToMarkers();
+    // After the markers exist and after any fit, since both the zoom and the marker count
+    // decide this and a re-render can change either.
+    applyLabelVisibility();
 
     window.renderUnplacedDevicesList(classification, deviceByIpLocal, placedByIp);
 };

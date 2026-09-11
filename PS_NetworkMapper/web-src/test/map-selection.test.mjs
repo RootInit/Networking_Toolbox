@@ -136,3 +136,31 @@ test('a focused port does not draw the UA focus ring over the panel art', () => 
   assert.match(indexSrc, /svg\.chassis-svg \.port-el:focus \{ outline: none; \}/);
   assert.match(indexSrc, /\.port-el:focus-visible \.port-body[^\n]*stroke-width: \.7;/);
 });
+
+/* ---- marker labels ----
+   Hostname labels are permanent Leaflet tooltips, so on a campus-sized fleet they bury the map
+   at the zoom the initial fit lands on. They are gated by a class on the map container, which
+   is the only part of this that can be checked without a browser. */
+
+test('marker labels are hidden below a zoom threshold', () => {
+  assert.match(src, /var LABEL_MIN_ZOOM = \d+;/);
+  const fn = src.match(/function applyLabelVisibility\(\)[\s\S]*?\n\}/)[0];
+  assert.match(fn, /getZoom\(\) < LABEL_MIN_ZOOM/);
+  assert.match(fn, /classList\.toggle\('hide-marker-labels'/);
+  // Without the CSS rule the class is inert, and the JS alone would look correct.
+  assert.match(indexSrc, /\.hide-marker-labels \.map-marker-label \{ display: none; \}/);
+});
+
+test('label visibility is re-evaluated on zoom and after a re-render', () => {
+  assert.match(src, /leafletMap\.on\('zoomend', applyLabelVisibility\)/);
+  // Both the zoom and the marker count decide it, and fitBounds runs inside renderMapMarkers.
+  const render = src.match(/window\.renderMapMarkers = function[\s\S]*?\n\};/)[0];
+  assert.match(render, /applyLabelVisibility\(\)/);
+});
+
+test('a handful of markers keep their labels at every zoom', () => {
+  // The problem is density, not zoom: a few markers never overlap, so hiding their names
+  // would only make the map less useful.
+  assert.match(src, /var LABEL_ALWAYS_BELOW = \d+;/);
+  assert.match(src, /mapMarkersByIp\.size >= LABEL_ALWAYS_BELOW/);
+});
