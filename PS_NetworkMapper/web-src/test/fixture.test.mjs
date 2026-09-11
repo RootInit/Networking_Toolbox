@@ -401,3 +401,78 @@ test('a different seed produces a different map', () => {
 });
 
 test.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
+
+/* ---- pins land indoors ----
+   A pin is only useful if it is on the building it names. The generator places closets on rings
+   inside each building's footprint, sized from the OpenStreetMap polygon, rather than jittering
+   them around an approximate centre - jitter wide enough to separate two closets also threw
+   pins onto the lawn. These read the declared footprints back out of the generator source, so a
+   coordinate edited without its radius is caught. */
+
+const CAMPUS_ROWS = new Map([...fs.readFileSync(GENERATOR, 'utf8')
+    .matchAll(/\{ abbr: '([^']+)', name: '[^']+', lat: ([\d.]+), lng: (-[\d.]+), r: (\d+), closets: \d+/g)]
+    .map(m => [m[1], { lat: +m[2], lng: +m[3], r: +m[4] }]));
+
+test('the campus table declares a footprint radius for every building', () => {
+    assert.equal(CAMPUS_ROWS.size, 48, 'the regex above must keep matching the table');
+    for (const [abbr, b] of CAMPUS_ROWS) {
+        assert.ok(b.r >= 5 && b.r <= 25, `${abbr} has an implausible footprint radius of ${b.r} m`);
+    }
+});
+
+test('every pin is inside the footprint of the building it names', () => {
+    // The rack ring nudges stack members off their closet's spot by up to 1.2 m.
+    const RACK_ALLOWANCE = 1.3;
+    for (const placed of fixture.config.devices) {
+        const abbr = placed.building.match(/\(([A-Z]+)\)$/)[1];
+        const b = CAMPUS_ROWS.get(abbr);
+        assert.ok(b, `${placed.building} is not in the campus table`);
+        const d = metres(placed, b);
+        assert.ok(d <= b.r + RACK_ALLOWANCE,
+            `${placed.key} is ${d.toFixed(1)} m from ${abbr}'s interior point, outside its ${b.r} m footprint`);
+    }
+});
+
+test('no two devices share a pin', () => {
+    const pins = fixture.config.devices;
+    let closest = Infinity, pair = null;
+    for (let i = 0; i < pins.length; i++) {
+        for (let j = i + 1; j < pins.length; j++) {
+            const d = metres(pins[i], pins[j]);
+            if (d < closest) { closest = d; pair = [pins[i].key, pins[j].key]; }
+        }
+    }
+    // Two members of one virtual chassis are the closest legitimate pair, about a metre apart.
+    assert.ok(closest > 0.3, `${pair && pair.join(' and ')} are ${closest.toFixed(2)} m apart - effectively one dot`);
+});
+
+test("a building's distribution frame sits at its interior point, with the closets around it", () => {
+    // The main frame is the one piece of kit whose location in a building is not arbitrary.
+    const byBuilding = new Map();
+    for (const placed of fixture.config.devices) {
+        const abbr = placed.building.match(/\(([A-Z]+)\)$/)[1];
+        if (!byBuilding.has(abbr)) byBuilding.set(abbr, []);
+        byBuilding.get(abbr).push(placed);
+    }
+    let checked = 0;
+    for (const [abbr, pins] of byBuilding) {
+        // The room suffix 'A' is how the generator marks a frame rather than a closet.
+        const frames = pins.filter(p => /A$/.test(p.room));
+        if (!frames.length || pins.length < 3) continue;
+        const b = CAMPUS_ROWS.get(abbr);
+        const closets = pins.filter(p => !/A$/.test(p.room));
+        const nearestFrame = Math.min(...frames.map(p => metres(p, b)));
+        const medianCloset = closets.map(p => metres(p, b)).sort((x, y) => x - y)[Math.floor(closets.length / 2)];
+        assert.ok(nearestFrame <= medianCloset,
+            `${abbr}: the frame is ${nearestFrame.toFixed(1)} m out but the typical closet only ${medianCloset.toFixed(1)} m`);
+        checked++;
+    }
+    assert.ok(checked >= 5, `only ${checked} buildings had both a frame and closets to compare`);
+});
+
+test('the default fleet size is the documented one', () => {
+    const src = fs.readFileSync(GENERATOR, 'utf8');
+    const dflt = src.match(/flag\('devices', '(\d+)'\)/)[1];
+    assert.equal(dflt, '350');
+    assert.match(src, new RegExp(`# ${dflt} devices ->`), 'the usage comment must match the default');
+});

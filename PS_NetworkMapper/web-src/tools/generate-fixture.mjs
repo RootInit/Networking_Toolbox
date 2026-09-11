@@ -1,7 +1,7 @@
 // Generates a synthetic but structurally realistic topology snapshot for testing the
 // visualizer at fleet scale, plus a matching Configuration file so the geographic Map and the
 // dashboard thresholds have something to show. Not part of the app - run manually:
-//   node tools/generate-fixture.mjs                       # 500 devices -> ../Network_Maps/
+//   node tools/generate-fixture.mjs                       # 350 devices -> ../Network_Maps/
 //   node tools/generate-fixture.mjs --devices 1500 --seed 7 --out /tmp/maps
 //   node tools/generate-fixture.mjs --snapshots 6         # six daily crawls of one fleet
 //   node tools/generate-fixture.mjs --now                 # stamp it as a scan that just ran
@@ -26,7 +26,7 @@ const flag = (name, fallback) => {
     const i = argv.indexOf('--' + name);
     return i === -1 ? fallback : argv[i + 1];
 };
-const DEVICE_COUNT = Math.max(4, parseInt(flag('devices', '500'), 10));
+const DEVICE_COUNT = Math.max(4, parseInt(flag('devices', '350'), 10));
 const SEED = parseInt(flag('seed', '1'), 10);
 // Successive daily crawls of the same fleet. The dashboard's Trends, Topology Diff, New Devices
 // and Config Changed tabs all read differences between snapshots and stay empty with only one.
@@ -129,83 +129,89 @@ const ACCESS_MODELS = [
 const MODULAR_MODEL = 'EX9200-32XS';
 
 // University of Washington, Seattle campus, in the five zones the university itself uses.
-// Coordinates are approximate building positions (good to roughly a building's own width) -
-// enough for pin placement, clustering and distance comparisons, not a survey. `closets` is how
-// many wiring closets a building rates, which is what makes a medical centre carry more
-// switches than a residence hall. `hub` marks the building whose main distribution frame feeds
-// the zone.
+//
+// lat/lng is each building's pole of inaccessibility - the interior point furthest from any
+// exterior wall - taken from its OpenStreetMap footprint, and `r` is how far a closet may sit
+// from it and still be indoors. A plain centroid is not good enough: many of these are L- or
+// U-shaped and their centroid falls in a courtyard or on the lawn. Madrona and Willow Hall are
+// real North Campus halls that OSM does not carry, so two neighbouring halls it does carry
+// stand in for them; every name here resolves to a footprint you can see on the tiles.
+//
+// `closets` is how many wiring closets a building rates, which is what makes a medical centre
+// carry more switches than a residence hall. `hub` marks the building whose main distribution
+// frame feeds the zone.
 const CAMPUS = [
     {
         name: 'West Campus', short: 'WEST', net: 20, adjacent: ['CENTRAL', 'NORTH'],
         buildings: [
-            { abbr: 'UWT', name: 'UW Tower', lat: 47.6609, lng: -122.3145, closets: 8, hub: true },
-            { abbr: 'CDH', name: 'Condon Hall', lat: 47.6570, lng: -122.3172, closets: 3 },
-            { abbr: 'FSH', name: 'Fishery Sciences Building', lat: 47.6531, lng: -122.3160, closets: 3 },
-            { abbr: 'ELM', name: 'Elm Hall', lat: 47.6562, lng: -122.3167, closets: 2 },
-            { abbr: 'ALD', name: 'Alder Hall', lat: 47.6545, lng: -122.3163, closets: 2 },
-            { abbr: 'LAN', name: 'Lander Hall', lat: 47.6558, lng: -122.3153, closets: 2 },
-            { abbr: 'TRY', name: 'Terry Hall', lat: 47.6562, lng: -122.3146, closets: 2 },
+            { abbr: 'UWT', name: 'UW Tower', lat: 47.660741, lng: -122.314667, r: 9, closets: 8, hub: true },
+            { abbr: 'CDH', name: 'Condon Hall', lat: 47.656621, lng: -122.316231, r: 11, closets: 3 },
+            { abbr: 'FSH', name: 'Fishery Sciences Building', lat: 47.653293, lng: -122.316354, r: 11, closets: 3 },
+            { abbr: 'ELM', name: 'Elm Hall', lat: 47.656491, lng: -122.315255, r: 9, closets: 2 },
+            { abbr: 'ALD', name: 'Alder Hall', lat: 47.655669, lng: -122.313853, r: 14, closets: 2 },
+            { abbr: 'LAN', name: 'Lander Hall', lat: 47.6558, lng: -122.314693, r: 6, closets: 2 },
+            { abbr: 'TRY', name: 'Terry Hall', lat: 47.655815, lng: -122.317064, r: 8, closets: 2 },
         ],
     },
     {
         name: 'Central Campus', short: 'CENTRAL', net: 30, adjacent: ['WEST', 'NORTH', 'SOUTH', 'EAST'],
         buildings: [
-            { abbr: 'CMU', name: 'Communications Building', lat: 47.6570, lng: -122.3052, closets: 6, hub: true },
-            { abbr: 'SUZ', name: 'Suzzallo Library', lat: 47.6557, lng: -122.3080, closets: 5 },
-            { abbr: 'ALB', name: 'Allen Library', lat: 47.6552, lng: -122.3075, closets: 4 },
-            { abbr: 'ODE', name: 'Odegaard Undergraduate Library', lat: 47.6566, lng: -122.3107, closets: 4 },
-            { abbr: 'KNE', name: 'Kane Hall', lat: 47.6566, lng: -122.3092, closets: 3 },
-            { abbr: 'MGH', name: 'Mary Gates Hall', lat: 47.6547, lng: -122.3079, closets: 4 },
-            { abbr: 'GRB', name: 'Gerberding Hall', lat: 47.6553, lng: -122.3092, closets: 2 },
-            { abbr: 'SAV', name: 'Savery Hall', lat: 47.6570, lng: -122.3079, closets: 3 },
-            { abbr: 'SMI', name: 'Smith Hall', lat: 47.6573, lng: -122.3072, closets: 2 },
-            { abbr: 'MLR', name: 'Miller Hall', lat: 47.6577, lng: -122.3068, closets: 2 },
-            { abbr: 'DEN', name: 'Denny Hall', lat: 47.6585, lng: -122.3092, closets: 2 },
-            { abbr: 'BAG', name: 'Bagley Hall', lat: 47.6540, lng: -122.3090, closets: 3 },
-            { abbr: 'JHN', name: 'Johnson Hall', lat: 47.6550, lng: -122.3096, closets: 2 },
-            { abbr: 'PAA', name: 'Physics/Astronomy Building', lat: 47.6535, lng: -122.3110, closets: 3 },
-            { abbr: 'HUB', name: 'Husky Union Building', lat: 47.6553, lng: -122.3050, closets: 4 },
-            { abbr: 'MEA', name: 'Meany Hall', lat: 47.6563, lng: -122.3116, closets: 2 },
-            { abbr: 'CSE', name: 'Paul G. Allen Center', lat: 47.6531, lng: -122.3057, closets: 5 },
-            { abbr: 'EEB', name: 'Electrical & Computer Engineering', lat: 47.6537, lng: -122.3050, closets: 3 },
-            { abbr: 'GUG', name: 'Guggenheim Hall', lat: 47.6540, lng: -122.3057, closets: 2 },
-            { abbr: 'MOR', name: 'More Hall', lat: 47.6535, lng: -122.3050, closets: 2 },
-            { abbr: 'SIG', name: 'Sieg Hall', lat: 47.6540, lng: -122.3062, closets: 2 },
+            { abbr: 'CMU', name: 'Communications Building', lat: 47.657156, lng: -122.305138, r: 7, closets: 6, hub: true },
+            { abbr: 'SUZ', name: 'Suzzallo Library', lat: 47.655802, lng: -122.308276, r: 19, closets: 5 },
+            { abbr: 'ALB', name: 'Allen Library', lat: 47.655661, lng: -122.307136, r: 12, closets: 4 },
+            { abbr: 'ODE', name: 'Odegaard Undergraduate Library', lat: 47.656443, lng: -122.310416, r: 18, closets: 4 },
+            { abbr: 'KNE', name: 'Kane Hall', lat: 47.656612, lng: -122.309161, r: 17, closets: 3 },
+            { abbr: 'MGH', name: 'Mary Gates Hall', lat: 47.654864, lng: -122.307797, r: 15, closets: 4 },
+            { abbr: 'GRB', name: 'Gerberding Hall', lat: 47.655301, lng: -122.309335, r: 9, closets: 2 },
+            { abbr: 'SAV', name: 'Savery Hall', lat: 47.657398, lng: -122.308028, r: 7, closets: 3 },
+            { abbr: 'SMI', name: 'Smith Hall', lat: 47.656786, lng: -122.306945, r: 7, closets: 2 },
+            { abbr: 'MLR', name: 'Miller Hall', lat: 47.657291, lng: -122.30619, r: 6, closets: 2 },
+            { abbr: 'DEN', name: 'Denny Hall', lat: 47.658385, lng: -122.308862, r: 8, closets: 2 },
+            { abbr: 'BAG', name: 'Bagley Hall', lat: 47.653479, lng: -122.308859, r: 16, closets: 3 },
+            { abbr: 'JHN', name: 'Johnson Hall', lat: 47.654762, lng: -122.309007, r: 7, closets: 2 },
+            { abbr: 'PAA', name: 'Physics/Astronomy Building', lat: 47.65361, lng: -122.311012, r: 7, closets: 3 },
+            { abbr: 'HUB', name: 'Husky Union Building', lat: 47.6553, lng: -122.30512, r: 19, closets: 4 },
+            { abbr: 'MEA', name: 'Meany Hall', lat: 47.655693, lng: -122.310611, r: 15, closets: 2 },
+            { abbr: 'CSE', name: 'Paul G. Allen Center', lat: 47.653221, lng: -122.305774, r: 12, closets: 5 },
+            { abbr: 'EEB', name: 'Electrical & Computer Engineering', lat: 47.653602, lng: -122.306195, r: 9, closets: 3 },
+            { abbr: 'GUG', name: 'Guggenheim Hall', lat: 47.654265, lng: -122.306322, r: 10, closets: 2 },
+            { abbr: 'MOR', name: 'More Hall', lat: 47.652319, lng: -122.304555, r: 9, closets: 2 },
+            { abbr: 'SIG', name: 'Sieg Hall', lat: 47.654876, lng: -122.306542, r: 6, closets: 2 },
         ],
     },
     {
         name: 'South Campus', short: 'SOUTH', net: 40, adjacent: ['CENTRAL', 'EAST'],
         buildings: [
-            { abbr: 'HSB', name: 'Health Sciences Building', lat: 47.6510, lng: -122.3082, closets: 10, hub: true },
-            { abbr: 'UWMC', name: 'UW Medical Center', lat: 47.6497, lng: -122.3072, closets: 9 },
-            { abbr: 'FOE', name: 'William H. Foege Building', lat: 47.6521, lng: -122.3130, closets: 4 },
-            { abbr: 'HIT', name: 'Hitchcock Hall', lat: 47.6528, lng: -122.3112, closets: 2 },
-            { abbr: 'OSB', name: 'Ocean Sciences Building', lat: 47.6497, lng: -122.3122, closets: 2 },
-            { abbr: 'MSB', name: 'Marine Sciences Building', lat: 47.6494, lng: -122.3116, closets: 2 },
-            { abbr: 'SOCC', name: 'South Campus Center', lat: 47.6503, lng: -122.3100, closets: 2 },
+            { abbr: 'HSB', name: 'Health Sciences Building', lat: 47.650778, lng: -122.309282, r: 20, closets: 10, hub: true },
+            { abbr: 'UWMC', name: 'UW Medical Center', lat: 47.649062, lng: -122.307241, r: 22, closets: 9 },
+            { abbr: 'FOE', name: 'William H. Foege Building', lat: 47.651865, lng: -122.313238, r: 10, closets: 4 },
+            { abbr: 'HIT', name: 'Hitchcock Hall', lat: 47.651919, lng: -122.311521, r: 10, closets: 2 },
+            { abbr: 'OSB', name: 'Ocean Sciences Building', lat: 47.651258, lng: -122.312714, r: 12, closets: 2 },
+            { abbr: 'MSB', name: 'Marine Sciences Building', lat: 47.649886, lng: -122.312902, r: 7, closets: 2 },
+            { abbr: 'SOCC', name: 'South Campus Center', lat: 47.649513, lng: -122.310909, r: 12, closets: 2 },
         ],
     },
     {
         name: 'North Campus', short: 'NORTH', net: 50, adjacent: ['CENTRAL', 'WEST'],
         buildings: [
-            { abbr: 'MCM', name: 'McMahon Hall', lat: 47.6602, lng: -122.3040, closets: 5, hub: true },
-            { abbr: 'HGG', name: 'Haggett Hall', lat: 47.6606, lng: -122.3050, closets: 3 },
-            { abbr: 'MCC', name: 'McCarty Hall', lat: 47.6616, lng: -122.3041, closets: 3 },
-            { abbr: 'MDR', name: 'Madrona Hall', lat: 47.6611, lng: -122.3053, closets: 2 },
-            { abbr: 'WIL', name: 'Willow Hall', lat: 47.6613, lng: -122.3060, closets: 2 },
-            { abbr: 'OAK', name: 'Oak Hall', lat: 47.6600, lng: -122.3061, closets: 2 },
-            { abbr: 'HNS', name: 'Hansee Hall', lat: 47.6600, lng: -122.3096, closets: 2 },
-            { abbr: 'PDL', name: 'Padelford Hall', lat: 47.6570, lng: -122.3038, closets: 4 },
+            { abbr: 'MCM', name: 'McMahon Hall', lat: 47.658223, lng: -122.303631, r: 16, closets: 5, hub: true },
+            { abbr: 'HGG', name: 'Haggett Hall', lat: 47.65929, lng: -122.30365, r: 10, closets: 3 },
+            { abbr: 'MCC', name: 'McCarty Hall', lat: 47.660527, lng: -122.304696, r: 6, closets: 3 },
+            { abbr: 'MDR', name: 'Oliver Hall', lat: 47.660003, lng: -122.304191, r: 15, closets: 2 },
+            { abbr: 'WIL', name: 'Spratlen Hall', lat: 47.660174, lng: -122.305491, r: 8, closets: 2 },
+            { abbr: 'OAK', name: 'Oak Hall', lat: 47.659269, lng: -122.306053, r: 7, closets: 2 },
+            { abbr: 'HNS', name: 'Hansee Hall', lat: 47.660834, lng: -122.306763, r: 6, closets: 2 },
+            { abbr: 'PDL', name: 'Padelford Hall', lat: 47.656964, lng: -122.30429, r: 6, closets: 4 },
         ],
     },
     {
         name: 'East Campus', short: 'EAST', net: 60, adjacent: ['CENTRAL', 'SOUTH'],
         buildings: [
-            { abbr: 'IMA', name: 'Intramural Activities Building', lat: 47.6535, lng: -122.3006, closets: 4, hub: true },
-            { abbr: 'HEC', name: 'Alaska Airlines Arena at Hec Edmundson Pavilion', lat: 47.6520, lng: -122.3013, closets: 3 },
-            { abbr: 'HSTD', name: 'Husky Stadium', lat: 47.6503, lng: -122.3016, closets: 4 },
-            { abbr: 'DEM', name: 'Dempsey Indoor Center', lat: 47.6520, lng: -122.2995, closets: 2 },
-            { abbr: 'CSH', name: 'Conibear Shellhouse', lat: 47.6532, lng: -122.2992, closets: 2 },
+            { abbr: 'IMA', name: 'Intramural Activities Building', lat: 47.653546, lng: -122.30113, r: 22, closets: 4, hub: true },
+            { abbr: 'HEC', name: 'Alaska Airlines Arena at Hec Edmundson Pavilion', lat: 47.652052, lng: -122.302307, r: 22, closets: 3 },
+            { abbr: 'HSTD', name: 'Husky Stadium', lat: 47.65037, lng: -122.30184, r: 10, closets: 4 },
+            { abbr: 'DEM', name: 'Dempsey Indoor Center', lat: 47.651495, lng: -122.299326, r: 21, closets: 2 },
+            { abbr: 'CSH', name: 'Conibear Shellhouse', lat: 47.652952, lng: -122.29972, r: 10, closets: 2 },
         ],
     },
 ];
@@ -650,24 +656,88 @@ for (const node of topology) {
     node.Configuration = configText(node.Hostname, node.zone, node.bldg, vlanTags, extra);
 }
 
+/* ---------------- map placement ---------------- */
+
+const M_PER_DEG_LAT = 111320;
+const mPerDegLng = (lat) => M_PER_DEG_LAT * Math.cos(lat * Math.PI / 180);
+// Metres east/north of a building's interior point, back to a coordinate.
+const offsetBy = (bldg, east, north) => ({
+    lat: +(bldg.lat + north / M_PER_DEG_LAT).toFixed(6),
+    lng: +(bldg.lng + east / mPerDegLng(bldg.lat)).toFixed(6),
+});
+
+// Concentric rings at `step` metres, centre outwards, or null when `count` of them will not fit
+// inside `limit`. Ring gap is `step` and the in-ring chord is held at or above it, so `step` is
+// the minimum distance between any two spots.
+function ringSpots(limit, step, count) {
+    const spots = [{ east: 0, north: 0 }];
+    for (let ring = 1; spots.length < count; ring++) {
+        const radius = ring * step;
+        if (radius > limit) return null;
+        const capacity = Math.max(1, Math.floor(Math.PI / Math.asin(Math.min(1, step / (2 * radius)))));
+        for (let i = 0; i < capacity && spots.length < count; i++) {
+            // Half-step rotation on alternate rings, so pins do not line up into spokes.
+            const angle = (2 * Math.PI * i) / capacity + (ring % 2) * Math.PI / capacity;
+            spots.push({ east: radius * Math.cos(angle), north: radius * Math.sin(angle) });
+        }
+    }
+    return spots;
+}
+
+// Closets are dealt around their building on rings inside its footprint rather than scattered
+// randomly: jitter wide enough to separate them also threw pins onto the lawn, and could still
+// drop two on one spot. The centre is the building's interior point, where its main frame
+// belongs. Deterministic, so the same fleet always draws the same map.
+function closetSpots(bldg, count) {
+    // The widest spacing that still fits every closet indoors: a quiet building spreads its
+    // pins out, a crowded one packs tighter rather than spilling outside the walls.
+    let step = Math.max(4, bldg.r / 2);
+    for (let attempt = 0; attempt < 60; attempt++) {
+        const spots = ringSpots(bldg.r, step, count);
+        if (spots) return { spots, step };
+        step *= 0.85;
+    }
+    // Unreachable for any plausible fleet - 60 reductions is a spacing of millimetres - but a
+    // null here would be a crash rather than a crowded building.
+    return { spots: ringSpots(bldg.r, bldg.r / 1e4, count) || [{ east: 0, north: 0 }], step: bldg.r / 1e4 };
+}
+
+// The frame is the building's main distribution frame, so it takes the interior point and the
+// closets ring around it.
+const placementRank = (node) => (node.role === 'ACC' ? 1 : 0);
+const pinnedByBuilding = new Map();
+for (const node of topology) {
+    if (!pinnedByBuilding.has(node.bldg)) pinnedByBuilding.set(node.bldg, []);
+    pinnedByBuilding.get(node.bldg).push(node);
+}
+
 // Serial-keyed so a device that is re-homed or renumbered keeps its map pin, which is how the
 // real Configuration.json is keyed.
-for (const node of topology) {
-    for (const m of node.StackMembers) {
-        if (!m.Serial) continue;
-        const bldg = node.bldg;
-        configDevices.push({
-            key: m.Serial, keyType: 'serial',
-            // Jittered by about a building's own footprint, so members of one stack and closets
-            // on different floors do not stack into a single unclickable dot, while every pin
-            // stays on the building it belongs to.
-            lat: +(bldg.lat + (rnd() - 0.5) * 0.0004).toFixed(6),
-            lng: +(bldg.lng + (rnd() - 0.5) * 0.0006).toFixed(6),
-            building: `${bldg.name} (${bldg.abbr})`,
-            room: `${bldg.abbr} ${int(1, 5)}${String(int(1, 40)).padStart(2, '0')}${pick(['', '', 'A', 'B'])}`,
-            notes: `${node.zone.name} - synthetic fixture device (seed ${SEED})`,
+for (const [bldg, nodes] of pinnedByBuilding) {
+    const ordered = nodes.slice().sort((a, b) => placementRank(a) - placementRank(b)
+        || String(a.DeviceIP).localeCompare(String(b.DeviceIP)));
+    const { spots, step } = closetSpots(bldg, ordered.length);
+    // Stack members share a rack, so they share a closet - ringed slightly apart so they are
+    // separate pins rather than one unclickable dot. A fraction of the closet spacing, not a
+    // radius that grows with the member index: a widening spread walks the far members of a
+    // long virtual chassis off their own closet and onto the next one.
+    const rackRadius = Math.min(1.2, step / 3);
+    ordered.forEach((node, slot) => {
+        const spot = spots[slot];
+        const floor = 1 + (slot % 5);
+        node.StackMembers.forEach((m, memberIndex) => {
+            if (!m.Serial) return;
+            const angle = (2 * Math.PI * memberIndex) / Math.max(1, node.StackMembers.length);
+            const at = offsetBy(bldg, spot.east + rackRadius * Math.cos(angle), spot.north + rackRadius * Math.sin(angle));
+            configDevices.push({
+                key: m.Serial, keyType: 'serial',
+                lat: at.lat, lng: at.lng,
+                building: `${bldg.name} (${bldg.abbr})`,
+                room: `${bldg.abbr} ${floor}${String(10 + slot).padStart(2, '0')}${node.role === 'ACC' ? '' : 'A'}`,
+                notes: `${node.zone.name} - synthetic fixture device (seed ${SEED})`,
+            });
         });
-    }
+    });
 }
 
 /* ---------------- snapshots over time ---------------- */
