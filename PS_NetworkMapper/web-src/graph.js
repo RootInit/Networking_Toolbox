@@ -10,6 +10,12 @@ var expandedNodes = new Set();
 // leaving a degenerate camera transform a plain redraw won't correct. Cleared only when
 // resizeDiagram actually runs fit(), so the user's own pan/zoom is never fought.
 var diagramSizedWhileHidden = false;
+// Set when a fresh vis.Network is constructed, consumed by the render that populates it. A
+// new instance opens at the default 1:1 transform centred on the origin, which on a large
+// fleet shows a handful of nodes and leaves the rest off-screen. Only the first render of an
+// instance fits: a cluster expand or a layout-setting change re-renders too, and must not
+// throw away the pan/zoom the user has since chosen.
+var fitOnNextRender = false;
 
 // Read live from the DOM rather than cached on the input's `change` event: the first render
 // after page load can precede that event and would then use a stale default.
@@ -127,6 +133,7 @@ window.buildSwitchMap = async function() {
         // doesn't clip at the canvas's bottom edge.
         interaction: { navigationButtons: false, keyboard: { bindToWindow: false }, hover: true, dragNodes: true },
     });
+    fitOnNextRender = true;
     window.buildDiagramNav();
     // "selectNode" doesn't fire for a blank click, but "click" does - so the drawer is
     // closed here rather than left pointing at a stale selection.
@@ -245,6 +252,13 @@ async function doRenderVisibleGraph() {
 
         nodesDataset.add(nodeRows);
         edgesDataset.add(edgeRows);
+
+        if (fitOnNextRender) {
+            fitOnNextRender = false;
+            // A container that is still display:none measures 0 and would fit against a
+            // bogus size; resizeDiagram already owns that case via diagramSizedWhileHidden.
+            if (!diagramSizedWhileHidden) network.fit();
+        }
 
         var vlanFilterEl = document.getElementById('vlanFilter');
         if (vlanFilterEl && vlanFilterEl.value !== 'ALL') { window.applyVlanFilter(); }

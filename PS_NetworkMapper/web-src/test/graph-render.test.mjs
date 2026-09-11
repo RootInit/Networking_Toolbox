@@ -32,16 +32,26 @@ function fixture(leaves) {
   };
 }
 
-async function render(leaves) {
+// doRenderVisibleGraph reads its collaborators as free variables, so they are supplied as
+// parameters. `fitOnNextRender` is a module-level `var` it also writes back to, which a
+// parameter cannot model - the surrounding `var` declaration is lifted in with it, and the
+// caller seeds it through a getter/setter pair on `state`.
+const BODY = src.match(/var fitOnNextRender = false;/)[0] + '\n' +
+  'fitOnNextRender = state.fit;\n' +
+  src.match(/async function doRenderVisibleGraph\(\)[\s\S]*?\n\}/)[0] +
+  '\nreturn doRenderVisibleGraph().then(() => { state.fit = fitOnNextRender; });';
+
+async function render(leaves, opts) {
+  const o = opts || {};
   const fx = fixture(leaves);
   const nodesDataset = makeDataset();
   const edgesDataset = makeDataset();
-  const body = src.match(/async function doRenderVisibleGraph\(\)[\s\S]*?\n\}/)[0] +
-    '\nreturn doRenderVisibleGraph();';
+  const network = { fitCalls: 0, fit() { this.fitCalls++; } };
+  const state = { fit: o.fitOnNextRender !== false };
   await new Function(
     'renderGeneration', 'window', 'nextPaint', 'graphRoot', 'primaryTree', 'expandedNodes',
     'getClusterThreshold', 'getLayoutSettings', 'nodesDataset', 'edgesDataset', 'allNodeMeta',
-    'document', 'positionsStub', body,
+    'document', 'network', 'diagramSizedWhileHidden', 'state', BODY,
   )(
     0,
     {
@@ -56,9 +66,11 @@ async function render(leaves) {
     () => 999, () => ({}),
     nodesDataset, edgesDataset, fx.allNodeMeta,
     { getElementById: () => null },
-    null,
+    network,
+    !!o.sizedWhileHidden,
+    state,
   );
-  return { nodesDataset, edgesDataset };
+  return { nodesDataset, edgesDataset, network, fitStillPending: state.fit };
 }
 
 test('the node and edge datasets are each written once, however many items there are', async () => {
@@ -79,4 +91,19 @@ test('batching does not change what ends up in the datasets', async () => {
   );
   assert.equal(nodesDataset.clearCalls, 1);
   assert.equal(edgesDataset.clearCalls, 1);
+});
+
+test('the first render of a new network instance fits the camera, later ones do not', async () => {
+  const first = await render(50);
+  assert.equal(first.network.fitCalls, 1, 'a fresh instance opens at 1:1 on the origin');
+  assert.equal(first.fitStillPending, false, 'the fit is consumed, not repeated');
+
+  const rerender = await render(50, { fitOnNextRender: false });
+  assert.equal(rerender.network.fitCalls, 0, 'a cluster expand must not discard the user pan/zoom');
+});
+
+test('a diagram rendered while hidden defers its fit to resizeDiagram', async () => {
+  // fit() against a display:none container measures 0 and produces a degenerate transform.
+  const hidden = await render(50, { sizedWhileHidden: true });
+  assert.equal(hidden.network.fitCalls, 0);
 });
