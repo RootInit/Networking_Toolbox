@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-    NPS Unique MAC Viewer - GUI for Windows Server 2019 Network Policy Server audit events.
+    Show-NpsMacAuth.ps1 - GUI viewer for Windows Server Network Policy Server audit events,
+    grouped by unique MAC address.
  
 .DESCRIPTION
     Reads Security log events 6272 (granted), 6273 (denied), 6274 (discarded),
@@ -185,8 +186,8 @@ $WorkerScript = {
                 $row.Identity    = $d['SubjectUserName']
                 $row.Detail      = $detail
                 if (-not $isGranted) {
-                    $row.Code   = $(if ($code -ne $null) { $code } else { '' })
-                    $row.Reason = $reason
+                    $row.Code    = $(if ($null -ne $code) { $code } else { '' })
+                    $row.Reason  = $reason
                     $row.EventId = $id
                 }
             }
@@ -203,7 +204,7 @@ $WorkerScript = {
                 FirstSeenRaw = $evt.TimeCreated
                 LastSeen     = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
                 LastSeenRaw  = $evt.TimeCreated
-                Code         = $(if (-not $isGranted -and $code -ne $null) { $code } else { '' })
+                Code         = $(if (-not $isGranted -and $null -ne $code) { $code } else { '' })
                 Reason       = $(if (-not $isGranted) { $reason } else { '' })
                 Policy       = $d['NetworkPolicyName']
                 Client       = $client
@@ -428,16 +429,17 @@ function Get-FilteredRows {
 }
  
 function Update-Pane {
-    param($Pane, $Cols, $Rows, $SortIdx, $SortAsc, $Kind)
+    param($Pane, $Cols, $Rows, $SortIdx, $SortAsc)
  
-    $rows = Get-FilteredRows -Rows $Rows
-    $key = $Cols[$SortIdx].S
-    $rows = @($rows | Sort-Object -Property $key -Descending:(-not $SortAsc))
+    # Not '$rows' -- PowerShell variable names are case-insensitive, so that name would
+    # overwrite the $Rows parameter and make the unfiltered total below equal $shown.
+    $key  = $Cols[$SortIdx].S
+    $view = @(Get-FilteredRows -Rows $Rows | Sort-Object -Property $key -Descending:(-not $SortAsc))
  
     $lv = $Pane.List
     $lv.BeginUpdate()
     $lv.Items.Clear()
-    foreach ($r in $rows) {
+    foreach ($r in $view) {
         $item = New-Object System.Windows.Forms.ListViewItem([string]$r.($Cols[0].P))
         for ($i = 1; $i -lt $Cols.Count; $i++) {
             [void]$item.SubItems.Add([string]$r.($Cols[$i].P))
@@ -448,13 +450,13 @@ function Update-Pane {
     $lv.EndUpdate()
  
     $total = @($Rows).Count
-    $shown = $rows.Count
+    $shown = $view.Count
     $Pane.Label.Text = if ($shown -eq $total) { "$total unique" } else { "$shown of $total unique" }
 }
  
 function Update-Both {
-    Update-Pane -Pane $paneOk -Cols $GrantedCols -Rows $script:GrantedAll -SortIdx $script:GSortIdx -SortAsc $script:GSortAsc -Kind 'granted'
-    Update-Pane -Pane $paneNo -Cols $DeniedCols  -Rows $script:DeniedAll  -SortIdx $script:DSortIdx -SortAsc $script:DSortAsc -Kind 'denied'
+    Update-Pane -Pane $paneOk -Cols $GrantedCols -Rows $script:GrantedAll -SortIdx $script:GSortIdx -SortAsc $script:GSortAsc
+    Update-Pane -Pane $paneNo -Cols $DeniedCols  -Rows $script:DeniedAll  -SortIdx $script:DSortIdx -SortAsc $script:DSortAsc
 }
  
 function Show-Detail {
@@ -483,7 +485,7 @@ $timer.Interval = 250
  
 $autoTimer = New-Object System.Windows.Forms.Timer
  
-function Stop-Job {
+function Stop-Worker {
     if ($script:PS) { try { $script:PS.Dispose() } catch {} ; $script:PS = $null }
     if ($script:Runspace) { try { $script:Runspace.Close(); $script:Runspace.Dispose() } catch {} ; $script:Runspace = $null }
     $script:Handle = $null
@@ -531,7 +533,7 @@ $timer.Add_Tick({
     catch {
         [System.Windows.Forms.MessageBox]::Show($form, $_.Exception.Message, 'Query failed', 'OK', 'Error') | Out-Null
     }
-    Stop-Job
+    Stop-Worker
  
     $script:Busy = $false
     $btnRefresh.Enabled = $true
@@ -603,8 +605,8 @@ function Copy-Macs {
  
 function Export-Rows {
     param($Rows, $DefaultName)
-    $rows = Get-FilteredRows -Rows $Rows
-    if (-not $rows.Count) {
+    $view = @(Get-FilteredRows -Rows $Rows)
+    if (-not $view.Count) {
         [System.Windows.Forms.MessageBox]::Show($form, 'Nothing to export.', 'Export', 'OK', 'Information') | Out-Null
         return
     }
@@ -612,9 +614,9 @@ function Export-Rows {
     $dlg.Filter = 'CSV file (*.csv)|*.csv'
     $dlg.FileName = "$DefaultName-$(Get-Date -Format 'yyyyMMdd-HHmmss').csv"
     if ($dlg.ShowDialog($form) -eq 'OK') {
-        $rows | Select-Object Mac, Count, FirstSeen, LastSeen, Code, Reason, Policy, Client, AuthType, Identity, EventId |
+        $view | Select-Object Mac, Count, FirstSeen, LastSeen, Code, Reason, Policy, Client, AuthType, Identity, EventId |
             Export-Csv -Path $dlg.FileName -NoTypeInformation -Encoding UTF8
-        $lblStatus.Text = "Exported $($rows.Count) row(s) to $($dlg.FileName)"
+        $lblStatus.Text = "Exported $($view.Count) row(s) to $($dlg.FileName)"
     }
 }
  
@@ -625,7 +627,7 @@ $paneNo.Csv.Add_Click({ Export-Rows -Rows $script:DeniedAll  -DefaultName 'NPS-D
  
 $form.Add_FormClosing({
     $timer.Stop(); $autoTimer.Stop()
-    Stop-Job
+    Stop-Worker
 })
  
 #endregion
@@ -634,7 +636,9 @@ $form.Add_FormClosing({
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    $lblStatus.Text = 'Warning: not running elevated - reading the Security log will likely fail.'
+    # The status strip is overwritten by the first query a moment later, so the warning
+    # goes on the title bar where it survives every refresh.
+    $form.Text = "$($form.Text)  [NOT ELEVATED - reading the Security log will likely fail]"
 }
  
 $form.Add_Shown({ $form.Activate(); Start-Query })

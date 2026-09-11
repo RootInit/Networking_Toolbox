@@ -6,8 +6,9 @@ Misc networking tools and scripts created by me or stolen from other people.
 
 - [`PS_NetworkMapper/`](#ps_networkmapper) — crawls a Juniper switch fleet over SSH and renders an interactive topology map in the browser.
 - [`PS_IPv4Scanner/`](#ps_ipv4scanner) — async IPv4 range/subnet scanner with optional MAC/vendor resolution.
+- [`Windows Server/`](#windows-server) — standalone WinForms GUIs for Active Directory and NPS/RADIUS admin.
 
-Both are PowerShell scripts; run them with either Windows PowerShell 5.1 or PowerShell 7+ (`pwsh`).
+All are PowerShell scripts; run them with either Windows PowerShell 5.1 or PowerShell 7+ (`pwsh`).
 PS_NetworkMapper's encryption additionally needs **.NET Framework 4.7.2 or newer** under
 Windows PowerShell 5.1 — earlier versions cannot derive keys with SHA-256, and the mapper
 refuses to start rather than write a file it could not read back. Pass `-NoEncryption` to run
@@ -162,3 +163,58 @@ the IEEE registry with:
 ```powershell
 .\getOUI.ps1
 ```
+
+---
+
+## Windows Server
+
+Two standalone WinForms GUIs for running a MAC Authentication Bypass (MAB) setup on
+Windows Server: one registers device MACs as AD accounts, the other reads back what
+NPS actually did with them. They share no code and neither depends on the other —
+they just pair naturally.
+
+### `Register-MacDevice.ps1`
+
+Registers MAC-based device accounts in Active Directory. Enter a single MAC, or pick a
+text file with one MAC per line; each account is created in the configured OU, added to
+the device group, and (optionally) stripped of every other group membership so the
+device group is primary. Any separator style is accepted (`aa:bb:...`, `aa-bb-...`,
+`aabb.ccdd.eeff`, bare hex) — the script normalizes before checking. A checkbox switches
+on overwrite (delete + recreate) for MACs that already exist; results are tallied per
+run and for the session.
+
+Edit the CONFIG block at the top of the script — `$OUPath`, `$GroupName`,
+`$TempPassword`, `$StripOtherGroups` — before first use. The OU and group must already
+exist. Needs RSAT (the `ActiveDirectory` module) and rights to create users in the target
+OU; without them the GUI still opens and reports why it can't connect.
+
+```powershell
+.\Register-MacDevice.ps1
+```
+
+### `Show-NpsMacAuth.ps1`
+
+Reads NPS audit events from the Security log — 6272 (granted), 6273 (denied), 6274
+(discarded), 6276 (quarantined), 6277 (probation), 6278 (full access) — pulls the
+RADIUS Calling-Station-ID out of each, normalizes it to a MAC, and de-duplicates into
+two sortable lists: authenticated and denied. Denied rows carry the NPS reason code and
+text. Double-click any row for the full raw event; per-pane buttons copy the MAC list to
+the clipboard or export to CSV.
+
+Query runs on a background runspace, so the window stays responsive. The server box
+accepts a remote NPS host (Event Log RPC — TCP 135 + dynamic RPC, not WinRM) with
+optional alternate credentials. Run elevated: reading the Security log needs it, and the
+title bar says so if you didn't.
+
+```powershell
+# Local server, last 24h
+.\Show-NpsMacAuth.ps1
+
+# A remote NPS server, last week
+.\Show-NpsMacAuth.ps1 -ComputerName NPS01 -Hours 168
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `-ComputerName` | local machine | NPS server to query. Editable in the GUI too. |
+| `-Hours` | `24` | How far back to read. Editable in the GUI too. |

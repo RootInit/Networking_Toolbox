@@ -1,6 +1,9 @@
-#Requires -Modules ActiveDirectory
+# No '#Requires -Modules ActiveDirectory' on purpose: that aborts before the form
+# exists, so a workstation without RSAT gets a bare parser error instead of the
+# GUI's "Could not initialize Active Directory" message. Initialize-AD reports it.
+#Requires -Version 5.1
 <#
-    Register-Device-GUI.ps1
+    Register-MacDevice.ps1
     ------------------------------------------------------------------
     GUI tool to register MAC-based device accounts in Active Directory.
     Enter a single MAC address, or select a text file of MACs (one per
@@ -30,6 +33,11 @@ $ColInfo = [System.Drawing.Color]::Black
 
 # session-wide running totals
 $script:Tally = @{ added = 0; existed = 0; invalid = 0; error = 0 }
+
+# Set-Busy re-enables controls when a run finishes, so it has to know which ones
+# were legitimately disabled for other reasons and must stay that way.
+$script:AdReady    = $false
+$script:FileChosen = $false
 
 # ---------------------------------------------------------------------------
 # AD helpers
@@ -102,7 +110,7 @@ function Format-Tally($t) {
 # GUI
 # ---------------------------------------------------------------------------
 $form               = New-Object System.Windows.Forms.Form
-$form.Text          = "RADIUS Device Registration  -  ComputerMACs"
+$form.Text          = "RADIUS Device Registration  -  $GroupName"
 $form.ClientSize    = New-Object System.Drawing.Size(560, 480)
 $form.StartPosition = 'CenterScreen'
 $form.MinimumSize   = New-Object System.Drawing.Size(500, 420)
@@ -203,7 +211,11 @@ function Update-Status {
 
 function Set-Busy($busy) {
     $form.Cursor = if ($busy) { 'WaitCursor' } else { 'Default' }
-    foreach ($c in @($btnAdd, $btnFile, $btnBrowse, $btnClear, $txtMac)) { $c.Enabled = -not $busy }
+    $btnClear.Enabled  = -not $busy
+    $txtMac.Enabled    = (-not $busy) -and $script:AdReady
+    $btnAdd.Enabled    = (-not $busy) -and $script:AdReady
+    $btnBrowse.Enabled = (-not $busy) -and $script:AdReady
+    $btnFile.Enabled   = (-not $busy) -and $script:AdReady -and $script:FileChosen
     [System.Windows.Forms.Application]::DoEvents()
 }
 
@@ -230,8 +242,9 @@ $btnBrowse.Add_Click({
     $dlg = New-Object System.Windows.Forms.OpenFileDialog
     $dlg.Filter = 'Text files (*.txt)|*.txt|All files (*.*)|*.*'
     if ($dlg.ShowDialog() -eq 'OK') {
-        $txtFile.Text  = $dlg.FileName
-        $btnFile.Enabled = $true
+        $txtFile.Text      = $dlg.FileName
+        $script:FileChosen = $true
+        $btnFile.Enabled   = $true
     }
 })
 
@@ -270,6 +283,7 @@ $btnClear.Add_Click({ $log.Clear() })
 $form.Add_Shown({
     $txtMac.Focus()
     if (Initialize-AD) {
+        $script:AdReady = $true
         Write-Log "Connected to $script:DC. Target group: $GroupName" $ColInfo
         Update-Status
     } else {
@@ -277,10 +291,9 @@ $form.Add_Shown({
         Write-Log "  $script:InitError" $ColErr
         Write-Log "Run on an admin workstation with RSAT installed, elevated." $ColWarn
         $statusLabel.Text = 'Session: AD not available'
-        $btnAdd.Enabled = $false
     }
+    Set-Busy $false
 })
 
 [void]$form.ShowDialog()
-
-}
+$form.Dispose()
