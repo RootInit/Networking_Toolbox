@@ -32,6 +32,12 @@ Add-Type -AssemblyName System.Drawing
 #region ------------------------------------------------------------ Worker
  
 # Runs inside a background runspace so the UI never freezes.
+#
+# $Shared is a [hashtable]::Synchronized() the UI thread polls for progress and
+# partial results. Only ever WRITE whole replacement objects into it -- a fresh
+# array, a scalar. Never hand it a collection this loop is still mutating: the
+# docs are explicit that enumerating a synchronized Hashtable from another
+# thread while it changes throws, and the UI enumerates whatever it reads.
 $WorkerScript = {
     param(
         [string]$ComputerName,
@@ -39,7 +45,8 @@ $WorkerScript = {
         [int]$MaxEvents,
         [string]$MacFormat,
         [bool]$MacOnly,
-        $Credential
+        $Credential,
+        $Shared
     )
  
     # Fallback text only - the event itself normally carries a Reason string.
@@ -102,123 +109,150 @@ $WorkerScript = {
         if ($Credential) { $p['Credential'] = $Credential }
     }
  
+    $granted = [ordered]@{}
+    $denied  = [ordered]@{}
+    $fetched = 0
+
+    # Snapshot the buckets into the shared table as fresh arrays. Sorting here
+    # matches what the final result used to do, so a partial paint is ordered
+    # the same way the finished one is.
+    $publish = {
+        $Shared['Granted']   = @($granted.Values | Sort-Object LastSeenRaw -Descending)
+        $Shared['Denied']    = @($denied.Values  | Sort-Object LastSeenRaw -Descending)
+        $Shared['Total']     = $fetched
+        $Shared['Skipped']   = $result.Skipped
+        $Shared['Version']   = [int]$Shared['Version'] + 1
+    }
+
+    $clock       = [System.Diagnostics.Stopwatch]::StartNew()
+    $lastPublish = [TimeSpan]::Zero
+    $interval    = [TimeSpan]::FromMilliseconds(1200)
+
     try {
-        $events = @(Get-WinEvent @p)
+        # Piped, not @(...)-collected: Get-WinEvent yields newest-first as the
+        # service walks the log, so rows reach the screen while the scan is
+        # still running instead of after it.
+        Get-WinEvent @p | ForEach-Object {
+            $evt = $_
+            $fetched++
+            try { $xml = [xml]$evt.ToXml() } catch { return }
+ 
+            $d = @{}
+            foreach ($node in $xml.Event.EventData.Data) {
+                if ($node.Name) { $d[$node.Name] = [string]$node.'#text' }
+            }
+ 
+            # Prefer the RADIUS Calling-Station-ID, then fall back to the identity.
+            $mac = $null
+            $rawId = $null
+            foreach ($key in 'CallingStationID', 'SubjectUserName', 'FullyQualifiedSubjectUserName', 'SubjectMachineName') {
+                if ($d.ContainsKey($key) -and $d[$key]) {
+                    if (-not $rawId) { $rawId = $d[$key] }
+                    $try = ConvertTo-Mac -Value $d[$key] -Format $MacFormat
+                    if ($try) { $mac = $try; break }
+                }
+            }
+ 
+            if (-not $mac) {
+                if ($MacOnly) { $result.Skipped++; return }
+                $mac = if ($rawId) { $rawId } else { '(unknown)' }
+            }
+ 
+            $id = [int]$evt.Id
+            $isGranted = ($id -eq 6272 -or $id -eq 6277 -or $id -eq 6278)
+ 
+            $code = $null
+            if ($d.ContainsKey('ReasonCode') -and $d['ReasonCode'] -match '^\d+$') { $code = [int]$d['ReasonCode'] }
+ 
+            $reason = $d['Reason']
+            if ([string]::IsNullOrWhiteSpace($reason) -and $code -ne $null -and $ReasonTable.ContainsKey($code)) {
+                $reason = $ReasonTable[$code]
+            }
+            if ([string]::IsNullOrWhiteSpace($reason)) {
+                $reason = switch ($id) {
+                    6274 { 'NPS discarded the request (malformed or unmatched RADIUS packet)' }
+                    6276 { 'Client quarantined by NAP health policy' }
+                    default { 'No reason supplied by NPS' }
+                }
+            }
+ 
+            $client = $d['ClientName']
+            if ([string]::IsNullOrWhiteSpace($client)) { $client = $d['NASIdentifier'] }
+            if ([string]::IsNullOrWhiteSpace($client)) { $client = $d['ClientIPAddress'] }
+            if ([string]::IsNullOrWhiteSpace($client)) { $client = $d['NASIPv4Address'] }
+ 
+            # The detail text used to be composed here, for every event, and then
+            # thrown away for all but the newest event of each MAC. Keep the parsed
+            # fields instead and let Format-Detail render on double-click.
+            $bucket = if ($isGranted) { $granted } else { $denied }
+ 
+            if ($bucket.Contains($mac)) {
+                $row = $bucket[$mac]
+                $row.Count++
+                if ($evt.TimeCreated -gt $row.LastSeenRaw) {
+                    $row.LastSeenRaw = $evt.TimeCreated
+                    $row.LastSeen    = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                    $row.Policy      = $d['NetworkPolicyName']
+                    $row.Client      = $client
+                    $row.AuthType    = $d['AuthenticationType']
+                    $row.Identity    = $d['SubjectUserName']
+                    # Detail describes the newest event, so its inputs move together
+                    # with it. EventId used to be left behind on granted rows, which
+                    # made the detail header and the CSV column disagree.
+                    $row.Data        = $d
+                    $row.Machine     = $evt.MachineName
+                    $row.EventId     = $id
+                    if (-not $isGranted) {
+                        $row.Code    = $(if ($null -ne $code) { $code } else { '' })
+                        $row.Reason  = $reason
+                    }
+                }
+                if ($evt.TimeCreated -lt $row.FirstSeenRaw) {
+                    $row.FirstSeenRaw = $evt.TimeCreated
+                    $row.FirstSeen    = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                }
+            }
+            else {
+                $row = [pscustomobject]@{
+                    Mac          = $mac
+                    Count        = 1
+                    FirstSeen    = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                    FirstSeenRaw = $evt.TimeCreated
+                    LastSeen     = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
+                    LastSeenRaw  = $evt.TimeCreated
+                    Code         = $(if (-not $isGranted -and $null -ne $code) { $code } else { '' })
+                    Reason       = $(if (-not $isGranted) { $reason } else { '' })
+                    Policy       = $d['NetworkPolicyName']
+                    Client       = $client
+                    AuthType     = $d['AuthenticationType']
+                    Identity     = $d['SubjectUserName']
+                    EventId      = $id
+                    Machine      = $evt.MachineName
+                    Data         = $d
+                }
+                $bucket[$mac] = $row
+            }
+
+            if ($clock.Elapsed - $lastPublish -gt $interval) {
+                & $publish
+                $lastPublish = $clock.Elapsed
+            }
+        }
     }
     catch {
-        if ($_.Exception.Message -match 'No events were found') {
-            $events = @()
-        }
-        else {
+        if ($_.Exception.Message -notmatch 'No events were found') {
             $result.Error = $_.Exception.Message
+            $Shared['Error'] = $result.Error
+            $Shared['Done']  = $true
             return $result
         }
     }
- 
-    $result.Total = $events.Count
- 
-    $granted = [ordered]@{}
-    $denied  = [ordered]@{}
- 
-    foreach ($evt in $events) {
-        try { $xml = [xml]$evt.ToXml() } catch { continue }
- 
-        $d = @{}
-        foreach ($node in $xml.Event.EventData.Data) {
-            if ($node.Name) { $d[$node.Name] = [string]$node.'#text' }
-        }
- 
-        # Prefer the RADIUS Calling-Station-ID, then fall back to the identity.
-        $mac = $null
-        $rawId = $null
-        foreach ($key in 'CallingStationID', 'SubjectUserName', 'FullyQualifiedSubjectUserName', 'SubjectMachineName') {
-            if ($d.ContainsKey($key) -and $d[$key]) {
-                if (-not $rawId) { $rawId = $d[$key] }
-                $try = ConvertTo-Mac -Value $d[$key] -Format $MacFormat
-                if ($try) { $mac = $try; break }
-            }
-        }
- 
-        if (-not $mac) {
-            if ($MacOnly) { $result.Skipped++; continue }
-            $mac = if ($rawId) { $rawId } else { '(unknown)' }
-        }
- 
-        $id = [int]$evt.Id
-        $isGranted = ($id -eq 6272 -or $id -eq 6277 -or $id -eq 6278)
- 
-        $code = $null
-        if ($d.ContainsKey('ReasonCode') -and $d['ReasonCode'] -match '^\d+$') { $code = [int]$d['ReasonCode'] }
- 
-        $reason = $d['Reason']
-        if ([string]::IsNullOrWhiteSpace($reason) -and $code -ne $null -and $ReasonTable.ContainsKey($code)) {
-            $reason = $ReasonTable[$code]
-        }
-        if ([string]::IsNullOrWhiteSpace($reason)) {
-            $reason = switch ($id) {
-                6274 { 'NPS discarded the request (malformed or unmatched RADIUS packet)' }
-                6276 { 'Client quarantined by NAP health policy' }
-                default { 'No reason supplied by NPS' }
-            }
-        }
- 
-        $client = $d['ClientName']
-        if ([string]::IsNullOrWhiteSpace($client)) { $client = $d['NASIdentifier'] }
-        if ([string]::IsNullOrWhiteSpace($client)) { $client = $d['ClientIPAddress'] }
-        if ([string]::IsNullOrWhiteSpace($client)) { $client = $d['NASIPv4Address'] }
- 
-        $detail = ($d.GetEnumerator() | Sort-Object Name |
-            ForEach-Object { '{0,-34} {1}' -f $_.Name, $_.Value }) -join "`r`n"
-        $detail = "Event ID   : $id`r`nTime       : $($evt.TimeCreated)`r`nMachine    : $($evt.MachineName)`r`n" +
-                  ('-' * 70) + "`r`n" + $detail
- 
-        $bucket = if ($isGranted) { $granted } else { $denied }
- 
-        if ($bucket.Contains($mac)) {
-            $row = $bucket[$mac]
-            $row.Count++
-            if ($evt.TimeCreated -gt $row.LastSeenRaw) {
-                $row.LastSeenRaw = $evt.TimeCreated
-                $row.LastSeen    = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
-                $row.Policy      = $d['NetworkPolicyName']
-                $row.Client      = $client
-                $row.AuthType    = $d['AuthenticationType']
-                $row.Identity    = $d['SubjectUserName']
-                $row.Detail      = $detail
-                if (-not $isGranted) {
-                    $row.Code    = $(if ($null -ne $code) { $code } else { '' })
-                    $row.Reason  = $reason
-                    $row.EventId = $id
-                }
-            }
-            if ($evt.TimeCreated -lt $row.FirstSeenRaw) {
-                $row.FirstSeenRaw = $evt.TimeCreated
-                $row.FirstSeen    = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
-            }
-        }
-        else {
-            $row = [pscustomobject]@{
-                Mac          = $mac
-                Count        = 1
-                FirstSeen    = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
-                FirstSeenRaw = $evt.TimeCreated
-                LastSeen     = $evt.TimeCreated.ToString('yyyy-MM-dd HH:mm:ss')
-                LastSeenRaw  = $evt.TimeCreated
-                Code         = $(if (-not $isGranted -and $null -ne $code) { $code } else { '' })
-                Reason       = $(if (-not $isGranted) { $reason } else { '' })
-                Policy       = $d['NetworkPolicyName']
-                Client       = $client
-                AuthType     = $d['AuthenticationType']
-                Identity     = $d['SubjectUserName']
-                EventId      = $id
-                Detail       = $detail
-            }
-            $bucket[$mac] = $row
-        }
-    }
- 
+
+    $result.Total   = $fetched
     $result.Granted = @($granted.Values | Sort-Object LastSeenRaw -Descending)
     $result.Denied  = @($denied.Values  | Sort-Object LastSeenRaw -Descending)
+    & $publish
+    $Shared['Done'] = $true
     return $result
 }
  
@@ -233,6 +267,9 @@ $script:Runspace     = $null
 $script:PS           = $null
 $script:Handle       = $null
 $script:Busy         = $false
+$script:Shared       = $null
+$script:SeenVersion  = 0
+$script:QueryClock   = $null
  
 $GrantedCols = @(
     @{ H = 'MAC Address';    P = 'Mac';      S = 'Mac';         W = 160 }
@@ -459,6 +496,18 @@ function Update-Both {
     Update-Pane -Pane $paneNo -Cols $DeniedCols  -Rows $script:DeniedAll  -SortIdx $script:DSortIdx -SortAsc $script:DSortAsc
 }
  
+# Renders the same text the worker used to precompute for every event.
+function Format-Detail {
+    param($Row)
+    $body = ''
+    if ($Row.Data) {
+        $body = ($Row.Data.GetEnumerator() | Sort-Object Name |
+            ForEach-Object { '{0,-34} {1}' -f $_.Name, $_.Value }) -join "`r`n"
+    }
+    "Event ID   : $($Row.EventId)`r`nTime       : $($Row.LastSeenRaw)`r`nMachine    : $($Row.Machine)`r`n" +
+        ('-' * 70) + "`r`n" + $body
+}
+
 function Show-Detail {
     param($Row)
     if (-not $Row) { return }
@@ -470,7 +519,7 @@ function Show-Detail {
     $tb.Multiline = $true; $tb.ReadOnly = $true; $tb.ScrollBars = 'Both'
     $tb.WordWrap = $false; $tb.Dock = 'Fill'
     $tb.Font = New-Object System.Drawing.Font('Consolas', 9)
-    $tb.Text = [string]$Row.Detail
+    $tb.Text = Format-Detail -Row $Row
     $d.Controls.Add($tb)
     [void]$d.ShowDialog($form)
     $d.Dispose()
@@ -504,6 +553,13 @@ function Start-Query {
     $btnRefresh.Enabled = $false
     $btnRefresh.Text = 'Working...'
     $lblStatus.Text = "Querying $($txtServer.Text) ..."
+
+    $script:Shared = [hashtable]::Synchronized(@{
+        Granted = @(); Denied = @(); Total = 0; Skipped = 0
+        Version = 0; Done = $false; Error = $null
+    })
+    $script:SeenVersion = 0
+    $script:QueryClock  = [System.Diagnostics.Stopwatch]::StartNew()
  
     $script:Runspace = [runspacefactory]::CreateRunspace()
     $script:Runspace.ApartmentState = 'STA'
@@ -519,12 +575,27 @@ function Start-Query {
     [void]$script:PS.AddArgument([string]$cmbFmt.SelectedItem)
     [void]$script:PS.AddArgument([bool]$chkMacOnly.Checked)
     [void]$script:PS.AddArgument($script:Cred)
- 
+    [void]$script:PS.AddArgument($script:Shared)
+
     $script:Handle = $script:PS.BeginInvoke()
     $timer.Start()
 }
  
 $timer.Add_Tick({
+    # Paint whatever the worker has published so far. Reads named keys only --
+    # never enumerates $script:Shared, which would race the worker's writes.
+    if ($script:Shared -and [int]$script:Shared['Version'] -ne $script:SeenVersion) {
+        $script:SeenVersion = [int]$script:Shared['Version']
+        $script:GrantedAll  = @($script:Shared['Granted'])
+        $script:DeniedAll   = @($script:Shared['Denied'])
+        Update-Both
+    }
+    if ($script:Busy -and $script:QueryClock) {
+        $lblStatus.Text = ("Querying {0} ... {1:N0}s  |  {2} events read, {3} granted MACs, {4} denied MACs so far" -f
+            $txtServer.Text, $script:QueryClock.Elapsed.TotalSeconds,
+            $script:Shared['Total'], $script:GrantedAll.Count, $script:DeniedAll.Count)
+    }
+
     if (-not $script:Handle -or -not $script:Handle.IsCompleted) { return }
     $timer.Stop()
  
