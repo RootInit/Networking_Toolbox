@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -475,4 +475,55 @@ test('the default fleet size is the documented one', () => {
     const dflt = src.match(/flag\('devices', '(\d+)'\)/)[1];
     assert.equal(dflt, '350');
     assert.match(src, new RegExp(`# ${dflt} devices ->`), 'the usage comment must match the default');
+});
+
+/* ---- the stale-config guard ----
+   The app reads Configuration.json; the generator writes Configuration.fixture.json beside the
+   maps. Serials are handed out in generation order, so a fixture regenerated without copying
+   the placements over still resolves every serial - against the PREVIOUS fleet's buildings.
+   Every pin then shows on the wrong building and nothing about it looks like an error. */
+
+function generateInto(parent, args) {
+    const maps = path.join(parent, 'Network_Maps');
+    fs.mkdirSync(maps, { recursive: true });
+    const res = spawnSync(process.execPath, [GENERATOR, '--out', maps, '--snapshots', '1', ...args],
+        { encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    return { maps, stderr: res.stderr };
+}
+const tmpParent = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_cfg_'));
+
+test('regenerating over a stale server config warns that every pin will be wrong', () => {
+    const parent = tmpParent();
+    fs.writeFileSync(path.join(parent, 'Configuration.json'), JSON.stringify({
+        devices: [{ key: 'SYN99999', building: 'Nowhere (NWH)', lat: 1, lng: 1 }],
+        credentials: {}, settings: {},
+    }));
+    const { stderr } = generateInto(parent, ['--devices', '40']);
+    assert.match(stderr, /WARNING/);
+    assert.match(stderr, /Configuration\.json still holds the previous fixture's placements/);
+});
+
+test('the guard stays quiet when there is nothing to warn about', () => {
+    // No server config at all.
+    assert.doesNotMatch(generateInto(tmpParent(), ['--devices', '40']).stderr, /WARNING/);
+
+    // A config already matching the fleet just written.
+    const fresh = tmpParent();
+    const first = generateInto(fresh, ['--devices', '40']);
+    const written = JSON.parse(fs.readFileSync(path.join(first.maps, 'Configuration.fixture.json'), 'utf8'));
+    fs.writeFileSync(path.join(fresh, 'Configuration.json'),
+        JSON.stringify({ devices: written.devices, credentials: {}, settings: {} }));
+    assert.doesNotMatch(generateInto(fresh, ['--devices', '40']).stderr, /WARNING/);
+});
+
+test("the guard never comments on an operator's real placements", () => {
+    // Real serials are not SYN-prefixed. Those placements are the operator's business, and a
+    // fixture run must not tell them their own config is stale.
+    const real = tmpParent();
+    fs.writeFileSync(path.join(real, 'Configuration.json'), JSON.stringify({
+        devices: [{ key: 'JN123REAL', building: 'A real site', lat: 1, lng: 1 }],
+        credentials: {}, settings: {},
+    }));
+    assert.doesNotMatch(generateInto(real, ['--devices', '40']).stderr, /WARNING/);
 });

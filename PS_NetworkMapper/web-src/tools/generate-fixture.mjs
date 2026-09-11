@@ -866,3 +866,32 @@ process.stderr.write(
     `${configPath}\n  ${configDevices.length} placed devices in ${ALL_BUILDINGS.length} buildings ` +
     `across ${CAMPUS.length} campus zones, seed ${SEED}\n`
 );
+
+// The visualizer reads Configuration.json, not the .fixture.json written beside the maps, so a
+// fixture regenerated without copying it over leaves the server resolving this fleet's serials
+// against the last fleet's placements. Serials are handed out in generation order, so they all
+// still resolve - to whichever building held that serial last time. Every pin lands on the
+// wrong building, and nothing about it looks like an error.
+const serverConfigPath = path.join(OUT_DIR, '..', 'Configuration.json');
+if (fs.existsSync(serverConfigPath)) {
+    let existing = null;
+    try { existing = JSON.parse(fs.readFileSync(serverConfigPath, 'utf8')); } catch (err) { /* not ours to read */ }
+    const placed = existing && Array.isArray(existing.devices) ? existing.devices : null;
+    // Only fixture output is ours to comment on; a real config's placements are the operator's.
+    const allFixture = placed && placed.length > 0 && placed.every(d => /^SYN\d+$/.test(String(d.key)));
+    if (allFixture) {
+        const fresh = new Set(configDevices.map(d => d.key));
+        const stale = placed.filter(d => !fresh.has(d.key)).length;
+        if (stale > 0 || placed.length !== configDevices.length) {
+            process.stderr.write(
+                `\nWARNING: ${serverConfigPath} still holds the previous fixture's placements\n` +
+                `  (${placed.length} devices, ${stale} of them not in the fleet just written). The app reads that\n` +
+                `  file, so every pin will show on the wrong building until it is refreshed:\n` +
+                `    node -e "const f=require('fs'),c=JSON.parse(f.readFileSync('${serverConfigPath}','utf8'));` +
+                `c.devices=JSON.parse(f.readFileSync('${configPath}','utf8')).devices;` +
+                `f.writeFileSync('${serverConfigPath}',JSON.stringify(c,null,2))"\n` +
+                `  (that replaces only .devices, leaving your credentials and dashboard settings alone)\n`
+            );
+        }
+    }
+}
