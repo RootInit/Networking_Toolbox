@@ -362,51 +362,6 @@ without a config-management system.
 
 ---
 
-## Compared to SecureCRT
-
-SecureCRT is the tool most people reading this already have open, so it's the honest point of
-reference — but the comparison is not a contest, because the two aren't solving the same problem.
-SecureCRT is a terminal, and a good one. PS_NetworkMapper has no terminal at all; its **Launch SSH
-Session** button exists precisely because at some point you need one.
-
-| | SecureCRT | PS_NetworkMapper |
-|---|---|---|
-| **What it is** | Terminal emulator / SSH client | Read-only fleet snapshot + viewer |
-| **Cost** | Commercial: per-seat perpetual licence, one year of updates included, paid maintenance renewals after that ([pricing](https://www.vandyke.com/pricing/)) | Free, in this repo |
-| **Protocols** | SSH2/SSH1, Telnet, Telnet/TLS, Rlogin, Serial, RDP | SSH to Junos, nothing else |
-| **Terminal emulation** | VT100/220, ANSI, Wyse, Xterm, TN3270, tabs, tab groups | None — it hands off to `ssh.exe` |
-| **Scripting** | VBScript, JScript, PerlScript, Python; script recorder; button bar | None; the crawl is the automation |
-| **Multi-session send** | Command window sends to all sessions / a tab group | N/A |
-| **Topology discovery** | None | LLDP crawl from one seed IP |
-| **Visual map** | None | Topology graph + geographic map |
-| **Config diff over time** | None (session logs are transcripts, not diffs) | Line-by-line, snapshot to snapshot, per device |
-| **Fleet inventory / dashboard** | None | Health, alarms, clients, VLANs, local accounts |
-| **Credential storage** | Session tree + Credentials Manager, AES-256 under an optional Configuration Passphrase | `Configuration.json.enc`, AES-256-CBC + HMAC, PBKDF2-SHA256 600k iterations, password mandatory unless `-NoEncryption` |
-| **Auth methods** | Password, public key (RSA/Ed25519/ECDSA/DSA), X.509, smart card/PKCS#11, Kerberos/GSSAPI, agent forwarding | Password only |
-| **FIPS mode** | Yes — BSAFE Crypto-C ME, FIPS 140-2 Level 1, **Windows only** | No FIPS-validated mode; uses the platform's own AES/HMAC/PBKDF2 |
-| **Centralized audit** | No — session logging is local, per workstation | No — accountability comes from the switch's own logs, under your login |
-| **Platforms** | Windows, macOS, Linux | Windows PowerShell 5.1 / PowerShell 7+ |
-
-Two details from SecureCRT's side worth naming honestly, because they cut both ways:
-
-- Its **FIPS mode and smart-card/X.509 support** are real capabilities this tool has nothing to answer
-  with. If your environment mandates FIPS-validated crypto for stored credentials, SecureCRT ships a
-  validated module ([FIPS 140-2 Level 1, Windows only](https://www.vandyke.com/products/fips_info.html))
-  and this does not.
-- Its **saved-password scheme is publicly documented by reverse engineering** — AES-256-CBC with a
-  fixed all-zero IV, keyed on a SHA-256 digest of the Configuration Passphrase
-  ([write-up](https://github.com/HyperSine/how-does-SecureCRT-encrypt-password/blob/master/doc/how-does-SecureCRT-encrypt-password.md)),
-  with a Metasploit post-exploitation module that harvests those credentials from a compromised
-  workstation ([module docs](https://github.com/rapid7/metasploit-framework/blob/master/documentation/modules/post/windows/gather/credentials/securecrt.md)).
-  The passphrase is optional, and if it was never set there is effectively nothing to break. This
-  tool's envelope uses a random IV, a random per-file salt, 600,000 PBKDF2 iterations and
-  encrypt-then-MAC, and refuses to run without a password unless you explicitly opt out — but it is
-  also a far smaller and far less scrutinized piece of software, which is its own kind of risk.
-
-**Use both.** Keep SecureCRT for the work that is actually a terminal — a config change, a serial
-console, a long-running session, sending one command to twenty tabs. Use this to decide which
-twenty tabs.
-
 ## Compared to the rest of the landscape
 
 For completeness, since "why not just use X" is a fair question:

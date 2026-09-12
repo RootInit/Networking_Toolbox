@@ -385,7 +385,7 @@
         /* Deliberately unthemed, like an editor's find-highlight. Color is forced on every descendant -
            drawer.js's inline `color:var(--...)` would otherwise sit unreadably light on pale yellow. */
         .highlight { background-color: #ffff99 !important; border-left: 3px solid #f39c12 !important; color: #3a3306 !important; }
-        .highlight *:not(.badge):not(.type-badge):not(.vendor-tag):not(.daisy-badge) { color: #3a3306 !important; }
+        .highlight *:not(.badge):not(.type-badge):not(.vendor-tag):not(.daisy-badge):not(.ine-badge):not(.wap-badge) { color: #3a3306 !important; }
 
         .summary-grid { padding: 20px; display: grid; grid-template-columns: 1fr; gap: 15px; }
         .summary-item { background: var(--subtle-bg); padding: 15px; border: 1px solid var(--border); border-radius: 5px; }
@@ -539,6 +539,7 @@
         .vendor-tag.vendor-phone { background-color: #16a085; }
         .vendor-tag.vendor-laptop-oem { background-color: #8e44ad; }
         .vendor-tag.vendor-dock-adapter-chipset { background-color: #7f8c8d; }
+        .vendor-tag.vendor-crypto-ine { background-color: #d35400; }
         .vendor-tag.vendor-other { background-color: #bdc3c7; color: #333; }
         .vendor-tag.vendor-unknown { background-color: #ecf0f1; color: #7f8c8d; border: 1px solid #dcdfe1; }
         :root[data-theme="dark"] .vendor-tag.vendor-other { background-color: #4a5058; color: #e4e6ea; }
@@ -548,6 +549,11 @@
         .daisy-badge { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 3px; font-size: 0.65rem; font-weight: bold; cursor: help; }
         .daisy-badge.confirmed { background-color: #16a085; color: white; }
         .daisy-badge.possible { background-color: #f6d55c; color: #6b5600; }
+
+        /* Same shape as a daisy badge so these read as one family of port annotations. */
+        .ine-badge, .wap-badge { display: inline-block; margin-top: 3px; padding: 1px 6px; border-radius: 3px; font-size: 0.65rem; font-weight: bold; cursor: help; color: white; }
+        .ine-badge { background-color: #d35400; }
+        .wap-badge { background-color: #5b4bcf; }
 
         /* Overrides leaflet.css's chunky tooltip; this block comes after the <link>, so it wins. */
         .map-marker-label { font-size: 9px; font-weight: 700; color: #333; background: rgba(255,255,255,0.85); border: none; box-shadow: none; padding: 1px 3px; }

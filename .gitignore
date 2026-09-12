@@ -24,6 +24,9 @@ PS_NetworkMapper/Raw_*.tar
 PS_NetworkMapper/Raw_*.tar.*
 PS_NetworkMapper/Raw_*.zip
 PS_NetworkMapper/Raw_*.7z
+# Same sensitivity, but named by hand rather than by the Raw_ convention, so matched on the marker.
+*DO_NOT_UPLOAD*
+*_scan_raw.txt
 
 # Atomic-write temps from lib/FileHelpers.ps1. Under -NoEncryption the Configuration.json temp is
 # plaintext SSH credentials, and the exact-name rule above does not match it.

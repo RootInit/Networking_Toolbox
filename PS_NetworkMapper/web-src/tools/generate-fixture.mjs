@@ -24,7 +24,8 @@ const DEVICE_COUNT = Math.max(4, parseInt(flag('devices', '350'), 10));
 const SEED = parseInt(flag('seed', '1'), 10);
 // Successive daily crawls of one fleet; the Trends/Diff/New Devices tabs stay empty with only one.
 const SNAPSHOT_COUNT = Math.max(1, parseInt(flag('snapshots', '3'), 10));
-const OUT_DIR = path.resolve(flag('out', path.join(HERE, '..', '..', 'Network_Maps')));
+const DEFAULT_OUT_DIR = path.resolve(path.join(HERE, '..', '..', 'Network_Maps'));
+const OUT_DIR = path.resolve(flag('out', DEFAULT_OUT_DIR));
 
 // mulberry32: a fixture must be reproducible from --seed alone, so never reach for Math.random().
 let seedState = SEED >>> 0;
@@ -212,6 +213,9 @@ const daysAgo = (n) => new Date(SCAN_DATE.getTime() - n * 86400000);
 
 const hexByte = () => int(0, 255).toString(16).padStart(2, '0');
 const clientMac = () => ['aa', 'bb', hexByte(), hexByte(), hexByte(), hexByte()].join(':');
+// A real IEEE assignment to General Dynamics Mission Systems, so the viewer's OUI lookup resolves it
+// and the Crypto/INE flag fires; the aa:bb prefix above is deliberately unassigned and never would.
+const ineMac = () => ['00', 'a0', '21', hexByte(), hexByte(), hexByte()].join(':');
 const switchMac = () => ['02', 'ab', hexByte(), hexByte(), hexByte(), hexByte()].join(':').toUpperCase();
 
 // Straddles the cpu/mem warn and critical thresholds, so every dashboard severity band is populated.
@@ -271,6 +275,7 @@ function blankNode(deviceIp) {
 
 const AP_DESC = n => `AP-${1000 + n}`;
 const PHONE_DESC = n => `PHONE-${2000 + n}`;
+const INE_DESC = n => `INE-${3000 + n}`;
 
 // One row per port the faceplate draws; uplinks carrying a neighbour are filled in by linkDevices.
 function buildInterfaces(device, members) {
@@ -401,14 +406,25 @@ function addClients(node, gatewayNode, vlanTags) {
         else if (!isPhone && dataTags.length > 1 && chance(0.04)) addClient(node, gatewayNode, row, pick(dataTags)); // likely
         else if (!isPhone && chance(0.03)) addClient(node, gatewayNode, row, first.VLAN_Tag);               // possible
     }
+
+    // Placed after the loop so it lands on a port the loop left alone: an inline network encryptor is
+    // one GD-OUI MAC on an otherwise quiet port with no LLDP of any kind, which is exactly the shape
+    // the viewer's Crypto/INE flag keys on. Rare on purpose - a flag on every third port says nothing.
+    if (chance(0.06)) {
+        const free = shuffled(accessPorts).find(r => r.Desc === 'Unknown' && !node.Clients.some(c => c.Port === `${r.Port}.0`));
+        if (free) {
+            free.Desc = INE_DESC(int(1, 60));
+            addClient(node, gatewayNode, free, pick(dataTags.length ? dataTags : vlanTags), ineMac());
+        }
+    }
 }
 
 // Anything but "Unknown"/"Authenticated" counts as a violation, so all three must appear.
 const DOT1X_FAILURES = ['Held', 'Connecting', 'Failed', 'Force-Unauthorized'];
 
-function addClient(node, gatewayNode, row, tag) {
+function addClient(node, gatewayNode, row, tag, macOverride) {
     const vlan = VLANS.find(v => v.tag === tag);
-    const mac = clientMac();
+    const mac = macOverride || clientMac();
     const clientIp = `10.${node.zone.net}.${int(100, 240)}.${int(2, 250)}`;
     const dot1x = chance(0.35);
     const client = {
@@ -716,17 +732,22 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     written.push({ mapPath, fleet });
 }
 
-// Never named Configuration.json: the generator must not overwrite the real credentials file.
-const configPath = path.join(OUT_DIR, 'Configuration.fixture.json');
-fs.writeFileSync(configPath, JSON.stringify({
+const FIXTURE_CONFIG = {
     devices: configDevices,
     credentials: { username: 'fixture-user', password: 'fixture-password' },
     settings: {
         cpuWarnPct: 70, cpuCriticalPct: 90, memWarnPct: 75, memCriticalPct: 90,
         crawlAgeFreshMin: 60, crawlAgeStaleMin: 1440, recentRebootMin: 60,
         clusterThreshold: 50, nodeSpacing: 350, leafSpacing: 250, minRadius: 250,
+        // The fleet's own prefixes, so a fresh clone can crawl and rescan the fixture immediately.
+        allowedScopes: CAMPUS.map(z => `10.${z.net}.`),
     },
-}, null, 2));
+};
+
+// Kept as the canonical record of what this run placed, and as the source the refresh below copies
+// from. Named .fixture.json so it can be gitignored separately from a real config.
+const configPath = path.join(OUT_DIR, 'Configuration.fixture.json');
+fs.writeFileSync(configPath, JSON.stringify(FIXTURE_CONFIG, null, 2));
 
 for (const { mapPath, fleet } of written) {
     const c = fleet.reduce((a, d) => {
@@ -748,28 +769,47 @@ process.stderr.write(
     `across ${CAMPUS.length} campus zones, seed ${SEED}\n`
 );
 
-// The visualizer reads Configuration.json, not the .fixture.json beside the maps, so a regenerated
-// fixture that isn't copied over resolves every serial against the PREVIOUS fleet's buildings.
+// The visualizer reads Configuration.json, not the .fixture.json beside the maps, so a fixture whose
+// placements aren't copied over resolves every serial against the PREVIOUS fleet's buildings and
+// every pin lands on the wrong building. Refreshed here rather than left to the operator.
+//
+// Only ever this path: Start-NetworkMapper reads Configuration.json under -NoEncryption alone, so a
+// real encrypted Configuration.json.enc is never touched or shadowed by what is written here.
 const serverConfigPath = path.join(OUT_DIR, '..', 'Configuration.json');
-if (fs.existsSync(serverConfigPath)) {
+const isFixtureKey = d => /^SYN\d+$/.test(String(d && d.key));
+
+// Keyed on the directory name rather than the default path, so a test harness or a second checkout
+// laid out the same way still gets the refresh: it is the "Network_Maps beside a Configuration.json"
+// shape that makes the sibling ours to write. A bare --out /tmp/maps does not, and its parent has no
+// business gaining a Configuration.json.
+if (path.basename(OUT_DIR) !== path.basename(DEFAULT_OUT_DIR)) {
+    process.stderr.write(`\nNOTE: --out is not a Network_Maps directory, so no Configuration.json was written.\n  Placements for this fleet are in ${configPath}.\n`);
+} else if (!fs.existsSync(serverConfigPath)) {
+    fs.writeFileSync(serverConfigPath, JSON.stringify(FIXTURE_CONFIG, null, 2));
+    process.stderr.write(`\n${serverConfigPath}\n  written: fixture credentials, scopes and ${configDevices.length} placements\n`);
+} else {
     let existing = null;
     try { existing = JSON.parse(fs.readFileSync(serverConfigPath, 'utf8')); } catch (err) { /* not ours to read */ }
     const placed = existing && Array.isArray(existing.devices) ? existing.devices : null;
-    // Only fixture output is ours to comment on; a real config's placements are the operator's.
-    const allFixture = placed && placed.length > 0 && placed.every(d => /^SYN\d+$/.test(String(d.key)));
-    if (allFixture) {
-        const fresh = new Set(configDevices.map(d => d.key));
-        const stale = placed.filter(d => !fresh.has(d.key)).length;
-        if (stale > 0 || placed.length !== configDevices.length) {
-            process.stderr.write(
-                `\nWARNING: ${serverConfigPath} still holds the previous fixture's placements\n` +
-                `  (${placed.length} devices, ${stale} of them not in the fleet just written). The app reads that\n` +
-                `  file, so every pin will show on the wrong building until it is refreshed:\n` +
-                `    node -e "const f=require('fs'),c=JSON.parse(f.readFileSync('${serverConfigPath}','utf8'));` +
-                `c.devices=JSON.parse(f.readFileSync('${configPath}','utf8')).devices;` +
-                `f.writeFileSync('${serverConfigPath}',JSON.stringify(c,null,2))"\n` +
-                `  (that replaces only .devices, leaving your credentials and dashboard settings alone)\n`
-            );
-        }
+    // A real operator's placements and credentials are never ours to overwrite, so the refresh is
+    // gated on the file holding nothing but fixture output: all-SYN keys, or no placements at all
+    // under a login we recognize as the fixture's own.
+    const onlyFixture = placed !== null && (
+        (placed.length > 0 && placed.every(isFixtureKey)) ||
+        (placed.length === 0 && (!existing.credentials || !existing.credentials.username || existing.credentials.username === FIXTURE_CONFIG.credentials.username))
+    );
+
+    if (onlyFixture) {
+        // Only .devices: an operator testing against the fixture may have set their own thresholds,
+        // scopes or login in the viewer, and regenerating a fleet is no reason to discard them.
+        existing.devices = configDevices;
+        fs.writeFileSync(serverConfigPath, JSON.stringify(existing, null, 2));
+        process.stderr.write(`\n${serverConfigPath}\n  refreshed: ${configDevices.length} placements (credentials and settings left alone)\n`);
+    } else {
+        process.stderr.write(
+            `\nNOTE: ${serverConfigPath} holds placements that are not this generator's, so it was left\n` +
+            `  untouched. The app reads that file, so fixture pins will show on the wrong building until\n` +
+            `  its .devices are replaced with those in ${configPath}.\n`
+        );
     }
 }

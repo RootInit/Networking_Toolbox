@@ -703,6 +703,8 @@ window.inactiveForText = function(intf) {
 window.renderInterfaces = function() {
     var tbody = document.getElementById('interfaces-tbody');
     var daisyChains = window.detectDaisyChains(currentSelectedNodeData);
+    var encryptorPorts = window.detectEncryptorPorts(currentSelectedNodeData);
+    var accessPointPorts = window.detectAccessPointPorts(currentSelectedNodeData);
     var html = "";
 
     var view = window.buildInterfaceView(currentSelectedNodeData);
@@ -718,11 +720,13 @@ window.renderInterfaces = function() {
             var type = typeOf.get(intf);
             var linkBadge = String(intf.Link).toLowerCase() === "up" ? "green" : "red";
             var chain = daisyChains.get(window.normalizePort(intf.Port));
+            var ine = encryptorPorts.get(window.normalizePort(intf.Port));
+            var wap = accessPointPorts.get(window.normalizePort(intf.Port));
             var desc = (intf.Desc && intf.Desc !== 'Unknown') ? intf.Desc : '';
 
             html += `<tr class="intf-row${selected ? ' selected' : ''}" data-port="${esc(portName)}" tabindex="0" role="button" aria-pressed="${selected}" onclick="window.selectInterfacePort(this.dataset.port, {source:'table'})" onkeydown="window.activateOnKey(event, () => window.selectInterfacePort(this.dataset.port, {source:'table'}))">
                 <td><span class="intf-chev">&#9656;</span><b>${esc(intf.Port)}</b></td>
-                <td class="intf-type"><span class="badge ${type.badge}">${type.label}</span>${type.detailHtml}${chain ? ' ' + window.renderDaisyChainBadge(chain) : ''}</td>
+                <td class="intf-type"><span class="badge ${type.badge}">${type.label}</span>${type.detailHtml}${chain ? ' ' + window.renderDaisyChainBadge(chain) : ''}${ine ? ' ' + window.renderEncryptorBadge(ine) : ''}${wap ? ' ' + window.renderAccessPointBadge(wap) : ''}</td>
                 <td><span class="badge ${linkBadge}">${esc(intf.Admin)}/${esc(intf.Link)}</span></td>
                 <td class="intf-desc" title="${esc(desc)}">${esc(desc)}</td>
             </tr>`;
@@ -743,7 +747,7 @@ window.renderInterfaces = function() {
                 <div class="intf-detail-wide"><label>Description</label>${desc ? esc(desc) : '<span class="intf-type-detail">none configured</span>'}</div>
                 <div class="intf-detail-wide"><label>Clients</label>${portClients.length ? portClients.length + ' learned on this port' + (vlanFilter !== "ALL" ? ' (VLAN filter applied)' : '') : '<span class="intf-type-detail">none learned</span>'}</div>
             </div></td></tr>`;
-            portClients.forEach(c => { html += renderClientSubRow(c, daisyChains); });
+            portClients.forEach(c => { html += renderClientSubRow(c, daisyChains, accessPointPorts); });
         });
     }
     tbody.innerHTML = html || `<tr><td colspan="4" style="text-align:center;">No interface data</td></tr>`;
@@ -757,7 +761,7 @@ window.renderInterfaces = function() {
     }
 };
 
-function renderClientSubRow(c, daisyChains) {
+function renderClientSubRow(c, daisyChains, accessPointPorts) {
     var isHighlighted = searchHighlightQuery && ((c.IP && String(c.IP).toLowerCase().includes(searchHighlightQuery)) || (c.MAC && String(c.MAC).toLowerCase().includes(searchHighlightQuery)) || (c.Dot1x_User && String(c.Dot1x_User).toLowerCase().includes(searchHighlightQuery)));
     var rowClass = 'client-subrow' + (isHighlighted ? ' highlight' : '');
 
@@ -776,6 +780,15 @@ function renderClientSubRow(c, daisyChains) {
     var chain = daisyChains.get(window.normalizePort(c.Port));
     var daisyStr = chain ? window.renderDaisyChainBadge(chain) : "";
 
+    // Per-client, not per-port: on a shared port the flag belongs to the MAC that earned it.
+    var ineStr = vendorInfo.category === 'Crypto/INE' ? window.renderEncryptorBadge([c]) : "";
+
+    // Only the AP's own chassis MAC, never the wireless clients bridged behind it. The chassis ID is
+    // often a radio MAC offset from the wired one, so this silently misses; the port row still flags.
+    var apNeighbors = (accessPointPorts && accessPointPorts.get(window.normalizePort(c.Port))) || null;
+    var apMatch = apNeighbors ? apNeighbors.filter(n => String(n.MacAddress || '').toLowerCase() === String(c.MAC || '').toLowerCase()) : [];
+    var wapStr = apMatch.length ? window.renderAccessPointBadge(apMatch) : "";
+
     return `<tr class="${rowClass}"><td colspan="4"><div class="client-subrow-inner">
         <span class="csr-identity">${esc(c.IP)}</span>
         <span class="csr-mac">${esc(String(c.MAC).toUpperCase())}</span>
@@ -785,6 +798,8 @@ function renderClientSubRow(c, daisyChains) {
         <span><b>${dotUserStr}</b>${dotStateStr}</span>
         ${descStr}
         ${daisyStr}
+        ${ineStr}
+        ${wapStr}
     </div></td></tr>`;
 }
 

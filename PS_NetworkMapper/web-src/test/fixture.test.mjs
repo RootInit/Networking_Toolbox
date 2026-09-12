@@ -446,8 +446,9 @@ test('the default fleet size is the documented one', () => {
     assert.match(src, new RegExp(`# ${dflt} devices ->`), 'the usage comment must match the default');
 });
 
-/* ---- stale-config guard: the app reads Configuration.json but the generator writes
-   Configuration.fixture.json, so an uncopied regeneration resolves serials against the old fleet. ---- */
+/* ---- server-config refresh: the app reads Configuration.json, so the generator keeps its
+   placements in step. Gated on the file holding nothing but fixture output - a real operator's
+   credentials and placements are never overwritten. ---- */
 
 function generateInto(parent, args) {
     const maps = path.join(parent, 'Network_Maps');
@@ -459,36 +460,67 @@ function generateInto(parent, args) {
 }
 const tmpParent = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_cfg_'));
 
-test('regenerating over a stale server config warns that every pin will be wrong', () => {
+const readServerConfig = parent => JSON.parse(fs.readFileSync(path.join(parent, 'Configuration.json'), 'utf8'));
+
+test('a stale fixture config is refreshed to the fleet just written', () => {
     const parent = tmpParent();
     fs.writeFileSync(path.join(parent, 'Configuration.json'), JSON.stringify({
         devices: [{ key: 'SYN99999', building: 'Nowhere (NWH)', lat: 1, lng: 1 }],
         credentials: {}, settings: {},
     }));
-    const { stderr } = generateInto(parent, ['--devices', '40']);
-    assert.match(stderr, /WARNING/);
-    assert.match(stderr, /Configuration\.json still holds the previous fixture's placements/);
+    const { maps, stderr } = generateInto(parent, ['--devices', '40']);
+    assert.match(stderr, /refreshed/);
+    const written = JSON.parse(fs.readFileSync(path.join(maps, 'Configuration.fixture.json'), 'utf8'));
+    assert.deepEqual(readServerConfig(parent).devices, written.devices);
 });
 
-test('the guard stays quiet when there is nothing to warn about', () => {
-    // No server config at all.
-    assert.doesNotMatch(generateInto(tmpParent(), ['--devices', '40']).stderr, /WARNING/);
-
-    // A config already matching the fleet just written.
-    const fresh = tmpParent();
-    const first = generateInto(fresh, ['--devices', '40']);
-    const written = JSON.parse(fs.readFileSync(path.join(first.maps, 'Configuration.fixture.json'), 'utf8'));
-    fs.writeFileSync(path.join(fresh, 'Configuration.json'),
-        JSON.stringify({ devices: written.devices, credentials: {}, settings: {} }));
-    assert.doesNotMatch(generateInto(fresh, ['--devices', '40']).stderr, /WARNING/);
-});
-
-test("the guard never comments on an operator's real placements", () => {
-    // Real serials are not SYN-prefixed, and a fixture run must not call the operator's config stale.
-    const real = tmpParent();
-    fs.writeFileSync(path.join(real, 'Configuration.json'), JSON.stringify({
-        devices: [{ key: 'JN123REAL', building: 'A real site', lat: 1, lng: 1 }],
-        credentials: {}, settings: {},
+// Only .devices: an operator testing against the fixture may have set their own login, scopes or
+// thresholds in the viewer, and regenerating a fleet is no reason to discard them.
+test('the refresh replaces only the placements', () => {
+    const parent = tmpParent();
+    fs.writeFileSync(path.join(parent, 'Configuration.json'), JSON.stringify({
+        devices: [{ key: 'SYN99999', building: 'Nowhere (NWH)', lat: 1, lng: 1 }],
+        credentials: { username: 'fixture-user', password: 'my-own-test-pw' },
+        settings: { cpuWarnPct: 42, allowedScopes: ['10.20.'] },
     }));
-    assert.doesNotMatch(generateInto(real, ['--devices', '40']).stderr, /WARNING/);
+    generateInto(parent, ['--devices', '40']);
+    const after = readServerConfig(parent);
+    assert.equal(after.credentials.password, 'my-own-test-pw');
+    assert.equal(after.settings.cpuWarnPct, 42);
+    assert.deepEqual(after.settings.allowedScopes, ['10.20.']);
+    assert.ok(after.devices.length > 1);
+});
+
+test('an absent server config is created with fixture credentials and scopes', () => {
+    const parent = tmpParent();
+    const { stderr } = generateInto(parent, ['--devices', '40']);
+    assert.match(stderr, /written/);
+    const cfg = readServerConfig(parent);
+    assert.equal(cfg.credentials.username, 'fixture-user');
+    // Without a scope the crawl and every connect refuse, so a fresh clone would be inert.
+    assert.ok(cfg.settings.allowedScopes.length > 0);
+});
+
+test("an operator's real config is never overwritten", () => {
+    // Real serials are not SYN-prefixed. This is the one case that would destroy real credentials.
+    const real = tmpParent();
+    const original = {
+        devices: [{ key: 'JN123REAL', building: 'A real site', lat: 1, lng: 1 }],
+        credentials: { username: 'netops', password: 'real-secret' }, settings: {},
+    };
+    fs.writeFileSync(path.join(real, 'Configuration.json'), JSON.stringify(original));
+    const { stderr } = generateInto(real, ['--devices', '40']);
+    assert.match(stderr, /left\s+untouched/);
+    assert.deepEqual(readServerConfig(real), original);
+});
+
+test('a --out that is not a Network_Maps directory writes no Configuration.json', () => {
+    const parent = tmpParent();
+    const elsewhere = path.join(parent, 'somewhere-else');
+    fs.mkdirSync(elsewhere, { recursive: true });
+    const res = spawnSync(process.execPath, [GENERATOR, '--out', elsewhere, '--snapshots', '1', '--devices', '40'],
+        { encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stderr, /no Configuration\.json was written/);
+    assert.equal(fs.existsSync(path.join(parent, 'Configuration.json')), false);
 });

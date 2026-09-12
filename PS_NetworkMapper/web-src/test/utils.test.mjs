@@ -80,3 +80,105 @@ test('esc leaves a string with no special characters unchanged', () => {
   assert.equal(esc('switch-01.example.com'), 'switch-01.example.com');
   assert.equal(esc(''), '');
 });
+
+// lookupVendor reads window.OUI_DATABASE at call time, so the shim can be installed after import.
+global.window.OUI_DATABASE = {
+  '00A021': 'General Dynamics Mission Systems',
+  'A0B437': 'GD Mission Systems',
+  '002689': 'General Dynamics Land Systems Inc.',
+  '60C78D': 'Juniper Networks',
+  '001565': 'Yealink(Xiamen) Network Technology',
+  'AABBCC': 'Acme Widgets Ltd',
+};
+const lookupVendor = global.window.lookupVendor;
+const detectEncryptorPorts = global.window.detectEncryptorPorts;
+const detectAccessPointPorts = global.window.detectAccessPointPorts;
+
+// Contract: a General Dynamics OUI is a candidate inline network encryptor, ranked ahead of the
+// other vendor rules so a GD hit is never absorbed by them.
+
+test('lookupVendor categorizes a General Dynamics Mission Systems OUI as Crypto/INE', () => {
+  assert.deepEqual(lookupVendor('00:a0:21:11:22:33'),
+    { vendor: 'General Dynamics Mission Systems', category: 'Crypto/INE' });
+  assert.equal(lookupVendor('a0-b4-37-11-22-33').category, 'Crypto/INE');
+});
+
+test('lookupVendor categorizes other General Dynamics divisions as Crypto/INE too', () => {
+  // Deliberate: the flag says "confirm this port", and a GD Land Systems box on a switch port is
+  // itself worth a look. Narrowing to Mission Systems would silently drop legacy TACLANE OUIs.
+  assert.equal(lookupVendor('00:26:89:11:22:33').category, 'Crypto/INE');
+});
+
+test('lookupVendor leaves the existing categories unchanged', () => {
+  assert.equal(lookupVendor('60:c7:8d:11:22:33').category, 'Network-Infra');
+  assert.equal(lookupVendor('00:15:65:11:22:33').category, 'Phone');
+  assert.equal(lookupVendor('aa:bb:cc:11:22:33').category, 'Other');
+  assert.equal(lookupVendor('de:ad:be:11:22:33').category, 'Unknown');
+});
+
+test('detectEncryptorPorts keys the ports whose learned MACs carry a GD OUI', () => {
+  var device = { TrueClients: [
+    { MAC: '00:a0:21:11:22:33', Port: 'ge-0/0/5.0' },
+    { MAC: '60:c7:8d:11:22:33', Port: 'ge-0/0/6.0' },
+    { MAC: 'a0:b4:37:44:55:66', Port: 'ge-0/0/5.0' },
+  ] };
+  var result = detectEncryptorPorts(device);
+  assert.deepEqual([...result.keys()], ['ge-0/0/5']);
+  assert.equal(result.get('ge-0/0/5').length, 2);
+});
+
+test('detectEncryptorPorts returns an empty map when nothing matches', () => {
+  assert.equal(detectEncryptorPorts({ TrueClients: [{ MAC: '60:c7:8d:11:22:33', Port: 'ge-0/0/1.0' }] }).size, 0);
+  assert.equal(detectEncryptorPorts({}).size, 0);
+});
+
+// Contract: an AP is identified by what it advertised over LLDP-MED, not by its OUI - MedNeighbors
+// carries phones as well, and the vendors that build APs also build switches.
+
+test('detectAccessPointPorts keys ports whose MED neighbour describes an access point', () => {
+  var device = { MedNeighbors: [
+    { LocalPort: 'ge-0/0/9.0', Description: 'ArubaOS (MODEL: AP-515), Version 8.10.0.4', Hostname: 'ap-lib-03' },
+    { LocalPort: 'ge-0/0/10.0', Description: 'Yealink SIP-T46S 66.85.0.5', Hostname: 'phone-221' },
+    { LocalPort: 'ge-0/0/11.0', Description: 'Cisco Aironet 2802I Access Point', Hostname: 'ap-lib-04' },
+  ] };
+  var result = detectAccessPointPorts(device);
+  assert.deepEqual([...result.keys()], ['ge-0/0/9', 'ge-0/0/11']);
+});
+
+test('detectAccessPointPorts ignores a MED neighbour with no usable description', () => {
+  assert.equal(detectAccessPointPorts({ MedNeighbors: [{ LocalPort: 'ge-0/0/1.0', Description: 'Unknown' }] }).size, 0);
+  assert.equal(detectAccessPointPorts({}).size, 0);
+});
+
+test('detectAccessPointPorts does not match an Aruba CX switch neighbour', () => {
+  var device = { MedNeighbors: [
+    { LocalPort: 'ge-0/0/1.0', Description: 'ArubaOS-CX GL_10_08_1010', Hostname: 'sw-idf-02' },
+    { LocalPort: 'ge-0/0/2.0', Description: 'ArubaOS (MODEL: AP-515), Version 8.10.0.4', Hostname: 'ap-lib-03' },
+  ] };
+  assert.deepEqual([...detectAccessPointPorts(device).keys()], ['ge-0/0/2']);
+});
+
+// Regression: an AP bridges every wireless client through one port, and advertises over LLDP-MED
+// exactly as a phone does, so without the AP check each one reported a confirmed phone daisy-chain.
+test('detectDaisyChains does not report an access-point port as a daisy chain', () => {
+  var device = {
+    MedNeighbors: [{ LocalPort: 'ge-0/0/9.0', Description: 'Wireless Access Point', Hostname: 'AP-1139' }],
+    TrueClients: [
+      { MAC: 'aa:bb:01:00:00:01', Port: 'ge-0/0/9.0', VLAN_Tag: '20' },
+      { MAC: 'aa:bb:01:00:00:02', Port: 'ge-0/0/9.0', VLAN_Tag: '30' },
+      { MAC: 'aa:bb:01:00:00:03', Port: 'ge-0/0/9.0', VLAN_Tag: '30' },
+    ],
+  };
+  assert.equal(global.window.detectDaisyChains(device).size, 0);
+});
+
+test('detectDaisyChains still reports a phone port as a confirmed chain', () => {
+  var device = {
+    MedNeighbors: [{ LocalPort: 'ge-0/0/10.0', Description: 'Yealink SIP-T46S 66.85.0.5', Hostname: 'phone-221' }],
+    TrueClients: [
+      { MAC: 'aa:bb:02:00:00:01', Port: 'ge-0/0/10.0', VLAN_Tag: '20' },
+      { MAC: 'aa:bb:02:00:00:02', Port: 'ge-0/0/10.0', VLAN_Tag: '30' },
+    ],
+  };
+  assert.equal(global.window.detectDaisyChains(device).get('ge-0/0/10').confidence, 'confirmed');
+});

@@ -150,7 +150,12 @@ window.renderCrawlAge = function(scanTimestampIso) {
 
 // Best-effort string matching on vendor names, not a certified inventory.
 var VENDOR_CATEGORY_RULES = [
-    // Ordered first: for vendors selling both, a hit in a client MAC table is the AP/switch.
+    // A HAIPE encryptor (TACLANE and kin) terminates IP, so its ciphertext side learns on a switch
+    // port like any host. The vendor is the only signal in a MAC table, and General Dynamics builds
+    // more than encryptors - this marks a port worth confirming against the unit itself, not a
+    // positive identification.
+    { category: 'Crypto/INE', keywords: ['general dynamics', 'gd mission'] },
+    // Ordered above Laptop-OEM: for vendors selling both, a hit in a client MAC table is the AP/switch.
     { category: 'Network-Infra', keywords: ['cisco', 'juniper', 'aruba', 'hewlett packard enterprise', 'hpe ', 'arista', 'ubiquiti', 'extreme networks', 'netgear', 'fortinet', 'palo alto'] },
     { category: 'Phone', keywords: ['poly', 'yealink', 'avaya', 'grandstream', 'mitel', 'snom', 'shoretel', 'aastra'] },
     { category: 'Laptop-OEM', keywords: ['dell', 'hewlett packard', 'hewlett-packard', 'lenovo', 'panasonic', 'getac', 'apple', 'microsoft'] },
@@ -208,6 +213,9 @@ window.detectDaisyChains = function(device) {
         var distinctVlans = new Set(clients.map(c => String(c.VLAN_Tag)));
 
         var med = medByPort.get(port);
+        // An AP advertises over LLDP-MED the same as a phone, and every wireless client bridges
+        // through it, so without this every AP port reads as a confirmed daisy-chained phone.
+        if (med && isAccessPointDescription(med.Description)) return;
         var confidence = med ? 'confirmed' : (distinctVlans.size >= 2 ? 'likely' : 'possible');
         result.set(port, {
             confidence: confidence,
@@ -223,6 +231,57 @@ window.detectDaisyChains = function(device) {
 window.resolveDeviceIdentity = function(device) {
     var k = window.ConfigResolve.bestKeyForSave(device);
     return k.keyType + ':' + k.key;
+};
+
+// Mirrors detectDaisyChains so a port row can flag without walking its clients twice. A HAIPE
+// encryptor terminates IP, so its ciphertext interface learns on the port like any host and the OUI
+// is the only signal a MAC table carries.
+window.detectEncryptorPorts = function(device) {
+    var result = new Map();
+    window.asArray(device.TrueClients).forEach(c => {
+        if (window.lookupVendor(c.MAC).category !== 'Crypto/INE') return;
+        var port = window.normalizePort(c.Port);
+        if (!result.has(port)) result.set(port, []);
+        result.get(port).push(c);
+    });
+    return result;
+};
+
+// Deliberately worded as a prompt to confirm: the vendor also builds radios and vehicle equipment,
+// so the OUI narrows the port down, it does not identify the box on it.
+window.renderEncryptorBadge = function(clients) {
+    var vendors = Array.from(new Set(clients.map(c => window.lookupVendor(c.MAC).vendor).filter(Boolean)));
+    var who = vendors.length ? vendors.join(', ') : 'A General Dynamics';
+    return `<span class="ine-badge" title="${esc(who)} OUI learned on this port - consistent with an inline network encryptor (HAIPE/TACLANE), which terminates IP and so appears in the MAC table like any host. The same vendor builds non-crypto equipment, so confirm against the unit itself.">Inline Network Encryptor</span>`;
+};
+
+// Get-JunosNodeData already routes "WLAN Access Point" and ArubaOS LLDP blocks into MedNeighbors
+// alongside phones, so the System Description is what separates the two here. This is the AP saying
+// what it is, not an inference from an OUI - a vendor match alone can't tell an AP from a switch.
+// "arubaos (model:" rather than "arubaos": an Aruba CX switch advertises ArubaOS-CX and is routed
+// here too, and a switch is not an access point.
+var AP_DESCRIPTION_KEYWORDS = ['access point', 'arubaos (model:', 'aironet', 'unifi', 'meraki mr', 'mist ap', 'air-ap', 'air-cap'];
+function isAccessPointDescription(description) {
+    var desc = String(description || '').toLowerCase();
+    return AP_DESCRIPTION_KEYWORDS.some(kw => desc.indexOf(kw) !== -1);
+}
+
+window.detectAccessPointPorts = function(device) {
+    var result = new Map();
+    window.asArray(device.MedNeighbors).forEach(m => {
+        if (!isAccessPointDescription(m.Description)) return;
+        var port = window.normalizePort(m.LocalPort);
+        if (!result.has(port)) result.set(port, []);
+        result.get(port).push(m);
+    });
+    return result;
+};
+
+window.renderAccessPointBadge = function(neighbors) {
+    var descs = Array.from(new Set(neighbors.map(n => n.Description).filter(d => d && d !== 'Unknown')));
+    var names = Array.from(new Set(neighbors.map(n => n.Hostname).filter(h => h && h !== 'Unknown')));
+    var detail = [names.join(', '), descs.join(' | ')].filter(Boolean).join(' - ');
+    return `<span class="wap-badge" title="LLDP-MED identified: ${esc(detail || 'a WLAN access point')}">Wireless Access Point</span>`;
 };
 
 // Shared so drawer.js's port rows and nested client sub-rows render an identical badge.
