@@ -1,29 +1,18 @@
-#
-# Shared AES-256-CBC + PBKDF2-SHA256 + HMAC-SHA256 (encrypt-then-MAC) envelope logic,
-# used by Start-NetworkMapper.ps1 (topology snapshots) and WebServer.ps1
-# (Configuration.json.enc). Mirrors web-src/topology-crypto.js's decryptEnvelope.
-#
-# Not meant to be run directly - dot-source it.
+# Shared AES-256-CBC + PBKDF2-SHA256 + HMAC-SHA256 (encrypt-then-MAC) envelope logic, used by
+# Start-NetworkMapper.ps1 (topology snapshots) and WebServer.ps1 (Configuration.json.enc). Mirrors
+# web-src/topology-crypto.js's decryptEnvelope. Dot-source it rather than running it.
 
-# Single source of truth for the iteration count (OWASP's current PBKDF2-HMAC-SHA256
-# guidance), so it can't drift between crawler and webserver. A function, not a variable, so
-# it resolves through however many layers of dot-sourcing sit between caller and file. Safe
-# to raise: iterations is stored per-file in the envelope and read back on decrypt.
+# Single source of truth for the iteration count, so it can't drift between crawler and webserver. A
+# function so it resolves through dot-sourcing layers. Safe to raise: it is stored per envelope.
 function Get-TopologyPbkdf2Iterations {
     return 600000
 }
 
-# Rfc2898DeriveBytes(String, Byte[], Int32, HashAlgorithmName) - the SHA-256 overload
-# Get-TopologyKeyMaterial needs, since the older 3-arg constructor is SHA-1 only and would
-# derive different keys - requires .NET Framework 4.7.2 or later:
-#   https://learn.microsoft.com/en-us/dotnet/api/system.security.cryptography.rfc2898derivebytes.-ctor
-# Windows Server 2016 and Windows 10 up to 1709 ship 4.6.2/4.7/4.7.1 by default (4.7.2 is an
-# optional install there), so this is reachable on plausible targets:
-#   https://learn.microsoft.com/en-us/dotnet/framework/install/versions-and-dependencies
-# Without this check the shortfall surfaces as a constructor-resolution error from inside a
-# password-retry loop, which re-prompts the operator three times for something no password can
-# fix. Callers invoke it once at startup, before prompting. Not run at dot-source time: the
-# -NoEncryption path loads this file without ever deriving a key.
+# The SHA-256 Rfc2898DeriveBytes overload Get-TopologyKeyMaterial needs (the 3-arg constructor is
+# SHA-1 only and derives different keys) requires .NET Framework 4.7.2+. Windows Server 2016 and
+# Windows 10 up to 1709 ship 4.6.2/4.7/4.7.1 by default, so this is reachable on plausible targets.
+# Without the check the shortfall surfaces from inside a password-retry loop, re-prompting three
+# times for something no password can fix. Called once at startup, not at dot-source time.
 function Assert-TopologyCryptoRuntime {
     $Signature = [type[]]@([string], [byte[]], [int], [System.Security.Cryptography.HashAlgorithmName])
     if ($null -eq [System.Security.Cryptography.Rfc2898DeriveBytes].GetConstructor($Signature)) {
@@ -86,9 +75,8 @@ function Protect-TopologyPayload {
     }
 }
 
-# Must stay in lockstep with web-src/topology-crypto.js's decryptEnvelope. Verifies the HMAC
-# before decrypting (encrypt-then-MAC) so a wrong password or tampered file fails with one
-# clear error instead of an AES-CBC padding exception.
+# Must stay in lockstep with topology-crypto.js's decryptEnvelope. Verifies the HMAC before
+# decrypting, so a wrong password fails with one clear error instead of an AES padding exception.
 function Unprotect-TopologyPayload {
     param(
         [Parameter(Mandatory=$true)]$Envelope,
@@ -99,9 +87,7 @@ function Unprotect-TopologyPayload {
     if (-not $Envelope -or $ExpectedFormats -cnotcontains $Envelope.format) {
         throw "Not a recognized encrypted file (expected one of: $($ExpectedFormats -join ', '))."
     }
-    # PowerShell's -ne coerces the right operand to the left's type, so a JSON string "1"
-    # would compare equal - the JS side's strict !== rejects it. Check the runtime type
-    # explicitly to match.
+    # PowerShell's -ne coerces the right operand, so a JSON string "1" compares equal - check the type.
     if ($Envelope.version -isnot [int] -and $Envelope.version -isnot [long] -and $Envelope.version -isnot [double] -and $Envelope.version -isnot [decimal]) {
         throw "Unsupported envelope version: $($Envelope.version)"
     }
@@ -111,17 +97,14 @@ function Unprotect-TopologyPayload {
     if ($Envelope.kdf -cne "PBKDF2-SHA256" -or $Envelope.cipher -cne "AES-256-CBC" -or $Envelope.macAlgorithm -cne "HMAC-SHA256") {
         throw "Unsupported encryption parameters: $($Envelope.kdf)/$($Envelope.cipher)/$($Envelope.macAlgorithm)"
     }
-    # Same bounds as topology-crypto.js's MIN_ITERATIONS/MAX_ITERATIONS - a CPU-burn guard
-    # against a tampered file forcing an absurd PBKDF2 cost, not a security boundary.
-    # Requiring a numeric runtime type (rather than parsing a string) mirrors the JS side's
-    # Number.isInteger check, which rejects a JSON string like "600000".
+    # Same bounds as topology-crypto.js - a CPU-burn guard against a tampered file, not a security
+    # boundary. A numeric runtime type is required, mirroring the JS Number.isInteger check.
     $IterationsValue = $Envelope.iterations
     $IsNumericType = $IterationsValue -is [int] -or $IterationsValue -is [long] -or $IterationsValue -is [double] -or $IterationsValue -is [decimal]
     if (-not $IsNumericType) {
         throw "Iteration count out of range: $($Envelope.iterations)"
     }
-    # A JSON number like 1e300 parses as a double whose [long] cast throws a raw overflow
-    # RuntimeException before the range check below could run - bound it as a double first.
+    # 1e300 parses as a double whose [long] cast throws before the range check - bound it as a double.
     if ($IterationsValue -lt [long]::MinValue -or $IterationsValue -gt [long]::MaxValue) {
         throw "Iteration count out of range: $($Envelope.iterations)"
     }
@@ -139,14 +122,12 @@ function Unprotect-TopologyPayload {
         throw "Incorrect password, or the file is corrupted."
     }
 
-    # FromBase64String("") succeeds with a 0-length array, so it escapes the catch above and
-    # would surface as a raw ParameterBindingValidationException downstream instead of this
-    # function's clean error.
+    # FromBase64String("") succeeds with a 0-length array, escaping the catch above and surfacing as
+    # a raw binding exception downstream instead of this function's clean error.
     if ($SaltBytes.Length -eq 0 -or $IvBytes.Length -eq 0 -or $CipherBytes.Length -eq 0 -or $MacBytes.Length -eq 0) {
         throw "Incorrect password, or the file is corrupted."
     }
-    # Below PBKDF2's 8-byte salt minimum, Rfc2898DeriveBytes throws a raw exception on some
-    # .NET runtimes instead of this function's clean error.
+    # Below PBKDF2's 8-byte salt minimum, Rfc2898DeriveBytes throws a raw exception on some runtimes.
     if ($SaltBytes.Length -lt 8) {
         throw "Incorrect password, or the file is corrupted."
     }
@@ -157,8 +138,7 @@ function Unprotect-TopologyPayload {
     $ComputedMac = $Hmac.ComputeHash($IvBytes + $CipherBytes)
     $Hmac.Dispose()
 
-    # Byte-by-byte, not constant-time - acceptable given this app's threat model (localhost-
-    # only server, single local operator).
+    # Not constant-time - acceptable for a localhost-only server with a single local operator.
     $MacOk = $ComputedMac.Length -eq $MacBytes.Length
     if ($MacOk) {
         for ($i = 0; $i -lt $ComputedMac.Length; $i++) {

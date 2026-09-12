@@ -26,9 +26,7 @@ function generate(args) {
     };
 }
 
-// One generation shared by most cases: the generator is deterministic, so a second run would
-// only re-prove that, and generating takes long enough that per-test runs would dominate the
-// suite's runtime.
+// One generation shared by most cases: it's deterministic, and per-test runs would dominate the suite.
 const fixture = generate(['--devices', '120', '--seed', '3']);
 const topology = fixture.map.Topology;
 
@@ -41,9 +39,7 @@ test('the fixture is a snapshot the app can load', () => {
     }
 });
 
-// The whole point of scraping port lists out of the artwork: if a generated device ever falls
-// back to the inferred panel, either the catalogue's port names or the scrape has drifted, and
-// the fixture would be silently testing the fallback instead of the real face.
+// A fall back to the inferred panel means the catalogue's port names or the scrape have drifted.
 test('every drawn member renders from its own catalogue art, never the inferred panel', () => {
     const offenders = [];
     for (const device of topology) {
@@ -103,10 +99,7 @@ test('the graph is connected and carries redundant links, not just a tree', () =
     assert.ok(seen.size >= scanned * 0.95, `only ${seen.size} of ${topology.length} devices are reachable`);
     assert.ok(edges.length > topology.length, 'a pure tree never reaches the secondary-edge rendering');
 
-    // A switch that never got patched is not a visible failure - it becomes an orphan node in a
-    // row beside the diagram, which reads as a layout quirk rather than as missing data. This
-    // happens the moment the distribution frames run out of uplink cages. A placeholder is
-    // exempt: the crawler could not read the device, so of course it reports no neighbours.
+    // An unpatched switch reads as a layout quirk, not a failure. A placeholder is exempt - unreadable.
     const orphans = topology.filter(d => d.ScanStatus === 'Ok' && d.Neighbors.length === 0);
     assert.deepEqual(orphans.map(d => d.Hostname), [], 'scanned devices with no neighbours at all');
 });
@@ -116,8 +109,7 @@ test('interface rows carry the fields the table, faceplate and sort all read', (
     for (const field of ['Port', 'Admin', 'Link', 'Desc', 'STP', 'PoE']) {
         assert.ok(rows.every(r => r[field] !== undefined), `every row needs ${field}`);
     }
-    // "Longest inactive" sorts on LastFlappedSeconds and must exclude rows that have none, so
-    // the fixture has to contain both kinds.
+    // "Longest inactive" excludes rows with no LastFlappedSeconds, so both kinds must be present.
     assert.ok(rows.some(r => r.LastFlappedSeconds === null));
     assert.ok(rows.some(r => Number.isFinite(r.LastFlappedSeconds)));
     // The activity lens bands at 72h and 6 months; all three must be represented.
@@ -154,8 +146,7 @@ test('ports shared by two MACs produce all three daisy-chain confidences', () =>
     assert.deepEqual([...verdicts].sort(), ['confirmed', 'likely', 'possible']);
 });
 
-// The dashboard counts anything that is neither "Unknown" nor "Authenticated" as a violation,
-// so all three states have to appear or that tile is stuck at zero.
+// Anything neither "Unknown" nor "Authenticated" counts as a violation, so all three must appear.
 test('dot1x states cover unobserved, authenticated and failed', () => {
     const states = new Set(topology.flatMap(d => d.Clients).map(c => c.Dot1x_State));
     assert.ok(states.has('Unknown'));
@@ -172,8 +163,7 @@ test('failed scans appear as placeholder nodes carrying a status and an error', 
     }
 });
 
-// The fixture stands in for a real crawl, so a key the crawler always writes but the fixture
-// omits reaches the UI as `undefined` rather than the "Unknown" the crawler would have written.
+// A key the crawler always writes but the fixture omits reaches the UI as `undefined`.
 test('fixture devices carry every key Get-JunosNodeData.ps1 initializes', () => {
     const source = fs.readFileSync(path.join(ROOT, 'lib', 'Get-JunosNodeData.ps1'), 'utf8');
     const init = source.match(/\$NodeData = @\{([\s\S]*?)\n\}/);
@@ -194,8 +184,7 @@ test('placed devices are keyed by serial so the Map can find them', () => {
     }
     assert.ok(new Set(fixture.config.devices.map(d => d.building)).size > 1, 'clustering needs more than one building');
 
-    // Most of the fleet is placed, but not all of it: a switch commissioned since the location
-    // file was written has no pin yet, which is what the Map's unplaced-devices panel lists.
+    // Not all of it: a switch commissioned since the location file was written has no pin yet.
     const placedKeys = new Set(fixture.config.devices.map(d => d.key));
     const scanned = topology.filter(d => d.ScanStatus === 'Ok');
     const placedCount = scanned.filter(d => d.StackMembers.some(m => placedKeys.has(m.Serial))).length;
@@ -203,12 +192,8 @@ test('placed devices are keyed by serial so the Map can find them', () => {
     assert.ok(placedCount < scanned.length, 'an entirely placed fleet never shows the unplaced-devices panel');
 });
 
-/* ---- geography ----
-   The fleet is modelled on the UW Seattle campus, and the topology is supposed to follow the
-   buildings: a closet uplinks to the distribution frame nearest it, a closet fed from another
-   closet is on another floor of the same building, and nothing reaches across campus. These
-   read the placements back out of the generated config, so they check the geometry itself
-   rather than the constants that produced it. */
+/* ---- geography: a closet uplinks to the nearest distribution frame, a closet fed from another
+   closet is elsewhere in the same building, and nothing reaches across campus. ---- */
 
 const metres = (a, b) => {
     const dLat = (a.lat - b.lat) * 111320;
@@ -240,14 +225,11 @@ test('a stack is in one room, not spread across campus', () => {
     }
 });
 
-// The rule the campus model implements is zone first, distance second - fibre follows the
-// campus zones, so a building is fed from its own zone's frame even where another zone's frame
-// happens to be physically nearer (Fishery Sciences is the honest example). Within the zone,
-// the nearest frame wins. The zone is the leading clause of each placement's notes.
+// Zone first, distance second - a building is fed from its own zone's frame even where another
+// zone's is physically nearer (Fishery Sciences). The zone leads each placement's notes.
 const zoneOfPin = (pin) => String(pin.notes).split(' - ')[0];
 
-// Which campus zones share a border, stated here rather than imported so that widening the
-// generator's fibre plant has to be a deliberate edit to the spec as well as to the code.
+// Stated here rather than imported, so widening the fibre plant is a deliberate edit to both.
 const ADJACENT = {
     'West Campus': ['Central Campus', 'North Campus'],
     'Central Campus': ['West Campus', 'North Campus', 'South Campus', 'East Campus'],
@@ -263,10 +245,7 @@ test('an access switch uplinks to the nearest frame in its own zone', () => {
     assert.ok(frames.length >= 4, 'campus needs several distribution frames for this to mean anything');
     const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
 
-    // Pins are jittered by about a building's footprint so a stack does not collapse into one
-    // dot, and two frames can sit closer together than that jitter. Comparing exact rankings
-    // would be more precise than the data: the assertion is that nothing is patched appreciably
-    // further than the nearest candidate, not that ties break a particular way.
+    // Pins are jittered by about a footprint, so assert only that nothing is patched much further.
     const TIE_M = 120;
     const nearestOf = (pin, candidates) => Math.min(...candidates.map(f => metres(pin, f.pin)));
 
@@ -290,8 +269,7 @@ test('an access switch uplinks to the nearest frame in its own zone', () => {
                     `${device.Hostname} is patched to ${peer.Hostname} at ${Math.round(chosen)} m when its zone has one at ${Math.round(nearestOf(pin, inZone))} m`);
                 continue;
             }
-            // The only uplink out of the zone is the deliberate dual-homing, and it must go to
-            // the nearest frame in a bordering zone - never a haul across campus.
+            // The only out-of-zone uplink is the deliberate dual-homing, to a bordering zone.
             secondaries++;
             assert.ok(ADJACENT[zone].includes(peerZone),
                 `${device.Hostname} (${zone}) dual-homes to ${peer.Hostname} in ${peerZone}, which does not border it`);
@@ -344,14 +322,12 @@ test('links are campus-length, not wishful', () => {
     }
     lengths.sort((a, b) => a - b);
     assert.ok(lengths.length > 50);
-    // The campus is about 1.5 km corner to corner, so nothing can legitimately exceed that, and
-    // a median in the hundreds of metres means most links stay inside a building or its block.
+    // The campus is ~1.5 km corner to corner, so nothing can legitimately exceed that.
     assert.ok(lengths[lengths.length - 1] < 2000, `longest link is ${Math.round(lengths[lengths.length - 1])} m`);
     assert.ok(lengths[Math.floor(lengths.length / 2)] < 400, `median link is ${Math.round(lengths[Math.floor(lengths.length / 2)])} m`);
 });
 
-// Trends, New Devices, Topology Diff and Config Changed are all comparisons between snapshots,
-// so a fixture with one snapshot leaves four dashboard tabs untestable.
+// Four dashboard tabs are snapshot comparisons, so a one-snapshot fixture leaves them untestable.
 test('successive daily snapshots differ the way a fleet does between crawls', () => {
     assert.ok(fixture.snapshots.length >= 3, 'the default is several snapshots');
     const times = fixture.snapshots.map(s => new Date(s.ScanTimestamp).getTime());
@@ -367,17 +343,14 @@ test('successive daily snapshots differ the way a fleet does between crawls', ()
     const [firstCfg, lastCfg] = [configOf(first), configOf(last)];
     assert.ok([...lastCfg].some(([ip, cfg]) => firstCfg.has(ip) && firstCfg.get(ip) !== cfg), 'no configuration changed');
 
-    // Reboot detection compares a device's boot timestamp against the previous snapshot's, so a
-    // fleet whose Uptime never moves reports none however many snapshots are loaded.
+    // Reboot detection compares boot timestamps, so a fleet whose Uptime never moves reports none.
     const bootOf = t => new Map(t.map(d => [String(d.DeviceIP), d.Uptime]));
     const [firstBoot, lastBoot] = [bootOf(first), bootOf(last)];
     assert.ok([...lastBoot].some(([ip, up]) => firstBoot.has(ip) && firstBoot.get(ip) !== up && up !== 'Unknown'),
         'no device rebooted between the first and last snapshot');
 });
 
-// A placeholder has no StackMembers, so its cross-snapshot identity falls back from serial to
-// hostname. Re-rolling which devices fail each crawl therefore reports most of the fleet as
-// removed and re-added, burying the genuine changes.
+// Identity falls back to hostname for a placeholder, so a re-rolled failing set reads as churn.
 test('the set of unreachable devices is stable across snapshots', () => {
     const failedIn = fixture.snapshots.map(s => new Set(s.Topology.filter(d => d.ScanStatus !== 'Ok').map(d => String(d.DeviceIP))));
     for (let i = 1; i < failedIn.length; i++) {
@@ -402,12 +375,8 @@ test('a different seed produces a different map', () => {
 
 test.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
 
-/* ---- pins land indoors ----
-   A pin is only useful if it is on the building it names. The generator places closets on rings
-   inside each building's footprint, sized from the OpenStreetMap polygon, rather than jittering
-   them around an approximate centre - jitter wide enough to separate two closets also threw
-   pins onto the lawn. These read the declared footprints back out of the generator source, so a
-   coordinate edited without its radius is caught. */
+/* ---- pins land indoors: closets ring inside each building's OSM footprint, because jitter wide
+   enough to separate two closets also threw pins onto the lawn. ---- */
 
 const CAMPUS_ROWS = new Map([...fs.readFileSync(GENERATOR, 'utf8')
     .matchAll(/\{ abbr: '([^']+)', name: '[^']+', lat: ([\d.]+), lng: (-[\d.]+), r: (\d+), closets: \d+/g)]
@@ -477,11 +446,8 @@ test('the default fleet size is the documented one', () => {
     assert.match(src, new RegExp(`# ${dflt} devices ->`), 'the usage comment must match the default');
 });
 
-/* ---- the stale-config guard ----
-   The app reads Configuration.json; the generator writes Configuration.fixture.json beside the
-   maps. Serials are handed out in generation order, so a fixture regenerated without copying
-   the placements over still resolves every serial - against the PREVIOUS fleet's buildings.
-   Every pin then shows on the wrong building and nothing about it looks like an error. */
+/* ---- stale-config guard: the app reads Configuration.json but the generator writes
+   Configuration.fixture.json, so an uncopied regeneration resolves serials against the old fleet. ---- */
 
 function generateInto(parent, args) {
     const maps = path.join(parent, 'Network_Maps');
@@ -518,8 +484,7 @@ test('the guard stays quiet when there is nothing to warn about', () => {
 });
 
 test("the guard never comments on an operator's real placements", () => {
-    // Real serials are not SYN-prefixed. Those placements are the operator's business, and a
-    // fixture run must not tell them their own config is stale.
+    // Real serials are not SYN-prefixed, and a fixture run must not call the operator's config stale.
     const real = tmpParent();
     fs.writeFileSync(path.join(real, 'Configuration.json'), JSON.stringify({
         devices: [{ key: 'JN123REAL', building: 'A real site', lat: 1, lng: 1 }],

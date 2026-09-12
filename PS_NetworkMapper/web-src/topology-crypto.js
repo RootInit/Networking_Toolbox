@@ -1,8 +1,6 @@
-// Decrypts a "PSNetworkMapper-EncryptedTopology" envelope: AES-256-CBC, keys from
-// PBKDF2-SHA256, encrypt-then-MAC with HMAC-SHA256 over IV+ciphertext. Every parameter here
-// must stay in lockstep with lib/TopologyCrypto.ps1, which writes the envelope. Not AES-GCM
-// because that side must also run under Windows PowerShell 5.1, whose .NET Framework lacks
-// AesGcm.
+// Decrypts a "PSNetworkMapper-EncryptedTopology" envelope: AES-256-CBC, keys from PBKDF2-SHA256,
+// encrypt-then-MAC with HMAC-SHA256 over IV+ciphertext. Must stay in lockstep with
+// lib/TopologyCrypto.ps1. Not AES-GCM because that side also runs under Windows PowerShell 5.1.
 var TopologyCrypto = (function() {
     function b64ToBytes(b64) {
         var bin = atob(b64);
@@ -30,8 +28,7 @@ var TopologyCrypto = (function() {
         return { encKeyBytes: keyMaterial.slice(0, 32), macKeyBytes: keyMaterial.slice(32, 64) };
     }
 
-    // MIN must stay <= any real file's iteration count (the shared count is 600,000) or
-    // decryption stops working. MAX is a CPU-burn guard, not a security boundary.
+    // MIN must stay <= any real file's iteration count; MAX is a CPU-burn guard, not a boundary.
     var MIN_ITERATIONS = 1000;
     var MAX_ITERATIONS = 5000000;
 
@@ -58,12 +55,9 @@ var TopologyCrypto = (function() {
             throw new Error(`Iteration count out of range: ${envelope.iterations}`);
         }
 
-        // A corrupted envelope throws raw DOMExceptions here (atob on non-base64,
-        // crypto.subtle.decrypt on a non-block-multiple ciphertext). Collapse them into the
-        // same message as a bad MAC so no raw exception escapes and the caller cannot
-        // distinguish "wrong password" from "corrupt file". Everything thrown from here on is
-        // tagged wrongPassword, which is what callers gate their re-prompt loop on: the
-        // checks above are password-independent, so re-prompting for them can never succeed.
+        // A corrupted envelope throws raw DOMExceptions here (atob, or a non-block-multiple
+        // ciphertext). Collapse them into the same message as a bad MAC. Everything thrown from here
+        // is tagged wrongPassword; the checks above are password-independent, so they are not.
         try {
             var saltBytes = b64ToBytes(envelope.salt);
             var ivBytes = b64ToBytes(envelope.iv);
@@ -72,8 +66,7 @@ var TopologyCrypto = (function() {
 
             var keys = await deriveKeyMaterial(password, saltBytes, envelope.iterations);
 
-            // MAC is verified before decrypting: a wrong password fails clearly here rather
-            // than as a confusing AES-CBC padding exception.
+            // MAC verified before decrypting: a wrong password fails clearly, not as a padding error.
             var macKey = await crypto.subtle.importKey('raw', keys.macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
             var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, concatBytes(ivBytes, cipherBytes));
             if (!macOk) throw wrongPasswordError();

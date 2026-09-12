@@ -1,12 +1,8 @@
-# Standalone CLI to encrypt or decrypt a topology snapshot (Network_Maps\NetworkMap_*.json[.enc])
-# or Configuration.json[.enc] outside of a live crawl/webserver session, using the same
-# TopologyCrypto.ps1 envelope as the rest of the app.
-#
-# Run it directly:
+# Standalone CLI to encrypt or decrypt a topology snapshot or Configuration.json[.enc] outside a
+# live crawl/webserver session, using the same TopologyCrypto.ps1 envelope as the rest of the app.
 #   .\Protect-MapperFile.ps1 -InputFile .\Network_Maps\NetworkMap_2026-08-28_120000.json          # encrypt
 #   .\Protect-MapperFile.ps1 -InputFile .\Network_Maps\NetworkMap_2026-08-28_120000.json.enc -Decrypt
 #   .\Protect-MapperFile.ps1 -InputFile .\Configuration.json.enc -Decrypt -OutputFile plain.json
-#
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [Parameter(Mandatory = $true, Position = 0)]
@@ -19,14 +15,12 @@ param(
     # Default action is encrypt; pass this to reverse it.
     [switch]$Decrypt,
 
-    # Which envelope `format` to stamp when encrypting; auto-detected from the filename by
-    # default. Start-NetworkMapper.ps1 loads Configuration.json.enc only under
-    # "PSNetworkMapper-EncryptedConfig", so the wrong value yields a file the app rejects.
+    # Which envelope `format` to stamp when encrypting; auto-detected from the filename. Start-
+    # NetworkMapper.ps1 loads Configuration.json.enc only as "PSNetworkMapper-EncryptedConfig".
     [ValidateSet('Auto', 'Topology', 'Config')]
     [string]$Type = 'Auto',
 
-    # Non-interactive use, e.g. -Password (ConvertTo-SecureString 'x' -AsPlainText -Force).
-    # Prompted interactively when omitted.
+    # Non-interactive use; prompted interactively when omitted.
     [securestring]$Password,
 
     # Skips the overwrite confirmation if OutputFile already exists.
@@ -60,15 +54,12 @@ if ([string]::IsNullOrEmpty($PlainPassword)) { throw "Password cannot be empty."
 
 $ResolvedInput = (Resolve-Path -LiteralPath $InputFile).Path
 
-# -Force means "don't ask", which now has to work through $ConfirmPreference rather than by
-# skipping the check: the ShouldProcess call below is also what makes -WhatIf work, and
-# Set-FileContentAtomic can't carry it - Set-Content honours -WhatIf and writes nothing, then
-# Move-FileAtomic throws trying to Convert-Path the temp file that was never created.
+# -Force works through $ConfirmPreference rather than skipping the check: the ShouldProcess call
+# below is also what makes -WhatIf work, and Set-FileContentAtomic can't carry it.
 if ($Force) { $ConfirmPreference = 'None' }
 
 if ($Decrypt) {
-    # -Encoding UTF8 explicit: Get-Content -Raw with no -Encoding falls back to the system
-    # ANSI codepage on a BOM-less file, corrupting any non-ASCII byte before ConvertFrom-Json.
+    # -Encoding UTF8 explicit, or a BOM-less file is read as ANSI and non-ASCII is corrupted.
     $Envelope = Get-Content -LiteralPath $ResolvedInput -Raw -Encoding UTF8 | ConvertFrom-Json
     if (-not $Envelope.format) {
         throw "$ResolvedInput does not look like an encrypted PS_NetworkMapper file (no 'format' field) - nothing to decrypt."
@@ -86,11 +77,9 @@ if ($Decrypt) {
     $TargetPath = if ($OutputFile) { $OutputFile } else { $DefaultOutput }
 
     if (-not $PSCmdlet.ShouldProcess($TargetPath, "Write decrypted plaintext")) { return }
-    # Written verbatim: a ConvertFrom-Json/ConvertTo-Json round-trip would reformat date-like
-    # string fields depending on PowerShell version/culture.
-    #
-    # Atomic because -OutputFile can equal -InputFile (in-place decrypt), making $TargetPath
-    # the operator's only copy - a partway failure must not truncate it.
+    # Written verbatim: a ConvertFrom-Json/ConvertTo-Json round-trip would reformat date-like string
+    # fields by version/culture. Atomic because -OutputFile can equal -InputFile, making $TargetPath
+    # the operator's only copy.
     Set-FileContentAtomic -DestinationPath $TargetPath -Content $PlainJson -Encoding utf8
     Write-Host "Wrote plaintext to: $TargetPath" -ForegroundColor Green
 
@@ -99,8 +88,7 @@ if ($Decrypt) {
     $RawInput = Get-Content -LiteralPath $ResolvedInput -Raw -Encoding UTF8
     $ParsedInput = $null
     try { $ParsedInput = $RawInput | ConvertFrom-Json } catch { throw "$ResolvedInput is not valid JSON - nothing to encrypt." }
-    # Re-wrapping an already-encrypted envelope would silently produce a file nothing can
-    # decrypt back to the real data.
+    # Re-wrapping an already-encrypted envelope would produce a file nothing can decrypt.
     if ($ParsedInput.format -match '^PSNetworkMapper-Encrypted') {
         throw "$ResolvedInput is already an encrypted envelope (format: $($ParsedInput.format)) - use -Decrypt instead, or point -InputFile at the original plaintext source."
     }

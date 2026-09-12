@@ -1,8 +1,6 @@
-// Pure graph algorithms for the topology layout: no DOM, no vis-network,
-// no browser globals. Importable from both the browser and node:test.
+// Pure graph algorithms for the topology layout: no DOM, no vis-network, no browser globals.
 
-// Splits a dotted-quad-shaped ID into comparable numeric octets; IDs that
-// aren't dotted-quads (e.g. "cluster:10.55.2.2") fall back to string compare.
+// Splits a dotted-quad-shaped ID into numeric octets; non-quads fall back to string compare.
 function compareIpIds(a, b) {
   const partsA = String(a).split('.');
   const partsB = String(b).split('.');
@@ -27,10 +25,8 @@ function buildAdjacency(nodeIds, edges) {
   return adj;
 }
 
-// BFS distances from `startId`. The head pointer keeps dequeue O(1); `queue.shift()` is
-// O(n) and would make this worse than its nominal O(V+E). Neighbors are visited unsorted
-// because only component size and max depth matter here, and neither depends on visit
-// order - unlike buildPrimaryTree's BFS, where order decides each node's parent.
+// BFS distances from `startId`. The head pointer keeps dequeue O(1). Neighbors are visited unsorted
+// because only component size and max depth matter - unlike buildPrimaryTree, where order picks parents.
 function bfsDistances(adj, startId) {
   const dist = new Map([[startId, 0]]);
   const queue = [startId];
@@ -107,15 +103,12 @@ function buildPrimaryTree(nodeIds, edges, rootId) {
   growTreeFrom(rootId);
 
   // Anything the BFS never reached is a disconnected fabric island. Left out, computeVisibleTree
-  // would never see it and expandAncestors' parentOf.get() would return undefined for it - so
-  // each gets its own local root (same heuristic, scoped to that component) recorded as another
-  // top-level entry, exactly like rootId.
+  // never sees it and expandAncestors' parentOf.get() returns undefined, so each gets its own root.
   const remaining = nodeIds.filter(id => !parentOf.has(id)).sort(compareIpIds);
   for (const id of remaining) {
     if (parentOf.has(id)) continue; // swept into an earlier component this loop
 
-    // Plain adjacency walk: the component's root isn't known yet, so growTreeFrom can't
-    // be used here.
+    // Plain adjacency walk: the component's root isn't known yet, so growTreeFrom can't be used.
     const componentIds = [];
     const seen = new Set([id]);
     const stack = [id];
@@ -159,8 +152,7 @@ function computeVisibleTree(rootId, childrenOf, expandedNodes, threshold, extraR
   const visibleNodeIds = [];
   const visibleEdges = [];
   const clusters = new Map();
-  // hidden node id -> the `cluster:X` placeholder standing in for it, so an edge onto a
-  // hidden endpoint can be rerouted to the placeholder rather than dropped.
+  // hidden node id -> the `cluster:X` placeholder, so an edge onto it is rerouted, not dropped.
   const hiddenNodeToCluster = new Map();
 
   if (rootId == null) return { visibleNodeIds, visibleEdges, clusters, hiddenNodeToCluster };
@@ -201,14 +193,11 @@ function expandAncestors(parentOf, childrenOf, targetId, expandedNodes, threshol
   }
 }
 
-// Places the visible tree recursively. Children fan out around their own parent in a full
-// circle at every depth rather than a wedge inherited from above, which crammed deep
-// branches into a narrow slice and blew up their radius.
-//
-// Angles are fixed and proportional; each child's DISTANCE from the shared centre is relaxed
-// individually by a fixed-iteration numerical pass (deterministic, no animation), so a small
-// cluster can sit closer than a large sibling. Every pair is checked each iteration, not just
-// angular neighbors, since independent radii can bring non-neighbors closer together.
+// Places the visible tree recursively. Children fan out around their own parent in a full circle at
+// every depth rather than a wedge inherited from above, which crammed deep branches into a narrow
+// slice. Angles are fixed and proportional; each child's DISTANCE from the shared centre is relaxed
+// individually by a fixed-iteration numerical pass, so a small cluster can sit closer than a large
+// sibling. Every pair is checked each iteration, since independent radii can bring non-neighbors close.
 function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const opts = options || {};
   // nodeSpacing: branch-to-branch separation and inter-cluster margin.
@@ -217,10 +206,8 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const leafSpacing = opts.leafSpacing ?? 250;
   const minRadius = opts.minRadius ?? 250;
   const relaxIterations = opts.relaxIterations ?? 150;
-  // An absolute Date.now() timestamp (the caller derives it from its own budget); null
-  // means unbounded. It has to be checked from inside the computation: this function runs
-  // synchronously start-to-finish, so a racing setTimeout cannot fire until it has already
-  // returned, however long it took.
+  // An absolute Date.now() timestamp; null means unbounded. Checked from inside the computation:
+  // this runs synchronously start-to-finish, so a racing setTimeout cannot fire until it returns.
   const deadline = opts.deadline ?? null;
   function checkDeadline() {
     if (deadline !== null && Date.now() > deadline) {
@@ -235,14 +222,12 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   const isLeaf = id => !childrenOf.has(id) || childrenOf.get(id).length === 0;
   const allChildrenAreLeaves = kids => kids.every(isLeaf);
 
-  // Angular slices are proportional to each child's natural size rather than an equal 1/n
-  // share; otherwise one large child forces its angular neighbors out to nearly its own
-  // radius just to clear it.
+  // Angular slices are proportional to each child's natural size rather than an equal 1/n share;
+  // otherwise one large child forces its neighbors out to nearly its own radius just to clear it.
   function computeChildAngles(naturalMin) {
     const n = naturalMin.length;
     const total = naturalMin.reduce((a, b) => a + b, 0);
-    // total is 0 only when every child is a leaf with minRadius 0 - unreachable from the
-    // UI, which floors minRadius, but tests call this directly. Equal split avoids NaN.
+    // total is 0 only when every child is a leaf with minRadius 0 - reachable only from tests.
     const angles = [];
     let cumulative = 0;
     for (let i = 0; i < n; i++) {
@@ -253,23 +238,20 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     return angles;
   }
 
-  // childrenOf is in IP order, so two large clusters can land adjacent by chance and force
-  // excess separation. Returns posOf[originalIndex] -> circular position, placing each
-  // next-largest extent in whichever free slot is farthest from those already placed.
+  // childrenOf is in IP order, so two large clusters can land adjacent by chance. Returns
+  // posOf[originalIndex] -> position, placing each next-largest extent farthest from those placed.
   function spreadBySize(extents) {
     const n = extents.length;
     const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => extents[b] - extents[a]);
     const posOf = new Array(n).fill(-1);
-    // All-equal extents (every child a leaf - the common case, and the same one relaxRadii
-    // fast-paths) make every permutation equivalent, so the O(n^3) search below buys nothing.
+    // All-equal extents (every child a leaf - the common case) make every permutation equivalent.
     // Without this, n=3000 spent 15.2s here before the 8s budget could even be noticed.
     if (extents.every(e => e === extents[0])) return posOf.map((_, i) => i);
     const filled = new Array(n).fill(false);
     posOf[order[0]] = 0;
     filled[0] = true;
     for (let k = 1; k < n; k++) {
-      // The sweep below is O(n^2) per placement, long enough that the budget must be
-      // observed here rather than only once this whole function has returned.
+      // The sweep below is O(n^2) per placement, so the budget must be observed here too.
       checkDeadline();
       let bestPos = -1, bestMinDist = -1;
       for (let p = 0; p < n; p++) {
@@ -288,10 +270,9 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     return posOf;
   }
 
-  // Finds each child's minimal radius at its fixed angle. Each starts at its natural resting
-  // radius; every pair is then checked, and i is pushed out to just clear j when their chord
-  // distance falls short. Nothing is ever pulled below its natural rest, and j moves on its
-  // own turn rather than being moved from here.
+  // Finds each child's minimal radius at its fixed angle. Each starts at its natural resting radius;
+  // every pair is then checked, and i is pushed out to just clear j when their chord distance falls
+  // short. Nothing is pulled below its natural rest, and j moves on its own turn.
   function relaxRadii(kids, extents, spacing) {
     const n = extents.length;
     if (n === 0) return { radii: [], angles: [] };
@@ -312,27 +293,21 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     const naturalMin = orderedExtents.map(e => minRadius + e);
     const angles = computeChildAngles(naturalMin);
 
-    // The floor only has to keep a child's descendants off the PARENT, so it charges for the
-    // reach back along the child's own spoke, not for extent's omnidirectional worst case.
-    // Angles still come from extent (a child's total size is what earns it angular room);
-    // sibling clearance is the pair sweep's job below, and it measures directionally too.
-    // Paying the omnidirectional price here compounded: each level's radius covered the whole
-    // subtree beneath it, so radii roughly doubled per level and a 6-deep tree spent 32x the
-    // space it needed.
+    // The floor only has to keep a child's descendants off the PARENT, so it charges for the reach
+    // back along the child's own spoke, not for extent's omnidirectional worst case. Angles still
+    // come from extent; sibling clearance is the pair sweep's job. Paying the omnidirectional price
+    // here compounded: radii roughly doubled per level, so a 6-deep tree spent 32x the space needed.
     const radii = orderedKids.map((k, i) => minRadius + reachToward(k, angles[i] + Math.PI));
 
-    // Leaf/leaf pairs have reachToward == 0, so requiredDist collapses to plain `spacing`
-    // and the vector math can be skipped. They dominate on real networks: without this fast
-    // path, 300 branch-level siblings took 11863ms instead of 371ms.
+    // Leaf/leaf pairs have reachToward == 0, so requiredDist collapses to plain `spacing` and the
+    // vector math is skipped. Without this fast path, 300 siblings took 11863ms instead of 371ms.
     const isLeafOrdered = orderedKids.map(isLeaf);
 
     for (let iter = 0; iter < relaxIterations; iter++) {
-      // Cheap next to the O(n^2) sweep, and per-iteration so one pathologically large
-      // sibling set can't run unbounded inside a single relaxRadii call.
+      // Per-iteration so one pathologically large sibling set can't run unbounded in one call.
       checkDeadline();
-      // Jacobi-style: reads `radii` from the start of the sweep, applies all updates at the
-      // end. Updating in place (Gauss-Seidel) makes the result order-dependent - 40
-      // identical leaves converged to radii between 190 and 1120 purely from order.
+      // Jacobi-style: reads `radii` from the start of the sweep, applies updates at the end. In-place
+      // (Gauss-Seidel) made results order-dependent - 40 identical leaves spread from 190 to 1120.
       const next = radii.slice();
       for (let i = 0; i < n; i++) {
         let desired = radii[i];
@@ -342,10 +317,8 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
           const rj = radii[j];
           const angleJ = angles[j];
 
-          // reachToward measures how far each subtree reaches toward the other, along the
-          // real vector between their positions. A fixed extents[i]+extents[j] (worst-case
-          // reach in any direction) over-charges for reach pointing away and forces excess
-          // clearance.
+          // reachToward measures how far each subtree reaches toward the other along the real vector
+          // between them; a fixed extents[i]+extents[j] over-charges for reach pointing away.
           let requiredDist;
           if (isLeafOrdered[i] && isLeafOrdered[j]) {
             requiredDist = spacing;
@@ -359,10 +332,9 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
           const rawDiff = Math.abs(angleI - angleJ);
           const angleDiff = Math.min(rawDiff, 2 * Math.PI - rawDiff);
           const cosA = Math.cos(angleDiff);
-          // chord(ri)^2 = ri^2 - 2*rj*cosA*ri + rj^2 is a parabola in ri, so the constraint
-          // holds OUTSIDE the root interval - including below the smaller root, where
-          // `desired` may already satisfy it. Jumping to the larger root unconditionally
-          // made radii diverge to the billions within 150 iterations.
+          // chord(ri)^2 = ri^2 - 2*rj*cosA*ri + rj^2 is a parabola in ri, so the constraint holds
+          // OUTSIDE the root interval - including below the smaller root, where `desired` may already
+          // satisfy it. Jumping to the larger root unconditionally diverged to billions in 150 iters.
           const chordSq = desired * desired - 2 * rj * cosA * desired + rj * rj;
           if (chordSq < requiredDist * requiredDist) {
             const b = -2 * rj * cosA;
@@ -374,8 +346,7 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
         }
         next[i] = desired;
       }
-      // Most topologies converge well before relaxIterations sweeps, and further sweeps
-      // cost real time once reachToward is working on non-leaf pairs.
+      // Most topologies converge well before relaxIterations sweeps, and further sweeps cost time.
       let maxChange = 0;
       for (let i = 0; i < n; i++) {
         const change = Math.abs(next[i] - radii[i]);
@@ -400,8 +371,7 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
 
   function childLayout(nodeId) {
     if (layoutCache.has(nodeId)) return layoutCache.get(nodeId);
-    // Once per distinct node, so the budget also binds a WIDE tree of cheap nodes, not
-    // just a single expensive one.
+    // Once per distinct node, so the budget also binds a WIDE tree of cheap nodes.
     checkDeadline();
     const kids = childrenOf.get(nodeId) || [];
     const extents = kids.map(extent);
@@ -411,9 +381,8 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     return layout;
   }
 
-  // How far nodeId's subtree extends from its own position in the OMNIDIRECTIONAL worst
-  // case - distinct from reachToward below, which answers "toward one neighbor". Used by
-  // naturalMin to keep descendants from wrapping back onto nodeId's own parent.
+  // How far nodeId's subtree extends OMNIDIRECTIONALLY - distinct from reachToward, which answers
+  // "toward one neighbor". Used by naturalMin to keep descendants off nodeId's own parent.
   function extent(nodeId) {
     if (extentCache.has(nodeId)) return extentCache.get(nodeId);
     let result;
@@ -432,16 +401,12 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
     return result;
   }
 
-  // How far nodeId's subtree extends toward `angle`, in the absolute frame (place() adds
-  // child angles straight onto the parent position). extent(child) upper-bounds any child's
-  // reach, so a child that can't beat the current `best` is skipped without recursing.
-  //
-  // Memoized per (nodeId, angle bucket) - safe because childLayout is fixed for the rest of
-  // the pass. Bucketing turns a converging relaxation's near-identical repeated queries into
-  // hits; without it, 300 non-leaf siblings took ~5.3s instead of under a second. The cached
-  // value is computed at the bucket's CENTRE (the raw query angle rounded toward a lower,
-  // under-reserving value) and padded by extent(nodeId) * angular distance, which is a safe
-  // bound because reachToward is extent(nodeId)-Lipschitz in angle.
+  // How far nodeId's subtree extends toward `angle`, in the absolute frame. extent(child) upper-bounds
+  // any child's reach, so a child that can't beat the current `best` is skipped without recursing.
+  // Memoized per (nodeId, angle bucket) - safe because childLayout is fixed for the pass; without
+  // bucketing, 300 non-leaf siblings took ~5.3s instead of under a second. The cached value is taken
+  // at the bucket CENTRE and padded by extent(nodeId) * angular distance, safe because reachToward
+  // is extent(nodeId)-Lipschitz in angle.
   const reachCache = new Map(); // nodeId -> Map<bucket, valueAtBucketCenter>
   const REACH_ANGLE_BUCKET = (2 * Math.PI) / 315;
 
@@ -492,9 +457,8 @@ function computeRecursiveRadialLayout(rootId, childrenOf, options) {
   return positions;
 }
 
-// Dual-mode export: node:test reaches module.exports through Node's CJS/ESM interop, while
-// the browser loads this as a classic <script> and gets window.GraphLayout. Deliberately not
-// an ES module - file:// can't fetch those, and the bundle must open straight off disk.
+// Dual-mode export: node:test reaches module.exports, the browser loads this as a classic <script>
+// and gets window.GraphLayout. Not an ES module - file:// can't fetch those.
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { compareIpIds, computeGraphRoot, buildPrimaryTree, computeVisibleTree, expandAncestors, computeRecursiveRadialLayout };
 } else if (typeof window !== 'undefined') {

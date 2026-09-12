@@ -1,6 +1,5 @@
-// Analysis Dashboard (#analysisview, the third centre view beside Diagram and Map): Fleet
-// Health, New Devices, Trends, Local Accounts, Topology Diff, IP Space and Reliability, plus
-// stat-card drill-down into a search.js results list.
+// Analysis Dashboard (#analysisview): Fleet Health, New Devices, Trends, Local Accounts, Topology
+// Diff, IP Space and Reliability, plus stat-card drill-down into a search.js results list.
 
 // Re-renders every dashboard view; called on activation and after a load while showing.
 window.refreshAnalysisDashboard = function() {
@@ -29,24 +28,19 @@ window.switchAnalysisTab = function(tabId) {
     if (tabId === 'analysis-tab-reliability') window.renderReliabilityHeatmap();
 };
 
-
-// --- Shared inline graphics for the dashboard (plain SVG/HTML strings, no library) ---
-
 // One severity vocabulary ('ok' | 'warn' | 'crit') for every bar, band and badge here.
 function severityTier(value, warn, critical) {
     return value >= critical ? 'crit' : (value >= warn ? 'warn' : 'ok');
 }
 var SEVERITY_WORD = { ok: 'ok', warn: 'warning', crit: 'critical' };
 
-// Horizontal bar with the value beside it, so "how full" reads at a glance rather than from
-// a number. `pct` is the fill (0-100), `tier` picks the colour.
+// Horizontal bar with the value beside it. `pct` is the fill (0-100), `tier` picks the colour.
 function inlineBar(pct, label, tier, title) {
     var clamped = Math.max(0, Math.min(100, pct || 0));
     return `<span class="inline-bar" title="${esc(title || label)}"><span class="inline-bar-track"><span class="inline-bar-fill tier-${tier}" style="width:${clamped}%"></span></span><span class="inline-bar-label tier-${tier}">${esc(label)}</span></span>`;
 }
 
-// Tiny line chart of a fleet metric across the loaded snapshots, oldest left. Fewer than two
-// points draws nothing. The last point is emphasised so the eye lands on "now".
+// Tiny line chart across the loaded snapshots, oldest left; the last point is emphasised.
 function sparklineSvg(values, opts) {
     opts = opts || {};
     var pts = values.filter(v => typeof v === 'number' && isFinite(v));
@@ -73,11 +67,9 @@ function datedSnapshotsAsc() {
         .sort((a, b) => a.ts - b.ts);
 }
 
-// Memoised per snapshot object: detectDaisyChains over every device isn't free and the
-// dashboard re-renders on every activation.
+// Memoised per snapshot: detectDaisyChains over every device isn't free and this re-renders often.
 var fleetTotalsCache = new WeakMap();
-// Anything mutating a snapshot's topology in place must call this, or a stale cached total
-// gets drawn beside a stat recomputed live from the same mutated data.
+// Anything mutating a snapshot's topology in place must call this, or a stale total gets drawn.
 window.invalidateFleetTotalsCache = function(snapshot) { fleetTotalsCache.delete(snapshot); };
 function fleetTotalsFor(snapshot) {
     if (fleetTotalsCache.has(snapshot)) return fleetTotalsCache.get(snapshot);
@@ -96,8 +88,7 @@ function fleetTotalsFor(snapshot) {
     return t;
 }
 
-// Plain set difference of "display set" config lines (order isn't stable between Junos
-// commits, so this isn't a positional diff). Blank/whitespace-only differences are ignored.
+// Set difference of "display set" lines - order isn't stable between commits, so not positional.
 function configSetDiff(oldText, newText) {
     var oldLines = new Set(String(oldText || '').split('\n').map(l => l.trim()).filter(Boolean));
     var newLines = new Set(String(newText || '').split('\n').map(l => l.trim()).filter(Boolean));
@@ -107,9 +98,8 @@ function configSetDiff(oldText, newText) {
     };
 }
 
-// Positional LCS diff for the Config tab's side-by-side view, so unchanged lines align and
-// only +/- rows are shaded. O(n*m), hence the cell cap: an oversized config pair falls back
-// to the flat set diff rather than locking up the tab.
+// Positional LCS diff so unchanged lines align. O(n*m), hence the cell cap: an oversized pair falls
+// back to the flat set diff rather than locking up the tab.
 var CONFIG_DIFF_CELL_LIMIT = 4000000; // ~16MB of Int32Array at 4 bytes/cell
 function computeLineDiff(oldText, newText) {
     var oldLines = String(oldText || '').split('\n');
@@ -145,8 +135,7 @@ function computeLineDiff(oldText, newText) {
     return rows;
 }
 
-// Compares each device's two most recent config captures by string equality; the line-level
-// diff is computed lazily when its Config tab is opened. Spans all loaded snapshots.
+// Compares each device's two most recent captures by string equality; the line diff is lazy.
 function computeConfigChanges() {
     // Keyed by identity, not IP, so a device renumbered between captures stays one entry.
     var byDevice = new Map(); // identity -> [{idx, ts, config, hostname, ip}]
@@ -178,8 +167,7 @@ window.renderFleetDashboard = function() {
     if (!container) return;
     var settings = window.loadSettings();
     var activeSnapshot = loadedSnapshots[activeSnapshotIndex];
-    // Aggregates the ACTIVE snapshot only - merging snapshots from different times would
-    // double-count devices and mix states never simultaneously true.
+    // ACTIVE snapshot only - merging snapshots would mix states never simultaneously true.
     var devices = globalTopologyData || [];
 
     if (devices.length === 0) {
@@ -187,11 +175,9 @@ window.renderFleetDashboard = function() {
         return;
     }
 
-    // --- Fleet totals ---
     var totalClients = 0, totalAlarms = 0;
     devices.forEach(d => { totalClients += (d.TrueClients || []).length; totalAlarms += window.asArray(d.Alarms).length; });
 
-    // --- Worst-N by CPU / Memory ---
     function worstBy(field) {
         return devices
             .map(d => ({ device: d, value: parseFloat(d[field]) }))
@@ -202,15 +188,11 @@ window.renderFleetDashboard = function() {
     var worstCpu = worstBy('MasterCpuUtilization');
     var worstMem = worstBy('MasterMemoryUtilization');
 
-    // --- Recently rebooted, elapsed since boot measured from this snapshot's capture time
-    // rather than wall-clock "now" ---
+    // Elapsed since boot measured from this snapshot's capture time, not wall-clock "now".
     var recentlyRebooted = [];
-    // Separates "checked and found nothing" from "couldn't check", which must not render
-    // alike. The timestamp must parse, not merely be truthy: otherwise snapTime is NaN, every
-    // comparison below is silently false, and that renders as a trustworthy "None".
+    // The timestamp must parse, not merely be truthy, or every comparison below is silently false.
     var rebootCheckPossible = !!(activeSnapshot && window.parseTimestampMs(activeSnapshot.scanTimestamp) !== null);
-    // One level deeper than rebootCheckPossible: no device having a usable Uptime is also
-    // "couldn't check", not a genuine zero.
+    // No device having a usable Uptime is also "couldn't check", not a genuine zero.
     var anyUptimeUsable = false;
     if (rebootCheckPossible) {
         var snapTime = window.parseTimestampMs(activeSnapshot.scanTimestamp);
@@ -226,8 +208,7 @@ window.renderFleetDashboard = function() {
         });
     }
 
-    // --- Dot1x compliance. "Unknown" means dot1x wasn't observed at all, which is not
-    // necessarily a violation, so it is excluded rather than counted. ---
+    // "Unknown" means dot1x wasn't observed at all, so it is excluded rather than counted.
     var dot1xViolations = [];
     devices.forEach(d => (d.TrueClients || []).forEach(c => {
         if (c.Dot1x_State && c.Dot1x_State !== "Unknown" && c.Dot1x_State !== "Authenticated") {
@@ -235,24 +216,19 @@ window.renderFleetDashboard = function() {
         }
     }));
 
-    // --- Vendor/category breakdown ---
     var categoryCounts = {};
     devices.forEach(d => (d.TrueClients || []).forEach(c => {
         var cat = window.lookupVendor(c.MAC).category;
         categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
     }));
 
-    // --- Daisy-chain count ---
     var daisyChainCount = 0;
     devices.forEach(d => { daisyChainCount += window.detectDaisyChains(d).size; });
 
-    // --- Devices that didn't scan cleanly, tallied separately so they neither inflate nor
-    // hide inside the plain "Devices" count above ---
+    // Tallied separately so they neither inflate nor hide inside the plain "Devices" count.
     var unreachableDevices = devices.filter(d => d.ScanStatus && d.ScanStatus !== "Ok");
 
-    // --- New devices first seen in exactly this snapshot. updateDeviceHistory never writes a
-    // firstSeen from an unparseable timestamp, so the filter would come back empty and render
-    // as a trustworthy "0 new"; show "N/A" instead. ---
+    // An empty filter would render as a trustworthy "0 new", so unparseable firstSeen shows "N/A".
     var history = window.updateDeviceHistory();
     var activeSnapTs = activeSnapshot ? window.parseTimestampMs(activeSnapshot.scanTimestamp) : null;
     var newInThisSnapshot = activeSnapTs !== null
@@ -261,9 +237,7 @@ window.renderFleetDashboard = function() {
 
     var configChanges = computeConfigChanges();
 
-    // --- Render ---
-    // Most cards drill down into a search-style list; "New This Snapshot" has no single
-    // natural list target and stays a plain count.
+    // Most cards drill down into a search-style list; "New This Snapshot" stays a plain count.
     var series = datedSnapshotsAsc().map(x => fleetTotalsFor(x.s));
     var spark = key => sparklineSvg(series.map(t => t[key]));
     function card(opts) {
@@ -314,8 +288,7 @@ window.renderFleetDashboard = function() {
     ) + '</div>';
     html += '</div>';
 
-    // One proportional bar: the question is share of clients per category, which a stacked
-    // bar answers without reading three numbers.
+    // One proportional bar: the question is share of clients per category.
     var cats = Object.keys(categoryCounts).sort((a, b) => categoryCounts[b] - categoryCounts[a]);
     var vendorCls = cat => 'vendor-' + cat.toLowerCase().replace('/', '-');
     html += '<div class="fleet-section"><h3>Client Vendor/Category Breakdown</h3>' + (totalClients === 0
@@ -331,9 +304,7 @@ window.renderNewDevicesTable = function() {
     var tbody = document.getElementById('new-devices-tbody');
     var history = window.updateDeviceHistory();
 
-    // firstSeen/lastSeen aren't guaranteed parseable: localStorage may still hold entries
-    // written before that validation existed. Sort those to the bottom rather than letting a
-    // NaN comparator drop them anywhere, and show "unknown" instead of "Invalid Date".
+    // Older localStorage entries may be unparseable; sort those to the bottom and show "unknown".
     var rows = Object.keys(history).map(mac => Object.assign({ mac: mac }, history[mac]));
     rows.sort((a, b) => {
         var am = window.parseTimestampMs(a.firstSeen), bm = window.parseTimestampMs(b.firstSeen);
@@ -400,8 +371,7 @@ function trendThresholds(metric, settings) {
     return null;
 }
 
-// Per-device series for one metric: Map identity -> {label, points:[{t,v}|null per snapshot],
-// last, peak, rebootsAt:[t]}. A snapshot the device is missing from is a null gap.
+// Per-device series for one metric; a snapshot the device is missing from is a null gap.
 function trendSeries(metric) {
     var snaps = datedSnapshotsAsc();
     var byId = new Map();
@@ -430,9 +400,7 @@ function trendSeries(metric) {
     return { snaps: snaps, byId: byId };
 }
 
-// One SVG line chart. `series` is [{points, cls}] sharing the snapshot x-axis; the first is
-// the subject, drawn heavy, the rest context. Colours come from CSS classes so the chart
-// follows the theme.
+// `series` is [{points, cls}] sharing the x-axis; the first is the subject. Colours come from CSS.
 function trendChartSvg(series, opts) {
     var w = opts.w, h = opts.h, big = !!opts.big;
     var pad = big ? { l: 46, r: 16, t: 26, b: 34 } : { l: 30, r: 8, t: 8, b: 18 };
@@ -473,10 +441,8 @@ function trendChartSvg(series, opts) {
     return out + '</svg>';
 }
 
-// Trends tab. "top" draws small multiples - one panel per highest-peak device against the
-// fleet median - so the handful worth looking at are on screen together; "single" draws one
-// large chart with reboot markers. One dated snapshot has no trend to draw, so current
-// values are ranked as bars instead of an empty axis.
+// Trends tab. "top" draws small multiples against the fleet median; "single" draws one large chart
+// with reboot markers. One dated snapshot has no trend, so current values are ranked as bars.
 window.renderTrendChart = function() {
     var container = document.getElementById('trendChart');
     if (!container) return;
@@ -535,10 +501,8 @@ window.renderTrendChart = function() {
         }).join('')}</div>`;
 };
 
-// --- Local Account Audit (see #analysis-tab-accounts) ---
-// Reads captured Configuration text only. Deliberately doesn't flag usernames as
-// "suspicious" - not a judgment this tool can make reliably. The one objective check is
-// whether centralized RADIUS/TACACS+ auth is referenced at all.
+// Local Account Audit, from captured Configuration text. Deliberately doesn't flag usernames as
+// "suspicious"; the one objective check is whether centralized RADIUS/TACACS+ auth is referenced.
 function extractLocalAccounts(configText) {
     var accounts = [];
     var re = /set system login user (\S+) class (\S+)/g;
@@ -551,9 +515,7 @@ function hasCentralizedAuth(configText) {
     return /set system authentication-order[^\r\n]*\b(radius|tacplus)\b/i.test(configText);
 }
 
-// Grouped by username+class, since the same local account is usually defined identically
-// fleet-wide. `centralized` is per-device and deliberately not part of the key; see the
-// mixed-badge handling below for devices that disagree on it.
+// Grouped by username+class; `centralized` is per-device and deliberately not part of the key.
 function groupLocalAccounts(rows) {
     var groups = new Map(); // "username class" -> {username, cls, entries: [{device, centralized}]}
     rows.forEach(r => {
@@ -591,8 +553,7 @@ window.renderLocalAccountsAudit = function() {
     });
 
     if (noAuthEl) noAuthEl.textContent = noAuthCount;
-    // (account, device) instances, not distinct accounts: the grouped-row count would
-    // understate fleet-wide exposure.
+    // (account, device) instances, not distinct accounts: grouped rows would understate exposure.
     if (totalEl) totalEl.textContent = rows.length;
 
     var groups = groupLocalAccounts(rows).sort((a, b) => a.username.localeCompare(b.username) || a.cls.localeCompare(b.cls));
@@ -619,9 +580,7 @@ window.renderLocalAccountsAudit = function() {
     }).join('') : `<tr><td colspan="4" style="text-align:center;">No local accounts found (no config backups loaded, or none define local users).</td></tr>`;
 };
 
-// --- Topology Diff (see #analysis-tab-topodiff). A per-snapshot set difference rendered as
-// a list, not a graph: the layout engine positions one connected tree, so a device present
-// in only one snapshot has nowhere to be drawn. Touches none of the live graph state. ---
+// A list, not a graph: the layout engine positions one tree, so a one-snapshot device has nowhere.
 window.populateTopologyDiffSelects = function() {
     var fromSel = document.getElementById('topoDiffFromSelect');
     var toSel = document.getElementById('topoDiffToSelect');
@@ -646,9 +605,7 @@ window.populateTopologyDiffSelects = function() {
     toSel.value = opts.some(o => String(o.idx) === prevTo) ? prevTo : String(opts[opts.length - 1].idx);
 };
 
-// Edges display real IPs but are KEYED by identity where possible, so a link between two
-// renumbered devices doesn't read as "removed" plus "added". An uncrawled neighbor has no
-// device object to resolve and falls back to a plain IP key.
+// Edges are KEYED by identity where possible, so renumbering doesn't read as "removed" plus "added".
 function snapshotEdgeSet(snapshot) {
     var ipToIdentity = new Map();
     (snapshot.topology || []).forEach(d => { if (d && d.DeviceIP) ipToIdentity.set(String(d.DeviceIP), window.resolveDeviceIdentity(d)); });
@@ -687,8 +644,7 @@ window.renderTopologyDiff = function() {
         return;
     }
 
-    // Keyed by identity: a device that changed IP but kept its serial is neither removed nor
-    // added - it belongs in the IP Changed section below.
+    // Keyed by identity: a device that changed IP but kept its serial belongs in IP Changed below.
     var fromByKey = new Map((fromSnap.topology || []).filter(d => d && d.DeviceIP).map(d => [window.resolveDeviceIdentity(d), d]));
     var toByKey = new Map((toSnap.topology || []).filter(d => d && d.DeviceIP).map(d => [window.resolveDeviceIdentity(d), d]));
 
@@ -733,13 +689,10 @@ window.renderTopologyDiff = function() {
     container.innerHTML = html;
 };
 
-// --- IP-Space / Subnet Utilization (see #analysis-tab-ipspace) ---
-// Subnet boundaries are read opportunistically from captured config, which only works if a
-// device holding that VLAN's L3 gateway was crawled. A VLAN with no discovered boundary
-// shows a raw live-IP count rather than a fabricated percentage.
+// IP-Space / Subnet Utilization. Boundaries are read opportunistically from captured config, so a
+// VLAN whose L3 gateway was never crawled shows a raw live-IP count rather than a fake percentage.
 function extractSubnetsFromConfigs(devices) {
-    // irb unit numbers are unique only within one device's config, so each device's own
-    // irb->subnet map is resolved before merging into vlanName->subnet.
+    // irb unit numbers are unique only within one device's config, so resolve per device first.
     var vlanToSubnet = new Map();
     var conflicts = [];
 
@@ -748,15 +701,12 @@ function extractSubnetsFromConfigs(devices) {
         var text = d.Configuration;
         var m;
 
-        // Older platforms name the RVI "vlan" rather than "irb"; keys carry the interface
-        // type to avoid unit-number collisions between the two.
+        // Older platforms name the RVI "vlan" rather than "irb"; keys carry the interface type.
         var irbToSubnet = new Map(); // "irb.N"/"vlan.N" -> {ip, prefix}, this device only
         var irbRe = /set interfaces (irb|vlan) unit (\d+)[^\r\n]*family inet address (\d{1,3}(?:\.\d{1,3}){3})\/(\d{1,2})/g;
         while ((m = irbRe.exec(text)) !== null) {
             var prefix = parseInt(m[4], 10);
-            // The regex accepts 0-99 but a valid IPv4 prefix is 0-32; a malformed config line
-            // would otherwise produce a negative "usable addresses" count below. Dropping it
-            // sends the vlan to the existing "boundary not found" state.
+            // The regex accepts 0-99 but a valid prefix is 0-32; a bad one gives a negative count.
             if (prefix < 0 || prefix > 32) continue;
             irbToSubnet.set(m[1] + '.' + m[2], { ip: m[3], prefix: prefix });
         }
@@ -769,8 +719,7 @@ function extractSubnetsFromConfigs(devices) {
 
             var existing = vlanToSubnet.get(vlanName);
             if (existing && (existing.ip !== subnet.ip || existing.prefix !== subnet.prefix)) {
-                // Two devices disagree on this VLAN's subnet: keep the first (deterministic)
-                // and surface the conflict.
+                // Two devices disagree: keep the first (deterministic) and surface the conflict.
                 conflicts.push({ vlanName: vlanName, device: d.Hostname || d.DeviceIP, kept: existing, sawInstead: subnet });
                 continue;
             }
@@ -815,8 +764,7 @@ window.renderIpSpaceUtilization = function() {
         return;
     }
 
-    // Known boundaries first, fullest first - subnets that need growing are the reason to
-    // open this tab. Unknown-boundary rows trail alphabetically.
+    // Known boundaries first, fullest first; unknown-boundary rows trail alphabetically.
     var rows = Array.from(vlanNames).map(vlanName => {
         var ips = vlanIps.get(vlanName) || new Set();
         var subnet = vlanToSubnet.get(vlanName);
@@ -857,19 +805,15 @@ window.renderIpSpaceUtilization = function() {
     }).join('');
 };
 
-// Reliability tab: one row per device, one column per crawled day. Cell colour is that day's
-// peak alarm count and a red ring marks a reboot. Rows rank by total alarms then reboots, so
-// flappy devices sit at the top; quiet devices are hidden unless #reliabilityShowQuiet is
-// ticked. Cells stretch to the column width, so more days means smaller cells rather than a
-// sideways scroll, down to an 8px floor.
+// Reliability tab: one row per device, one column per crawled day, cell colour = that day's peak
+// alarm count and a red ring = a reboot. Cells stretch to the column width, down to an 8px floor.
 window.renderReliabilityHeatmap = function() {
     var container = document.getElementById('reliability-heatmap');
     if (!container) return;
     var showQuiet = !!(document.getElementById('reliabilityShowQuiet') || {}).checked;
     var history = window.updateAlarmHistory();
 
-    // Only crawled days become columns: gaps between crawls carry no information, and
-    // spacing them to scale would leave most of the strip empty.
+    // Only crawled days become columns: gaps carry no information and would leave the strip empty.
     var dateSet = new Set();
     var rows = Object.keys(history).map(id => {
         var e = history[id], alarms = 0, reboots = 0;
@@ -898,10 +842,8 @@ window.renderReliabilityHeatmap = function() {
             var day = r.days[d];
             if (!day) return '<div class="rel-cell none" title="' + esc(d + ': not crawled') + '"></div>';
             var title = `${d}: ${day.alarmCount} alarm${day.alarmCount === 1 ? '' : 's'}${day.rebooted ? ' - rebooted' : ''}`;
-            // Colour alone can't carry severity (WCAG 1.4.1) and a title is hover-only, so
-            // the count is printed in the cell and tabindex/aria-label put the same detail
-            // behind focus. The printed digit is gated on column width: a clipped "12" read
-            // as "1" would be worse than no digit, and title/aria-label still carry it.
+            // Colour alone can't carry severity (WCAG 1.4.1) and a title is hover-only, so the count is
+            // printed and aria-label carries it. The digit is gated on width: a clipped "12" reads as "1".
             var countText = (showDays && day.alarmCount > 0) ? day.alarmCount : '';
             return `<div class="rel-cell heatmap-cell ${level(day.alarmCount)}${day.rebooted ? ' rebooted' : ''}" title="${esc(title)}" aria-label="${esc(title)}" tabindex="0" role="button" onclick="window.goToSearchResult(esc(JSON.stringify(r.ip)), 'tab-alarms')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click();}">${countText}</div>`;
         }).join('') +
@@ -925,9 +867,7 @@ window.renderReliabilityHeatmap = function() {
 // Stat card click: jumps to the Search tab and renders that stat's underlying list.
 window.drillDownStat = function(kind) {
     window.switchSidebarTab('sidebar-tab-search');
-    // revealDeviceInActiveView can only target the map or the diagram canvas, and the
-    // dashboard is neither - so switch to the diagram before the list is populated, or every
-    // row's onClick reveals nothing.
+    // revealDeviceInActiveView can't target the dashboard, so switch views before populating.
     if (activeCenterView === 'analysis') window.switchCenterView('diagram');
     document.getElementById('globalSearch').value = '';
     searchHighlightQuery = '';
@@ -998,8 +938,7 @@ window.drillDownStat = function(kind) {
                 line2Html: `Configuration changed since its previous capture`,
                 onClick: () => {
                     window.goToSearchResult(c.deviceIp, 'tab-config', c.newIdx);
-                    // Best-effort pre-select of the previous capture in the compare picker;
-                    // falls back to the raw view if the drawer isn't ready in time.
+                    // Best-effort pre-select of the previous capture; falls back to the raw view.
                     setTimeout(() => {
                         var sel = document.getElementById('configCompareSelect');
                         if (sel && Array.from(sel.options).some(o => o.value === String(c.oldIdx))) {

@@ -4,22 +4,15 @@
     security/safety-critical logic.
 
 .DESCRIPTION
-    Plain PowerShell, no Pester - it isn't guaranteed to be installed on every deployment
-    target. Dot-sources the real lib/*.ps1 files and exercises their shipped behavior; it
-    never re-implements the logic under test. See the section banners below for what it covers.
-
-.USAGE
-    powershell.exe -File .\Run-Tests.ps1
-    (run from the project root; plain functions/scriptblocks only, so pwsh works too)
-
-    Exits 0 if every case passed, 1 otherwise.
+    Plain PowerShell, no Pester - it isn't guaranteed to be present on every deployment target.
+    Dot-sources the real lib/*.ps1 files and exercises their shipped behavior. Run from the
+    project root; exits 0 if every case passed.
 #>
 
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = $PSScriptRoot
 $LibDir = Join-Path $ProjectRoot 'lib'
 
-# --- tiny assertion harness -------------------------------------------------------------
 $script:Total = 0
 $script:Passed = 0
 
@@ -28,10 +21,7 @@ function Test-Case {
         [Parameter(Mandatory = $true)][string]$Description,
         [Parameter(Mandatory = $true)][scriptblock]$Actual,
         [switch]$ExpectThrow,
-        # Regex the thrown message must match. Prefer this over a bare -ExpectThrow for any
-        # test asserting that a GUARD rejected something: without it the case passes on any
-        # exception at all, so renaming or deleting the guard leaves the test green while
-        # proving nothing. -ExpectThrow alone remains valid where the message is incidental.
+        # Regex the thrown message must match: -ExpectThrow alone passes on any exception.
         [string]$ExpectThrowMatch,
         [switch]$ExpectFalse # default expectation is "truthy" unless this or ExpectThrow is set
     )
@@ -43,9 +33,7 @@ function Test-Case {
             Write-Host "[FAIL] $Description (expected a throw, none occurred; got: $Result)" -ForegroundColor Red
             return
         }
-        # A scriptblock emits its WHOLE output stream, so a stray Write-Output before the real
-        # assertion makes $Result a multi-element array - which is truthy regardless of what the
-        # assertion actually evaluated to. Demand a single boolean instead of coercing.
+        # A stray Write-Output makes $Result a truthy array, so demand a single boolean.
         if ($Result -is [object[]]) {
             Write-Host "[FAIL] $Description (scriptblock emitted $($Result.Count) values; the assertion must be the only output)" -ForegroundColor Red
             return
@@ -67,8 +55,7 @@ function Test-Case {
             Write-Host "[FAIL] $Description (unexpected throw: $Message)" -ForegroundColor Red
             return
         }
-        # A missing/renamed function throws too, which would otherwise satisfy every
-        # -ExpectThrow case in this file and hide the deletion of the code under test.
+            # A missing/renamed function throws too, which would satisfy every -ExpectThrow case.
         if ($_.CategoryInfo.Reason -eq 'CommandNotFoundException') {
             Write-Host "[FAIL] $Description (the function under test does not exist: $Message)" -ForegroundColor Red
             return
@@ -82,12 +69,8 @@ function Test-Case {
     }
 }
 
-# =========================================================================================
-# 1. Get-JunosNodeData.ps1 RawDumps secret-redaction regex
-# =========================================================================================
-# Get-JunosNodeData.ps1 opens a real ssh.exe session, so there's no dot-sourceable function to
-# call. Extract the shipped -replace pattern/replacement literals from the source and apply
-# them, rather than hand-copying the regex here where it could drift from the real one.
+# Get-JunosNodeData.ps1 opens a real ssh.exe session, so there's no dot-sourceable function. Extract
+# the shipped -replace literals from the source rather than hand-copying a regex that could drift.
 Write-Host "`n--- 1. RawDumps secret-redaction regex (Get-JunosNodeData.ps1:147) ---" -ForegroundColor Cyan
 
 $JunosNodeDataPath = Join-Path $LibDir 'Get-JunosNodeData.ps1'
@@ -104,7 +87,7 @@ if (-not $RedactMatch.Success) {
     $RedactPattern = $RedactMatch.Groups[1].Value -replace "''", "'"
     $RedactReplacement = $RedactMatch.Groups[2].Value -replace "''", "'"
 
-    # Case A: a representative real dump - secret in the config section must be redacted.
+    # Case A: secret in the config section must be redacted.
     $DumpWithSecret = @"
 admin@switch1> show system uptime
 System booted: 2024-01-01 00:00:00 UTC
@@ -121,7 +104,7 @@ Physical interface: ge-0/0/0, Enabled, Physical link is Up
     Test-Case "leaves a CONFIGURATION REDACTED marker in place of the secret" { $RedactedA -match 'CONFIGURATION REDACTED' }
     Test-Case "does not touch unrelated sections (uptime line still present)" { $RedactedA -match 'System booted: 2024-01-01' }
 
-    # Case B: no config section at all -> no over-redaction, output passes through unchanged.
+    # Case B: no config section -> no over-redaction.
     $DumpNoConfig = @"
 admin@switch1> show system uptime
 System booted: 2024-01-01 00:00:00 UTC
@@ -132,10 +115,7 @@ Local Interface: ge-0/0/0, Parent Interface: -, Chassis Id: 00:11:22:33:44:55
     $RedactedB = $DumpNoConfig -replace $RedactPattern, $RedactReplacement
     Test-Case "dump with no config section passes through byte-for-byte unchanged" { $RedactedB -eq $DumpNoConfig }
 
-    # Case C: a decoy, prompt-shaped line planted inside a later command's output (e.g. an
-    # operator-set interface Description), positioned AFTER the real config section. A greedy
-    # prefix would backtrack to the later decoy and leave the earlier real secret
-    # un-redacted; the shipped regex uses a non-greedy prefix to avoid that.
+    # Case C: a prompt-shaped decoy AFTER the real config section; a greedy prefix backtracks to it.
     $DumpWithDecoy = @"
 admin@switch1> show system uptime
 System booted: 2024-01-01 00:00:00 UTC
@@ -153,9 +133,6 @@ Physical interface: ge-0/0/0, Enabled, Physical link is Up
     Test-Case "decoy prompt-shaped text later in the stream does not un-redact the real earlier secret (Pass 6->7 regression shape)" { $RedactedC -notmatch 'TopSecretPassword1' }
 }
 
-# =========================================================================================
-# 2. SshHelpers.ps1 Get-JunosSshArgs injection guard
-# =========================================================================================
 Write-Host "`n--- 2. Get-JunosSshArgs injection guard (SshHelpers.ps1) ---" -ForegroundColor Cyan
 . (Join-Path $LibDir 'SshHelpers.ps1')
 
@@ -163,9 +140,7 @@ Test-Case "valid username + valid IP is accepted" {
     (Get-JunosSshArgs -Username "admin" -TargetIP "10.1.2.3") -join ' ' -match '10\.1\.2\.3'
 }
 
-# Regression guard: if ServerAliveInterval x ServerAliveCountMax is shorter than the worker's
-# per-batch Process.WaitForExit, ssh tears down healthy sessions to switches whose RE stalls
-# mid-batch, yielding an empty payload on those switches only.
+# If the keepalive budget is shorter than the worker's WaitForExit, ssh tears down healthy sessions.
 Test-Case "ssh keepalive budget stays longer than the worker's per-batch timeout" {
     $SshArgs = Get-JunosSshArgs -Username "admin" -TargetIP "10.1.2.3"
     $Interval = [int](($SshArgs | Where-Object { $_ -like 'ServerAliveInterval=*' }) -replace '\D')
@@ -183,9 +158,7 @@ Test-Case "ssh keepalive budget stays longer than the worker's per-batch timeout
     $true
 }
 
-# Same coupling one layer up: the orchestrator's abandon deadline has to outlast a worker that
-# is legitimately sitting on its full batch timeout, or slow-but-healthy switches get dropped
-# from the crawl with "job abandoned".
+# Same coupling one layer up: the abandon deadline must outlast a worker on its full batch timeout.
 Test-Case "orchestrator job-abandon deadline stays longer than the worker's per-batch timeout" {
     $WorkerSrc = Get-Content -LiteralPath (Join-Path $LibDir 'Get-JunosNodeData.ps1') -Raw
     if ($WorkerSrc -notmatch 'WaitForExit\((?<ms>\d+)\)') { throw "Could not find WaitForExit(<ms>) in Get-JunosNodeData.ps1" }
@@ -200,9 +173,7 @@ Test-Case "orchestrator job-abandon deadline stays longer than the worker's per-
     }
     $true
 }
-# Third layer of the same coupling: the UI's single-device Rescan runs the worker directly, not
-# through Invoke-FleetCrawl, so it needs its own deadline longer than the batch. Left behind at
-# 90s it reported "timeout" for exactly the slow-RE switches the batch budget was raised for.
+# Third layer: the UI's Rescan runs the worker directly and needs its own longer deadline.
 Test-Case "the web rescan deadline stays longer than the worker's per-batch timeout" {
     $WorkerSrc = Get-Content -LiteralPath (Join-Path $LibDir 'Get-JunosNodeData.ps1') -Raw
     if ($WorkerSrc -notmatch 'WaitForExit\((?<ms>\d+)\)') { throw "Could not find WaitForExit(<ms>) in Get-JunosNodeData.ps1" }
@@ -245,9 +216,6 @@ Test-Case "target IP missing an octet is rejected" {
     Get-JunosSshArgs -Username "admin" -TargetIP "10.1.2"
 } -ExpectThrowMatch 'Invalid Junos target IP'
 
-# =========================================================================================
-# 3. FleetCrawl.ps1 Test-IpInAllowedScopes crawl-scope fence
-# =========================================================================================
 Write-Host "`n--- 3. Test-IpInAllowedScopes crawl-scope fence (FleetCrawl.ps1) ---" -ForegroundColor Cyan
 . (Join-Path $LibDir 'FleetCrawl.ps1')
 
@@ -259,8 +227,7 @@ Test-Case "IP clearly outside the default allowed scope is blocked" {
     Test-IpInAllowedScopes -IP "10.0.0.1" -AllowedScopes $DefaultScopes
 } -ExpectFalse
 Test-Case "IP that is a numeric superstring of the scope (not prefix-bounded) is blocked" {
-    # "1131.30.1.1" contains "131.30." as a substring but does not start with it - a naive
-    # substring (rather than prefix) match would wrongly allow this.
+    # Contains "131.30." as a substring but does not start with it - a substring match would allow it.
     Test-IpInAllowedScopes -IP "1131.30.1.1" -AllowedScopes $DefaultScopes
 } -ExpectFalse
 Test-Case "IP sharing the scope's digits but not the trailing dot boundary is blocked (e.g. 131.300.1.1)" {
@@ -273,9 +240,6 @@ Test-Case "empty IP is blocked" {
     Test-IpInAllowedScopes -IP "" -AllowedScopes $DefaultScopes
 } -ExpectFalse
 
-# =========================================================================================
-# 4. FileHelpers.ps1 Move-FileAtomic / Set-FileContentAtomic
-# =========================================================================================
 Write-Host "`n--- 4. Move-FileAtomic / Set-FileContentAtomic (FileHelpers.ps1) ---" -ForegroundColor Cyan
 . (Join-Path $LibDir 'FileHelpers.ps1')
 
@@ -313,16 +277,12 @@ try {
     Remove-Item -LiteralPath $TestDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# =========================================================================================
-# 5. Cross-session history-merge / reboot detection
-# =========================================================================================
 Write-Host "`n--- 5. coverage-5 (history-merge / reboot detection) ---" -ForegroundColor Cyan
 Write-Host "SKIPPED: this logic lives entirely in web-src/persistence.js (JS), already covered" -ForegroundColor Yellow
 Write-Host "by web-src/test/*.test.mjs via 'node --test'. No PowerShell-side reboot-detection" -ForegroundColor Yellow
 Write-Host "(comparison) logic exists to test here - not forcing an inapplicable PS test." -ForegroundColor Yellow
 
-# Bonus: the Uptime "System booted:" parsing regex that feeds the JS-side reboot detection,
-# extracted from source the same way as item 1 above.
+# The Uptime "System booted:" regex that feeds JS-side reboot detection, extracted as in item 1.
 $UptimeMatch = [regex]::Match(
     $JunosNodeDataSrc,
     "(?s)if\s*\(\`$UptimeScope\s*-match\s*`"([^`"]*)`"\)"
@@ -339,13 +299,9 @@ if (-not $UptimeMatch.Success) {
     }
 }
 
-# =========================================================================================
-# 6. TopologyCrypto.ps1 envelope (round-trip, tamper rejection, JS interop)
-# =========================================================================================
-# This is the most security-critical PowerShell in the repo and had no coverage at all. It
-# must also stay byte-compatible with web-src/topology-crypto.js, which decrypts the same
-# envelopes in the browser - hence the fixed vector below, which web-src/test/topology-crypto.test.mjs
-# decrypts from its own copy. If either side drifts, exactly one of the two suites goes red.
+# The most security-critical PowerShell in the repo. It must stay byte-compatible with
+# web-src/topology-crypto.js - hence the fixed vector below, which that suite decrypts from its own
+# copy. If either side drifts, exactly one of the two suites goes red.
 Write-Host "`n--- 6. TopologyCrypto envelope ---" -ForegroundColor Cyan
 
 . (Join-Path $LibDir 'TopologyCrypto.ps1')
@@ -369,9 +325,7 @@ Test-Case "the wrong password is rejected" {
     Unprotect-TopologyPayload -Envelope $CryptoEnvelope -Password "wrong password"
 } -ExpectThrowMatch 'Incorrect password, or the file is corrupted'
 
-# Tamper cases. Each flips one byte of one field; the HMAC covers IV+ciphertext and is
-# checked BEFORE decrypting, so all three must fail with the same clean error rather than
-# surfacing a raw AES padding exception.
+# The HMAC is checked BEFORE decrypting, so all three must fail with the same clean error.
 function New-TamperedEnvelope {
     param($Source, [string]$Field)
     $Copy = [ordered]@{}
@@ -388,9 +342,7 @@ foreach ($TamperField in @('ciphertext', 'iv', 'mac')) {
     } -ExpectThrowMatch 'Incorrect password, or the file is corrupted'
 }
 
-# Type strictness. PowerShell's -ne coerces the right operand to the left's type, so a JSON
-# string "1" would compare equal to 1 - the JS side's strict !== rejects it, and these guards
-# exist so both runtimes agree on what is a valid envelope.
+# PowerShell's -ne coerces the right operand, so "1" compares equal to 1 - JS's !== rejects it.
 Test-Case "a JSON-string version is rejected (PS coercion must not accept what JS rejects)" {
     $Bad = [ordered]@{}; foreach ($Key in $CryptoEnvelope.Keys) { $Bad[$Key] = $CryptoEnvelope[$Key] }
     $Bad['version'] = "1"
@@ -412,27 +364,18 @@ Test-Case "an envelope of the wrong format is rejected" {
     Unprotect-TopologyPayload -Envelope $Bad -Password $CryptoPassword
 } -ExpectThrowMatch 'Not a recognized encrypted file'
 
-# Fixed cross-runtime vector: produced by Protect-TopologyPayload, decrypted here AND by
-# web-src/test/topology-crypto.test.mjs. Pins salt/IV/MAC ordering, base64 and UTF-8 handling
-# across both implementations.
+# Fixed cross-runtime vector, decrypted here AND by web-src/test/topology-crypto.test.mjs.
 $InteropEnvelope = '{"format":"PSNetworkMapper-EncryptedTopology","version":1,"kdf":"PBKDF2-SHA256","iterations":1000,"cipher":"AES-256-CBC","macAlgorithm":"HMAC-SHA256","salt":"AQIDBAUGBwgJCgsMDQ4PEA==","iv":"b+iBnE7OTNxUHdbMJLgqNA==","mac":"ZPIp4GkNDGJeBU0QZ1VLLci2HQGC482oBvInAG1G5tw=","ciphertext":"k1v8NbYk+p0Qm04nui5MVixuNLLTPAxZyxnlc0vwyvgCnckpR+qhdOu9xhXCE2L2sDIZVf75RyOZ3oE2RdLWeJtbJjgk7Ub+lA/5hzA+HJPzSFNulBOHlKPCTVbyGEknwmUyA+7tu8l4JHNBkwk6cw=="}' | ConvertFrom-Json
 Test-Case "decrypts the fixed interop vector shared with the JS implementation" {
     (Unprotect-TopologyPayload -Envelope $InteropEnvelope -Password "Correct Horse Battery Stapleäöü😀") -eq '{"Topology":[{"DeviceIP":"10.55.1.1","Hostname":"swutch-e"}],"ScanTimestamp":"2026-01-01T00:00:00Z"}'
 }
 
-# =========================================================================================
-# 7. Get-JunosNodeData.ps1 CLI-output regexes that have silently failed on 100% of real input
-# =========================================================================================
-# Both regexes below shipped in a state where they matched nothing (PoE) or the wrong field on
-# every neighbour (LLDP), and neither failed loudly - the fields just came back "Unknown" or
-# nonsense. Patterns are extracted from the shipped source rather than retyped, so they cannot
-# drift from what actually runs. Fixtures are synthetic, in the real Junos column layout.
+# Both regexes below shipped matching nothing (PoE) or the wrong field (LLDP), and neither failed
+# loudly. Patterns are extracted from the shipped source; fixtures use the real column layout.
 Write-Host "`n--- 7. Junos CLI parsing regexes ---" -ForegroundColor Cyan
 
 # --- LLDP remote port ---
-# The block's Local Information section contains "Local Port ID : <local ifIndex>". An
-# unanchored "Port ID\s*:" matches inside THAT line first, so every neighbour's RemotePort
-# became the local interface's ifIndex integer instead of the neighbour's port name.
+# "Local Port ID : <local ifIndex>" comes first, so an unanchored "Port ID\s*:" matched there.
 $LldpMatch = [regex]::Match($JunosNodeDataSrc, '\$Block\s+-match\s+"((?:[^"\\]|\\.)*rport(?:[^"\\]|\\.)*)"')
 if (-not $LldpMatch.Success) {
     Write-Host "[FAIL] Could not locate the LLDP RemotePort regex in Get-JunosNodeData.ps1" -ForegroundColor Red
@@ -462,9 +405,7 @@ System name        : NEIGHBOR-SWITCH
 }
 
 # --- PoE interface table ---
-# The field count between Oper and Power/Class varies by Junos version and platform, so the
-# pattern must anchor Power+Class as the last two tokens rather than assume a fixed column.
-# A fixed-position pattern matched zero rows on a real EX3400.
+# The field count before Power/Class varies by version, so anchor them as the last two tokens.
 $PoeMatch = [regex]::Match($JunosNodeDataSrc, '\$Line\s+-match\s+"((?:[^"\\]|\\.)*\(\?<power>(?:[^"\\]|\\.)*)"')
 if (-not $PoeMatch.Success) {
     Write-Host "[FAIL] Could not locate the PoE interface regex in Get-JunosNodeData.ps1" -ForegroundColor Red
@@ -491,10 +432,8 @@ if (-not $PoeMatch.Success) {
 }
 
 # --- multi-VLAN spanning-tree collapse ---
-# "show spanning-tree interface" repeats a port once per VLAN. The loop used to overwrite .STP
-# on every repeat, so a trunk BLK in one VLAN and FWD in another reported whichever VLAN came
-# last - on a real capture two uplinks disagreed across VLANs and both reported FWD. The field
-# is still one state string; repeats are now collapsed by precedence, BLK highest.
+# "show spanning-tree interface" repeats a port per VLAN, and the loop used to overwrite .STP on
+# every repeat. Repeats are now collapsed by precedence, BLK highest.
 $StpLineMatch = [regex]::Match($JunosNodeDataSrc, '\$Line\s+-match\s+"((?:[^"\\]|\\.)*\(\?<state>FWD(?:[^"\\]|\\.)*)"')
 $StpPrecMatch = [regex]::Match($JunosNodeDataSrc, '\$StpStatePrecedence\s*=\s*(@\{[^}]*\})')
 if (-not ($StpLineMatch.Success -and $StpPrecMatch.Success)) {
@@ -503,8 +442,7 @@ if (-not ($StpLineMatch.Success -and $StpPrecMatch.Success)) {
 } else {
     $StpPattern = $StpLineMatch.Groups[1].Value
     $StpPrecedence = Invoke-Expression $StpPrecMatch.Groups[1].Value
-    # Real layout: the same three ports repeated per STP instance, ge-0/2/0 and ae0 blocking
-    # only in instance 100.
+    # Real layout: the same three ports per STP instance, two blocking only in instance 100.
     $StpText = @"
 Spanning tree interface parameters for instance 0
 
@@ -556,10 +494,8 @@ ge-0/0/5     128:518    128:518   32768.0019e2b0c380         20000  FWD    DESG
     }
 }
 
-# --- virtual-chassis master RE scoping (show version / show system uptime) ---
-# Both commands emit one "fpcN:" block per VC member and a bare -match takes fpc0's. On the real
-# capture the prompt was {master:1} while the parsed boot time was fpc0's, so reboot detection
-# compared a member that is not the RE that answered.
+# --- virtual-chassis master RE scoping ---
+# Both commands emit one "fpcN:" block per member and a bare -match takes fpc0's, not the master's.
 $MasterBlockMatch = [regex]::Match($JunosNodeDataSrc, '\$MasterFpcBlockPattern\s*=\s*"((?:[^"\\]|\\.)*)"')
 $MasterPromptMatch = [regex]::Match($JunosNodeDataSrc, '\$RawOutput\s+-match\s+"((?:[^"\\]|\\.)*\(\?<fpc>(?:[^"\\]|\\.)*)"')
 $UptimeScopeMatch = [regex]::Match($JunosNodeDataSrc, '\$UptimeScope\s+-match\s+"((?:[^"\\]|\\.)*\(\?<boot>(?:[^"\\]|\\.)*)"')
@@ -630,8 +566,7 @@ Last configured: 2026-08-01 12:00:00 UTC (4w0d 00:00 ago) by admin
 }
 
 # --- chassis-hardware fallback model ---
-# The fallback runs only when the virtual-chassis parse failed, i.e. exactly when the device IS a
-# VC - and "Chassis <serial> Virtual Chassis" with a \S+ model capture reported Model = "Virtual".
+# The fallback runs only when the VC parse failed, and a \S+ capture reported Model = "Virtual".
 $ChassisMatch = [regex]::Match($JunosNodeDataSrc, '\$DataDict\["CHASSIS_HARDWARE"\]\s+-match\s+"((?:[^"\\]|\\.)*)"')
 if (-not $ChassisMatch.Success) {
     Write-Host "[FAIL] Could not locate the chassis-hardware fallback regex in Get-JunosNodeData.ps1" -ForegroundColor Red
@@ -670,11 +605,8 @@ Chassis                                JN11D2E7CAFB      EX3400-48P
 }
 
 # --- ssh.exe process ownership (unredacted-temp-file leak) ---
-# The batch used to run `cmd.exe /c ssh.exe ... > %TEMP%\ssh_out_*.txt`. On timeout it killed the
-# cmd.exe wrapper; Windows does not kill children with their parent and .NET Framework 4.x (the
-# 5.1 runtime) has no Kill(entireProcessTree) overload, so ssh.exe survived holding a write
-# handle on ssh_out_ - the raw, unredacted `show configuration | display set` output. These are
-# source-shape assertions: the real behaviour needs a Windows host with a live switch.
+# The batch used to run `cmd.exe /c ssh.exe ... > %TEMP%\ssh_out_*.txt` and on timeout killed only
+# the wrapper, so ssh.exe survived holding the raw config output. Source-shape assertions only.
 Test-Case "the SSH batch no longer routes through a cmd.exe wrapper it cannot kill through" {
     # The word may still appear in the comment explaining why; only an actual invocation counts.
     $JunosNodeDataSrc -notmatch 'ProcessStartInfo\(\s*"cmd\.exe"'
@@ -720,21 +652,14 @@ Test-Case "the worker masks with an int64 literal (bare 0xFFFFFFFF parses as Int
     ($JunosNodeDataSrc -match '-band\s+0xFFFFFFFFL') -and ($JunosNodeDataSrc -notmatch '-band\s+0xFFFFFFFF\b')
 }
 
-# =========================================================================================
-# 8. WebServer.ps1 endpoint payload shapes (accept-loop blocking guards)
-# =========================================================================================
-# The single-threaded accept loop serves one request at a time, so any handler that
-# serializes a large payload blocks the whole server. Two endpoints did exactly that and the
-# symptom - a browser-side "failed to fetch" with nothing in the server log - gave no hint
-# where it came from. These assert the payload SHAPES that keep them cheap; a regression here
-# is invisible on a fast machine and only bites on Windows PowerShell 5.1 with a real archive.
+# The single-threaded accept loop serves one request at a time, so a handler that serializes a large
+# payload blocks the whole server. These assert the payload SHAPES that keep two endpoints cheap; a
+# regression is invisible except on 5.1 with a real archive.
 Write-Host "`n--- 8. WebServer endpoint payload shapes ---" -ForegroundColor Cyan
 
 . (Join-Path $LibDir 'WebServer.ps1')
 
-# Send-WebResponse only needs settable properties plus a writable stream, so a PSCustomObject
-# with a MemoryStream stands in for HttpListenerResponse. ToArray() is still valid after the
-# handler closes the stream.
+# A PSCustomObject with a MemoryStream stands in for HttpListenerResponse.
 function New-MockResponse {
     [PSCustomObject]@{
         StatusCode = 0; ContentType = ''; ContentLength64 = 0
@@ -776,8 +701,7 @@ try {
         (Get-MockResponseText -Response $FileResponse) -eq $BigBody
     }
 
-    # The name regex alone admits path separators, so containment is what actually stops
-    # traversal - assert the containment check, not just the regex.
+    # The name regex admits path separators, so assert the containment check, not just the regex.
     $TraversalResponse = New-MockResponse
     Invoke-GetSnapshotAction -Response $TraversalResponse -SnapshotDir $SnapTestDir -Name 'NetworkMap_../../../etc/NetworkMap_passwd.json'
     Test-Case "/api/snapshot refuses a traversal name that satisfies the filename regex" {
@@ -792,10 +716,7 @@ try {
     Remove-Item -LiteralPath $SnapTestDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# Invoke-ScanNetworkStatusAction needs a live runspace job to exercise directly, so assert the
-# payload shape at the source: the completed job is retained to be re-served idempotently, so
-# carrying the topology in it means re-serializing the whole fleet on every poll - including
-# the one the client makes on every page load.
+# Asserted at the source: a retained job carrying the topology re-serializes the fleet per poll.
 $WebServerSrc = Get-Content -LiteralPath (Join-Path $LibDir 'WebServer.ps1') -Raw
 Test-Case "/api/scan-network/status does not carry the topology in its completed-job outcome" {
     $WebServerSrc -notmatch 'topology\s*=\s*\$Payload\.Topology'
@@ -804,8 +725,7 @@ Test-Case "/api/scan-network/status still reports the output file the client fet
     $WebServerSrc -match 'outputFile\s*=\s*\(Split-Path\s+\$Payload\.OutputFile'
 }
 
-# --- fix 1: a rejected /api/scan-network must change no server state -------------------
-# Collected=$true so the seeded job needs no real EndInvoke/Dispose.
+# --- fix 1: a rejected /api/scan-network must change no server state (Collected=$true seeded job) ---
 $PriorScan = [PSCustomObject]@{
     Handle = [PSCustomObject]@{ IsCompleted = $true }; Collected = $true
     StartIP = '10.0.0.1'; Outcome = @{ status = 'complete'; ok = $true }
@@ -819,8 +739,7 @@ Invoke-ScanNetworkAction -Response $BadIpResponse -Body '{"startIp":"not-an-ip"}
 Test-Case "/api/scan-network rejects a malformed start IP" {
     $BadIpResponse.StatusCode -eq 400
 }
-# The reap that clears this slot must sit BELOW validation: a typo'd IP used to discard the
-# previous scan's result, after which every status poll 404'd.
+# The reap must sit BELOW validation: a typo'd IP used to discard the previous scan's result.
 Test-Case "a malformed start IP does not discard the previous scan's pollable result" {
     $null -ne $script:PendingScanNetwork
 }
@@ -848,8 +767,7 @@ $EnginePath = Get-PowerShellEnginePath
 Test-Case "Get-PowerShellEnginePath resolves an executable that exists on disk" {
     [System.IO.File]::Exists($EnginePath)
 }
-# The ISE hosts the engine in-process, so MainModule.FileName yields powershell_ise.exe -
-# which cannot run -File/-NoExit, yet Start-Process succeeds and leaks the credential file.
+# The ISE hosts the engine in-process, so MainModule.FileName yields powershell_ise.exe.
 Test-Case "Get-PowerShellEnginePath never returns the ISE host" {
     [System.IO.Path]::GetFileName($EnginePath) -ne 'powershell_ise.exe'
 }
@@ -888,8 +806,7 @@ try {
     Test-Case "a client error report logs its header plus one line per stack frame" {
         $ErrLines.Count -eq 6
     }
-    # Batching must not cost the per-line "[timestamp] " prefix - that prefix is what stops a
-    # stack frame from forging what looks like a separate log entry.
+    # The per-line "[timestamp] " prefix is what stops a stack frame forging a separate entry.
     Test-Case "every batched client-error log line keeps its own real timestamp prefix" {
         @($ErrLines | Where-Object { $_ -notmatch '^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\] ' }).Count -eq 0
     }
@@ -905,10 +822,7 @@ try {
     $script:DebugLogPath = $SavedDebugLogPath
 }
 
-# --- fix 7: a mid-write disconnect logs once instead of throwing three times ------------
-# Uses the REAL Send-WebResponse; the pre-disposed stream is what fails, exactly as a
-# vanished client does. Headers are set before the write, so the handler's catch runs with
-# $script:WebResponseStarted already true.
+# --- fix 7: a mid-write disconnect logs once; the pre-disposed stream fails like a vanished client ---
 $DeadSnapDir = Join-Path ([System.IO.Path]::GetTempPath()) ("pnm_dead_" + [guid]::NewGuid().Guid.Substring(0, 8))
 New-Item -ItemType Directory -Path $DeadSnapDir -Force | Out-Null
 try {
@@ -921,8 +835,7 @@ try {
         Invoke-GetSnapshotAction -Response $DeadResponse -SnapshotDir $DeadSnapDir -Name 'NetworkMap_2026-01-01_000000.json'
     } catch { $EscapedError = $_ }
 
-    # StatusCode still 200 proves the 500 send was never attempted; no escaped error proves
-    # the dispatcher is not handed a third send.
+    # StatusCode still 200 proves the 500 send was never attempted.
     Test-Case "a mid-write client disconnect is logged, not answered with a second throwing send" {
         $null -eq $EscapedError -and $DeadResponse.StatusCode -eq 200
     }
@@ -931,10 +844,8 @@ try {
     $script:WebResponseStarted = $false
 }
 
-# --- fix 5: shutdown cleanup must skip already-Collected jobs -------------------------
-# The status actions dispose PS and reap the grandchildren on first collection, but leave the
-# slot populated. Re-running that at shutdown double-Disposes, and re-reaps an "@<IP>" that
-# may by then belong to an unrelated interactive session.
+# --- fix 5: shutdown cleanup must skip already-Collected jobs ---
+# Re-running it double-Disposes and re-reaps an "@<IP>" that may now be an unrelated session.
 $ShutdownSrc = $WebServerSrc.Substring($WebServerSrc.IndexOf('SERVER SHUTDOWN (IsListening='))
 Test-Case "shutdown cleanup skips an already-Collected rescan job" {
     $ShutdownSrc -match '\$script:PendingScan\s+-and\s+-not\s+\$script:PendingScan\.Collected'
@@ -943,13 +854,9 @@ Test-Case "shutdown cleanup skips an already-Collected ping job" {
     $ShutdownSrc -match '\$script:PendingPing\s+-and\s+-not\s+\$script:PendingPing\.Collected'
 }
 
-# =========================================================================================
-# 9. Placeholder-node parity + crawl-abort behavior (FleetCrawl.ps1)
-# =========================================================================================
 Write-Host "`n--- 9. Placeholder nodes and crawl abort (FleetCrawl.ps1) ---" -ForegroundColor Cyan
 
-# Item 4 was a placeholder that had silently drifted from the real initializer, so compare the
-# two key sets from source rather than trusting a comment that says they match.
+# Item 4 was a placeholder that silently drifted, so compare the two key sets from source.
 $NodeDataSrc = Get-Content -LiteralPath (Join-Path $LibDir 'Get-JunosNodeData.ps1') -Raw
 $FleetCrawlSrc = Get-Content -LiteralPath (Join-Path $LibDir 'FleetCrawl.ps1') -Raw
 
@@ -973,9 +880,7 @@ if (-not $RealInitMatch.Success -or -not $PlaceholderMatch.Success) {
     }
 }
 
-# End-to-end: the circuit breaker used to BeginStop in-flight jobs and drop them, leaving
-# devices in $Visited with no node anywhere in the output. Takes ~8s (the fake worker
-# deliberately wedges two jobs so the abort path has something in flight to synthesize for).
+# End-to-end: the breaker used to drop in-flight jobs, leaving devices in $Visited with no node.
 $CrawlDir = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_crawl_$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $CrawlDir -Force | Out-Null
 try {
@@ -1021,11 +926,8 @@ return @{ Node = $Base; Logs = @() }
         $OnDisk = (Get-Content -LiteralPath $SnapFile.FullName -Raw | ConvertFrom-Json).Topology
         $OnDisk.Count -eq $CrawlResult.VisitedCount
     }
-    # The abort path used to block on Dispose()/RunspacePool.Close() for as long as the wedged
-    # worker ran (measured 16s against a 15s sleep; up to ~50s against a real
-    # Process.WaitForExit). Both waits are now bounded, so this must finish well under the sleep. The
-    # bound is 14s rather than a tighter number so a slow runspace-pool start on 5.1 cannot
-    # flake it - the old blocking behaviour measured 16.0s, so it still discriminates.
+    # The abort path used to block on Dispose()/Close() for as long as the wedged worker ran (16.0s
+    # against a 15s sleep). 14s rather than tighter so a slow pool start on 5.1 cannot flake it.
     Test-Case "aborting does not block the orchestrator until the wedged worker finishes" {
         $CrawlClock.Elapsed.TotalSeconds -lt 14
     }
@@ -1034,15 +936,12 @@ return @{ Node = $Base; Logs = @() }
 }
 
 # --- Retry pass ---
-# A device lost to a transient failure used to be lost for the whole crawl: $Visited was
-# stamped at dispatch, so nothing could re-queue it. These cover the retry rules, including
-# the one that must NOT retry - repeating a bad credential is how an account gets locked out.
+# Covers the retry rules, including the one that must NOT retry - a bad credential locks the account.
 $RetryDir = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_retry_$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $RetryDir -Force | Out-Null
 try {
     $RetryWorker = Join-Path $RetryDir 'RetryWorker.ps1'
-    # Attempts are counted through files in the worker's own directory: runspaces share no
-    # state, and retries for one IP never overlap, so a plain file-per-attempt count is safe.
+    # Attempts are counted via files in the worker's own directory: runspaces share no state.
     Set-Content -LiteralPath $RetryWorker -Encoding utf8 -Value @'
 param([string]$TargetIP, [string]$Username, [string]$Password, [switch]$Log, [string]$DebugLogPath)
 $AttemptDir = Join-Path $PSScriptRoot 'attempts'
@@ -1077,8 +976,7 @@ return @{ Node = $Base; Logs = @() }
     function Get-RetryAttemptCount { param([string]$IP)
         @(Get-ChildItem -LiteralPath (Join-Path $RetryDir 'attempts') -Filter "$IP`_*" -ErrorAction SilentlyContinue).Count
     }
-    # Callers wrap this in @(): a node is a hashtable, so an unwrapped single result would
-    # report .Count as its key count (19) rather than 1.
+    # Callers wrap this in @(): an unwrapped single hashtable reports .Count as its key count.
     function Get-RetryNodes { param([string]$IP)
         $RetryResult.Topology | Where-Object { $_.DeviceIP -eq $IP }
     }
@@ -1110,10 +1008,8 @@ return @{ Node = $Base; Logs = @() }
     Remove-Item -LiteralPath $RetryDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# A retry-queued IP is the one state that is in $Visited, has no node yet (its failed attempt
-# was discarded) and is in the QUEUE rather than in $Jobs - so the abort path's live-job sweep
-# does not see it. Without a drain it vanishes from the topology entirely, which is exactly the
-# silent-drop the abort placeholders exist to prevent.
+# A retry-queued IP is in $Visited, has no node yet, and sits in the QUEUE rather than $Jobs, so the
+# abort path's live-job sweep misses it - the exact silent-drop the placeholders exist to prevent.
 $AbortRetryDir = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_abortretry_$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $AbortRetryDir -Force | Out-Null
 try {
@@ -1154,9 +1050,7 @@ return @{ Node = $Base; Logs = @() }
     Remove-Item -LiteralPath $AbortRetryDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# A batch killed mid-stream still parses whatever arrived, so the node used to come back
-# ScanStatus="Ok" and the orchestrator never learned the data was truncated - which would also
-# make it invisible to the retry rules above.
+# A batch killed mid-stream still parses, so the node used to come back ScanStatus="Ok".
 Test-Case "a timed-out batch that still produced output is flagged Partial, not Ok" {
     $JunosNodeDataSrc -match '(?s)\$Result\.TimedOut[^\r\n]*\r?\n[^\r\n]*ScanStatus\s*=\s*"Partial"'
 }
@@ -1167,13 +1061,9 @@ Test-Case "the retryable statuses exclude AuthFailed and Aborted" {
     ($List -match 'Unreachable') -and ($List -notmatch 'AuthFailed') -and ($List -notmatch 'Aborted')
 }
 
-# =========================================================================================
-# 10. Resolve-PathForDotNetIo (FileHelpers.ps1)
-# =========================================================================================
 Write-Host "`n--- 10. Resolve-PathForDotNetIo (FileHelpers.ps1) ---" -ForegroundColor Cyan
 
-# [Environment]::CurrentDirectory is NOT kept in step with $PWD, so a raw [System.IO.File]
-# call given a relative path writes to a different directory than the caller expects.
+# [Environment]::CurrentDirectory isn't kept in step with $PWD, so a relative path lands elsewhere.
 $SavedNetCwd = [Environment]::CurrentDirectory
 $SavedLocation = Get-Location
 $IoDir = Join-Path ([System.IO.Path]::GetTempPath()) "pnm_io_$([guid]::NewGuid().ToString('N'))"
@@ -1203,14 +1093,9 @@ try {
     Remove-Item -LiteralPath $IoDecoy -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# =========================================================================================
-# 11. Runtime floor + Protect-MapperFile -WhatIf
-# =========================================================================================
 Write-Host "`n--- 11. Crypto runtime floor and -WhatIf preview ---" -ForegroundColor Cyan
 
-# Rfc2898DeriveBytes(String, Byte[], Int32, HashAlgorithmName) needs .NET Framework 4.7.2+;
-# Windows Server 2016 ships 4.6.2 by default. On such a box this fails here with a clear
-# message instead of deep inside key derivation, behind a password prompt.
+# Rfc2898DeriveBytes' SHA-256 overload needs .NET Framework 4.7.2+; Server 2016 ships 4.6.2.
 Test-Case "Assert-TopologyCryptoRuntime accepts the runtime running these tests" {
     Assert-TopologyCryptoRuntime
     $true
@@ -1224,9 +1109,7 @@ try {
     $ProtectScript = Join-Path $LibDir 'Protect-MapperFile.ps1'
     $WhatIfPassword = ConvertTo-SecureString 'test-password' -AsPlainText -Force
 
-    # Set-FileContentAtomic isn't ShouldProcess-aware: -WhatIf reaching it makes Set-Content
-    # write nothing, then Move-FileAtomic throws Convert-Paths'ing a temp file that never
-    # existed. The whole write has to sit behind one ShouldProcess in the script itself.
+    # Set-FileContentAtomic isn't ShouldProcess-aware: -WhatIf reaching it breaks Move-FileAtomic.
     Test-Case "Protect-MapperFile -WhatIf previews instead of throwing" {
         & $ProtectScript -InputFile $WhatIfInput -Password $WhatIfPassword -WhatIf | Out-Null
         $true
@@ -1243,7 +1126,6 @@ try {
     Remove-Item -LiteralPath $WhatIfDir -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# --- summary ---------------------------------------------------------------------------
 Write-Host "`n============================================" -ForegroundColor Cyan
 if ($script:Passed -eq $script:Total) {
     Write-Host "$($script:Passed)/$($script:Total) passed" -ForegroundColor Green

@@ -46,18 +46,14 @@ test('computeGraphRoot picks a star graph\'s hub, not a leaf', () => {
 });
 
 test('computeGraphRoot breaks eccentricity ties by lowest IP', () => {
-  // A - B - C: both A and C have eccentricity 2, B has 1 and would normally win;
-  // here we force a tie by using a 2-node graph where both nodes tie at eccentricity 1.
+  // Both nodes tie at eccentricity 1; the tie-break must be deterministic.
   const nodeIds = ['10.0.0.5', '10.0.0.2'];
   const edges = [{ from: '10.0.0.5', to: '10.0.0.2' }];
   assert.equal(computeGraphRoot(nodeIds, edges), '10.0.0.2');
 });
 
 test('computeGraphRoot prefers the largest component over a smaller-eccentricity isolated node', () => {
-  // A 6-node chain (root candidates have eccentricity 2-5) plus one fully isolated
-  // node (eccentricity 0 - the global minimum, but reachable to nobody). Without a
-  // component-size preference, the isolated node wins and the whole chain vanishes
-  // from any downstream tree/render built from this root.
+  // Chain of 6 plus an isolated node: eccentricity 0 wins globally without a component-size tiebreak.
   const nodeIds = ['c1', 'c2', 'c3', 'c4', 'c5', 'c6', 'isolated'];
   const edges = [
     { from: 'c1', to: 'c2' }, { from: 'c2', to: 'c3' }, { from: 'c3', to: 'c4' },
@@ -65,11 +61,7 @@ test('computeGraphRoot prefers the largest component over a smaller-eccentricity
   ];
   const root = computeGraphRoot(nodeIds, edges);
   assert.notEqual(root, 'isolated');
-  // The real implementation is deterministic here: sortedIds visits 'c3' before 'c4'
-  // (lowest-ID tie-break, see the test above), and the eccentricity-improvement check
-  // is a strict '<', so 'c3' is set first and 'c4's later-tied eccentricity never
-  // displaces it. Asserting the exact value (rather than accepting either) catches a
-  // regression that flips the tie-break direction (e.g. '<' becoming '<=').
+  // Asserting the exact value catches a tie-break flip ('<' to '<='); sortedIds visits c3 first.
   assert.equal(root, 'c3'); // center of a 6-node chain, lowest-ID tie-break
 });
 
@@ -91,9 +83,7 @@ test('buildPrimaryTree assigns BFS-order parents on a simple tree', () => {
 });
 
 test('buildPrimaryTree picks the deterministic (lowest-ID) parent when a node has two equal-depth candidates', () => {
-  // root -> {10.0.0.1, 10.0.0.2}, both root's children, both connected to "leaf".
-  // "leaf" is discovered at depth 2 either way; its parent must deterministically
-  // be whichever of 10.0.0.1/10.0.0.2 sorts first among root's children.
+  // "leaf" sits at depth 2 either way, so its parent must be whichever of the two sorts first.
   const nodeIds = ['root', '10.0.0.2', '10.0.0.1', 'leaf'];
   const edges = [
     { from: 'root', to: '10.0.0.2' }, { from: 'root', to: '10.0.0.1' },
@@ -109,8 +99,7 @@ test('buildPrimaryTree picks the deterministic (lowest-ID) parent when a node ha
 });
 
 test('buildPrimaryTree puts every non-tree edge into secondaryEdges', () => {
-  // Triangle: root-a, root-b, a-b. a-b is not a tree edge (a and b are both
-  // root's direct children), so it's secondary.
+  // Triangle: a-b is not a tree edge (both are root's direct children), so it's secondary.
   const nodeIds = ['root', 'a', 'b'];
   const edges = [
     { from: 'root', to: 'a' }, { from: 'root', to: 'b' }, { from: 'a', to: 'b' },
@@ -124,18 +113,14 @@ test('buildPrimaryTree attaches an unreachable single node as its own extra root
   const nodeIds = ['root', 'a', 'island'];
   const edges = [{ from: 'root', to: 'a' }];
   const { parentOf, childrenOf, extraRoots } = buildPrimaryTree(nodeIds, edges, 'root');
-  // It becomes a top-level entry of its own (parentOf === null, just like the main
-  // root), rather than silently missing from parentOf/childrenOf.
+  // A top-level entry of its own, rather than silently missing from parentOf/childrenOf.
   assert.deepEqual(extraRoots, ['island']);
   assert.equal(parentOf.get('island'), null);
   assert.deepEqual(childrenOf.get('island'), []);
 });
 
 test('buildPrimaryTree attaches a disconnected 2-node island as its own extra tree, reachable from parentOf/childrenOf', () => {
-  // Main component: root-a. Separate island: island1-island2, with no edge back to
-  // either root or a. Without its own extra root it would be unreachable from rootId
-  // and never added to parentOf/childrenOf, so computeVisibleTree (which only walks
-  // from rootId) would never render it and expandAncestors could never find a path to it.
+  // Without its own extra root the island is unreachable from rootId and never rendered.
   const nodeIds = ['root', 'a', 'island1', 'island2'];
   const edges = [
     { from: 'root', to: 'a' },
@@ -162,11 +147,7 @@ test('buildPrimaryTree attaches a disconnected 2-node island as its own extra tr
   assert.deepEqual(visibleNodeIds.sort(), ['a', 'island1', 'island2', 'root'].sort());
   assert.ok(visibleEdges.some(e => (e.from === islandRoot && e.to === islandLeaf)));
 
-  // expandAncestors can walk up from a node buried in the island without silently
-  // no-op'ing on an undefined parentOf entry (parentOf.get() on an unreached node
-  // returns undefined, which would stop the ancestor walk before it starts).
-  // Threshold 0 makes islandRoot's one child "over threshold", so a real expansion
-  // must happen for this to pass - not just a no-op walk that happens to not throw.
+  // expandAncestors must walk up out of the island; threshold 0 forces a real, non-no-op expansion.
   const expandedNodes = new Set();
   expandAncestors(parentOf, childrenOf, islandLeaf, expandedNodes, 0);
   assert.equal(expandedNodes.has(islandRoot), true);
@@ -216,9 +197,7 @@ test('computeVisibleTree collapses a deep subtree behind its nearest over-thresh
 });
 
 test('computeVisibleTree returns a hiddenNodeToCluster map so a secondary edge into a collapsed cluster can be rerouted instead of dropped', () => {
-  // root -> mid -> (20 leaves, over threshold so mid's children collapse into cluster:mid).
-  // A secondary/redundant edge from "other" (visible) to one of mid's hidden leaves should
-  // be reroutable to cluster:mid via hiddenNodeToCluster, rather than the leaf being unreachable.
+  // A secondary edge into a hidden leaf must reroute to cluster:mid via hiddenNodeToCluster.
   const nodeIds = ['root', 'mid', 'other', ...Array.from({ length: 20 }, (_, i) => `leaf${i}`)];
   const edges = [
     { from: 'root', to: 'mid' },
@@ -273,9 +252,7 @@ test('computeRecursiveRadialLayout keeps a large leaf-parent\'s single ring at a
 });
 
 test('computeRecursiveRadialLayout gives an intermediate STRUCTURAL node (not just leaf-parents) a full circle around itself too (regression: a second-level branch - e.g. a second core switch hanging off the first - inherited a narrow wedge from root in an earlier version and needed radius ~26000px for its own 8 children on the real sample; confirmed by measuring it)', () => {
-  // root -> [core2, dist0..dist11] (12 siblings for core2 to inherit a narrow wedge from,
-  // if wedge inheritance still existed) -> core2 -> [b0..b7], each of which is itself a
-  // leaf-parent with a real cluster, mirroring the real sample's second-core shape.
+  // 12 siblings for core2 to inherit a narrow wedge from, if wedge inheritance existed.
   const childrenOf = new Map([['root', ['core2']]]);
   for (let i = 0; i < 12; i++) childrenOf.get('root').push(`dist${i}`);
   childrenOf.set('core2', Array.from({ length: 8 }, (_, i) => `b${i}`));
@@ -307,9 +284,7 @@ test('computeRecursiveRadialLayout centers a non-root leaf-parent\'s cluster on 
     const p = result.get(`leaf${i}`);
     return Math.atan2(p.y - midPos.y, p.x - midPos.x);
   });
-  // At least one leaf should fall on the ROOT-FACING side of mid (within 90 degrees of
-  // pointing back toward root, i.e. roughly PI away from mid's own outward angle) - proof
-  // the cluster gets a full circle around mid, not an outward-only wedge.
+  // At least one leaf on the ROOT-FACING side proves the cluster gets a full circle, not a wedge.
   const facesRootward = leafAngles.some(a => {
     let delta = a - (midAngle + Math.PI);
     while (delta > Math.PI) delta -= 2 * Math.PI;
@@ -337,8 +312,7 @@ test('computeRecursiveRadialLayout lets a small branch sit much closer to its pa
   assert.equal(Math.max(...modestRadii) < hugeRadius, true,
     `expected every modest branch closer to root than "huge", got modest max ${Math.max(...modestRadii).toFixed(1)} vs huge ${hugeRadius.toFixed(1)}`);
 
-  // And still no collision anywhere, including each modest branch's own leaves against
-  // "huge"'s leaves.
+  // And still no collision anywhere, including modest branches against "huge"'s leaves.
   const allPositions = Array.from(result.values());
   let minDist = Infinity;
   for (let i = 0; i < allPositions.length; i++) {
@@ -390,16 +364,13 @@ test('computeRecursiveRadialLayout never places two different nodes closer than 
       minDist = Math.min(minDist, Math.hypot(allPositions[i].x - allPositions[j].x, allPositions[i].y - allPositions[j].y));
     }
   }
-  // The smallest spacing anywhere in the tree is nodeSpacing (90) - leafSpacing (220) only
-  // applies within a single cluster's own ring, which is always >= nodeSpacing here.
+  // The smallest spacing anywhere is nodeSpacing; leafSpacing only applies within one cluster.
   assert.equal(minDist >= nodeSpacing - 0.5, true, `closest pair anywhere was ${minDist.toFixed(1)}, expected >= ${nodeSpacing}`);
 });
 
 test('computeRecursiveRadialLayout spreads the largest children apart from each other instead of using their original array order (regression: two of the real sample\'s biggest leaf-parents, 25 and 42 devices, were consecutive in IP order, forcing far more separation between that one pair than the rest of the ring needed - reported directly as "still can be brought together more")', () => {
   const childrenOf = new Map([['root', []]]);
-  // Two huge branches placed adjacently in array order, deliberately, plus several
-  // modest ones - if array order were used as-is, the two huge branches would end up
-  // angular neighbors; spreading by size should separate them instead.
+  // Two huge branches adjacent in array order: spreading by size must separate them angularly.
   const sizes = [5, 5, 5, 80, 90, 5, 5, 5, 5];
   sizes.forEach((n, i) => {
     const id = `p${i}`;
@@ -411,9 +382,7 @@ test('computeRecursiveRadialLayout spreads the largest children apart from each 
   const rootPos = result.get('root');
   const angleOf = id => Math.atan2(result.get(id).y - rootPos.y, result.get(id).x - rootPos.x);
 
-  // The two huge branches (p3, p4) should not be angularly adjacent - some other branch
-  // should sit between them on at least one side, i.e. they should not be consecutive in
-  // the final ordering of children sorted by angle around root.
+  // p3 and p4 must not be consecutive in the final ordering of children sorted by angle.
   const idsSortedByAngle = childrenOf.get('root').slice().sort((a, b) => angleOf(a) - angleOf(b));
   let adjacent = false;
   for (let i = 0; i < idsSortedByAngle.length; i++) {
@@ -446,9 +415,7 @@ test('computeRecursiveRadialLayout: nodeSpacing and leafSpacing move independent
   const tighterBranch = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 60, leafSpacing: 190, minRadius: 190 });
   const widerLeaves = computeRecursiveRadialLayout('root', childrenOf, { nodeSpacing: 190, leafSpacing: 400, minRadius: 190 });
 
-  // mid is root's only child, so its own radius from root is just minRadius regardless of
-  // nodeSpacing (no siblings to space out from) - but its own leaf packing (relative to
-  // itself) should be identical between base and tighterBranch, since only nodeSpacing changed.
+  // mid sits at minRadius from root either way, but its own leaf packing must be identical.
   const maxLeafExtentFromMid = (result) => {
     const midPos = result.get('mid');
     let maxR = 0;
@@ -461,11 +428,7 @@ test('computeRecursiveRadialLayout: nodeSpacing and leafSpacing move independent
   assert.equal(maxLeafExtentFromMid(tighterBranch), maxLeafExtentFromMid(base),
     'shrinking nodeSpacing should not change a cluster\'s own internal leaf packing extent');
 
-  // Growing leafSpacing should make the cluster's own extent (furthest leaf from mid)
-  // bigger. mid itself legitimately moves further from root too (mid has no siblings
-  // to space out from, but its own bigger cluster still needs enough clearance from
-  // root not to crowd it - a lone child's distance from its parent depends on its own
-  // size, not just a flat minRadius).
+  // Growing leafSpacing must grow the cluster's extent; a lone child's distance tracks its own size.
   const midPosBase = base.get('mid'), midPosWider = widerLeaves.get('mid');
   const midRadiusBase = Math.hypot(midPosBase.x, midPosBase.y);
   const midRadiusWider = Math.hypot(midPosWider.x, midPosWider.y);
@@ -494,10 +457,7 @@ test('computeRecursiveRadialLayout stays fast and does not blow up radius on the
 
   let maxRadius = 0;
   for (const p of result.values()) maxRadius = Math.max(maxRadius, Math.hypot(p.x, p.y));
-  // A generous but meaningful bound: the huge branch's own cluster needs
-  // clusterRadius(150) from ITSELF, plus root's own ring radius to reach that branch in
-  // the first place - a small constant multiple of that sum catches an unbounded blowup
-  // (an order of magnitude beyond this bound) while still allowing real, proportionate growth.
+  // Generous but meaningful: catches an unbounded blowup while still allowing real growth.
   const totalLeaves = 150 + Array.from({ length: 15 }, (_, i) => 5 + (i % 8)).reduce((a, b) => a + b, 0);
   const roughClusterRadius = 190 * Math.sqrt(150 / (2 * Math.PI)); // same math as clusterRadius(150), inlined
   const bound = 5 * (roughClusterRadius + 190 * 16); // + a generous root-ring allowance
@@ -511,11 +471,8 @@ test('computeRecursiveRadialLayout lets modest siblings sit closer to a structur
     childrenOf.get('root').push(id);
     childrenOf.set(id, Array.from({ length: 6 }, (_, k) => `${id}_leaf${k}`)); // modest leaf-parents
   }
-  // A structural branch (like the real sample's second core switch) whose own children
-  // are unevenly sized (24, 8, 7, 9, 6, 8, 7 - a ~3.4x spread, matching the real sample's
-  // core2's own 354-1196 child extents) - its omnidirectional extent is dominated by its
-  // one largest child, sitting at whatever angle it happens to land at within the
-  // branch's own full circle, unrelated to which of root's other children are nearby.
+  // A structural branch with unevenly sized children - its omnidirectional extent is dominated by
+  // its one largest child, at whatever angle that lands, unrelated to root's other children.
   childrenOf.get('root').push('hub');
   const hubKids = [];
   [24, 8, 7, 9, 6, 8, 7].forEach((size, i) => {
@@ -543,12 +500,8 @@ test('computeRecursiveRadialLayout lets modest siblings sit closer to a structur
       minDistToHub = Math.min(minDistToHub, Math.hypot(a.x - b.x, a.y - b.y));
     }
   }
-  // An omnidirectional-extent algorithm (charging a neighbor for a branch's farthest
-  // reach in ANY direction, not just toward that neighbor) gives a closest true clearance
-  // of 1157px on this exact tree shape; directional reach gives 906px, a real (if here
-  // modest - the effect compounds much more on a deeper, wider tree) reduction. 5.5x
-  // nodeSpacing sits comfortably between the two, catching a regression back toward
-  // omnidirectional behavior without being so tight it's fragile to unrelated changes.
+  // Omnidirectional extent gives a closest true clearance of 1157px here, directional reach 906px.
+  // 5.5x nodeSpacing sits between them, catching a regression without being fragile.
   assert.equal(minDistToHub < nodeSpacing * 5.5, true,
     `closest true clearance to hub's subtree was ${minDistToHub.toFixed(0)}, expected under ${nodeSpacing * 5.5} (nodeSpacing=${nodeSpacing})`);
 
@@ -641,10 +594,8 @@ test('computeRecursiveRadialLayout places equal-extent leaves in childrenOf orde
 
 
 test('a deep chain does not compound its radius per level: the parent link is charged for the reach back toward the parent, not the subtree\'s omnidirectional size', () => {
-  // root -> c1 -> c2 -> c3 -> c4, each cN also carrying 5 leaves. Charging each parent link
-  // for extent() - the worst case in ANY direction - made every level's radius cover the
-  // whole subtree beneath it, so radii roughly doubled per level and a 6-deep campus needed
-  // ~32x the space. The subtree only ever reaches back toward its parent along one spoke.
+  // root -> c1 -> c2 -> c3 -> c4, each carrying 5 leaves. Charging each parent link for extent() -
+  // the worst case in ANY direction - doubled radii per level; a subtree reaches back on one spoke.
   const SPACING = 250;
   const childrenOf = new Map();
   const chain = ['root', 'c1', 'c2', 'c3', 'c4'];
@@ -661,8 +612,7 @@ test('a deep chain does not compound its radius per level: the parent link is ch
   const rootPos = result.get('root');
   const radiusOf = (id) => Math.hypot(result.get(id).x - rootPos.x, result.get(id).y - rootPos.y);
 
-  // Per-level doubling puts c1 beyond 4000 for this shape; the directional floor keeps every
-  // level's step bounded by what actually points back at the parent.
+  // Per-level doubling puts c1 beyond 4000 for this shape.
   assert.ok(radiusOf('c1') < 2500, `c1 sat at ${radiusOf('c1').toFixed(0)} - the chain is compounding again`);
 
   // Steps must not grow going up the chain, which is the signature of the old behaviour.

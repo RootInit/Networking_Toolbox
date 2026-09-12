@@ -1,6 +1,5 @@
-// Computes positions for the visible subgraph via GraphLayout.computeRecursiveRadialLayout
-// (graph-layout.js). ELK.js is not used despite the filename; the `window.ElkLayout` name is
-// kept so callers don't need to change.
+// Computes positions for the visible subgraph via GraphLayout.computeRecursiveRadialLayout. ELK.js
+// is not used despite the filename; the `window.ElkLayout` name is kept so callers don't change.
 
 const NODE_WIDTH = 160;
 const NODE_HEIGHT = 50;
@@ -21,13 +20,11 @@ function computeGridFallback(visibleNodeIds) {
 async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
   if (visibleNodeIds.length === 0) return new Map();
 
-  // Absolute deadline from "now", not from when doLayout's yield resolves, so it shares the
-  // race timer's budget.
+  // Absolute deadline from "now", so it shares the race timer's budget.
   const deadline = Date.now() + LAYOUT_TIMEOUT_MS;
 
   const doLayout = async () => {
-    // Yield once so "Computing layout..." can paint before the synchronous crunch blocks
-    // the main thread.
+    // Yield once so "Computing layout..." can paint before the synchronous crunch.
     await new Promise(r => setTimeout(r, 0));
     const childrenOf = new Map();
     const hasIncomingEdge = new Set();
@@ -37,14 +34,12 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
       hasIncomingEdge.add(e.to);
     });
 
-    // Besides the primary root, disconnected fabric islands (kept by buildPrimaryTree) also
-    // have no incoming edge. Each needs its own layout pass, or graph.js defaults every
-    // unpositioned node to (0, 0) and stacks the components on top of each other.
+    // Besides the primary root, disconnected islands also have no incoming edge. Each needs its own
+    // pass, or graph.js defaults every unpositioned node to (0, 0) and stacks the components.
     const roots = visibleNodeIds.filter(id => !hasIncomingEdge.has(id));
     const positions = new Map();
-    // Each component is centred at cursorX and pushes cursorX out by its own extent, so
-    // bounding circles stay NODE_WIDTH*3 apart whatever the relative sizes. A fixed offset
-    // derived only from the previous component's extent lets a wider later one overlap it.
+    // Each component is centred at cursorX and pushes it out by its own extent; an offset derived
+    // only from the previous component's extent lets a wider later one overlap.
     let cursorX = null;
     for (const root of roots) {
       const sub = window.GraphLayout.computeRecursiveRadialLayout(root, childrenOf, { ...layoutSettings, deadline });
@@ -59,10 +54,8 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
     return positions;
   };
 
-  // Backstop only: JS is single-threaded, so this timer cannot preempt doLayout()'s
-  // synchronous work - by the time the event loop runs it, doLayout() has already settled.
-  // The `deadline` above is what actually bounds a slow layout. timeoutId is tracked so the
-  // winning path can clear it; otherwise it keeps `node --test` alive ~9s per call.
+  // Backstop only: JS is single-threaded, so this timer cannot preempt doLayout()'s synchronous
+  // work - `deadline` is what bounds it. timeoutId is cleared, or `node --test` idles ~9s per call.
   let timeoutId;
   const timeout = new Promise((_, reject) => {
     timeoutId = setTimeout(() => reject(new Error('Layout timed out')), LAYOUT_TIMEOUT_MS + 1000);
@@ -76,8 +69,7 @@ async function computeLayout(visibleNodeIds, visibleEdges, layoutSettings) {
       var textEl = document.getElementById('fatal-error-text');
       var modalEl = document.getElementById('fatal-error-modal');
       if (textEl && modalEl) {
-        // innerHTML is safe here only because the markup is a fixed literal; err.message is
-        // appended via textContent below so it can never be interpreted as markup.
+        // innerHTML is safe only because the markup is a fixed literal; err.message goes via textContent.
         textEl.innerHTML = 'Layout engine failed, showing a basic grid instead of the normal tree view.<br><br>';
         var errMsgEl = document.createElement('span');
         errMsgEl.textContent = (err && err.message) ? err.message : String(err);

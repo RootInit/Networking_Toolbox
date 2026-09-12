@@ -1,9 +1,7 @@
-// Matches a scanned device to its Configuration.json location entry. Keyed by chassis
-// serial first (survives IP/hostname changes/reimaging), then hostname, then DeviceIP
-// as a last resort.
+// Matches a scanned device to its Configuration.json location entry. Keyed by chassis serial first
+// (survives IP/hostname changes and reimaging), then hostname, then DeviceIP.
 
-// Local copy of utils.js's window.asArray (see it for the reason) - this file also runs
-// under plain Node, where window doesn't exist.
+// Local copy of utils.js's window.asArray - this file also runs under Node, where window is absent.
 function asArray(val) {
   if (Array.isArray(val)) return val.filter(function (item) { return item !== null && item !== undefined; });
   if (val === null || val === undefined) return [];

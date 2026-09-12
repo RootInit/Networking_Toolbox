@@ -1,8 +1,7 @@
 // Pure device-classification/edge extraction shared by graph.js (diagram) and map.js
 // (geo view), so both views classify devices identically. No DOM, no vis-network, no Leaflet.
 
-// Local copy of utils.js's window.asArray (see it for the reason) - this file also runs
-// under plain Node, where window doesn't exist.
+// Local copy of utils.js's window.asArray - this file also runs under Node, where window is absent.
 function asArray(val) {
   if (Array.isArray(val)) return val.filter(function (item) { return item !== null && item !== undefined; });
   if (val === null || val === undefined) return [];
@@ -35,8 +34,7 @@ function computeDeviceClassification(topology) {
   return result;
 }
 
-// Per-device VLAN tags from the MAC table, keyed by DeviceIP. A device with no TrueClients
-// gets an empty array, not a missing entry.
+// Per-device VLAN tags from the MAC table. No TrueClients gives an empty array, not a missing entry.
 function computeVlanCache(topology) {
   var result = new Map();
   topology.forEach(function (device) {
@@ -67,9 +65,7 @@ function computeNeighborEdges(topology) {
 }
 
 // Topology -> per-node {label, shape, isStack, scanned, vlanCache} keyed by IP. Kept out of
-// graph.js's buildSwitchMap so the node-construction rules have one implementation shared by
-// the real caller and its test; buildSwitchMap keeps the vis-network-specific pieces this
-// function deliberately has no dependency on.
+// buildSwitchMap so the rules have one implementation shared by the real caller and its test.
 function buildSwitchMapNodeMeta(topology) {
   var allNodeMeta = new Map();
   var classification = computeDeviceClassification(topology);

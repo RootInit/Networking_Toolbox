@@ -1,12 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// chassis.js is dual-mode (module.exports under node, window.Chassis in the browser) - the
-// pure string builders are what's under test here; the DOM binding only exists in the browser.
+// chassis.js is dual-mode; the pure string builders are what's under test here.
 const Chassis = (await import('../chassis.js')).default;
 const { resolveModel, inferModel, activityState, linkState, buildMembers, lightStates, H72_S, H6MO_S, MODELS } = Chassis;
-
-// ---- model resolution: what Junos reports vs. catalogue keys ----
 
 test('resolveModel is case-insensitive (virtual-chassis output is lower-case)', () => {
   assert.equal(resolveModel('ex2300-24t').key, 'EX2300-24T');
@@ -36,31 +33,25 @@ test('every real model seen in the fixture snapshot resolves to a catalogue entr
   }
 });
 
-// ---- activity lens thresholds ----
-
 test('activityState: link up is green regardless of flap age', () => {
   assert.equal(activityState({ Link: 'up', LastFlappedSeconds: 10 * H6MO_S }), 'green');
   assert.equal(linkState({ Link: 'up' }), 'green');
 });
 
-// A down port shows the same "down" state chassis-side as the red badge the
-// Interfaces table shows for it (drawer.js renderInterfaces) - 'off' is reserved for a port
-// the artwork has but the device didn't report at all (linkState never even gets called for
-// those - lightStates only iterates device.Interfaces).
+// A down port shows the same "down" state chassis-side as the table's red badge - 'off' is reserved
+// for a port the artwork has but the device didn't report at all.
 test('linkState: down is red (matches the table\'s down badge), no interface data is off', () => {
   assert.equal(linkState({ Link: 'down' }), 'red');
   assert.equal(linkState({ Link: 'Unknown' }), 'red');
   assert.equal(linkState(null), 'off');
 });
 
-// LastFlappedSeconds is captured once, as of the snapshot's own scan - a stale
-// snapshot must not read as "recently active" just because its age isn't accounted for.
+// LastFlappedSeconds is captured as of the snapshot's scan; a stale snapshot must not read as recent.
 test('activityState: an ageSec offset (time since the snapshot was captured) ages out a stale-but-recent flap', () => {
   assert.equal(activityState({ Link: 'down', LastFlappedSeconds: H72_S - 1 }, 0), 'green');
   assert.equal(activityState({ Link: 'down', LastFlappedSeconds: H72_S - 1 }, 2), 'amber');
   assert.equal(activityState({ Link: 'down', LastFlappedSeconds: H72_S }, H6MO_S), 'off');
-  // link up still short-circuits to green regardless of snapshot age - only the
-  // LastFlappedSeconds comparison is age-adjusted.
+  // Link up short-circuits to green; only the LastFlappedSeconds comparison is age-adjusted.
   assert.equal(activityState({ Link: 'up', LastFlappedSeconds: 0 }, H6MO_S), 'green');
 });
 
@@ -78,8 +69,6 @@ test('activityState: unknown flap time (null/undefined/NaN) is unlit, not green'
   assert.equal(activityState({ Link: 'down', LastFlappedSeconds: NaN }), 'off');
   assert.equal(activityState(null), 'off');
 });
-
-// ---- member build: one SVG per stack member, ports bound by Junos name ----
 
 const countAttr = (html, re) => (html.match(re) || []).length;
 
@@ -157,8 +146,7 @@ test('buildMembers handles a single-element StackMembers object (PowerShell Conv
   assert.ok(members[0].html.includes('data-port="ge-0/0/11"'));
 });
 
-// The ALM LED must reflect device.Alarms, both for the statusCluster-drawn
-// families (EX2300 right section) and RIGHT.lcd, which draws its ALM dot directly.
+// The ALM LED must reflect device.Alarms for both the statusCluster families and RIGHT.lcd.
 test('buildMembers wires the ALM LED to device.Alarms', () => {
   const withAlarm = vcDevice();
   withAlarm.Alarms = [{ Class: 'Major', Time: 'now', Description: 'psu' }];
@@ -194,8 +182,7 @@ test('buildMembers: unknown fixed-config model is inferred from its interface na
 });
 
 test('buildMembers falls back to the inferred layout when catalogue art covers under half the reported ports', () => {
-  // A real EX4300-48P names its access ports ge-0/0/x; this record reports only xe-0/0/x, which
-  // the measured EX4300 artwork has no jacks for.
+  // A real EX4300-48P names access ports ge-0/0/x; this reports xe-0/0/x, which the art has no jacks for.
   const ifs = Array.from({ length: 8 }, (_, n) => ({ Port: `xe-0/0/${n}`, Link: 'up' }));
   const [m] = buildMembers({ StackMembers: [{ FPC: '0', Model: 'ex4300-48p', Role: 'Master' }], Interfaces: ifs });
   assert.equal(m.inferred, true);
@@ -207,9 +194,8 @@ test('buildMembers falls back to the inferred layout when catalogue art covers u
   assert.equal(g.catalogueKey, 'EX4300-48P');
 });
 
-// mgig must be flagged per port, not per 12-port block, or a ge port sharing a block with
-// an mge port would get renamed/mislabeled too. mge ports here (14, 15) don't align to the
-// 12-port boundary (block 2 starts at port 12).
+// mgig must be flagged per port, not per 12-port block, or a ge port sharing a block would be
+// renamed too. The mge ports here (14, 15) don't align to the 12-port boundary.
 test('inferModel flags mgig per port, not per 12-port block', () => {
   const ifs = [];
   for (let n = 0; n < 14; n++) ifs.push({ Port: `ge-0/0/${n}` });
@@ -247,9 +233,8 @@ test('every catalogue entry renders without throwing and binds at least one port
 });
 
 test('buildMembers: a stack member with no reported ports blocks its sibling being demoted', () => {
-  // 10.55.10.1's shape: fpc0 reports 9 ports the EX4300 art has no jacks for, fpc1 reports
-  // none at all. fpc1 has nothing to infer a layout from, so demoting fpc0 alone would render
-  // one virtual chassis as two different switches.
+  // 10.55.10.1's shape: fpc0 reports 9 ports the art has no jacks for, fpc1 reports none at all, so
+  // demoting fpc0 alone would render one virtual chassis as two different switches.
   const ifs = [{ Port: 'xe-0/1/0', Link: 'up' }].concat(
     Array.from({ length: 8 }, (_, n) => ({ Port: `xe-0/0/${n}`, Link: 'up' })));
   const members = buildMembers({
@@ -277,12 +262,9 @@ test('buildMembers: pooling still demotes when every member carries contrary evi
   assert.deepEqual(members.map(m => m.inferred), [true, true]);
 });
 
-
 // ---- SFP cage binding: the prefix follows the optic, not the cage ----
-// A 1G optic in an SFP+ cage reports as ge-, not xe-. The catalogue art names EX4600 cages
-// xe-, so exact-name binding covered none of them, the whole pool was demoted to the inferred
-// panel, and inferModel's "all ports are ge- so it must be copper" rule then drew RJ45 jacks
-// on an all-fiber switch.
+// A 1G optic in an SFP+ cage reports ge-, not xe-. The art names EX4600 cages xe-, so exact-name
+// binding covered none, the pool was demoted, and inferModel then drew RJ45 on an all-fiber switch.
 function sfpVcDevice(prefix) {
   const interfaces = [];
   for (const fpc of [0, 1]) {
@@ -309,8 +291,7 @@ test('an EX4600 reporting 1G optics as ge- still gets its catalogue art, not the
 test('a cage binds to the name the switch actually reports, so its lens and tooltip resolve', () => {
   const [m] = buildMembers(sfpVcDevice('ge'));
   assert.equal(m.catalogueKey, 'EX4600-40F', 'must be the catalogue art, not the inferred panel');
-  // The art names this cage xe-0/0/7; the device reports ge-0/0/7, and that is what must
-  // reach data-port - lightStates and the tooltip are both keyed by the reported name.
+  // The art names this cage xe-0/0/7; the device reports ge-0/0/7, and that is what must reach data-port.
   assert.ok(m.html.includes('data-port="ge-0/0/7"'), 'cage bound to the reported ge- name');
   assert.ok(!m.html.includes('port-absent" data-port="xe-0/0/7"'), 'not reported as an absent xe- port');
 });
@@ -323,12 +304,10 @@ test('the same art still binds xe- names when 10G optics are fitted', () => {
 });
 
 // ---- catalogue-wide guard against the EX4600 failure mode ----
-// Every model is driven through each prefix its cages could legitimately report. A model whose
-// art only binds one spelling gets demoted to the inferred panel and, if its ports happen to
-// be ge-, redrawn as RJ45 - which is how an all-fiber EX4600 came out with copper jacks.
+// Every model is driven through each prefix its cages could report. A model whose art binds only one
+// spelling gets demoted and, if its ports are ge-, redrawn as RJ45.
 function artPortsOf(key) {
-  // Rendered with no interfaces: nothing is reported, so nothing can be demoted, and the SVG
-  // carries the art's own port names.
+  // Rendered with no interfaces: nothing reported, nothing can be demoted, so the art's names show.
   const [m] = buildMembers({ StackMembers: [{ FPC: '0', Model: key, Role: 'Standalone' }], Interfaces: [], Alarms: [] });
   return [...m.html.matchAll(/data-port="([^"]+)"/g)].map(x => x[1]);
 }

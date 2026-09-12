@@ -1,16 +1,12 @@
-// Generates a synthetic but structurally realistic topology snapshot for testing the
-// visualizer at fleet scale, plus a matching Configuration file so the geographic Map and the
-// dashboard thresholds have something to show. Not part of the app - run manually:
+// Generates a synthetic but structurally realistic topology snapshot for testing the visualizer at
+// fleet scale, plus a matching Configuration file. Not part of the app - run manually:
 //   node tools/generate-fixture.mjs                       # 350 devices -> ../Network_Maps/
 //   node tools/generate-fixture.mjs --devices 1500 --seed 7 --out /tmp/maps
 //   node tools/generate-fixture.mjs --snapshots 6         # six daily crawls of one fleet
 //   node tools/generate-fixture.mjs --now                 # stamp it as a scan that just ran
 //
-// Port lists are scraped from chassis.js's own artwork rather than written out here, so a
-// device's Interfaces always match what its faceplate draws. That keeps the fixture honest as
-// the catalogue grows: a new model is covered the moment it is added, and a model whose art
-// stops matching its port names fails the fixture's own assertions instead of silently
-// rendering as an inferred panel.
+// Port lists are scraped from chassis.js's artwork, so a device's Interfaces always match what its
+// faceplate draws and art that stops matching its port names fails the fixture's assertions.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -19,8 +15,6 @@ import Chassis from '../chassis.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 
-/* ---------------- CLI ---------------- */
-
 const argv = process.argv.slice(2);
 const flag = (name, fallback) => {
     const i = argv.indexOf('--' + name);
@@ -28,16 +22,11 @@ const flag = (name, fallback) => {
 };
 const DEVICE_COUNT = Math.max(4, parseInt(flag('devices', '350'), 10));
 const SEED = parseInt(flag('seed', '1'), 10);
-// Successive daily crawls of the same fleet. The dashboard's Trends, Topology Diff, New Devices
-// and Config Changed tabs all read differences between snapshots and stay empty with only one.
+// Successive daily crawls of one fleet; the Trends/Diff/New Devices tabs stay empty with only one.
 const SNAPSHOT_COUNT = Math.max(1, parseInt(flag('snapshots', '3'), 10));
 const OUT_DIR = path.resolve(flag('out', path.join(HERE, '..', '..', 'Network_Maps')));
 
-/* ---------------- deterministic randomness ---------------- */
-
-// mulberry32: a whole fixture has to be reproducible from --seed alone, so nothing may reach
-// for Math.random(). Any run with the same flags must produce a byte-identical file, or a
-// visual regression can't be told apart from a different roll of the dice.
+// mulberry32: a fixture must be reproducible from --seed alone, so never reach for Math.random().
 let seedState = SEED >>> 0;
 function rnd() {
     seedState = (seedState + 0x6D2B79F5) >>> 0;
@@ -55,14 +44,10 @@ const shuffled = (arr) => {
     return a;
 };
 
-/* ---------------- port lists, scraped from the catalogue art ---------------- */
-
 const PORT_RE = /^([a-z]+)-(\d+)\/(\d+)\/(\d+)$/;
 const renumber = (name, fpc) => name.replace(PORT_RE, (_, pfx, _f, pic, n) => `${pfx}-${fpc}/${pic}/${n}`);
 
-// An uplink module bay draws a blank cover until the switch reports something in it, so a face
-// scraped from an empty device hides its module ports. Offering these candidates reveals which
-// ones the bay actually accepts; a model with no bay simply binds none of them.
+// A bay draws a blank cover until something is reported, so these candidates reveal what it accepts.
 const MODULE_CANDIDATES = [1, 2].flatMap(pic => [
     ...Array.from({ length: 8 }, (_, n) => `xe-0/${pic}/${n}`),
     ...Array.from({ length: 4 }, (_, n) => `et-0/${pic}/${n}`),
@@ -74,8 +59,7 @@ const scrape = (interfaces, model) => {
         Interfaces: interfaces.map(Port => ({ Port })),
     })[0];
     const jacks = [], cages = [];
-    // A modular chassis, or a model the catalogue has no art for, carries a note instead of a
-    // drawing - and so has no ports to scrape.
+    // A modular chassis, or a model with no art, carries a note instead of a drawing - no ports to scrape.
     for (const m of (member.html || '').matchAll(/id="(port|uplink)_[^"]*"[^>]*data-port="([^"]+)"/g)) {
         (m[1] === 'port' ? jacks : cages).push(m[2]);
     }
@@ -83,15 +67,11 @@ const scrape = (interfaces, model) => {
 };
 
 const portCache = new Map();
-// { jacks, cages, module } for one model: jacks are fixed copper (their prefix is evidence, so
-// the fixture must never vary it), cages are pluggable (the fixture varies the optic there on
-// purpose, which is exactly what the binding logic exists to survive).
+// jacks are fixed copper (never vary the prefix); cages are pluggable (the fixture varies the optic).
 function portsFor(model) {
     if (portCache.has(model)) return portCache.get(model);
     const base = scrape([], model);
-    // A modular chassis has no drawing, but the crawler still reports its ports - the missing
-    // art is a rendering decision, not missing scan data, and a device with no interfaces at all
-    // would exercise the wrong empty-state.
+    // A modular chassis has no drawing, but the crawler still reports its ports.
     if (!base.member.catalogueKey && base.member.note) {
         const result = {
             jacks: [], cages: Array.from({ length: 32 }, (_, n) => `xe-0/0/${n}`),
@@ -113,8 +93,6 @@ function portsFor(model) {
     return result;
 }
 
-/* ---------------- fleet shape ---------------- */
-
 const CORE_MODELS = ['QFX5120-32C', 'QFX5200-32C'];
 const DIST_MODELS = ['EX4600-40F', 'EX4650-48Y', 'QFX5120-48Y', 'EX4300-32F'];
 const ACCESS_MODELS = [
@@ -123,23 +101,16 @@ const ACCESS_MODELS = [
     'EX4100-48P', 'EX4100-24T', 'EX4000-48P', 'EX2300-C-12P', 'EX4100-F-12P',
     'EX2200-48P', 'EX3300-48P', 'EX4200-48P',
 ];
-// A real fleet has a chassis or two the drawing code deliberately refuses to draw. Keeping one
-// in the fixture means the "no front-panel drawing" path is never rendered for the first time
-// in production.
+// Keeping one undrawable chassis here means that path is never first rendered in production.
 const MODULAR_MODEL = 'EX9200-32XS';
 
 // University of Washington, Seattle campus, in the five zones the university itself uses.
 //
-// lat/lng is each building's pole of inaccessibility - the interior point furthest from any
-// exterior wall - taken from its OpenStreetMap footprint, and `r` is how far a closet may sit
-// from it and still be indoors. A plain centroid is not good enough: many of these are L- or
-// U-shaped and their centroid falls in a courtyard or on the lawn. Madrona and Willow Hall are
-// real North Campus halls that OSM does not carry, so two neighbouring halls it does carry
-// stand in for them; every name here resolves to a footprint you can see on the tiles.
-//
-// `closets` is how many wiring closets a building rates, which is what makes a medical centre
-// carry more switches than a residence hall. `hub` marks the building whose main distribution
-// frame feeds the zone.
+// lat/lng is each building's pole of inaccessibility - the interior point furthest from any exterior
+// wall - from its OpenStreetMap footprint, and `r` is how far a closet may sit from it and still be
+// indoors. A plain centroid is not enough: many are L- or U-shaped. Madrona and Willow Hall are
+// stood in for by neighbouring halls OSM does carry. `closets` is how many wiring closets a building
+// rates; `hub` marks the building whose main distribution frame feeds the zone.
 const CAMPUS = [
     {
         name: 'West Campus', short: 'WEST', net: 20, adjacent: ['CENTRAL', 'NORTH'],
@@ -224,8 +195,7 @@ const VLANS = [
 ];
 
 const JUNOS_VERSIONS = ['21.4R3-S5.4', '22.2R3-S3.8', '22.4R3.25', '23.2R2-S1.5', '20.4R3-S9.2'];
-// Everything but Ok is a placeholder node: FleetCrawl records the device it could not read, so
-// the visualizer must cope with a device that has a status and nothing else.
+// Everything but Ok is a placeholder node - a device with a status and nothing else.
 const FAILURE_STATUSES = ['Unreachable', 'AuthFailed', 'Timeout', 'Aborted', 'ParseError'];
 const FAILURE_TEXT = {
     Unreachable: 'ssh: connect to host {ip} port 22: Connection timed out',
@@ -235,11 +205,7 @@ const FAILURE_TEXT = {
     ParseError: 'Switch returned empty payload [exit=255 elapsed=5.1s timedOut=False]',
 };
 
-/* ---------------- value generators ---------------- */
-
-// Fixed by default so a run is reproducible byte for byte; --now anchors the snapshot to the
-// present instead, which is what the crawl-age badge and the activity lens's elapsed-time
-// correction need in order to read as fresh.
+// Fixed by default so a run is byte-reproducible; --now anchors it to the present instead.
 const SCAN_DATE = argv.includes('--now') ? new Date() : new Date('2026-09-08T14:32:07Z');
 const iso = (d) => d.toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
 const daysAgo = (n) => new Date(SCAN_DATE.getTime() - n * 86400000);
@@ -248,8 +214,7 @@ const hexByte = () => int(0, 255).toString(16).padStart(2, '0');
 const clientMac = () => ['aa', 'bb', hexByte(), hexByte(), hexByte(), hexByte()].join(':');
 const switchMac = () => ['02', 'ab', hexByte(), hexByte(), hexByte(), hexByte()].join(':').toUpperCase();
 
-// Straddles cpuWarnPct/cpuCriticalPct (70/90) and memWarnPct/memCriticalPct (75/90) from
-// Configuration.example.json, so every dashboard severity band is populated.
+// Straddles the cpu/mem warn and critical thresholds, so every dashboard severity band is populated.
 const cpuValue = () => (chance(0.06) ? int(91, 99) : chance(0.14) ? int(71, 89) : int(3, 62)) + '%';
 const memValue = () => (chance(0.05) ? int(91, 98) : chance(0.18) ? int(76, 89) : int(28, 71)) + '%';
 
@@ -273,18 +238,13 @@ function configText(host, zone, bldg, vlanTags, extraLines) {
     return lines.join('\n');
 }
 
-/* ---------------- device construction ---------------- */
-
 let serialCounter = 10000;
 const nextSerial = () => `SYN${++serialCounter}`;
 
-// A /24 per building inside a /16 per zone, which is how a campus of this size is actually
-// addressed - and it gives the IP Space tab subnets that mean something geographically.
+// A /24 per building inside a /16 per zone, so the IP Space tab's subnets mean something.
 const ipFor = (bldg, host) => `10.${bldg.zone.net}.${bldg.idx}.${host}`;
 
-// Metres between two campus buildings, near enough at this latitude. Used to attach a closet to
-// the distribution frame it would really be patched to - the nearest one - rather than to
-// whichever switch came next in a loop.
+// Metres between two buildings, near enough at this latitude, to find the nearest frame.
 function metresBetween(a, b) {
     const dLat = (a.lat - b.lat) * 111320;
     const dLng = (a.lng - b.lng) * 111320 * Math.cos(a.lat * Math.PI / 180);
@@ -292,17 +252,13 @@ function metresBetween(a, b) {
 }
 const nearest = (bldg, candidates) =>
     candidates.reduce((best, d) => (metresBetween(bldg, d.bldg) < metresBetween(bldg, best.bldg) ? d : best));
-// You patch to the nearest frame that still has a port free; a full one is simply not a
-// candidate, however close it is.
+// You patch to the nearest frame that still has a port free, however close a full one is.
 const nearestWithPort = (bldg, candidates) => {
     const free = candidates.filter(d => freeUplinks(d).length > 0);
     return free.length ? nearest(bldg, free) : null;
 };
 
-// The full key set of Get-JunosNodeData.ps1's $NodeData initializer. A device missing one of
-// these reaches the UI as `undefined` rather than as the "Unknown" the crawler would have
-// written, so the two must stay in step - test/fixture.test.mjs pins this against the
-// PowerShell source.
+// The full key set of the crawler's $NodeData initializer; a missing key reaches the UI undefined.
 function blankNode(deviceIp) {
     return {
         DeviceIP: deviceIp, Hostname: 'Unknown', JunosVersion: 'Unknown', Gateway: 'Unknown',
@@ -316,8 +272,7 @@ function blankNode(deviceIp) {
 const AP_DESC = n => `AP-${1000 + n}`;
 const PHONE_DESC = n => `PHONE-${2000 + n}`;
 
-// One interface row per port the faceplate draws. Uplinks that carry a neighbour are filled in
-// later by linkDevices, which needs both endpoints' port lists to exist first.
+// One row per port the faceplate draws; uplinks carrying a neighbour are filled in by linkDevices.
 function buildInterfaces(device, members) {
     const rows = [];
     for (const m of members) {
@@ -326,8 +281,7 @@ function buildInterfaces(device, members) {
         const poe = /-\d+(P|MP)$/i.test(m.Model);
         for (const jack of p.jacks) rows.push(accessRow(renumber(jack, fpc), poe, false));
         for (const cage of p.cages) rows.push(accessRow(renumber(cage, fpc), false, true));
-        // Only some chassis have a module fitted; an empty bay is the commoner state and draws
-        // a cover, which is its own rendering path.
+        // An empty bay is the commoner state and draws a cover, which is its own rendering path.
         if (p.module.length && chance(0.55)) {
             const fitted = p.module.filter(x => x.includes(`/${p.module[0].split('/')[1]}/`));
             for (const mod of fitted) rows.push(accessRow(renumber(mod, fpc), false, true));
@@ -337,8 +291,7 @@ function buildInterfaces(device, members) {
 }
 
 function accessRow(port, poe, isCage) {
-    // A cage names itself after the optic fitted, not the cage type, so a fixture that always
-    // emitted the catalogue's own prefix would never exercise the sibling-binding path.
+    // A cage names itself after the optic, so the catalogue prefix alone would skip sibling binding.
     if (isCage && chance(0.25)) port = port.replace(PORT_RE, (_, pfx, f2, pic, n) => `${pick(['ge', 'xe', 'et'])}-${f2}/${pic}/${n}`);
     const live = chance(0.42);
     const row = {
@@ -348,9 +301,7 @@ function accessRow(port, poe, isCage) {
         Desc: 'Unknown',
         STP: live ? (chance(0.9) ? 'FWD' : 'BLK') : 'Unknown',
         PoE: poe ? (live && chance(0.5) ? `Delivering (${(rnd() * 25 + 3).toFixed(1)}W)` : 'Enabled') : 'Unknown',
-        // The "longest inactive" sort needs a spread that crosses the activity lens's 72h and
-        // 6-month thresholds, and a slice with no value at all - an unparseable "Last flapped"
-        // leaves this null and must drop out of the sort rather than sort as zero.
+        // The sort needs a spread across the 72h/6-month bands plus a slice with no value at all.
         LastFlappedSeconds: live ? int(60, 72 * 3600)
             : chance(0.15) ? null
                 : chance(0.5) ? int(72 * 3600, 182 * 86400) : int(182 * 86400, 900 * 86400),
@@ -361,8 +312,7 @@ function accessRow(port, poe, isCage) {
 
 function makeDevice({ deviceIp, bldg, seq, models, role, gateway }) {
     const node = blankNode(deviceIp);
-    // Building abbreviation first, the way campus network gear is normally named: the hostname
-    // alone tells you which closet to walk to.
+    // Building abbreviation first: the hostname alone tells you which closet to walk to.
     node.Hostname = `uw-${bldg.abbr.toLowerCase()}-${role.toLowerCase()}${String(seq).padStart(2, '0')}.washington.edu`;
     node.JunosVersion = pick(JUNOS_VERSIONS);
     node.Gateway = gateway;
@@ -374,8 +324,7 @@ function makeDevice({ deviceIp, bldg, seq, models, role, gateway }) {
     }));
     node.MasterCpuUtilization = cpuValue();
     node.MasterMemoryUtilization = memValue();
-    // A handful of recent boots so the reboot badge has something to flag; the rest span years,
-    // which is what a real fleet's uptime distribution looks like.
+    // A handful of recent boots so the reboot badge has something to flag; the rest span years.
     node.Uptime = iso(chance(0.04) ? daysAgo(rnd() * 0.02) : daysAgo(int(3, 1100)));
     // Crosses crawlAgeStaleMin so the "recently changed" and "stale" config views differ.
     node.LastConfigured = iso(daysAgo(chance(0.2) ? rnd() * 0.5 : int(1, 700)));
@@ -393,10 +342,7 @@ function makeDevice({ deviceIp, bldg, seq, models, role, gateway }) {
     return node;
 }
 
-/* ---------------- linking ---------------- */
-
-// Free uplink cages, in the order the art draws them, so links land on ports a real
-// installation would patch first.
+// Free uplink cages in the order the art draws them, so links land where a real install would patch.
 function freeUplinks(node) {
     if (!node._freeUplinks) {
         const cageSet = new Set();
@@ -415,9 +361,7 @@ function freeUplinks(node) {
 
 const byPort = (node) => (node._byPort ||= new Map(node.Interfaces.map(r => [r.Port, r])));
 
-// LLDP is symmetric: both ends report the link, from their own side. An asymmetric fixture
-// hides every bug in the edge-deduplication and primary-tree code, which is most of what the
-// diagram does.
+// LLDP is symmetric; an asymmetric fixture hides every edge-dedup and primary-tree bug.
 function linkDevices(a, b, descPrefix) {
     const pa = freeUplinks(a).shift();
     const pb = freeUplinks(b).shift();
@@ -436,11 +380,7 @@ function linkDevices(a, b, descPrefix) {
     return true;
 }
 
-/* ---------------- endpoints ---------------- */
-
-// A client's MAC-table entry usually sits on the access switch while its ARP entry sits on the
-// L3 gateway, so the crawler backfills IP from a fleet-wide MAC->IP map. Emitting the halves on
-// different devices is the only way that correlation is exercised at all.
+// The MAC-table half and the ARP half sit on different devices, which is what exercises the backfill.
 function addClients(node, gatewayNode, vlanTags) {
     const accessPorts = node.Interfaces.filter(r => r.Link === 'up' && !r.Desc.startsWith('TRUNK') && !r.Desc.startsWith('UPLINK'));
     const dataTags = vlanTags.filter(t => t !== '100');
@@ -456,19 +396,14 @@ function addClients(node, gatewayNode, vlanTags) {
                 Class: isAp ? 'Class III' : 'Class II',
             });
         }
-        // Daisy chains are detected from two MACs on one physical port, and the confidence the
-        // badge shows depends on whether LLDP-MED saw a phone there and on whether the two sit
-        // in different VLANs. All three verdicts need to occur, or two thirds of that code is
-        // only ever exercised by unit tests.
+        // Confidence depends on LLDP-MED and a VLAN split; all three verdicts need to occur.
         if (isPhone && dataTags.length && chance(0.7)) addClient(node, gatewayNode, row, pick(dataTags));   // confirmed
         else if (!isPhone && dataTags.length > 1 && chance(0.04)) addClient(node, gatewayNode, row, pick(dataTags)); // likely
         else if (!isPhone && chance(0.03)) addClient(node, gatewayNode, row, first.VLAN_Tag);               // possible
     }
 }
 
-// Dot1x_State is read three ways: "Unknown" means dot1x was never observed, "Authenticated"
-// means it passed, and anything else counts as a violation on the dashboard. A fixture with
-// only the first two leaves that tile permanently at zero.
+// Anything but "Unknown"/"Authenticated" counts as a violation, so all three must appear.
 const DOT1X_FAILURES = ['Held', 'Connecting', 'Failed', 'Force-Unauthorized'];
 
 function addClient(node, gatewayNode, row, tag) {
@@ -477,9 +412,7 @@ function addClient(node, gatewayNode, row, tag) {
     const clientIp = `10.${node.zone.net}.${int(100, 240)}.${int(2, 250)}`;
     const dot1x = chance(0.35);
     const client = {
-        // Left unresolved more often than not: a client's ARP entry usually lives on the L3
-        // gateway rather than on the access switch that learned its MAC, and the crawler's
-        // fleet-wide MAC->IP backfill is what closes the gap.
+        // Left unresolved more often than not: the ARP entry usually lives on the L3 gateway.
         IP: chance(0.55) ? 'Unknown' : clientIp,
         MAC: mac,
         Port: `${row.Port}.0`,
@@ -495,8 +428,6 @@ function addClient(node, gatewayNode, row, tag) {
     return client;
 }
 
-/* ---------------- assemble the fleet ---------------- */
-
 // Back-references, so a building alone is enough to address and place a device.
 const ZONES = new Map(CAMPUS.map(z => [z.short, z]));
 const ALL_BUILDINGS = [];
@@ -508,8 +439,7 @@ const hubOf = (zone) => zone.buildings.find(b => b.hub);
 const topology = [];
 const configDevices = [];
 const seqIn = new Map();
-// Per-building sequence, so uw-hsb-acc01..07 are the seven closets in that one building rather
-// than an arbitrary slice of a fleet-wide counter.
+// Per-building sequence, so uw-hsb-acc01..07 are that building's seven closets.
 const nextSeq = (bldg, role) => {
     const key = bldg.abbr + role;
     const n = (seqIn.get(key) || 0) + 1;
@@ -524,30 +454,24 @@ const place = (bldg, role, models, gateway) => makeDevice({
 const coreBuildings = [hubOf(ZONES.get('CENTRAL')), hubOf(ZONES.get('WEST'))];
 const cores = coreBuildings.map((bldg, i) => place(
     bldg, 'CORE',
-    // The second core is the modular chassis, so both the drawn and the undrawable paths appear
-    // on a device that matters rather than on an obscure leaf.
+    // The second core is the modular chassis, so the undrawable path appears on a device that matters.
     [i === 1 ? MODULAR_MODEL : CORE_MODELS[i % CORE_MODELS.length]],
     ipFor(coreBuildings[0], 1),
 ));
 linkDevices(cores[0], cores[1], 'ICL');
 
-// A distribution switch has a finite number of uplink cages, and a frame that runs out simply
-// leaves the next closet unpatched - so the frame count has to follow the fleet size. Well under
-// the ~44 cages on the smallest frame model, leaving headroom for the two core trunks, the
-// dual-homed closets from the zone next door, and a stack member's share of the pool.
+// A frame that runs out of uplink cages leaves the next closet unpatched, so the count follows fleet
+// size - well under the ~44 cages on the smallest frame model, leaving trunk/dual-home headroom.
 const UPLINKS_PER_FRAME = 20;
 const totalClosets = ALL_BUILDINGS.reduce((sum, b) => sum + b.closets, 0);
 const zoneShare = (zone) => zone.buildings.reduce((sum, b) => sum + b.closets, 0) / totalClosets;
-// Frames displace access switches from the budget, so the split is settled once up front rather
-// than left to depend on itself.
+// Frames displace access switches from the budget, so the split is settled once up front.
 const framesFor = (zone) => Math.max(1, Math.ceil((DEVICE_COUNT - cores.length) * zoneShare(zone) / UPLINKS_PER_FRAME));
 const frameCount = CAMPUS.reduce((sum, z) => sum + framesFor(z), 0);
 
 const dists = [];
 for (const zone of CAMPUS) {
-    // The hub takes the first frame; the rest go to the biggest buildings. Dealt round-robin
-    // rather than one-per-building, because a zone can need more frames than it has buildings -
-    // a medical centre runs several, and capping at one would leave closets unpatched.
+    // Round-robin from the hub outward, because a zone can need more frames than it has buildings.
     const order = [hubOf(zone), ...zone.buildings.filter(b => !b.hub).sort((a, b) => b.closets - a.closets)];
     const want = framesFor(zone);
     const sites = Array.from({ length: want }, (_, i) => order[i % order.length]);
@@ -557,9 +481,7 @@ for (const zone of CAMPUS) {
         const d = place(bldg, 'DIST', models, cores[0].DeviceIP);
         dists.push(d);
         inThisZone.push(d);
-        // Only the zone's own frame homes to the core. The rest hang off it, because two core
-        // switches do not have enough cages to terminate every building frame on campus - which
-        // is exactly why a campus this size has a zone tier in the first place.
+        // Two core switches can't terminate every building frame, which is why there is a zone tier.
         if (inThisZone.length === 1) {
             for (const core of cores) linkDevices(d, core, 'TRUNK');
         } else {
@@ -571,14 +493,12 @@ for (const zone of CAMPUS) {
 }
 const distsInZone = (short) => dists.filter(d => d.zone.short === short);
 
-// Access switches are handed out in proportion to each building's closet count, so the fleet
-// thickens where the campus actually does.
+// Access switches in proportion to closet count, so the fleet thickens where the campus does.
 const accessBudget = Math.max(1, DEVICE_COUNT - cores.length - frameCount);
 const access = [];
 const inBuilding = new Map(ALL_BUILDINGS.map(b => [b.abbr, []]));
 
-// Largest-remainder apportionment: rounding each building's share independently drifts by a
-// dozen devices over 48 buildings, and --devices 500 has to mean 500.
+// Largest-remainder apportionment: independent rounding drifts a dozen devices over 48 buildings.
 const quotas = ALL_BUILDINGS.map(b => ({ bldg: b, exact: accessBudget * (b.closets / totalClosets) }));
 quotas.forEach(q => { q.n = Math.max(1, Math.floor(q.exact)); });
 let shortfall = accessBudget - quotas.reduce((sum, q) => sum + q.n, 0);
@@ -593,8 +513,7 @@ for (const q of quotas.slice().sort((a, b) => a.exact - b.exact)) {
 
 for (const { bldg, n: count } of quotas) {
     for (let i = 0; i < count && access.length < accessBudget; i++) {
-        // Virtual Chassis is the norm on access floors, and a multi-member stack is where the
-        // faceplate view does its most fragile work (per-member FPC numbering, master/backup LEDs).
+        // A multi-member stack is where the faceplate view does its most fragile work.
         const stackSize = chance(0.3) ? int(2, 5) : 1;
         const stackModel = pick(ACCESS_MODELS);
         const models = Array.from({ length: stackSize }, () => (stackSize > 1 && chance(0.15) ? pick(ACCESS_MODELS) : stackModel));
@@ -602,9 +521,7 @@ for (const { bldg, n: count } of quotas) {
         if (!parent) throw new Error(`Every distribution frame in ${bldg.zone.name} is full - lower UPLINKS_PER_FRAME (currently ${UPLINKS_PER_FRAME}).`);
         const a = place(bldg, 'ACC', models, parent.DeviceIP);
         linkDevices(a, parent, 'UPLINK');
-        // A closet dual-homed for resilience goes to the nearest frame in a NEIGHBOURING zone -
-        // there is no fibre to the far side of campus, and a redundant path back into the same
-        // building it already depends on would not be redundant.
+        // Dual-homing goes to a NEIGHBOURING zone; back into the same building is not redundant.
         if (chance(0.08)) {
             const neighbours = bldg.zone.adjacent.flatMap(distsInZone);
             const spare = nearestWithPort(bldg, neighbours);
@@ -615,9 +532,7 @@ for (const { bldg, n: count } of quotas) {
     }
 }
 
-// A closet fed from another closet rather than from the frame - common in an older building,
-// and where the primary-tree depth calculation stops being trivial. Always within one building:
-// this is a patch between floors, not a campus link.
+// A closet fed from another closet, within one building - where primary-tree depth stops being trivial.
 for (const [, switches] of inBuilding) {
     if (switches.length < 3) continue;
     for (const a of shuffled(switches).slice(0, Math.floor(switches.length * 0.2))) {
@@ -628,9 +543,7 @@ for (const [, switches] of inBuilding) {
 
 for (const node of [...cores, ...dists, ...access]) topology.push(node);
 
-// linkDevices returns false when either end has run out of uplink cages, and an unlinked switch
-// is invisible in the fixture: it just becomes an orphan node in a row off to one side of the
-// diagram. Silent for one run and easy to mistake for a layout quirk, so it is fatal here.
+// An unlinked switch is just an orphan node beside the diagram, easy to miss - so it is fatal here.
 function assertNothingOrphaned(fleet) {
     const orphans = fleet.filter(d => d.Neighbors.length === 0);
     if (!orphans.length) return;
@@ -641,8 +554,6 @@ function assertNothingOrphaned(fleet) {
     );
 }
 assertNothingOrphaned(topology);
-
-/* ---------------- endpoints, configuration, failures ---------------- */
 
 const gatewayFor = (node) => (node.role === 'ACC' ? topology.find(d => d.DeviceIP === node.Gateway) : cores[0]);
 
@@ -656,8 +567,6 @@ for (const node of topology) {
     node.Configuration = configText(node.Hostname, node.zone, node.bldg, vlanTags, extra);
 }
 
-/* ---------------- map placement ---------------- */
-
 const M_PER_DEG_LAT = 111320;
 const mPerDegLng = (lat) => M_PER_DEG_LAT * Math.cos(lat * Math.PI / 180);
 // Metres east/north of a building's interior point, back to a coordinate.
@@ -666,9 +575,7 @@ const offsetBy = (bldg, east, north) => ({
     lng: +(bldg.lng + east / mPerDegLng(bldg.lat)).toFixed(6),
 });
 
-// Concentric rings at `step` metres, centre outwards, or null when `count` of them will not fit
-// inside `limit`. Ring gap is `step` and the in-ring chord is held at or above it, so `step` is
-// the minimum distance between any two spots.
+// Concentric rings at `step` metres, or null when `count` won't fit inside `limit`.
 function ringSpots(limit, step, count) {
     const spots = [{ east: 0, north: 0 }];
     for (let ring = 1; spots.length < count; ring++) {
@@ -684,26 +591,21 @@ function ringSpots(limit, step, count) {
     return spots;
 }
 
-// Closets are dealt around their building on rings inside its footprint rather than scattered
-// randomly: jitter wide enough to separate them also threw pins onto the lawn, and could still
-// drop two on one spot. The centre is the building's interior point, where its main frame
-// belongs. Deterministic, so the same fleet always draws the same map.
+// Closets ring inside the building's footprint: jitter wide enough to separate them threw pins onto
+// the lawn and could still drop two on one spot. Deterministic, centred on the interior point.
 function closetSpots(bldg, count) {
-    // The widest spacing that still fits every closet indoors: a quiet building spreads its
-    // pins out, a crowded one packs tighter rather than spilling outside the walls.
+    // The widest spacing that still fits every closet indoors.
     let step = Math.max(4, bldg.r / 2);
     for (let attempt = 0; attempt < 60; attempt++) {
         const spots = ringSpots(bldg.r, step, count);
         if (spots) return { spots, step };
         step *= 0.85;
     }
-    // Unreachable for any plausible fleet - 60 reductions is a spacing of millimetres - but a
-    // null here would be a crash rather than a crowded building.
+    // Unreachable for any plausible fleet, but a null here would be a crash rather than a crowded building.
     return { spots: ringSpots(bldg.r, bldg.r / 1e4, count) || [{ east: 0, north: 0 }], step: bldg.r / 1e4 };
 }
 
-// The frame is the building's main distribution frame, so it takes the interior point and the
-// closets ring around it.
+// The frame takes the building's interior point and the closets ring around it.
 const placementRank = (node) => (node.role === 'ACC' ? 1 : 0);
 const pinnedByBuilding = new Map();
 for (const node of topology) {
@@ -711,16 +613,12 @@ for (const node of topology) {
     pinnedByBuilding.get(node.bldg).push(node);
 }
 
-// Serial-keyed so a device that is re-homed or renumbered keeps its map pin, which is how the
-// real Configuration.json is keyed.
+// Serial-keyed so a re-homed device keeps its pin, which is how the real Configuration.json is keyed.
 for (const [bldg, nodes] of pinnedByBuilding) {
     const ordered = nodes.slice().sort((a, b) => placementRank(a) - placementRank(b)
         || String(a.DeviceIP).localeCompare(String(b.DeviceIP)));
     const { spots, step } = closetSpots(bldg, ordered.length);
-    // Stack members share a rack, so they share a closet - ringed slightly apart so they are
-    // separate pins rather than one unclickable dot. A fraction of the closet spacing, not a
-    // radius that grows with the member index: a widening spread walks the far members of a
-    // long virtual chassis off their own closet and onto the next one.
+    // Stack members share a closet, ringed apart by a fixed fraction of the closet spacing.
     const rackRadius = Math.min(1.2, step / 3);
     ordered.forEach((node, slot) => {
         const spot = spots[slot];
@@ -740,20 +638,13 @@ for (const [bldg, nodes] of pinnedByBuilding) {
     });
 }
 
-/* ---------------- snapshots over time ---------------- */
-
-// What a fleet does between two crawls: a few configs are edited, a few closets are cut over
-// to another distribution switch, ports move, and load is re-measured. Everything the
-// dashboard's Trends, Topology Diff, New Devices and Config Changed tabs compare is a
-// difference between snapshots, so a single-snapshot fixture leaves all four blank.
+// What a fleet does between crawls; every snapshot-diff tab compares exactly this.
 function ageFleet(days) {
     for (const node of topology) {
         node.MasterCpuUtilization = cpuValue();
         node.MasterMemoryUtilization = memValue();
     }
-    // Reboots are detected by comparing a device's boot timestamp against the previous
-    // snapshot's, so a fleet whose Uptime never moves reports none - and the trend charts'
-    // reboot markers stay empty however many snapshots are loaded.
+    // Reboots are detected from boot timestamps, so a fleet whose Uptime never moves reports none.
     for (const node of shuffled(topology).slice(0, int(2, 5))) node.Uptime = iso(daysAgo(rnd() * days));
     for (const node of shuffled(topology).slice(0, Math.max(2, Math.round(topology.length * 0.04)))) {
         node.Configuration += `\nset system syslog file interactive-commands interactive-commands any\nset snmp trap-group audit targets 10.${node.zone.net}.0.4${days}`;
@@ -767,13 +658,11 @@ function ageFleet(days) {
             row.LastFlappedSeconds = int(60, days * 86400);
         }
     }
-    // A closet retired and a closet commissioned, so New Devices has both a departure and an
-    // arrival to report rather than only ever growing.
+    // A retirement and a commissioning, so New Devices has a departure as well as an arrival.
     const retired = pick(topology.filter(d => d.role === 'ACC'));
     topology.splice(topology.indexOf(retired), 1);
     for (const node of topology) node.Neighbors = node.Neighbors.filter(n => n.ManagementIP !== retired.DeviceIP);
-    // Only a building whose zone still has a spare port can take a new closet - the arrival must
-    // end up patched to something, or the snapshot gains a device that is invisible in the graph.
+    // Only a building whose zone has a spare port - the arrival must end up patched to something.
     const bldg = pick(ALL_BUILDINGS.filter(b => nearestWithPort(b, distsInZone(b.zone.short))));
     const parent = nearestWithPort(bldg, distsInZone(bldg.zone.short));
     const arrival = place(bldg, 'ACC', [pick(ACCESS_MODELS)], parent.DeviceIP);
@@ -784,11 +673,8 @@ function ageFleet(days) {
     topology.push(arrival);
 }
 
-// A crawler that could not read a device has no serial for it, so a placeholder falls back to
-// hostname for its cross-snapshot identity. Re-rolling the failing set each snapshot would
-// therefore show most of the fleet as removed-and-re-added in the Topology Diff, drowning the
-// genuine arrivals. A device that is down stays down, and one flips per crawl - which is the
-// churn the Reliability tab is there to surface.
+// A placeholder has no serial, so identity falls back to hostname. Re-rolling the failing set each
+// snapshot would show most of the fleet as removed-and-re-added, so one device flips per crawl.
 const chronicallyFailing = shuffled(topology.filter(d => d.role === 'ACC'))
     .slice(0, Math.max(1, Math.round(topology.length * 0.025))).map(d => d.DeviceIP);
 
@@ -799,8 +685,7 @@ function withFailures(fleet, snapshotIndex) {
         const stillUp = fleet.filter(d => d.role === 'ACC' && !failing.has(d.DeviceIP));
         failing.add(stillUp[(snapshotIndex * 97) % stillUp.length].DeviceIP);            // newly down
     }
-    // Dropped before the clone, not after: bldg.zone.buildings points back at bldg, and a
-    // structuredClone/JSON round-trip of a node still carrying those would recurse.
+    // Dropped before the clone: bldg.zone.buildings points back at bldg, so a clone would recurse.
     const SCRATCH = ['zone', 'bldg', 'role', '_freeUplinks', '_byPort'];
     return fleet.map(node => {
         const copy = JSON.parse(JSON.stringify(node, (key, value) => (SCRATCH.includes(key) ? undefined : value)));
@@ -816,8 +701,6 @@ function withFailures(fleet, snapshotIndex) {
     });
 }
 
-/* ---------------- write ---------------- */
-
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const written = [];
 for (let i = 0; i < SNAPSHOT_COUNT; i++) {
@@ -826,16 +709,14 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     if (i > 0) { ageFleet(daysBack + 1); assertNothingOrphaned(topology); }
     const scanTime = new Date(SCAN_DATE.getTime() - daysBack * 86400000);
     const stamp = scanTime.toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '');
-    // NetworkMap_* so the server and the folder loader pick it up, .fixture.json so a generated
-    // map can be gitignored without also ignoring a real crawl's output sitting beside it.
+    // NetworkMap_* so the loaders pick it up, .fixture.json so it can be gitignored separately.
     const mapPath = path.join(OUT_DIR, `NetworkMap_${stamp}.fixture.json`);
     const fleet = withFailures(topology, i);
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));
     written.push({ mapPath, fleet });
 }
 
-// Never named Configuration.json: the generator must not be able to overwrite the real
-// credentials file that sits beside the maps.
+// Never named Configuration.json: the generator must not overwrite the real credentials file.
 const configPath = path.join(OUT_DIR, 'Configuration.fixture.json');
 fs.writeFileSync(configPath, JSON.stringify({
     devices: configDevices,
@@ -867,11 +748,8 @@ process.stderr.write(
     `across ${CAMPUS.length} campus zones, seed ${SEED}\n`
 );
 
-// The visualizer reads Configuration.json, not the .fixture.json written beside the maps, so a
-// fixture regenerated without copying it over leaves the server resolving this fleet's serials
-// against the last fleet's placements. Serials are handed out in generation order, so they all
-// still resolve - to whichever building held that serial last time. Every pin lands on the
-// wrong building, and nothing about it looks like an error.
+// The visualizer reads Configuration.json, not the .fixture.json beside the maps, so a regenerated
+// fixture that isn't copied over resolves every serial against the PREVIOUS fleet's buildings.
 const serverConfigPath = path.join(OUT_DIR, '..', 'Configuration.json');
 if (fs.existsSync(serverConfigPath)) {
     let existing = null;

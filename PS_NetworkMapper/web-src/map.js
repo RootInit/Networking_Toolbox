@@ -1,7 +1,4 @@
-// Geographic map view, rendered Leaflet-native rather than by syncing vis-network onto a
-// Leaflet map, which proved unreliable. Owns Leaflet init, marker/edge rendering from the
-// same topology and classification the diagram uses, the Unplaced Devices list, and the
-// location editor.
+// Geographic map view, Leaflet-native: init, marker/edge rendering, Unplaced Devices, location editor.
 
 var leafletMap = null;
 var mapMarkersByIp = new Map();
@@ -9,18 +6,15 @@ var mapConfigEntries = [];      // decrypted Configuration.json's devices[], or 
 var loadedCredentials = null;   // decrypted Configuration.json's credentials ({username, password}), or null
 var loadedSettings = {};        // decrypted Configuration.json's settings (partial or empty) - merge over defaults at read time
 var mapConfigLoaded = false;    // true once a GET /api/config attempt (success OR "no file yet") has completed
-// In-flight loadMapConfiguration promise, so near-simultaneous ensureConfigLoaded callers
-// share one fetch and one password prompt instead of racing two.
+// In-flight promise, so simultaneous callers share one fetch and one password prompt.
 var configLoadPromise = null;
-// renderMapMarkers fires on every topology change, so only the first marker appearance
-// auto-frames the camera; otherwise every rescan would reset the user's pan/zoom.
+// Only the first marker appearance auto-frames; otherwise every rescan resets the user's pan/zoom.
 var hasFitBoundsOnce = false;
 
 // Centre column views: 'diagram' (vis-network), 'map' (Leaflet), 'analysis' (dashboard.js).
 window.switchCenterView = function(view) {
     activeCenterView = view;
-    // A sibling of #mapview, not a child, so the display-toggling below misses it and it
-    // would float over the next view.
+    // A sibling of #mapview, not a child, so the display-toggling below misses it.
     window.showMapStatus('');
     document.getElementById('mynetwork').style.display = (view === 'diagram') ? 'block' : 'none';
     document.getElementById('mapview').style.display = (view === 'map') ? 'block' : 'none';
@@ -43,15 +37,13 @@ window.switchCenterView = function(view) {
         return;
     }
     if (view !== 'map') {
-        // The network may have been built while #mynetwork was hidden, sizing its canvas
-        // against 0x0 - re-measure now it is visible.
+        // The network may have been built while #mynetwork was hidden, sizing its canvas against 0x0.
         if (typeof window.resizeDiagram === 'function') window.resizeDiagram();
         return;
     }
 
     if (leafletMap !== null) {
-        // Leaflet reads 0x0 from a display:none container, so tiles for the real viewport
-        // were never loaded. invalidateSize() re-measures without touching center/zoom.
+        // Leaflet reads 0x0 from a hidden container. invalidateSize() re-measures without moving it.
         leafletMap.invalidateSize();
     }
 
@@ -60,16 +52,14 @@ window.switchCenterView = function(view) {
             window.showMapStatus('Failed to load map: ' + err.message);
         });
     } else if (!mapConfigLoaded) {
-        // Retried via ensureConfigLoaded, not loadMapConfiguration, so it shares the
-        // already-loaded and in-flight guards with the Settings tab instead of re-prompting.
+        // Via ensureConfigLoaded so it shares the in-flight guard instead of re-prompting.
         window.ensureConfigLoaded().then(function () {
             window.renderMapMarkers();
         }).catch(function (err) {
             window.showMapStatus('Failed to load map: ' + err.message);
         });
     } else {
-        // Markers that first appeared while hidden deferred their fit; retry now the
-        // container is correctly sized.
+        // Markers that appeared while hidden deferred their fit; retry now the size is right.
         maybeFitBoundsToMarkers();
     }
 };
@@ -77,26 +67,20 @@ window.switchCenterView = function(view) {
 window.initMapView = async function() {
     leafletMap = L.map('mapview', { zoomControl: true }).setView([0, 0], 2);
     leafletMap.on('zoomend', applyLabelVisibility);
-    // Keyless standard OSM tiles - CARTO's free tier now requires registration and watermarks
-    // otherwise. No {r} retina placeholder: the OSM tile server doesn't serve @2x tiles.
+    // Keyless standard OSM tiles; no {r} retina placeholder, since OSM doesn't serve @2x.
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        // OSM has no tiles past z19, so beyond maxNativeZoom Leaflet upscales the z19 image
-        // rather than requesting a 404. The imagery gets blurry, but closets in one building
-        // sit metres apart and need the extra separation to be clickable at all.
+        // OSM has no tiles past z19, so Leaflet upscales rather than 404ing - closets need the room.
         maxNativeZoom: 19,
         maxZoom: MAX_MAP_ZOOM,
         attribution: '&copy; OpenStreetMap contributors'
     }).addTo(leafletMap);
 
-    // ensureConfigLoaded returns early when the Settings tab already loaded the config, so
-    // the explicit renderMapMarkers below is still needed.
+    // ensureConfigLoaded returns early if Settings already loaded it, so still render explicitly.
     await window.ensureConfigLoaded();
     window.renderMapMarkers();
 };
 
-// Fetches and decrypts Configuration.json.enc. A 404 is a normal empty state and sets
-// mapConfigLoaded; every other failure leaves it false so switchCenterView can retry.
-// Must never throw - initMapView awaits it with nothing to catch a rejection.
+// A 404 is a normal empty state; any other failure leaves mapConfigLoaded false. Must never throw.
 window.loadMapConfiguration = async function() {
     var resp;
     try {
@@ -141,8 +125,7 @@ window.loadMapConfiguration = async function() {
     if (envelope && envelope.format === 'PSNetworkMapper-EncryptedConfig') {
         var decryptedText = null;
         var errorMsg = null;
-        // Session password first, silently; the prompt is only reached if it is missing
-        // or wrong.
+        // Session password first, silently; the prompt is only reached if it is missing or wrong.
         var sessionPassword = await window.getSessionEncryptionPassword();
         var triedSessionPassword = false;
         while (decryptedText === null) {
@@ -165,8 +148,7 @@ window.loadMapConfiguration = async function() {
             try {
                 decryptedText = await window.TopologyCrypto.decryptEnvelope(envelope, password, ['PSNetworkMapper-EncryptedConfig']);
             } catch (decErr) {
-                // Only a wrong password is retryable; an unsupported version or bad envelope
-                // parameters fail for every password, so surface them instead of re-prompting.
+                // Only a wrong password is retryable; a bad envelope fails for every password.
                 if (!decErr.wrongPassword) {
                     window.showMapStatus('Could not decrypt Configuration.json.enc: ' + decErr.message + ' Devices will show without saved locations.');
                     mapConfigEntries = [];
@@ -205,10 +187,7 @@ window.setLoadedSettings = function(settings) {
     loadedSettings = settings;
 };
 
-// Session-wide gate, so the fetch and password prompt happen at most once. Returns whether
-// the config is actually loaded. Any caller about to WRITE the config must check this and
-// bail: on failure the in-memory state is empty, and saving would POST that emptiness over
-// everything previously saved.
+// Session-wide gate. A caller about to WRITE must check the result: on failure the state is empty.
 window.ensureConfigLoaded = async function() {
     if (mapConfigLoaded) return true;
     if (!configLoadPromise) {
@@ -219,8 +198,7 @@ window.ensureConfigLoaded = async function() {
     return mapConfigLoaded;
 };
 
-// Repaints only the two markers whose state changed. A full renderMapMarkers would also drop
-// any in-progress "Edit position" arming, which selecting a device must not do.
+// Repaints only the changed markers; a full rebuild would drop in-progress "Edit position" arming.
 window.updateMapSelection = function(ip) {
     var next = (ip === null || ip === undefined) ? null : String(ip);
     if (next === selectedMapIp) return;
@@ -249,22 +227,16 @@ var MARKER_COLORS = {
     selected: { background: '#4CAF50', border: '#2E7D32' },
 };
 
-// The IP whose drawer is open, or null. Tracked here rather than read from
-// currentSelectedNodeData so a selection made before the Map view has ever been opened is
-// still painted by the first renderMapMarkers.
+// Tracked here, not read from currentSelectedNodeData, so a pre-Map-view selection still paints.
 var selectedMapIp = null;
 
-// dimmedByVlan: a filter is active and this device's clients don't carry the selected tag.
-// Selection outranks every other state, VLAN dimming included: losing track of which device
-// is open costs more than the filter's marker staying truthful about this one.
+// Selection outranks every other state, VLAN dimming included.
 function iconForClassification(meta, dimmedByVlan, selected) {
     var colors = selected ? MARKER_COLORS.selected
         : !meta.scanned ? MARKER_COLORS.unscanned
         : dimmedByVlan ? MARKER_COLORS.vlanDimmed
         : (meta.isStack ? MARKER_COLORS.scannedStack : MARKER_COLORS.scanned);
-    // Deliberately small and textless (the hostname is a tooltip): a circle big enough for
-    // text is also a bigger click target, and Leaflet markers don't bubble clicks, so an
-    // oversized marker made the editor's click-to-place-pin miss in clustered areas.
+    // Small and textless: Leaflet markers don't bubble clicks, so a big one made click-to-place miss.
     var size = 22;
     var html = '<div style="width:' + size + 'px;height:' + size + 'px;border-radius:' + (meta.isStack ? '30%' : '50%') +
         ';background:' + colors.background + ';border:2px solid ' + colors.border +
@@ -272,29 +244,22 @@ function iconForClassification(meta, dimmedByVlan, selected) {
     return L.divIcon({ className: '', html: html, iconSize: [size, size], iconAnchor: [size / 2, size / 2] });
 }
 
-// Two levels past OSM's last real tile. Each level doubles the scale, so this is 4x the
-// separation z19 gives between two closets in the same building.
+// Two levels past OSM's last real tile - 4x the z19 separation between closets in one building.
 var MAX_MAP_ZOOM = 21;
 
-// Hostname labels are permanent tooltips, so on a campus-sized fleet the whole map is covered
-// in text at the zoom the initial fit lands on. Below this they are hidden and the markers
-// alone carry position; a device is still identified by clicking it.
+// Permanent tooltips bury a campus-sized fleet at the initial fit's zoom; below this they hide.
 var LABEL_MIN_ZOOM = 18;
-// Below this many placed devices there is nothing to declutter - a handful of markers never
-// overlap - and hiding their names would only make the map less useful.
+// Below this many placed devices nothing overlaps, so hiding names would only lose information.
 var LABEL_ALWAYS_BELOW = 20;
 
-// Toggles one class on the map container rather than opening and closing each tooltip:
-// hundreds of Leaflet tooltip layers cannot be rebound fast enough to keep up with a pinch,
-// and the browser hides them in CSS for free.
+// One class, not per-tooltip toggling: hundreds of Leaflet tooltips can't be rebound during a pinch.
 function applyLabelVisibility() {
     if (!leafletMap) return;
     var hide = mapMarkersByIp.size >= LABEL_ALWAYS_BELOW && leafletMap.getZoom() < LABEL_MIN_ZOOM;
     leafletMap.getContainer().classList.toggle('hide-marker-labels', hide);
 }
 
-// Defers rather than fitting against the 0x0 Leaflet reads from a hidden container;
-// switchCenterView retries on the next return to Map.
+// Defers rather than fitting against the 0x0 a hidden container reports; retried on return to Map.
 function maybeFitBoundsToMarkers() {
     if (hasFitBoundsOnce || mapMarkersByIp.size === 0) return;
     var container = document.getElementById('mapview');
@@ -304,9 +269,7 @@ function maybeFitBoundsToMarkers() {
     hasFitBoundsOnce = true;
 }
 
-// Mirrors graph.js's computeSubtreeVlanSets. Duplicated rather than shared because that
-// version walks vis-network diagram state, which doesn't exist if Diagram view was never
-// opened; this builds its own tree from the map's own node/edge set.
+// Mirrors graph.js's computeSubtreeVlanSets; duplicated because that one walks vis-network state.
 function computeMapVlanTrunkSets(nodeIds, edges, vlanCacheByIp) {
     var root = window.GraphLayout.computeGraphRoot(nodeIds, edges);
     var tree = window.GraphLayout.buildPrimaryTree(nodeIds, edges, root);
@@ -333,14 +296,12 @@ function mapEdgeTrunksVlan(subtreeVlanSets, fromId, toId, vlanTag) {
 }
 
 window.renderMapMarkers = function() {
-    // Safe to call before Map view has ever been opened.
     if (leafletMap === null) return;
 
     mapMarkersByIp.forEach(function (marker) { leafletMap.removeLayer(marker); });
     mapMarkersByIp.clear();
     if (window.mapEdgeLayer) { leafletMap.removeLayer(window.mapEdgeLayer); window.mapEdgeLayer = null; }
-    // Every marker is rebuilt below, so a prior "Edit position" arming points at an object
-    // no longer on the map.
+    // Every marker is rebuilt below, so a prior arming points at an object no longer on the map.
     if (currentlyArmedMarker && currentlyArmedMarker._disarmOnMapClick) {
         leafletMap.off('click', currentlyArmedMarker._disarmOnMapClick);
     }
@@ -350,7 +311,6 @@ window.renderMapMarkers = function() {
     var deviceByIpLocal = new Map(globalTopologyData.filter(d => d && d.DeviceIP).map(d => [String(d.DeviceIP), d]));
     var placedByIp = new Map(); // ip -> {lat, lng}, used below for edges
 
-    // The same #vlanFilter control the diagram reads, live off the DOM.
     var vlanFilterEl = document.getElementById('vlanFilter');
     var selectedVlan = vlanFilterEl ? vlanFilterEl.value : 'ALL';
     var vlanCacheByIp = window.TopologyGraph.computeVlanCache(globalTopologyData);
@@ -359,17 +319,12 @@ window.renderMapMarkers = function() {
         var device = deviceByIpLocal.get(ip);
         if (!device) return; // an unscanned neighbor has no chassis data to resolve a location from
         var entry = window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries);
-        // pendingConfigEdits, not mapConfigEntries, is the current state: without this
-        // overlay a re-render would snap a marker back to its last-SAVED position while
-        // "N unsaved changes" still counts the newer edit, and a device placed via the
-        // editor but never saved would not render at all.
+        // pendingConfigEdits is the current state; without it a re-render reverts to the saved position.
         var pendingKeyInfo = window.ConfigResolve.bestKeyForSave(device);
         var pendingEdit = pendingConfigEdits.get(pendingKeyInfo.keyType + ':' + pendingKeyInfo.key);
         if (pendingEdit) entry = pendingEdit.entry;
         if (!entry) return;
-        // /api/save-config doesn't validate entry shape, so a hand-crafted POST can write a
-        // non-numeric lat/lng. L.marker throws on that, aborting the whole forEach and
-        // wedging the map.
+        // A hand-crafted POST can write a non-numeric lat/lng, and L.marker throws on that.
         if (!Number.isFinite(entry.lat) || !Number.isFinite(entry.lng)) {
             console.warn('Skipping map location entry with invalid lat/lng for device ' + ip, entry);
             return;
@@ -380,8 +335,7 @@ window.renderMapMarkers = function() {
         var marker = L.marker([entry.lat, entry.lng], { icon: iconForClassification(meta, dimmedByVlan, ip === selectedMapIp) }).addTo(leafletMap);
         // Kept so updateMapSelection can regenerate this marker's icon without a full rebuild.
         marker._iconState = { meta: meta, dimmedByVlan: dimmedByVlan };
-        // esc is required here: Leaflet's DivOverlay sets tooltip content via innerHTML, so
-        // a device-supplied hostname would otherwise be an XSS sink.
+        // Leaflet sets tooltip content via innerHTML, so a device-supplied hostname is an XSS sink.
         if (meta.hostname !== 'Unknown') {
             marker.bindTooltip(window.esc(meta.hostname), {
                 permanent: true, direction: 'bottom', offset: [0, 8],
@@ -389,8 +343,7 @@ window.renderMapMarkers = function() {
             });
         }
         marker.on('click', function () {
-            // A click rather than a drag after arming means the user changed their mind;
-            // dragging.enable() has no timeout or blur that would turn it back off.
+            // A click rather than a drag after arming means the user changed their mind.
             if (marker.dragging.enabled()) marker.dragging.disable();
             if (currentlyArmedMarker === marker) {
                 currentlyArmedMarker = null;
@@ -401,8 +354,7 @@ window.renderMapMarkers = function() {
             }
             window.openRightDrawer(ip);
         });
-        // Second entry point into the openLocationEditor the Unplaced list uses. Built with
-        // DOM methods, so no escaping is involved.
+        // Second entry point into openLocationEditor. Built with DOM methods, so no escaping.
         var popupEl = document.createElement('div');
         var editLink = document.createElement('a');
         editLink.href = '#';
@@ -422,17 +374,14 @@ window.renderMapMarkers = function() {
         repositionLink.addEventListener('click', function (evt) {
             evt.preventDefault();
             marker.closePopup();
-            // Disarm explicitly: clicking this marker's popup never bubbles to leafletMap,
-            // so the previously armed marker's one-shot disarm listener would never fire.
+            // A popup click never bubbles to leafletMap, so the armed marker's disarm would not fire.
             if (currentlyArmedMarker && currentlyArmedMarker !== marker && currentlyArmedMarker.dragging.enabled()) {
                 currentlyArmedMarker.dragging.disable();
             }
             marker.dragging.enable();
             currentlyArmedMarker = marker;
             window.showMapStatus('Drag "' + (meta.hostname !== 'Unknown' ? meta.hostname : ip) + '" to reposition it - release to stage the change.');
-            // Covers a click elsewhere on the map. Stored on the marker so dragend can `off`
-            // it: a completed drag emits no map 'click', so it would otherwise dangle until
-            // some unrelated later click consumed it.
+            // Stored on the marker so dragend can `off` it: a completed drag emits no map 'click'.
             marker._disarmOnMapClick = function () {
                 marker.dragging.disable();
                 if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
@@ -441,8 +390,7 @@ window.renderMapMarkers = function() {
         });
         popupEl.appendChild(repositionLink);
         marker.bindPopup(popupEl);
-        // Bound once at creation rather than on arming: it simply never fires until
-        // dragging is enabled.
+        // Bound once at creation: it never fires until dragging is enabled.
         marker.on('dragend', function () {
             marker.dragging.disable();
             if (currentlyArmedMarker === marker) currentlyArmedMarker = null;
@@ -452,8 +400,7 @@ window.renderMapMarkers = function() {
             }
             var newLatLng = marker.getLatLng();
             var currentDevice = deviceByIp.get(String(ip));
-            // A reload or rescan mid-drag leaves the closed-over `device` stale, so identity
-            // is re-resolved from deviceByIp here (as commitLocationEdit does).
+            // A reload mid-drag leaves the closed-over `device` stale, so re-resolve from deviceByIp.
             if (!currentDevice) {
                 marker.setLatLng([entry.lat, entry.lng]); // snap back - nothing to stage
                 window.showMapStatus('That device is no longer in the currently loaded data (the topology was reloaded or rescanned while dragging) - the position was not saved.');
@@ -461,9 +408,7 @@ window.renderMapMarkers = function() {
             }
             var keyInfo = window.ConfigResolve.bestKeyForSave(currentDevice);
             var deviceKeysAtCommit = window.ConfigResolve.extractDeviceKeys(currentDevice);
-            // A drag only changes lat/lng, so building/room/notes are preserved - from an
-            // already-pending edit in preference to the render-time `entry`, which holds the
-            // last-SAVED values and would silently revert a newer unsaved text edit.
+            // A drag only changes lat/lng; the text fields come from a pending edit, not stale `entry`.
             var alreadyPending = pendingConfigEdits.get(keyInfo.keyType + ':' + keyInfo.key);
             var preserveFrom = alreadyPending ? alreadyPending.entry : entry;
             var newEntry = {
@@ -500,15 +445,13 @@ window.renderMapMarkers = function() {
     window.mapEdgeLayer = L.layerGroup(lines).addTo(leafletMap);
 
     maybeFitBoundsToMarkers();
-    // After the markers exist and after any fit, since both the zoom and the marker count
-    // decide this and a re-render can change either.
+    // After the markers and any fit: both the zoom and the marker count decide this.
     applyLabelVisibility();
 
     window.renderUnplacedDevicesList(classification, deviceByIpLocal, placedByIp);
 };
 
-// Returns whether the device had a marker to reveal, so the caller can report "no location
-// set" instead.
+// Returns whether the device had a marker, so the caller can report "no location set" instead.
 window.revealDeviceOnMap = function(ip) {
     var marker = mapMarkersByIp.get(String(ip));
     if (!marker) return false;
@@ -517,28 +460,22 @@ window.revealDeviceOnMap = function(ip) {
     return true;
 };
 
-// The marker armed for drag-to-reposition, tracked explicitly because Leaflet markers don't
-// bubble clicks: opening marker B's popup never reaches leafletMap's handler, so B's arming
-// code must disarm A itself to keep at most one marker draggable.
+// Leaflet markers don't bubble clicks, so B's arming code must disarm A to keep at most one.
 var currentlyArmedMarker = null;
 
 var editorTargetIp = null;
-// keyType+':'+key -> { entry, deviceIp, deviceKeysAtCommit }, accumulated until Save.
-// deviceKeysAtCommit is snapshotted at commit time so saveConfiguration can collapse the
-// device's other stale-keyed entries; re-resolving via deviceByIp at save time deleted the
-// wrong device's location when that IP had since been reassigned. deviceIp is diagnostic only.
+// keyType+':'+key -> { entry, deviceIp, deviceKeysAtCommit }, accumulated until Save. The keys are
+// snapshotted at commit time; re-resolving at save time deleted the wrong device's location.
 var pendingConfigEdits = new Map();
 
-// Staged edits live only in memory until Save, so a reload would discard them silently
-// despite the "N unsaved changes" text.
+// Staged edits live only in memory until Save, so a reload would discard them silently.
 window.addEventListener('beforeunload', function (e) {
     if (pendingConfigEdits.size === 0) return;
     e.preventDefault();
     e.returnValue = '';
 });
 
-// Named so closeLocationEditor can `off` it; anonymous, repeated open/cancel cycles stack up
-// stale once-listeners that overwrite #editorLat/#editorLng on an unrelated later map click.
+// Named so closeLocationEditor can `off` it; anonymous listeners stack up across open/cancel cycles.
 function onEditorMapClick(e) {
     document.getElementById('editorLat').value = e.latlng.lat.toFixed(6);
     document.getElementById('editorLng').value = e.latlng.lng.toFixed(6);
@@ -549,9 +486,7 @@ window.openLocationEditor = function(ip) {
     editorTargetIp = ip;
     var device = deviceByIp.get(String(ip));
     document.getElementById('editorDeviceLabel').textContent = 'Set Location: ' + (device && device.Hostname !== 'Unknown' ? device.Hostname : ip);
-    // Prefilled so re-saving without touching a field doesn't wipe it. An unsaved drag wins
-    // over the saved entry: both write the same pendingConfigEdits key, so otherwise Set Pin
-    // would silently restore the pre-drag position.
+    // Prefilled so re-saving an untouched field doesn't wipe it; an unsaved drag beats the saved entry.
     var deviceKeyInfo = device ? window.ConfigResolve.bestKeyForSave(device) : null;
     var pending = deviceKeyInfo ? pendingConfigEdits.get(deviceKeyInfo.keyType + ':' + deviceKeyInfo.key) : null;
     var existing = pending ? pending.entry : (device ? window.ConfigResolve.resolveDeviceLocation(device, mapConfigEntries) : null);
@@ -563,8 +498,7 @@ window.openLocationEditor = function(ip) {
     document.getElementById('editorLng').value = (existing && Number.isFinite(existing.lng)) ? existing.lng : '';
     document.getElementById('location-editor-modal').style.display = 'flex';
 
-    // Reopening for a different device without closing first would otherwise stack up
-    // additional once-listeners alongside this one.
+    // Reopening for a different device without closing first would stack up extra once-listeners.
     leafletMap.off('click', onEditorMapClick);
     leafletMap.once('click', onEditorMapClick);
 };
@@ -584,8 +518,7 @@ window.commitLocationEdit = function() {
         return;
     }
     var device = deviceByIp.get(String(editorTargetIp));
-    // The editor's backdrop is pointer-events:none, so a load can replace deviceByIp while
-    // it is open. bestKeyForSave(undefined) would throw into the fatal-error modal.
+    // The backdrop is pointer-events:none, so a load can replace deviceByIp while the editor is open.
     if (!device) {
         window.closeLocationEditor();
         window.showMapStatus('That device is no longer in the currently loaded data (the topology was reloaded or rescanned while this editor was open) - the location was not saved. Reopen the editor from the device on the current map.');
@@ -624,9 +557,7 @@ window.renderSaveConfigButton = function() {
     document.getElementById('mapview').parentElement.appendChild(btn);
 };
 
-// Which pendingConfigEdits keys are safe to remove after a successful save. A key clears
-// only if the entry still under it is by reference the one actually sent: a newer edit that
-// landed on the same key mid-request is a different object and must survive.
+// A key clears only if the entry still under it is by reference the one actually sent.
 function computeSaveKeysToClear(includedKeys, includedEditsSnapshot, pendingConfigEditsNow) {
     return includedKeys.filter(function (key) {
         return pendingConfigEditsNow.get(key) === includedEditsSnapshot.get(key);
@@ -634,24 +565,18 @@ function computeSaveKeysToClear(includedKeys, includedEditsSnapshot, pendingConf
 }
 
 window.saveConfiguration = async function() {
-    // On a failed load the in-memory state is EMPTY, not "the saved config", so saving
-    // would overwrite everything previously stored - refuse instead.
+    // On a failed load the in-memory state is EMPTY, so saving would overwrite everything stored.
     var loaded = await window.ensureConfigLoaded();
     if (!loaded) {
         window.showMapStatus('Cannot save - the existing configuration has not loaded (password prompt was cancelled or the server could not be reached). Click Save Configuration again once it loads.');
         return false;
     }
 
-    // Which edits go into THIS save, snapshotted before the request. A drag or an editor
-    // commit stays reachable mid-save (the backdrop is pointer-events:none), and an entry
-    // added meanwhile must survive rather than be cleared as if it had been sent.
+    // Snapshotted before the request: an entry added mid-save must survive rather than be cleared.
     var includedKeys = Array.from(pendingConfigEdits.keys());
     var includedEditsSnapshot = new Map(includedKeys.map(function (k) { return [k, pendingConfigEdits.get(k)]; }));
 
-    // Edits merge over the loaded entries; untouched ones survive. Every candidate key the
-    // device had at commit time is deleted first, so an entry saved under an older key (a
-    // hostname before a rescan supplied a serial) can't linger forever - or be silently
-    // reused by a different device that later takes that key.
+    // Every candidate key the device had at commit time is deleted first, so an old key can't linger.
     var merged = new Map(mapConfigEntries.map(function (e) { return [e.keyType + ':' + e.key, e]; }));
     includedEditsSnapshot.forEach(function (pending) {
         var keys = pending.deviceKeysAtCommit;
@@ -675,8 +600,7 @@ window.saveConfiguration = async function() {
         return false;
     }
     if (!resp.ok) {
-        // The server returns a JSON {error} body naming the actual validation failure; the
-        // status code alone wouldn't tell the operator what was wrong.
+        // The server returns a JSON {error} body naming the actual validation failure.
         var serverMessage = null;
         try {
             var errBody = await resp.json();
@@ -707,8 +631,7 @@ window.toggleUnplacedPanel = function() {
     icon.innerHTML = collapsed ? '&#9660;' : '&#9650;';
 };
 
-// Snapshotted by the render below so the CSV export matches what the panel shows without
-// duplicating the filtering.
+// Snapshotted by the render below so the CSV export matches the panel without re-filtering.
 var unplacedDevicesForExport = [];
 
 window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, placedByIp) {
@@ -742,8 +665,7 @@ window.renderUnplacedDevicesList = function(classification, deviceByIpLocal, pla
     });
 };
 
-// A worklist for whoever walks the building placing pins. Serial comes from
-// extractDeviceKeys, the same source location-key resolution uses, so it can't drift.
+// A worklist for whoever walks the building placing pins. Serial comes from extractDeviceKeys.
 window.exportUnplacedDevicesCsv = function() {
     if (unplacedDevicesForExport.length === 0) return;
     var rows = [['Hostname', 'IP', 'Serial', 'Model', 'Junos Version', 'Uptime']];

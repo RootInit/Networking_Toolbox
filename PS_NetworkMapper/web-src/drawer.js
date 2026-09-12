@@ -1,8 +1,6 @@
-// Left-docked device detail drawer: the Summary/Hardware/Alarms/Neighbors/Interfaces/Config
-// tabs, CSV and config export, the printable report, and drawer open/close/tab-switch.
-
-// The side panel itself stays - it also hosts the Load/Search/Settings tabs; only the device
-// section under them is shown or hidden.
+// Left-docked device detail drawer: the Summary/Hardware/Alarms/Neighbors/Interfaces/Config tabs,
+// CSV and config export, the printable report, and drawer open/close/tab-switch. The side panel
+// itself stays - it also hosts Load/Search/Settings; only the device section is shown or hidden.
 window.closeDrawer = function() {
     document.getElementById('device-drawer').style.display = 'none';
     document.getElementById('device-empty').style.display = '';
@@ -24,14 +22,12 @@ window.switchTab = function(tabId) {
     }
 };
 
-// SSH quick-connect: the server launches Connect-Switch.ps1 as a real interactive session
-// via Start-Process. Only viable because the server is localhost-only.
+// SSH quick-connect via Start-Process. Only viable because the server is localhost-only.
 window.copyConnectCommand = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
     var btn = document.getElementById('copyConnectBtn');
-    // A launch is already in flight; a double-click must not fire a second SSH session and
-    // credential temp file.
+    // A double-click must not fire a second SSH session and credential temp file.
     if (btn && btn.disabled) return;
     var original = btn ? btn.textContent : null;
     try {
@@ -51,21 +47,16 @@ window.copyConnectCommand = async function() {
     }
 };
 
-// On-demand single-device rescan via /api/rescan, polled below. Also works for the
-// "Unscanned Node" case, a device only ever seen as an LLDP neighbor.
+// On-demand single-device rescan via /api/rescan. Also works for a pure LLDP-neighbor device.
 var rescanPollTimer = null;
-// The IP a poll is running for. Set the moment the button is disabled, unlike
-// rescanPollTimer, which is null during the POST and each in-flight status fetch, so
-// openRightDrawer can tell a poll for the device being opened from one for another device.
+// The IP a poll is running for, set the moment the button is disabled (unlike rescanPollTimer).
 var rescanPollTargetIp = null;
 
-// Called when a new file set is loaded mid-poll, so a pending result can't land in whatever
-// snapshot happens to be active once loadedSnapshots is replaced.
+// Called when a new file set is loaded mid-poll, so a pending result can't land in a new snapshot.
 window.cancelPendingRescan = function() {
     if (rescanPollTimer) { clearTimeout(rescanPollTimer); rescanPollTimer = null; }
     rescanPollTargetIp = null;
-    // rescanDevice's finish() is never reached on an external cancel, so the button is
-    // restored here or it stays disabled at "Scanning..." forever.
+    // rescanDevice's finish() is never reached on an external cancel, so restore the button here.
     var btn = document.getElementById('rescanBtn');
     if (btn) { btn.disabled = false; btn.textContent = 'Re-scan'; }
 };
@@ -74,9 +65,7 @@ window.rescanDevice = async function() {
     var ip = document.getElementById('drawer-title').innerText;
     if (!ip) return;
 
-    // A rescan for another device is in flight and shares this button and the server's single
-    // rescan slot. Starting a second would hit the 409 branch below and call finish(),
-    // clearing that poll's timer out from under it - so refuse up front.
+    // A rescan for another device shares this button and the server's single slot - refuse up front.
     if (rescanPollTargetIp && rescanPollTargetIp !== ip) {
         window.setStatus("A rescan of " + rescanPollTargetIp + " is still running - wait for it to finish.", "orange");
         return;
@@ -85,9 +74,7 @@ window.rescanDevice = async function() {
     var btn = document.getElementById('rescanBtn');
     var original = btn ? btn.textContent : null;
 
-    // Captured now, not re-read when the poll resolves: the result must land in the snapshot
-    // that was active when the rescan STARTED. An object reference rather than an array
-    // index, so it also survives snapshots being reordered or reloaded.
+    // Captured now, by reference: the result must land in the snapshot active when it STARTED.
     var targetSnapshot = (activeSnapshotIndex >= 0) ? loadedSnapshots[activeSnapshotIndex] : null;
 
     function finish(msg, color) {
@@ -163,13 +150,11 @@ window.rescanDevice = async function() {
             rescanPollTimer = setTimeout(() => { poll().catch(e => finish("Rescan poll failed unexpectedly: " + e.message, "red")); }, 2000);
             return;
         }
-        // status.status === 'complete'
         if (!status.ok) {
             finish("Rescan failed: " + (status.reason || "unknown error") + " - existing data left unchanged.", "red");
             return;
         }
-        // A throw anywhere in the merge or re-render must still reach finish(), or #rescanBtn
-        // stays disabled at "Scanning..." with no recovery short of a page reload.
+        // A throw in the merge must still reach finish(), or #rescanBtn stays disabled at "Scanning...".
         try {
             var merged = window.mergeRescannedDevice(status.node, targetSnapshot);
             if (!merged) {
@@ -184,15 +169,12 @@ window.rescanDevice = async function() {
     poll().catch(e => finish("Rescan poll failed unexpectedly: " + e.message, "red"));
 };
 
-// Quick reachability check: /api/ping runs server-side as a background job, so this polls
-// /api/ping/status just like rescanDevice above polls /api/rescan/status.
+// Quick reachability check: /api/ping is a background job, polled like the rescan above.
 var pingPollTimer = null;
 // Mirrors rescanPollTargetIp above, for the shared #pingBtn.
 var pingPollTargetIp = null;
 
-// Mirrors cancelPendingRescan, for the same reason. The completion path is self-defending
-// too (see isDrawerShowing), since a ping poll - unlike a rescan - isn't cancelled merely by
-// switching which device's drawer is open.
+// Mirrors cancelPendingRescan; the completion path is self-defending too (see isDrawerShowing).
 window.cancelPendingPing = function() {
     if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
     pingPollTargetIp = null;
@@ -200,9 +182,7 @@ window.cancelPendingPing = function() {
     if (btn) { btn.disabled = false; btn.textContent = 'Ping'; }
 };
 
-// #pingResult is a persistent element, unlike the rest of the drawer body, so a poll must
-// re-check this before painting: a result for IP A resolving after the user switched to IP B
-// would otherwise appear under B's data.
+// #pingResult is persistent, so a late result for IP A must not paint under IP B's data.
 function isDrawerShowing(ip) {
     var titleEl = document.getElementById('drawer-title');
     return !!titleEl && titleEl.innerText === ip;
@@ -220,8 +200,7 @@ window.pingDevice = async function() {
 
     var btn = document.getElementById('pingBtn');
     var original = btn ? btn.textContent : null;
-    // Written inline as well as to setStatus: the sidebar's #status-text is easy to miss
-    // from this panel.
+    // Written inline as well as to setStatus: the sidebar's #status-text is easy to miss from here.
     var resultEl = document.getElementById('pingResult');
     function showResult(msg, cls) {
         if (!resultEl) return;
@@ -233,8 +212,7 @@ window.pingDevice = async function() {
         if (pingPollTimer) { clearTimeout(pingPollTimer); pingPollTimer = null; }
         if (pingPollTargetIp === ip) pingPollTargetIp = null;
         if (btn) { btn.disabled = false; btn.textContent = original; }
-        // Only paint the inline result if the drawer still shows this ping's device;
-        // setStatus is global and safe either way.
+        // Only paint inline if the drawer still shows this ping's device; setStatus is safe either way.
         if (isDrawerShowing(ip)) showResult(msg, cls);
         window.setStatus(msg, cls);
     }
@@ -251,8 +229,7 @@ window.pingDevice = async function() {
         });
         var result = await resp.json();
         if (resp.status === 409 && result.jobId) {
-            // Only one ping slot exists server-side; only attach if it's our own device
-            // already in flight, not someone else's running job.
+                // One ping slot server-side; only attach if the running job is our own device.
             if (result.ip !== ip) {
                 finish("A ping of " + result.ip + " is already running - try again once it finishes.", "red");
                 return;
@@ -307,7 +284,6 @@ window.pingDevice = async function() {
             pingPollTimer = setTimeout(() => { poll().catch(e => finish("Ping poll failed unexpectedly: " + e.message, "red")); }, 2000);
             return;
         }
-        // status.status === 'complete'
         if (!status.ok) {
             finish("Could not ping " + ip + ": " + (status.reason || "unknown error"), "red");
             return;
@@ -325,14 +301,11 @@ window.pingDevice = async function() {
             window.setStatus(ip + " did not respond to ping (" + status.received + "/" + status.sent + " replies).", "red");
         }
     };
-    // Unguarded, a throw inside poll() escapes as an unhandled rejection: finish() never runs,
-    // so pingPollTargetIp stays set and #pingBtn stays disabled for the rest of the session.
+    // Unguarded, a throw in poll() escapes as an unhandled rejection and #pingBtn stays disabled.
     poll().catch(e => finish("Ping poll failed unexpectedly: " + e.message, "red"));
 };
 
-// Client-side port of Update-ClientIpCorrelation. A single-device rescan only has that
-// switch's own ARP table, while client IPs usually resolve from the L3 gateway's - so this
-// must re-run across the whole topology after a merge, or clients flip back to "Unknown".
+// Client-side port of Update-ClientIpCorrelation: a rescan only has that switch's own ARP table.
 function correlateClientIps(topology) {
     var globalArpMap = new Map();
     topology.forEach(device => {
@@ -349,22 +322,16 @@ function correlateClientIps(topology) {
     });
 }
 
-// True when the targeted snapshot is no longer loaded, so a result arriving after a new file
-// set must be discarded rather than spliced into whatever now occupies that slot.
+// True when the targeted snapshot is gone, so a late result is discarded rather than misplaced.
 function isRescanTargetSnapshotGone(snapshots, targetSnapshot) {
     return !targetSnapshot || snapshots.indexOf(targetSnapshot) === -1;
 }
 
-// True only while openRightDrawer runs from mergeRescannedDevice's re-render - a background
-// poll completing, not a user action. Lets renderInterfaces' auto-scroll and the compare-target
-// reset tell that apart from a genuine drawer-open, where their normal behavior is correct.
+// True only during mergeRescannedDevice's re-render - a background poll, not a user action.
 var isMergeRerender = false;
 
-// Merges into targetSnapshot - the snapshot active when the rescan STARTED, not whatever
-// activeSnapshotIndex reads now. Never written back to disk: the loaded file's password
-// isn't retained, and snapshot immutability is load-bearing for Topology Diff and
-// cross-snapshot config compare. RescannedAt surfaces that ephemerality in Summary.
-// Returns false if targetSnapshot is no longer loaded.
+// Merges into the snapshot active when the rescan STARTED. Never written back to disk: the file's
+// password isn't retained, and immutability is load-bearing for Topology Diff and config compare.
 window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
     if (!freshDevice || !freshDevice.DeviceIP) return false;
     if (isRescanTargetSnapshotGone(loadedSnapshots, targetSnapshot)) return false;
@@ -382,41 +349,32 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
         topology[index] = freshDevice;
     }
 
-    // dashboard.js memoises fleet totals on this same snapshot object, so it must be
-    // invalidated here, where the topology actually changes - otherwise the sparklines show
-    // pre-rescan numbers beside stat values that recompute live.
+    // dashboard.js memoises fleet totals per snapshot, so invalidate where the topology changes.
     if (window.invalidateFleetTotalsCache) window.invalidateFleetTotalsCache(targetSnapshot);
 
     correlateClientIps(topology);
 
-    // buildSearchIndex replaces each snapshot.deviceByIp with a new Map rather than mutating
-    // it, so the module-level deviceByIp must be re-pointed at the fresh one.
+    // buildSearchIndex replaces snapshot.deviceByIp with a new Map, so re-point the module-level one.
     window.buildSearchIndex();
     if (activeSnapshotIndex >= 0 && loadedSnapshots[activeSnapshotIndex]) {
         deviceByIp = loadedSnapshots[activeSnapshotIndex].deviceByIp;
     }
 
-    // Visible search rows were rendered from PRE-merge values, so the search is re-run.
-    // searchIndex spans every snapshot, hence no isActiveSnapshot gate. The box-content check
-    // matters: searchHighlightQuery holds the last SUBMITTED query, so if the user is
-    // mid-typing an unsubmitted one, re-running here would submit that half-typed text and
-    // overwrite the results they are actually looking at.
+    // Visible rows were rendered from PRE-merge values, so re-run the search. The box-content check
+    // matters: re-running a half-typed unsubmitted query would overwrite what the user is reading.
     var searchBox = document.getElementById('globalSearch');
     if (searchBox && searchBox.value.trim() && window.performGlobalSearch
         && searchBox.value.trim().toLowerCase() === searchHighlightQuery) {
         window.performGlobalSearch();
     }
 
-    // Everything below touches on-screen state, which reflects the ACTIVE snapshot only. If
-    // the user switched away mid-rescan, the merge above still updated that background
-    // snapshot, but nothing on screen may be re-rendered from the wrong snapshot's data.
+    // Below here is on-screen state, which reflects the ACTIVE snapshot only.
     var isActiveSnapshot = (activeSnapshotIndex >= 0 && loadedSnapshots[activeSnapshotIndex] === targetSnapshot);
     if (!isActiveSnapshot) return true;
 
     window.extractVlans();
 
-    // Gated on the displayed IP, not currentSelectedNodeData, which is null for an
-    // "Unscanned Node" - exactly the case this feature exists for.
+    // Gated on the displayed IP: currentSelectedNodeData is null for an "Unscanned Node".
     var drawerIp = document.getElementById('drawer-title').innerText;
     var drawerOpen = document.getElementById('device-drawer').style.display !== 'none';
     if (drawerOpen && drawerIp === ip) {
@@ -428,16 +386,13 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
         }
     }
 
-    // Not a full buildSwitchMap rebuild, which would reset pan/zoom and collapse expanded
-    // clusters. Known limitation: a new or removed LLDP neighbor won't change the edges
-    // until the graph is fully reloaded.
+    // Not a full rebuild, which would reset pan/zoom. A changed neighbor won't move edges until reload.
     if (window.refreshNodeVisual) window.refreshNodeVisual(ip);
 
     // No-op if Map was never opened, and doesn't reset its pan/zoom if it was.
     if (window.renderMapMarkers) window.renderMapMarkers();
 
-    // Same guard as setActiveSnapshot: the dashboard renders this topology separately and is
-    // only refreshed while it is the visible view.
+    // The dashboard renders this topology separately and is only refreshed while it is visible.
     if (activeCenterView === 'analysis') window.refreshAnalysisDashboard();
 
     return true;
@@ -447,14 +402,11 @@ window.openRightDrawer = function(ip) {
     var previous = currentSelectedNodeData;
     currentSelectedNodeData = deviceByIp.get(String(ip));
     if (window.updateMapSelection) window.updateMapSelection(ip);
-    // Opened from search, the Map or a neighbour link, the diagram has no selection of its own,
-    // so its node and the Map's marker would disagree about which device is open. Guarded on
-    // the dataset: a device hidden inside a collapsed cluster has no node to select.
+    // Opened from search/Map/a neighbour link, the diagram has no selection; a clustered node has none.
     if (typeof network !== 'undefined' && network && nodesDataset && nodesDataset.get(String(ip))) {
         network.selectNodes([String(ip)]);
     }
-    // A port selection belongs to one device. A same-device reopen keeps it, so the
-    // highlight survives a rescan merge.
+    // A port selection belongs to one device; a same-device reopen keeps it across a rescan merge.
     if (!previous || String(previous.DeviceIP) !== String(ip)) selectedInterfacePort = null;
     var panel = document.getElementById('device-drawer');
     var emptyNote = document.getElementById('device-empty');
@@ -463,10 +415,7 @@ window.openRightDrawer = function(ip) {
     var pingResultEl = document.getElementById('pingResult');
     if (pingResultEl) { pingResultEl.textContent = ''; pingResultEl.className = ''; }
 
-    // #rescanBtn/#pingBtn are shared, not per-device: a poll still running for a DIFFERENT
-    // device would read as "stuck" under this one, so the button is reset while the poll
-    // itself keeps running (its finish() then harmlessly re-enables an enabled button). A
-    // poll for the same IP being reopened is left alone.
+    // #rescanBtn/#pingBtn are shared, so a poll for another device would read as "stuck" here.
     var openIp = String(ip);
     if (rescanPollTargetIp && rescanPollTargetIp !== openIp) {
         var rescanBtn = document.getElementById('rescanBtn');
@@ -479,8 +428,7 @@ window.openRightDrawer = function(ip) {
 
     if (!currentSelectedNodeData) {
         document.getElementById('summary-content').innerHTML = `<div style="color:red; padding:20px;">No diagnostic data found (Unscanned Node).</div>`;
-        // Every other tab still holds the PREVIOUS device's content, which would now be
-        // mislabeled as this one's.
+        // Every other tab still holds the PREVIOUS device's content, now mislabeled as this one's.
         var alarmsTbody = document.getElementById('alarms-tbody');
         if (alarmsTbody) alarmsTbody.innerHTML = `<tr><td colspan="3" style="text-align:center;">No active alarms</td></tr>`;
         var stackTbody = document.getElementById('stack-tbody');
@@ -526,8 +474,7 @@ window.renderSummary = function() {
            </div>`
         : '';
 
-    // Surfaced prominently so the mostly-empty fields below can't pass as a normal,
-    // fully-scanned device.
+    // Surfaced prominently so the mostly-empty fields below can't pass as a fully-scanned device.
     var scanStatusHtml = (d.ScanStatus && d.ScanStatus !== "Ok")
         ? `<div style="grid-column:1/-1; background:var(--danger-bg); color:var(--danger-text); border:1px solid var(--danger-border); padding:8px 12px; border-radius:4px; font-size:0.85rem; margin-bottom:4px;">
              <b>Scan ${esc(d.ScanStatus)}</b>${d.ScanError ? ` &mdash; ${esc(d.ScanError)}` : ''} - the data below may be incomplete or stale.
@@ -596,17 +543,13 @@ window.renderNeighbors = function() {
     tbody.innerHTML = html || `<tr><td colspan="4" style="text-align:center;">No LLDP neighbors found</td></tr>`;
 };
 
-// Column-click sort state for #interfaces-table. A null column means the default
-// down-first/longest-inactive-first order. Deliberately not reset by openRightDrawer, so a
-// chosen sort persists across devices.
+// Not reset by openRightDrawer, so a chosen sort persists across devices.
 var interfaceSortState = { column: null, dir: 1 };
 
-// One comparator per data-sort-key in #interfaces-table's <thead>, each ASCENDING;
-// sortInterfacesBy applies the direction on top, so no comparator needs to know it.
+// One comparator per data-sort-key, each ASCENDING; sortInterfacesBy applies the direction.
 var INTERFACE_SORT_COMPARATORS = {
     port: (a, b) => String(a.Port || '').localeCompare(String(b.Port || ''), undefined, { numeric: true, sensitivity: 'base' }),
-    // Third argument is renderInterfaces' classification map (trunk < access with clients <
-    // idle access < shutdown); ties fall back to port order.
+    // Third argument is renderInterfaces' classification map; ties fall back to port order.
     type: (a, b, typeOf) => ((typeOf && typeOf.get(a) ? typeOf.get(a).order : 9) - (typeOf && typeOf.get(b) ? typeOf.get(b).order : 9)) || INTERFACE_SORT_COMPARATORS.port(a, b),
     state: (a, b) => `${a.Admin}/${a.Link}`.localeCompare(`${b.Admin}/${b.Link}`, undefined, { sensitivity: 'base' }),
     description: (a, b) => String(a.Desc || '').localeCompare(String(b.Desc || ''), undefined, { sensitivity: 'base' }),
@@ -630,13 +573,10 @@ function updateInterfaceSortArrows() {
     });
 }
 
-// Bare interface name of the port highlighted in both the front panel and the interfaces
-// table, or null. One selection per open device.
+// Bare name of the port highlighted in both the front panel and the table, or null. One per device.
 var selectedInterfacePort = null;
 
-// Toggles the selected port. A chassis click on a down port turns off "Hide Inactive Ports"
-// first, or the jack lights up with no row to show for it. Chassis clicks scroll the row
-// into view; table clicks don't, since the row is already under the pointer.
+// A chassis click on a down port turns off "Hide Inactive Ports" first and scrolls the row in.
 window.selectInterfacePort = function(port, opts) {
     opts = opts || {};
     // A search/drill-down navigation sets the selection outright; clicks toggle it.
@@ -655,8 +595,7 @@ window.selectInterfacePort = function(port, opts) {
     }
 };
 
-// Port modes parsed out of the captured config ("interface-mode", or "port-mode" on older
-// Junos). Map of bare port -> 'trunk'|'access', memoised per device: the config is large.
+// Port modes from the captured config, bare port -> 'trunk'|'access', memoised: the config is large.
 var portModeCache = new WeakMap();
 function buildPortModes(device) {
     if (!device) return new Map();
@@ -669,9 +608,7 @@ function buildPortModes(device) {
     return modes;
 }
 
-// What a port IS, in one word, for the collapsed list. Precedence: shutdown beats
-// everything; an LLDP switch on the far end or a configured trunk is a Trunk; the rest are
-// Access. `order` is the Type column's sort rank.
+// Precedence: shutdown, then Trunk (LLDP switch or configured trunk), then Access. `order` sorts.
 function classifyInterface(intf, ctx) {
     var port = window.normalizePort(intf.Port);
     var adminUp = String(intf.Admin).toLowerCase() === "up", linkUp = String(intf.Link).toLowerCase() === "up";
@@ -691,8 +628,7 @@ function classifyInterface(intf, ctx) {
     return { kind: 'access-idle', label: 'Access', badge: linkUp ? 'green' : 'gray', detailHtml: `<span class="intf-type-detail">${linkUp ? 'no clients learned' : 'no link'}</span>`, order: 2 };
 }
 
-// Resolves a search target to the bare port it lives on: `{port}` directly, or `{client}`
-// matched case-insensitively against client IPs, MACs and 802.1X usernames.
+// Resolves a search target to its bare port: `{port}`, or `{client}` matched against clients.
 window.focusPortFor = function(device, focus) {
     if (!device || !focus) return null;
     if (focus.port) return window.normalizePort(focus.port);
@@ -705,10 +641,8 @@ window.focusPortFor = function(device, focus) {
     return null;
 };
 
-// The one place the interfaces table's filter and sort are decided. The on-screen table, the
-// CSV export and the printable report all read the view from here, so they cannot disagree
-// about which ports are shown or in what order.
-// Reads the live controls, so it must be called at render/export time, not cached.
+// The one place the interfaces table's filter and sort are decided - the table, the CSV export and
+// the print report all read it, so they cannot disagree. Reads the live controls, so never cached.
 window.buildInterfaceView = function(device) {
     var hideDown = document.getElementById('hideDownPorts').checked;
     var vlanFilter = document.getElementById('vlanFilter').value;
@@ -744,9 +678,7 @@ window.buildInterfaceView = function(device) {
         var cmp = INTERFACE_SORT_COMPARATORS[interfaceSortState.column];
         rows.sort((a, b) => interfaceSortState.dir * cmp(a, b, typeOf));
     } else {
-        // Down ports first, longest-inactive first, unknown durations last among them -
-        // the ports most worth attention surface at the top. Up ports keep their original
-        // order: the comparator returns 0 for any up/up pair and the sort is stable.
+        // Down ports first, longest-inactive first; up/up pairs return 0 and the sort is stable.
         rows.sort((a, b) => {
             var aDown = String(a.Link).toLowerCase() !== "up", bDown = String(b.Link).toLowerCase() !== "up";
             if (aDown !== bDown) return aDown ? -1 : 1;
@@ -760,17 +692,14 @@ window.buildInterfaceView = function(device) {
     return { rows: rows, typeOf: typeOf, ctx: ctx, vlanFilter: vlanFilter, hideDown: hideDown };
 };
 
-// A port's dark time as shown everywhere: an up port has none, and a down port with no
-// LastFlappedSeconds (an older snapshot, or "Last flapped: Never") is Unknown rather than 0.
+// A down port with no LastFlappedSeconds (an older snapshot, or "Never") is Unknown rather than 0.
 window.inactiveForText = function(intf) {
     if (String(intf.Link).toLowerCase() === "up") return "-";
     var secs = intf.LastFlappedSeconds;
     return (secs === null || secs === undefined) ? "Unknown" : window.formatAge(secs * 1000);
 };
 
-// Interfaces and their edge clients in one table. Rows collapse to what identifies a port at
-// a glance; the selected row expands into a detail strip plus its client rows, one port at a
-// time. Clients still honor the shared #vlanFilter.
+// The selected row expands into a detail strip plus its client rows, one port at a time.
 window.renderInterfaces = function() {
     var tbody = document.getElementById('interfaces-tbody');
     var daisyChains = window.detectDaisyChains(currentSelectedNodeData);
@@ -821,8 +750,7 @@ window.renderInterfaces = function() {
     updateInterfaceSortArrows();
     if (typeof window.renderChassisView === 'function') window.renderChassisView(currentSelectedNodeData, selectedInterfacePort);
 
-    // Skipped on a merge-triggered re-render, so a background rescan completing can't yank
-    // the user's scroll position while they're reading.
+    // Skipped on a merge re-render, so a background rescan can't yank the user's scroll position.
     if (searchHighlightQuery && !isMergeRerender) {
         var highlightedEl = tbody.querySelector('.highlight');
         if (highlightedEl) highlightedEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -862,10 +790,8 @@ function renderClientSubRow(c, daisyChains) {
 
 function csvEscapeField(val) {
     var s = (val === null || val === undefined) ? '' : String(val);
-    // Device-supplied text (Desc, Hostname, Dot1x_User, ...) reaching a spreadsheet as a
-    // formula. Quoting does not stop this - the sheet strips the quotes, then evaluates - so
-    // the leading character is neutralised with an apostrophe first. A lone '-' is the
-    // exports' own "no value" placeholder and is not a formula, so it is left alone.
+    // Device-supplied text reaching a spreadsheet as a formula: quoting doesn't help (the sheet
+    // strips it, then evaluates), so prefix an apostrophe. A lone '-' is our own placeholder.
     if (/^[=+@\t\r]|^-(?!$)/.test(s)) { s = "'" + s; }
     if (/[",\r\n]/.test(s)) { s = '"' + s.replace(/"/g, '""') + '"'; }
     return s;
@@ -897,13 +823,10 @@ window.renderConfig = function() {
     window.populateConfigCompareSelect();
 };
 
-// Config diff. The tab compares this device against either (a) the SAME device in another
-// snapshot (the <select>) or (b) a DIFFERENT device (the search box). The two controls are
-// mutually exclusive and both write configCompareTarget, which renderConfigDiff reads.
+// Config diff against the SAME device in another snapshot (<select>) or a DIFFERENT one (search).
 var configCompareTarget = null; // {idx, ip} being diffed against, or null
 
-// snapshot index -> that snapshot's DeviceIP for the open device, which can differ from the
-// drawer's current IP if the device was renumbered between captures.
+// snapshot index -> that snapshot's DeviceIP for the open device, which differs if renumbered.
 var sameDeviceIpByIdx = {};
 
 // (a) only. Bounded to one entry per other snapshot, so a plain select suffices here.
@@ -914,9 +837,7 @@ window.populateConfigCompareSelect = function() {
     var searchResults = document.getElementById('configCompareSearchResults');
     if (!container || !select) return;
 
-    // The compare selection survives a merge-triggered re-render and is only cleared on a
-    // genuine switch to another device. Re-validated below rather than trusted: the rescan
-    // can have renamed the OTHER device or dropped its config.
+    // Survives a merge re-render; re-validated because the rescan may have renamed the other device.
     var preservedTarget = (isMergeRerender && configCompareTarget) ? configCompareTarget : null;
 
     configCompareTarget = null;
@@ -934,8 +855,7 @@ window.populateConfigCompareSelect = function() {
         return;
     }
 
-    // Matched by identity, not literal IP, so a device renumbered since an older capture
-    // still shows as "this same device".
+    // Matched by identity, not literal IP, so a renumbered device still shows as "this same device".
     var identity = window.resolveDeviceIdentity(d);
     var sameDeviceOptions = [];
     loadedSnapshots.forEach((snap, idx) => {
@@ -994,8 +914,7 @@ window.selectConfigCompareSnapshot = function() {
     window.renderConfigDiff();
 };
 
-// Live-filters every other device across every loaded snapshot, capped so a broad query
-// doesn't dump hundreds of rows into the DOM.
+// Live-filters every other device, capped so a broad query doesn't dump hundreds of rows into the DOM.
 var CONFIG_COMPARE_MAX_RESULTS = 25;
 window.searchConfigCompareDevices = function() {
     var input = document.getElementById('configCompareSearch');
@@ -1080,8 +999,7 @@ window.renderConfigDiff = function() {
     var d = currentSelectedNodeData;
     var other = otherSnap && (otherSnap.topology || []).find(dev => dev && String(dev.DeviceIP) === otherIp);
     var otherConfig = other ? other.Configuration : '';
-    // Identity-based: a "same device, other capture" pick can carry a different IP and must
-    // not trip the cross-device banner below.
+    // Identity-based: a "same device, other capture" pick can carry a different IP.
     var isCrossDevice = !other || window.resolveDeviceIdentity(other) !== window.resolveDeviceIdentity(d);
     var otherLabel = esc(other && other.Hostname && other.Hostname !== "Unknown" ? other.Hostname : otherIp);
 
@@ -1139,10 +1057,8 @@ window.downloadDeviceConfig = function() {
     downloadBlob(`${ip}_config.txt`, config, 'text/plain;charset=utf-8;');
 };
 
-// Printable device report. Deliberately excludes the config backup text: it can hold SNMP
-// communities and RADIUS/TACACS+ secrets, too sensitive for something printed or emailed
-// around - the config export button exists for that. Opens with a visible Print button
-// rather than auto-firing window.print(), avoiding popup/timing issues.
+// Printable device report. Deliberately excludes the config backup: it can hold SNMP communities and
+// RADIUS/TACACS+ secrets. Opens with a visible Print button rather than auto-firing window.print().
 window.printDeviceReport = function() {
     var d = currentSelectedNodeData;
     if (!d) { window.setStatus("No device selected.", "red"); return; }
@@ -1205,8 +1121,7 @@ ${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(
 
 </body></html>`;
 
-    // A blob URL rather than document.write(), and deliberately not revoked: the new tab
-    // needs it valid while the user reviews and prints.
+    // A blob URL rather than document.write(), deliberately not revoked: the new tab needs it valid.
     var blob = new Blob([html], { type: 'text/html' });
     var url = URL.createObjectURL(blob);
     var reportWindow = window.open(url, '_blank');
@@ -1216,9 +1131,7 @@ ${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(
     }
 };
 
-// Exports exactly the rows on screen, in the order they are on screen - same filter, same
-// sort - via the shared view. "Inactive For" is as of the snapshot's capture time, since
-// LastFlappedSeconds is frozen at the scan, not a live clock.
+// Exactly the rows on screen, in screen order. "Inactive For" is as of the snapshot's capture.
 window.exportInterfacesCsv = function() {
     if (!currentSelectedNodeData) { window.setStatus("Select a switch first.", "red"); return; }
     var rows = [['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description', 'Inactive For']];

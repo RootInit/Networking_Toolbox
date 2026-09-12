@@ -1,19 +1,16 @@
-// The settings panel plus the cross-session device and alarm/reboot histories the Analysis
-// Dashboard and Reliability heatmap build on. The histories are derived caches: PowerShell
-// never writes them, and reloading a fresh set of snapshots rebuilds them.
+// The settings panel plus the cross-session device and alarm/reboot histories the dashboard builds
+// on. The histories are derived caches: PowerShell never writes them, and a reload rebuilds them.
 
 // --- Dark Mode ---
-// Two layers. localStorage is the first-paint cache index.html's boot script reads, since the
-// server-synced Configuration.json.enc is encrypted and only resolves after a password prompt.
-// The config is the source of truth, so the preference follows the operator to another browser
-// or machine; applyDarkMode is the single writer that keeps the two in step.
+// Two layers: localStorage is the first-paint cache index.html's boot script reads, since the
+// server-synced config only resolves after a password prompt. The config is the source of truth,
+// and applyDarkMode is the single writer keeping the two in step.
 function applyDarkMode(dark) {
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
     var checkbox = document.getElementById('setting-darkMode');
     if (checkbox) checkbox.checked = dark;
     try { localStorage.setItem('darkMode', dark ? 'dark' : 'light'); } catch (e) {}
-    // Everything else is CSS and repaints itself; the trend chart is drawn to a <canvas>
-    // that samples theme colors at draw time, so it needs an explicit re-render.
+    // The trend chart samples theme colors at draw time, so it needs an explicit re-render.
     var trendsTab = document.getElementById('analysis-tab-trends');
     if (trendsTab && trendsTab.classList.contains('active')) window.renderTrendChart();
 }
@@ -26,10 +23,8 @@ window.initDarkModeToggle = function() {
 };
 document.addEventListener('DOMContentLoaded', window.initDarkModeToggle);
 
-// --- Configurable Thresholds (see #sidebar-tab-settings) ---
-
-// Persisted in Configuration.json.enc. The layout values must mirror index.html's static
-// defaults, since these are the fallback until a config has loaded.
+// --- Configurable Thresholds (#sidebar-tab-settings) --- persisted in Configuration.json.enc.
+// The layout values must mirror index.html's static defaults, the fallback until a config loads.
 var DEFAULT_SETTINGS = {
     cpuWarnPct: 70, cpuCriticalPct: 90,
     memWarnPct: 75, memCriticalPct: 90,
@@ -37,26 +32,22 @@ var DEFAULT_SETTINGS = {
     recentRebootMin: 60,
     clusterThreshold: 50, nodeSpacing: 350, leafSpacing: 250, minRadius: 250,
 };
-// Layout inputs are named by the bare key (#clusterThreshold); threshold inputs carry a
-// `setting-` prefix (#setting-cpuWarnPct).
+// Layout inputs are named by the bare key; threshold inputs carry a `setting-` prefix.
 var LAYOUT_SETTING_KEYS = ['clusterThreshold', 'nodeSpacing', 'leafSpacing', 'minRadius'];
 function settingInputId(key) {
     return LAYOUT_SETTING_KEYS.indexOf(key) === -1 ? 'setting-' + key : key;
 }
 
-// Synchronous by design: called on every render tick, potentially long before the
-// Configuration.json.enc fetch+decrypt completes, so it returns whatever is in memory.
+// Synchronous by design: called every render tick, long before the config fetch completes.
 window.loadSettings = function() {
     var loaded = window.getLoadedSettings ? window.getLoadedSettings() : {};
     return Object.assign({}, DEFAULT_SETTINGS, loaded);
 };
 
-// Runs twice per tab-open: once immediately with best-available values, once after
-// ensureConfigLoaded resolves with the real saved ones.
+// Runs twice per tab-open: once with best-available values, once after ensureConfigLoaded.
 window.populateSettingsInputs = function() {
     var settings = window.loadSettings();
-    // Captured as raw .value strings so the comparison below isn't string-vs-number, which
-    // would report "changed" on every call.
+    // Raw .value strings, so the comparison below isn't string-vs-number and always "changed".
     var layoutBefore = LAYOUT_SETTING_KEYS.map(function (key) {
         var el = document.getElementById(settingInputId(key));
         return el ? el.value : null;
@@ -67,8 +58,7 @@ window.populateSettingsInputs = function() {
         if (el) el.value = settings[key];
     });
 
-    // Tri-state: a config saved before dark mode moved here has no darkMode key, and must not
-    // override the cached/OS choice already applied at first paint. Only an explicit boolean wins.
+    // Tri-state: a config with no darkMode key must not override the choice applied at first paint.
     if (typeof settings.darkMode === 'boolean') applyDarkMode(settings.darkMode);
 
     var creds = window.getLoadedCredentials ? window.getLoadedCredentials() : { username: '', password: '' };
@@ -77,9 +67,8 @@ window.populateSettingsInputs = function() {
     if (userEl) userEl.value = creds.username || '';
     if (passEl) passEl.value = creds.password || '';
 
-    // Programmatic el.value doesn't fire the layout inputs' onchange handlers, so the
-    // re-layout is triggered by hand - only on a real change, since this runs twice per
-    // tab-open. `network` is null until a snapshot has loaded.
+    // Programmatic el.value doesn't fire the layout inputs' onchange, so re-layout is triggered by
+    // hand - only on a real change, since this runs twice per tab-open.
     var layoutChanged = LAYOUT_SETTING_KEYS.some(function (key, i) {
         var el = document.getElementById(settingInputId(key));
         return el ? el.value !== layoutBefore[i] : false;
@@ -87,9 +76,8 @@ window.populateSettingsInputs = function() {
     if (layoutChanged && typeof window.renderVisibleGraph === 'function' && network) window.renderVisibleGraph();
 };
 
-// The config must be loaded before the form is read: saveConfiguration's own
-// ensureConfigLoaded would otherwise run after setLoadedSettings and overwrite the
-// just-typed values with what is on disk.
+// The config must be loaded before the form is read: saveConfiguration's own ensureConfigLoaded
+// would otherwise run after setLoadedSettings and overwrite the just-typed values.
 window.saveSettingsPanel = async function() {
     var loaded = await window.ensureConfigLoaded();
     if (!loaded) {
@@ -111,9 +99,8 @@ window.saveSettingsPanel = async function() {
         return;
     }
 
-    // Not a DEFAULT_SETTINGS key - the loop above is numeric-only (parseFloat + range check) -
-    // but it must be written here regardless: setLoadedSettings REPLACES the settings object,
-    // so a darkMode left out would be silently dropped on the next threshold save.
+    // Not a DEFAULT_SETTINGS key, but written here regardless: setLoadedSettings REPLACES the
+    // settings object, so a darkMode left out would be dropped on the next threshold save.
     var darkEl = document.getElementById('setting-darkMode');
     if (darkEl) settings.darkMode = darkEl.checked;
 
@@ -132,14 +119,12 @@ window.saveSettingsPanel = async function() {
         if (typeof window.renderVisibleGraph === 'function' && network) window.renderVisibleGraph();
         window.setStatus("Settings saved.", "green");
     } else {
-        // noMirror: saveConfiguration already wrote the detailed reason to #mapStatusNote,
-        // which setStatus's mirroring would otherwise overwrite.
+        // noMirror: saveConfiguration already wrote the detailed reason to #mapStatusNote.
         window.setStatus("Settings not saved - see the status note for the error.", "red", { noMirror: true });
     }
 };
 
-// Resets the form fields only; credentials are left alone and nothing reaches
-// Configuration.json.enc until Save is clicked.
+// Resets the form fields only; nothing reaches Configuration.json.enc until Save is clicked.
 window.resetSettingsPanel = function() {
     Object.keys(DEFAULT_SETTINGS).forEach(key => {
         var el = document.getElementById(settingInputId(key));
@@ -151,8 +136,7 @@ window.resetSettingsPanel = function() {
 // --- Multi-Snapshot Analysis: New Devices + Trends (see #analysisview / dashboard.js) ---
 
 var DEVICE_HISTORY_STORAGE_KEY = 'ps_networkmapper_device_history_v1';
-// Without a cap this grows one entry per MAC ever seen, forever. Oldest lastSeen is trimmed
-// first when a merge pushes past it.
+// Without a cap this grows one entry per MAC ever seen; oldest lastSeen is trimmed first.
 var MAX_DEVICE_HISTORY_ENTRIES = 5000;
 
 function trimDeviceHistory(history) {
@@ -184,8 +168,7 @@ function saveDeviceHistory(history) {
     }
 }
 
-// Merges every client MAC across the loaded snapshots into the persisted history, so "new
-// device" detection spans weeks without reloading every historical file each session.
+// Merges every client MAC across loaded snapshots, so "new device" detection spans weeks.
 window.updateDeviceHistory = function() {
     var history = loadDeviceHistory();
 
@@ -201,10 +184,8 @@ window.updateDeviceHistory = function() {
                 if (!entry) {
                     history[mac] = { firstSeen: ts, lastSeen: ts, lastDeviceIp: device.DeviceIP, lastPort: c.Port, lastIp: c.IP, lastVlan: c.VLAN_Tag };
                 } else {
-                    // entry.firstSeen/lastSeen can be unparseable despite the guard above:
-                    // DEVICE_HISTORY_STORAGE_KEY was never version-bumped, so localStorage may
-                    // still hold entries written before that validation existed. A null parse
-                    // means the comparison is meaningless, so treat it as "replace".
+                    // firstSeen/lastSeen can be unparseable: the storage key was never version-bumped,
+                    // so a null parse means the comparison is meaningless - treat it as "replace".
                     var firstSeenMs = window.parseTimestampMs(entry.firstSeen);
                     if (firstSeenMs === null || tsMs < firstSeenMs) entry.firstSeen = ts;
                     var lastSeenMs = window.parseTimestampMs(entry.lastSeen);
@@ -225,12 +206,10 @@ window.updateDeviceHistory = function() {
     return history;
 };
 
-// --- Reliability Heatmap history (see #analysis-tab-reliability) ---
-// Keyed by window.resolveDeviceIdentity; the _v2 suffix abandons the old DeviceIP-keyed
-// entries rather than mixing them under the new keys.
+// --- Reliability Heatmap history --- keyed by window.resolveDeviceIdentity; the _v2 suffix
+// abandons the old DeviceIP-keyed entries rather than mixing them under the new keys.
 var ALARM_HISTORY_STORAGE_KEY = 'ps_networkmapper_alarm_history_v2';
-// entry.days would otherwise grow a key per calendar day forever. yyyy-MM-dd sorts
-// lexicographically = chronologically, so a plain string sort finds the oldest.
+// entry.days would grow a key per calendar day forever; yyyy-MM-dd sorts chronologically.
 var MAX_ALARM_HISTORY_DAYS = 550;
 
 function trimAlarmHistoryDays(history) {
@@ -262,10 +241,9 @@ function saveAlarmHistory(history) {
     }
 }
 
-// lastUptimeSeen must stay local to this call. Persisting it would make repeated runs over
-// the same snapshots non-idempotent - each refresh re-walks from the oldest snapshot against
-// an already-advanced value and falsely flags a reboot, which then sticks because `rebooted`
-// is OR'd into storage. Trade-off: a reboot between two file-load sessions goes undetected.
+// lastUptimeSeen must stay local to this call: persisting it makes repeated runs non-idempotent -
+// each refresh re-walks from the oldest snapshot against an already-advanced value and falsely
+// flags a reboot, which sticks because `rebooted` is OR'd into storage.
 window.updateAlarmHistory = function() {
     var history = loadAlarmHistory();
     var lastUptimeSeen = {};
@@ -276,9 +254,8 @@ window.updateAlarmHistory = function() {
         .sort((a, b) => a.ts - b.ts)
         .forEach(x => {
             var snapshot = x.s;
-            // Slicing the raw "yyyy-MM-dd..." FleetCrawl.ps1 writes keeps the original local
-            // wall-clock date rather than reinterpreting it through UTC. Any other parseable
-            // shape would slice into a garbage column key, hence the UTC fallback.
+            // Slicing the raw "yyyy-MM-dd..." keeps the original local wall-clock date rather than
+            // reinterpreting it through UTC. Any other shape would slice garbage, hence the fallback.
             var date = /^\d{4}-\d{2}-\d{2}/.test(snapshot.scanTimestamp)
                 ? snapshot.scanTimestamp.slice(0, 10)
                 : new Date(x.ts).toISOString().slice(0, 10);

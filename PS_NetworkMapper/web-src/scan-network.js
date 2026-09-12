@@ -1,14 +1,12 @@
-// "Scan Network" button: kicks off an async fleet crawl (WebServer.ps1's /api/scan-network),
-// then feeds the result through processSelectedFiles - same pipeline as a manual file upload.
+// "Scan Network" button: starts an async fleet crawl (/api/scan-network), then feeds the result
+// through processSelectedFiles - the same pipeline as a manual file upload.
 
 var scanNetworkPollTimer = null;
-// Re-entrancy guard, set synchronously before any await: a second pollRunningScan() (a
-// 409-triggered reattach landing while the first loop is alive) would otherwise spawn a
+// Re-entrancy guard, set synchronously before any await: a second pollRunningScan() would spawn a
 // competing chain fighting over the shared scanNetworkPollTimer id.
 var scanNetworkPollActive = false;
 
-// Promise-based starting-IP prompt, same resolve/reject shape as window.promptForPassword.
-// prefillIp/replacing reuse the modal as a confirm step when a snapshot is already loaded.
+// Promise-based starting-IP prompt; prefillIp/replacing reuse the modal as a confirm step.
 function promptForStartIp(prefillIp, replacing) {
     return new Promise((resolve, reject) => {
         var modal = document.getElementById('scan-start-ip-modal');
@@ -66,8 +64,7 @@ function bestStartIpFromActiveSnapshot() {
     return window.GraphLayout.computeGraphRoot(nodeIds, edges);
 }
 
-// Shared poll loop against /api/scan-network/status, used by a freshly-started scan and by a
-// page-load reattach alike.
+// Shared poll loop, used by a freshly-started scan and by a page-load reattach alike.
 function pollRunningScan() {
     if (scanNetworkPollActive) return;
     scanNetworkPollActive = true;
@@ -76,8 +73,7 @@ function pollRunningScan() {
     var loadBtn = document.getElementById('loadBtn');
     var loadFolderBtn = document.getElementById('loadFolderBtn');
 
-    // msg/color are optional: omitting them resets polling state and buttons but leaves the
-    // status line already on screen alone.
+    // msg/color are optional: omitting them leaves the status line already on screen alone.
     function finish(msg, color) {
         scanNetworkPollActive = false;
         if (scanNetworkPollTimer) { clearTimeout(scanNetworkPollTimer); scanNetworkPollTimer = null; }
@@ -122,17 +118,14 @@ function pollRunningScan() {
             scanNetworkPollTimer = setTimeout(runPoll, 2000);
             return;
         }
-        // status.status === 'complete'
         if (!status.ok) {
             finish("Scan failed: " + (status.reason || "unknown error"), "red");
             return;
         }
 
-        // The crawl already wrote this snapshot to disk, so fetch the file rather than having
-        // the status endpoint return the topology inline - that made the single-threaded server
-        // re-serialize the whole fleet on every poll. Fetching it also means an encrypted setup
-        // gets the real .enc envelope and decrypts it through the normal path, instead of the
-        // server handing back plaintext it had already encrypted on disk.
+        // The crawl already wrote this snapshot to disk, so fetch the file rather than have the
+        // status endpoint return it inline - that re-serialized the whole fleet on every poll. It
+        // also means an encrypted setup gets the real .enc envelope and decrypts it normally.
         if (!status.outputFile) {
             finish("Scan finished but the server did not report an output file - use Load Folder to open the snapshot manually.", "red");
             return;
@@ -153,14 +146,11 @@ function pollRunningScan() {
         finish("Scan complete - " + status.visitedCount + " device(s) found. Loading...", "green");
         await window.processSelectedFiles([snapshotFile]);
     };
-    // poll() is fire-and-forget, so an unhandled rejection would leave scanNetworkPollActive
-    // stuck true (finish() never runs), permanently disabling the scan/load buttons.
+    // poll() is fire-and-forget; an unhandled rejection would leave scanNetworkPollActive stuck true.
     function runPoll() {
         poll().catch(function(e) {
-            // Every failure before the trailing processSelectedFiles already calls finish()
-            // with its own message, so the only way here is that call throwing - and it has
-            // already set a more specific status than anything generic written here would be.
-            // Reset state without touching the status line. e may not be an Error.
+            // Every failure before the trailing processSelectedFiles already called finish(), so the
+            // only way here is that call throwing, having set a more specific status already.
             var msg = (e && e.message) ? e.message : String(e);
             console.error("Unexpected error while polling scan status:", msg);
             finish();
@@ -169,10 +159,9 @@ function pollRunningScan() {
     runPoll();
 }
 
-// Page-load reattach: a refresh mid-crawl loses the in-memory poll state, so the server's
-// status endpoint is the only way to tell "still running" from "safe to start".
-// Returns true when it reattached, in which case the caller must not run autoloadLastScan -
-// that would overwrite the live poll's status and buttons with a stale archived snapshot.
+// Page-load reattach: a refresh mid-crawl loses the in-memory poll state. Returns true when it
+// reattached, in which case the caller must not run autoloadLastScan - that would overwrite the
+// live poll's status and buttons with a stale archived snapshot.
 window.resumeScanIfInProgress = async function() {
     if (loadedSnapshots.length > 0 || scanNetworkPollActive) return false;
     var statusResp;
@@ -190,9 +179,8 @@ window.resumeScanIfInProgress = async function() {
     }
     if (status.status !== 'running') return false;
 
-    // Guard re-checked after the awaits: a manual Load or a user-started Scan may have
-    // completed while the status request was in flight, and reattaching now would overwrite
-    // it without the confirm-before-replace step startNetworkScan gives.
+    // Re-checked after the awaits: a manual Load or a user-started Scan may have completed while
+    // the status request was in flight, and reattaching would skip the confirm-before-replace step.
     if (loadedSnapshots.length > 0 || scanNetworkPollActive) {
         console.warn("resumeScanIfInProgress: state changed while checking scan status - not reattaching, leaving the newer data/scan in place.");
         return false;
@@ -227,9 +215,8 @@ window.startNetworkScan = async function() {
         }
     }
 
-    // The Load buttons stay disabled for the whole scan, not just the final load step, so a
-    // Load click can't start reading files mid-crawl. processSelectedFiles guards the race
-    // anyway; this just avoids wasted work and a status line flipping back and forth.
+    // The Load buttons stay disabled for the whole scan, so a Load click can't start reading files
+    // mid-crawl. processSelectedFiles guards the race anyway; this avoids a flip-flopping status.
     try {
         if (btn) { btn.disabled = true; btn.textContent = 'Starting scan...'; }
         if (loadBtn) loadBtn.disabled = true;
@@ -239,14 +226,11 @@ window.startNetworkScan = async function() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ startIp: startIp }),
         };
-        // When fetch rejects outright, how long it took separates two causes and only one is
-        // worth retrying:
-        //   fast - refused, or a stale pooled socket. This POST is uniquely exposed to the
-        //     latter because the connection idles while the user types into the modal. Safe
-        //     to repeat despite being a POST: if the first attempt did start a crawl, the
-        //     retry gets a 409, which the branch below handles as a reattach.
-        //   slow - the server accepted and never answered: its single-threaded accept loop is
-        //     blocked elsewhere. Retrying only waits out a second queue timeout.
+        // When fetch rejects outright, how long it took separates two causes and only one is worth
+        // retrying:
+        //   fast - refused, or a stale pooled socket (this POST idles while the user types). Safe to
+        //     repeat: if the first attempt did start a crawl, the retry gets a 409 and reattaches.
+        //   slow - the server accepted and never answered; retrying only waits out a second timeout.
         var SERVER_UNRESPONSIVE_MS = 5000;
         var resp;
         var attemptStartedAt = Date.now();
@@ -259,17 +243,15 @@ window.startNetworkScan = async function() {
             }
             resp = await fetch('/api/scan-network', scanRequest);
         }
-        // A non-JSON error body (an HTML 500 page, an empty response) must not throw out to
-        // the outer catch, which would report a server that demonstrably answered as
-        // unreachable. The !resp.ok branch below falls back to the status code.
+        // A non-JSON error body must not throw to the outer catch, which would report a server that
+        // demonstrably answered as unreachable. The !resp.ok branch falls back to the status code.
         var result = await resp.json().catch(() => ({}));
         if (!resp.ok) {
             if (btn) { btn.disabled = false; btn.textContent = 'Scan Network'; }
             if (loadBtn) loadBtn.disabled = false;
             if (loadFolderBtn) loadFolderBtn.disabled = false;
             if (resp.status === 409) {
-                // Already running server-side (another tab, or this tab's retry) - reattach
-                // rather than report a failure.
+                // Already running server-side (another tab, or this tab's retry) - reattach.
                 window.setStatus("A scan is already running - reattaching to progress...", "orange");
                 pollRunningScan();
             } else {

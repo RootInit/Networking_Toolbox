@@ -1,11 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// utils.js is a classic script (see its own header comment), not a dual-mode module like
-// graph-layout.js/elk-layout.js - it assigns straight onto `window` and, at load time, calls
-// window.addEventListener twice (global error/unhandledrejection reporting hooks). Shim just
-// enough of `window` for that top-level code to run before importing it, mirroring the
-// global.window pattern elk-layout.test.mjs already uses for the same reason.
+// utils.js is a classic script, not a dual-mode module: it assigns onto `window` and calls
+// window.addEventListener twice at load time. Shim just enough of `window` for that top-level code
+// to run before importing it, mirroring elk-layout.test.mjs.
 global.window = global.window || {};
 global.window.addEventListener = global.window.addEventListener || (() => {});
 global.window.location = global.window.location || { href: 'http://localhost/' };
@@ -16,12 +14,8 @@ const parseTimestampMs = global.window.parseTimestampMs;
 const esc = global.window.esc;
 const asArray = global.window.asArray;
 
-// Contract (see utils.js's own comment above the definition): normalizes PowerShell's
-// ConvertTo-Json single-element-array-as-bare-object quirk - null/undefined becomes [],
-// a bare (non-null, non-array) value becomes a 1-element array, an actual array passes
-// through - and strips any null/undefined elements an array itself contains (e.g. from
-// a hand-edited or corrupted uploaded topology file), since callers dereference elements
-// unguarded.
+// Contract: normalizes PowerShell's single-element-array-as-bare-object quirk, and strips any
+// null/undefined elements an array contains, since callers dereference elements unguarded.
 
 test('asArray passes an array through unchanged when it has no null/undefined elements', () => {
   var input = [{ a: 1 }, { a: 2 }];
@@ -41,10 +35,8 @@ test('asArray filters out null/undefined elements from within an array', () => {
   assert.deepEqual(asArray([{ a: 1 }, null, { a: 2 }, undefined]), [{ a: 1 }, { a: 2 }]);
 });
 
-// Contract (see utils.js's own comment above the definition): returns a finite epoch-ms
-// number for anything Date can parse, or null for anything falsy/unparseable. Never
-// falsy-zero-unsafe - callers must check `=== null`/`!== null`, not a bare truthy check,
-// since epoch 0 (1970-01-01T00:00:00.000Z) is itself a legitimate finite timestamp.
+// Contract: a finite epoch-ms number for anything Date can parse, or null. Callers must check
+// `=== null`, not truthiness - epoch 0 is itself a legitimate timestamp.
 
 test('parseTimestampMs parses a valid ISO string to its correct epoch ms', () => {
   assert.equal(parseTimestampMs('2026-08-20T12:00:00.000Z'), Date.parse('2026-08-20T12:00:00.000Z'));
@@ -62,20 +54,14 @@ test('parseTimestampMs returns null for a truthy but unparseable string', () => 
 });
 
 test('parseTimestampMs treats an epoch-zero-adjacent timestamp string as a valid finite result, not null', () => {
-  // Every real caller passes a (possibly garbage) ISO string, never a raw number - so the
-  // edge case that matters is the *return value* landing on exactly 0 ms, which callers
-  // must not mistake for "unparseable". A non-empty string is truthy going in regardless
-  // of what instant it names, so this exercises the `isNaN(ms) ? null : ms` return path
-  // rather than the `!ts` falsy-input guard.
+  // The edge case that matters is a return value of exactly 0 ms, which callers must not mistake
+  // for "unparseable" - this exercises the `isNaN(ms) ? null : ms` path, not the `!ts` guard.
   assert.equal(parseTimestampMs('1970-01-01T00:00:00.000Z'), 0);
-  // One millisecond after epoch is unambiguous either way - guards against an
-  // implementation that only special-cases exactly 0.
+  // One millisecond after epoch guards against special-casing exactly 0.
   assert.equal(parseTimestampMs('1970-01-01T00:00:00.001Z'), 1);
 });
 
-// Contract (see utils.js's own comment above the definition): esc() is the single
-// XSS-escaping choke point for every device-supplied string interpolated into innerHTML
-// elsewhere in the app, via the HTML_ESCAPES map: & < > " '.
+// esc() is the single XSS-escaping choke point for device-supplied strings: & < > " '.
 
 test('esc escapes each HTML_ESCAPES character individually', () => {
   assert.equal(esc('&'), '&amp;');

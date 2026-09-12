@@ -90,8 +90,7 @@ test('decryptEnvelope normalizes a missing envelope field instead of throwing a 
 
 test('decryptEnvelope normalizes a ciphertext length that is not a multiple of the AES block size', async () => {
   const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
-  // Valid base64, but decodes to a byte length that isn't a multiple of 16 - AES-CBC decrypt
-  // itself throws a raw DOMException (OperationError) on this, distinct from a bad-base64 field.
+  // Valid base64 decoding to a non-multiple of 16 - AES-CBC throws a raw OperationError on this.
   envelope.ciphertext = b64(new Uint8Array([1, 2, 3, 4, 5]));
   await assert.rejects(
     () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
@@ -189,16 +188,11 @@ test('decryptEnvelope rejects a non-integer iterations value', async () => {
   );
 });
 
-// Fixed cross-runtime vector, produced by lib/TopologyCrypto.ps1's Protect-TopologyPayload.
-// Run-Tests.ps1 decrypts this same envelope from its own copy of the literal. The two
-// implementations must stay byte-compatible - the browser decrypts what the crawler wrote -
-// and every existing test here builds its envelope with the SAME Web Crypto code it then
-// verifies, so none of them would notice the two drifting apart. If they do, exactly one of
-// the two suites goes red.
-//
-// Non-ASCII in both the password (incl. a non-BMP emoji, i.e. a surrogate pair) and the
-// plaintext, because that is where PBKDF2 password encoding and UTF-8 decoding differ if
-// either side gets it wrong.
+// Fixed cross-runtime vector produced by lib/TopologyCrypto.ps1. Run-Tests.ps1 decrypts this same
+// envelope from its own copy, so the two implementations must stay byte-compatible; every other
+// test here builds its envelope with the SAME Web Crypto code it then verifies, so none would
+// notice them drifting. Non-ASCII in both password (incl. a surrogate pair) and plaintext, because
+// that is where PBKDF2 password encoding and UTF-8 decoding differ if either side gets it wrong.
 const PS_INTEROP_ENVELOPE = {
   format: 'PSNetworkMapper-EncryptedTopology', version: 1, kdf: 'PBKDF2-SHA256', iterations: 1000,
   cipher: 'AES-256-CBC', macAlgorithm: 'HMAC-SHA256',
@@ -233,8 +227,7 @@ async function rejectionOf(env) {
   catch (err) { return err; }
 }
 
-// The re-prompt loops in app.js/map.js gate on this flag: an untagged rejection must exit
-// through the normal error path, since no password could ever satisfy it.
+// The re-prompt loops gate on this flag: an untagged rejection must exit through the error path.
 test('decryptEnvelope tags only the retryable wrong-password/corrupt failure', async () => {
   assert.equal((await rejectionOf(base)).wrongPassword, true);
   assert.equal((await rejectionOf({ ...base, salt: '!!!not base64!!!' })).wrongPassword, true);

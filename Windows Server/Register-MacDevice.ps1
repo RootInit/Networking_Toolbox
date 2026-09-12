@@ -1,25 +1,18 @@
-# No '#Requires -Modules ActiveDirectory' on purpose: that aborts before the form
-# exists, so a workstation without RSAT gets a bare parser error instead of the
-# GUI's "Could not initialize Active Directory" message. Initialize-AD reports it.
+# No '#Requires -Modules ActiveDirectory' on purpose: that aborts before the form exists, so a
+# workstation without RSAT gets a bare parser error instead of Initialize-AD's message.
 #Requires -Version 5.1
 <#
     Register-MacDevice.ps1
-    ------------------------------------------------------------------
-    GUI tool to register MAC-based device accounts in Active Directory.
-    Enter a single MAC address, or select a text file of MACs (one per
-    line). Every account is created in the Computers OU and added to the
-    ComputerMACs group. Optionally overwrite (delete + recreate) MACs
-    that already exist. Reports a tally of results after each run.
+    GUI tool to register MAC-based device accounts in Active Directory. Enter a single MAC, or
+    select a text file of MACs (one per line). Every account is created in the Computers OU and
+    added to the ComputerMACs group. Optionally overwrite (delete + recreate) existing MACs.
 #>
 
-# ===========================================================================
-# CONFIG  --  edit to match your environment (group + OU must already exist)
-# ===========================================================================
+# CONFIG - edit to match your environment (the group and OU must already exist)
 $TempPassword     = ConvertTo-SecureString '$ecur3T3mpP@ssW0rd' -AsPlainText -Force
 $OUPath           = 'OU=Computers,OU=Authorized_Devices,DC=627,DC=SCOI'
 $GroupName        = 'ComputerMACs'
 $StripOtherGroups = $true   # make ComputerMACs primary and remove all other groups
-# ===========================================================================
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -34,14 +27,10 @@ $ColInfo = [System.Drawing.Color]::Black
 # session-wide running totals
 $script:Tally = @{ added = 0; existed = 0; invalid = 0; error = 0 }
 
-# Set-Busy re-enables controls when a run finishes, so it has to know which ones
-# were legitimately disabled for other reasons and must stay that way.
+# Set-Busy re-enables controls on finish, so it must know which were disabled for other reasons.
 $script:AdReady    = $false
 $script:FileChosen = $false
 
-# ---------------------------------------------------------------------------
-# AD helpers
-# ---------------------------------------------------------------------------
 function Initialize-AD {
     try {
         Import-Module ActiveDirectory -ErrorAction Stop
@@ -106,9 +95,6 @@ function Format-Tally($t) {
     $parts -join ', '
 }
 
-# ---------------------------------------------------------------------------
-# GUI
-# ---------------------------------------------------------------------------
 $form               = New-Object System.Windows.Forms.Form
 $form.Text          = "RADIUS Device Registration  -  $GroupName"
 $form.ClientSize    = New-Object System.Drawing.Size(560, 480)
@@ -219,9 +205,6 @@ function Set-Busy($busy) {
     [System.Windows.Forms.Application]::DoEvents()
 }
 
-# ---------------------------------------------------------------------------
-# Events
-# ---------------------------------------------------------------------------
 $btnAdd.Add_Click({
     $val = $txtMac.Text.Trim()
     if (-not $val) { Write-Log '  (enter a MAC address first)' $ColWarn; return }
@@ -277,9 +260,6 @@ $btnFile.Add_Click({
 
 $btnClear.Add_Click({ $log.Clear() })
 
-# ---------------------------------------------------------------------------
-# Startup
-# ---------------------------------------------------------------------------
 $form.Add_Shown({
     $txtMac.Focus()
     if (Initialize-AD) {

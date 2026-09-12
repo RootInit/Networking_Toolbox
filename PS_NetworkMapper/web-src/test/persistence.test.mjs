@@ -2,11 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-// persistence.js is browser-only (no module.exports), so it is evaluated against a minimal
-// stub of just the browser surface it touches. Dark mode is the interesting part: it is the
-// one preference that lives in BOTH localStorage (index.html's first-paint cache, read before
-// the encrypted config can be decrypted) and Configuration.json.enc (the source of truth that
-// follows the operator between browsers), so the two have to stay reconciled.
+// persistence.js is browser-only, so it is evaluated against a minimal stub. Dark mode is the
+// interesting part: it lives in BOTH localStorage (first-paint cache) and Configuration.json.enc
+// (the source of truth that follows the operator), so the two have to stay reconciled.
 const src = fs.readFileSync(new URL('../persistence.js', import.meta.url), 'utf8');
 
 function makeEnv({ loadedSettings = {}, checked = false, theme = 'light' } = {}) {
@@ -110,7 +108,6 @@ test('darkMode survives a save made while the checkbox is off (false, not droppe
 
   await env.window.saveSettingsPanel();
 
-  // setLoadedSettings REPLACES the object, so an omitted key would silently revert the
-  // preference to "unset" on the next save rather than recording the operator's choice.
+  // setLoadedSettings REPLACES the object, so an omitted key would silently revert the preference.
   assert.equal(env.saved.settings.darkMode, false);
 });

@@ -1,6 +1,5 @@
-# Fetches the full IEEE MAC-vendor (OUI) registry and writes it as a vendored JS asset for
-# web-src to look up client vendors from. Kept separate from the crawler since it's the only
-# part of PS_NetworkMapper that needs internet egress; nothing runs it automatically.
+# Fetches the IEEE MAC-vendor (OUI) registry and writes it as a vendored JS asset for web-src. The
+# only part of PS_NetworkMapper needing internet egress; nothing runs it automatically.
 [CmdletBinding()]
 param(
     # $PSScriptRoot is PS_NetworkMapper/lib/; target is the sibling web-src/vendor/.
@@ -15,9 +14,8 @@ $Session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
 $Headers = @{ "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36" }
 
 Write-Host "Fetching IEEE OUI registry (standards-oui.ieee.org/oui/oui.txt)..." -ForegroundColor Cyan
-# Re-read as explicit UTF-8 rather than trusting Invoke-WebRequest's .Content decode, which
-# follows the runtime default and mojibakes the non-ASCII vendor names IEEE's registry
-# legitimately contains.
+# Re-read as explicit UTF-8 rather than trusting Invoke-WebRequest's .Content decode, which follows
+# the runtime default and mojibakes IEEE's non-ASCII vendor names.
 $TempFile = New-TemporaryFile
 try {
     try {
@@ -30,8 +28,7 @@ try {
     Remove-Item $TempFile.FullName -Force -ErrorAction SilentlyContinue
 }
 
-# Real line format: "286FB9     (base 16)\t\tNokia Shanghai Bell Co., Ltd." - address
-# lines that follow each entry don't match this pattern and are skipped for free.
+# Address lines following each entry don't match this pattern and are skipped for free.
 $Entries = [ordered]@{}
 foreach ($Line in ($RawText -split "[\r\n]")) {
     if ($Line -match "^(?<prefix>[A-Fa-f0-9]{6})\s*\(base 16\)\s*(?<vendor>.+)$") {
@@ -43,13 +40,11 @@ foreach ($Line in ($RawText -split "[\r\n]")) {
 
 if ($Entries.Count -eq 0) { throw "Parsed zero OUI entries - IEEE's response format may have changed. Inspect the raw response before assuming the fetch itself failed." }
 
-# The real registry has 30k+ entries; a connection dropped mid-download still yields a
-# well-formed prefix of it, which would pass the zero-count check above and overwrite a good
-# database with an incomplete one.
+# A connection dropped mid-download still yields a well-formed prefix, which would pass the
+# zero-count check above and overwrite a good database with an incomplete one.
 if ($Entries.Count -lt 10000) { throw "Only parsed $($Entries.Count) OUI entries (expected 30,000+) - the download likely failed partway through. Not overwriting $OutputPath." }
 
-# JSON is a strict subset of JS object-literal syntax, so this can be assigned directly to
-# window.OUI_DATABASE with no hand-escaping needed.
+# JSON is a strict subset of JS object-literal syntax, so it can be assigned directly.
 $JsonBody = $Entries | ConvertTo-Json -Depth 2 -Compress
 
 $OutputDir = Split-Path $OutputPath -Parent

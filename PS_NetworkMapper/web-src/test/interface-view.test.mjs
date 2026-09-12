@@ -2,10 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-// drawer.js is browser-only, so buildInterfaceView and inactiveForText are lifted out of the
-// source and run against a stub of the two controls they read. This is the single decision
-// point for which interface rows are shown and in what order - the table, the CSV export and
-// the printable report all go through it, which is what stops them disagreeing.
+// drawer.js is browser-only, so buildInterfaceView and inactiveForText are lifted out and run
+// against a stub. This is the single decision point the table, CSV export and print report share.
 const src = fs.readFileSync(new URL('../drawer.js', import.meta.url), 'utf8');
 
 function load({ hideDown = false, vlan = 'ALL', sortColumn = null, sortDir = 1 } = {}) {

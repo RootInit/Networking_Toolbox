@@ -1,42 +1,20 @@
 <#
     .SYNOPSIS
-    Powerful asynchronus IPv4 Network Scanner
+    Asynchronous IPv4 network scanner.
 
     .DESCRIPTION
-    This powerful asynchronus IPv4 Network Scanner allows you to scan every IPv4-Range you want (172.16.1.47 to 172.16.2.5 would work). But there is also the possibility to scan an entire subnet based on an IPv4-Address withing the subnet and a the subnetmask/CIDR.
-
-    The default result will contain the the IPv4-Address, Status (Up or Down) and the Hostname. Other values can be displayed via parameter.
-
-    .EXAMPLE
-    .\IPv4NetworkScan.ps1 -StartIPv4Address 192.168.178.0 -EndIPv4Address 192.168.178.20
-
-    IPv4Address   Status Hostname
-    -----------   ------ --------
-    192.168.178.1 Up     fritz.box
+    Scans an arbitrary IPv4 range (172.16.1.47 to 172.16.2.5) or a whole subnet given as an
+    address plus mask/CIDR. Output carries IPv4-Address, Status and Hostname by default; the
+    remaining columns are opt-in via parameter.
 
     .EXAMPLE
-    .\IPv4NetworkScan.ps1 -IPv4Address 192.168.178.0 -Mask 255.255.255.0 -DisableDNSResolving
-
-    IPv4Address    Status
-    -----------    ------
-    192.168.178.1  Up
-    192.168.178.22 Up
+    .\Ipv4Scan.ps1 -StartIPv4Address 192.168.178.0 -EndIPv4Address 192.168.178.20
 
     .EXAMPLE
-    .\IPv4NetworkScan.ps1 -IPv4Address 192.168.178.0 -CIDR 24 -Port 22
-
-    IPv4Address    Status
-    -----------    ------
-    192.168.178.1  Up
-    192.168.178.22 Up
+    .\Ipv4Scan.ps1 -IPv4Address 192.168.178.0 -Mask 255.255.255.0 -DisableDNSResolving
 
     .EXAMPLE
-    .\IPv4NetworkScan.ps1 -IPv4Address 192.168.178.0 -CIDR 25 -EnableMACResolving
-
-    IPv4Address    Status Hostname           MAC               Vendor
-    -----------    ------ --------           ---               ------
-    192.168.178.1  Up     fritz.box          XX-XX-XX-XX-XX-XX AVM Audiovisuelles Marketing und Computersysteme GmbH
-    192.168.178.22 Up     XXXXX-PC.fritz.box XX-XX-XX-XX-XX-XX ASRock Incorporation
+    .\Ipv4Scan.ps1 -IPv4Address 192.168.178.0 -CIDR 25 -EnableMACResolving
 
     .LINK
     https://github.com/BornToBeRoot/PowerShell_IPv4NetworkScanner/blob/master/README.md
@@ -162,20 +140,16 @@ Begin {
         Process {
             switch ($PSCmdlet.ParameterSetName) {
                 "CIDR" {                          
-                    # Make a string of bits (24 to 11111111111111111111111100000000)
                     $CIDR_Bits = ('1' * $CIDR).PadRight(32, "0")
                     
-                    # Split into groups of 8 bits, convert to Ints, join up into a string
                     $Octets = $CIDR_Bits -split '(.{8})' -ne ''
                     $Mask = ($Octets | ForEach-Object -Process { [Convert]::ToInt32($_, 2) }) -join '.'
                 }
 
                 "Mask" {
-                    # Convert the numbers into 8 bit blocks, join them all together, count the 1
                     $Octets = $Mask.ToString().Split(".") | ForEach-Object -Process { [Convert]::ToString($_, 2) }
                     $CIDR_Bits = ($Octets -join "").TrimEnd("0")
 
-                    # Count the "1" (111111111111111111111111 --> /24)                     
                     $CIDR = $CIDR_Bits.Length             
                 }               
             }
@@ -191,7 +165,6 @@ Begin {
         }
     }
 
-    # Helper function to convert an IPv4-Address to Int64 and vise versa
     function Convert-IPv4Address {
         [CmdletBinding(DefaultParameterSetName = 'IPv4Address')]
         param(
@@ -216,13 +189,11 @@ Begin {
 
         Process {
             switch ($PSCmdlet.ParameterSetName) {
-                # Convert IPv4-Address as string into Int64
                 "IPv4Address" {
                     $Octets = $IPv4Address.ToString().Split(".") 
                     $Int64 = [long]([long]$Octets[0] * 16777216 + [long]$Octets[1] * 65536 + [long]$Octets[2] * 256 + [long]$Octets[3]) 
                 }
         
-                # Convert IPv4-Address as Int64 into string 
                 "Int64" {            
                     $IPv4Address = (([System.Math]::Truncate($Int64 / 16777216)).ToString() + "." + ([System.Math]::Truncate(($Int64 % 16777216) / 65536)).ToString() + "." + ([System.Math]::Truncate(($Int64 % 65536) / 256)).ToString() + "." + ([System.Math]::Truncate($Int64 % 256)).ToString())
                 }      
@@ -239,7 +210,6 @@ Begin {
         }
     }
 
-    # Helper function to create a new Subnet
     function Get-IPv4Subnet {
         [CmdletBinding(DefaultParameterSetName = 'CIDR')]
         param(
@@ -278,7 +248,6 @@ Begin {
         }
 
         Process {
-            # Convert Mask or CIDR - because we need both in the code below
             switch ($PSCmdlet.ParameterSetName) {
                 "CIDR" {                          
                     $Mask = (Convert-Subnetmask -CIDR $CIDR).Mask            
@@ -290,12 +259,10 @@ Begin {
             
             $CIDRAddress = [System.Net.IPAddress]::Parse([System.Convert]::ToUInt64(("1" * $CIDR).PadRight(32, "0"), 2))
         
-            # Binary AND ... this is how subnets work.
             $NetworkID_bAND = $IPv4Address.Address -band $CIDRAddress.Address
 
             $NetworkID = [System.Net.IPAddress]::Parse([System.BitConverter]::GetBytes([UInt32]$NetworkID_bAND) -join ("."))
             
-            # Get HostBits based on SubnetBits (CIDR) // Hostbits (32 - /24 = 8 -> 00000000000000000000000011111111)
             $HostBits = ('1' * (32 - $CIDR)).PadLeft(32, "0")
             
             $AvailableIPs = [Convert]::ToInt64($HostBits, 2)
@@ -304,7 +271,6 @@ Begin {
 
             $Broadcast = [System.Net.IPAddress]::Parse((Convert-IPv4Address -Int64 ($NetworkID_Int64 + $AvailableIPs)).IPv4Address)
             
-            # Change useroutput ==> (/27 = 0..31 IPs -> AvailableIPs 32)
             $AvailableIPs += 1
 
             # Hosts = AvailableIPs - Network Address + Broadcast Address
@@ -349,7 +315,6 @@ Process {
     Write-Verbose -Message "Running with max $Threads threads"
     Write-Verbose -Message "ICMP checks per IP: $Tries"
 
-    # Properties which are displayed in the output
     $PropertiesToDisplay = @()
     $PropertiesToDisplay += "IPv4Address", "Status"
 
@@ -361,7 +326,6 @@ Process {
         $PropertiesToDisplay += "MAC"
     }
 
-    # Check if it is possible to assign vendor to MAC --> import CSV-File
     if ($EnableMACResolving) {
         if (Test-Path -Path $OUIListPath -PathType Leaf) {
             $OUIHashTable = @{ }
@@ -396,7 +360,6 @@ Process {
         $PropertiesToDisplay += "BufferSize", "ResponseTime", "TTL"
     }
 
-    # Scriptblock --> will run in runspaces (threads)...
     [System.Management.Automation.ScriptBlock]$ScriptBlock = {
         Param(
             $IPv4Address,
@@ -407,7 +370,6 @@ Process {
             $ExtendedInformations,
             $IncludeInactive
         )
-        # +++ Send ICMP requests +++
         $Status = [String]::Empty
 
 for ($i = 0; $i -lt $Tries; $i++) {
@@ -449,7 +411,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
     }
 }
              
-        # +++ Resolve DNS +++
         $Hostname = [String]::Empty     
 
         if ((-not($DisableDNSResolving)) -and ($Status -eq "Up" -or $IncludeInactive)) {   	
@@ -459,7 +420,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
             catch { } # No DNS      
         }
      
-        # +++ Get MAC-Address +++
         $MAC = [String]::Empty 
 
         if (($EnableMACResolving) -and (($Status -eq "Up") -or ($IncludeInactive))) {
@@ -477,7 +437,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
             } # arp.exe unavailable/failed - leave MAC empty
         }
 
-        # +++ Get extended informations +++
         $BufferSize = [String]::Empty 
         $ResponseTime = [String]::Empty 
         $TTL = $null
@@ -491,7 +450,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
             catch { } # Failed to get extended informations
         }	
 	
-        # +++ Result +++        
         if (($Status -eq "Up") -or ($IncludeInactive)) {
             [pscustomobject] @{
                 IPv4Address  = $IPv4Address
@@ -556,7 +514,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
     # Total jobs to calculate percent complete, because jobs are removed after they are processed
     $Jobs_Total = $Jobs.Count
 
-    # Process results, while waiting for other jobs
     try {
         Do {
             $Jobs_ToProcess = $Jobs | Where-Object -FilterScript { $_.Result.IsCompleted }
@@ -570,7 +527,6 @@ for ($i = 0; $i -lt $Tries; $i++) {
 
             $Jobs_Remaining = ($Jobs | Where-Object -FilterScript { $_.Result.IsCompleted -eq $false }).Count
 
-            # Catch when trying to divide through zero
             try {
                 $Progress_Percent = 100 - (($Jobs_Remaining / $Jobs_Total) * 100)
             }

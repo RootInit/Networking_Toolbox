@@ -2,10 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-// map.js is browser-only and Leaflet-bound, so the marker-icon decision and the selection
-// updater are lifted out and run against a stub L/marker. What matters here is which colour a
-// marker ends up with and that changing selection repaints only the two markers involved -
-// a full renderMapMarkers would drop any in-progress "Edit position" arming.
+// map.js is Leaflet-bound, so the marker-icon decision and the selection updater are lifted out and
+// run against a stub L/marker: which colour a marker gets, and that only two markers repaint.
 const src = fs.readFileSync(new URL('../map.js', import.meta.url), 'utf8');
 
 function load() {
@@ -110,8 +108,7 @@ test('the diagram paints the selected node the same green as the map marker', ()
 });
 
 test('the highlight is declared globally so a colour rewrite cannot drop it', () => {
-  // applyVlanFilter and refreshNodeVisual replace a node's whole colour object; vis falls back
-  // to the network-level highlight only because it is not carried per node.
+  // Both replace a node's whole colour object; vis falls back to the network-level highlight.
   const perNode = [...graphSrc.matchAll(/color: (node\.isStack \?|meta\.(?:isStack|scanned) \?|\{ background: '#(?:97C2FC|D2E5FF|E8E8E8|f2f2f2)')/g)];
   assert.ok(perNode.length > 0, 'the per-node colour sites should still exist');
   for (const m of perNode) {
@@ -138,9 +135,8 @@ test('a focused port does not draw the UA focus ring over the panel art', () => 
 });
 
 /* ---- marker labels ----
-   Hostname labels are permanent Leaflet tooltips, so on a campus-sized fleet they bury the map
-   at the zoom the initial fit lands on. They are gated by a class on the map container, which
-   is the only part of this that can be checked without a browser. */
+   Hostname labels are permanent Leaflet tooltips and bury a campus-sized fleet at the initial fit's
+   zoom. They are gated by a class on the map container, the only checkable part without a browser. */
 
 test('marker labels are hidden below a zoom threshold', () => {
   assert.match(src, /var LABEL_MIN_ZOOM = \d+;/);
@@ -159,8 +155,7 @@ test('label visibility is re-evaluated on zoom and after a re-render', () => {
 });
 
 test('a handful of markers keep their labels at every zoom', () => {
-  // The problem is density, not zoom: a few markers never overlap, so hiding their names
-  // would only make the map less useful.
+  // The problem is density, not zoom: a few markers never overlap.
   assert.match(src, /var LABEL_ALWAYS_BELOW = \d+;/);
   assert.match(src, /mapMarkersByIp\.size >= LABEL_ALWAYS_BELOW/);
 });
@@ -168,8 +163,7 @@ test('a handful of markers keep their labels at every zoom', () => {
 const num = (re) => Number(src.match(re)[1]);
 
 test('the map zooms past the last real OSM tile', () => {
-  // Leaflet requests tiles up to maxNativeZoom and upscales beyond it. Without maxNativeZoom
-  // every tile past 19 would 404 and the map would go blank instead of zooming further.
+  // Leaflet upscales beyond maxNativeZoom; without it every tile past 19 would 404.
   const maxZoom = num(/var MAX_MAP_ZOOM = (\d+);/);
   const native = num(/maxNativeZoom: (\d+),/);
   assert.equal(native, 19, "OSM's last served zoom level");
@@ -184,8 +178,7 @@ test('labels become reachable before the map runs out of zoom', () => {
 });
 
 test('revealing a device zooms in far enough to show its name', () => {
-  // A search result that reveals a marker with its label suppressed would look like the map
-  // had jumped to an unnamed dot.
+  // Revealing a marker with its label suppressed would look like a jump to an unnamed dot.
   const fn = src.match(/window\.revealDeviceOnMap = function[\s\S]*?\n\};/)[0];
   assert.match(fn, /Math\.max\(leafletMap\.getZoom\(\), LABEL_MIN_ZOOM\)/);
 });

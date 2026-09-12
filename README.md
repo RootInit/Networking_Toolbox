@@ -2,26 +2,22 @@
 
 Misc networking tools and scripts created by me or stolen from other people.
 
-## Contents
-
 - [`PS_NetworkMapper/`](#ps_networkmapper) — crawls a Juniper switch fleet over SSH and renders an interactive topology map in the browser.
 - [`PS_IPv4Scanner/`](#ps_ipv4scanner) — async IPv4 range/subnet scanner with optional MAC/vendor resolution.
 - [`Windows Server/`](#windows-server) — standalone WinForms GUIs for Active Directory and NPS/RADIUS admin.
 
-All are PowerShell scripts; run them with either Windows PowerShell 5.1 or PowerShell 7+ (`pwsh`).
-PS_NetworkMapper's encryption additionally needs **.NET Framework 4.7.2 or newer** under
-Windows PowerShell 5.1 — earlier versions cannot derive keys with SHA-256, and the mapper
-refuses to start rather than write a file it could not read back. Pass `-NoEncryption` to run
-without it.
+All are PowerShell; run them under Windows PowerShell 5.1 or PowerShell 7+ (`pwsh`).
+PS_NetworkMapper's encryption additionally needs **.NET Framework 4.7.2 or newer** under 5.1 —
+earlier versions cannot derive keys with SHA-256, and the mapper refuses to start rather than write
+a file it could not read back. Pass `-NoEncryption` to run without it.
 
 ---
 
 ## PS_NetworkMapper
 
-Crawls a Juniper (Junos) switch fleet starting from one seed IP, walks LLDP/neighbor
-data out across the network, and serves the result as an interactive map in your
-browser (topology graph, per-device config, client lists, history/diffing between
-snapshots).
+Crawls a Juniper (Junos) switch fleet from one seed IP, walks LLDP/neighbor data out across the
+network, and serves the result as an interactive map in your browser (topology graph, per-device
+config, client lists, history/diffing between snapshots).
 
 ### Quick start
 
@@ -35,14 +31,12 @@ cd PS_NetworkMapper
 .\Start-NetworkMapper.ps1
 ```
 
-The first run prompts for an encryption password. This password protects
-`Configuration.json.enc` (Juniper SSH credentials + app settings) and, unless
-`-NoEncryption` is passed, the topology snapshots and config backups written to
-`Network_Maps/`. The same password is entered again in the browser to decrypt an
-opened snapshot — nothing is ever written to disk unencrypted by default.
+The first run prompts for an encryption password. It protects `Configuration.json.enc` (Juniper SSH
+credentials + app settings) and, unless `-NoEncryption` is passed, the topology snapshots and config
+backups in `Network_Maps/`. The same password is entered again in the browser to decrypt an opened
+snapshot — nothing is written to disk unencrypted by default.
 
-Once running, open a browser to `http://localhost:8787` (or whatever `-WebPort` you
-chose) — `Start-NetworkMapper.ps1` opens it for you automatically.
+The script opens `http://localhost:8787` (or whatever `-WebPort` you chose) for you.
 
 ### Parameters
 
@@ -52,165 +46,110 @@ chose) — `Start-NetworkMapper.ps1` opens it for you automatically.
 | `-AllowedScopes` | `131.30.` | IP prefixes the crawl is allowed to follow — keeps it from wandering off the intended network. |
 | `-MaxConcurrent` | `10` | Max concurrent SSH connections during a crawl. |
 | `-Log` | off | Save raw device payloads to `.\RawDumps\` for debugging. |
-| `-NoEncryption` | off | Disable encryption entirely: no password prompt, snapshots/config written as plain `.json` (uses `Configuration.json` instead of `Configuration.json.enc`). |
+| `-NoEncryption` | off | No password prompt; snapshots/config written as plain `.json` (uses `Configuration.json`). |
 | `-WebPort` | `8787` | Local port for the viewer/API server (bound to localhost only). |
-
-### Configuration
-
-Device metadata (map pin coordinates, building/room, notes), Juniper credentials, and
-map/alert thresholds live in `Configuration.json.enc` (or `Configuration.json` under
-`-NoEncryption`), next to the script. See `Configuration.example.json` for the shape —
-it's editable from the web UI's Settings tab, so you generally don't need to hand-edit
-the file.
 
 ### Layout
 
-- `Start-NetworkMapper.ps1` — entry point (see above).
-- `lib/` — crawl engine, SSH/Junos helpers, encryption, web server, and the built
-  single-file visualizer (`Network_Visualizer.html`). This is everything a release
-  needs — `web-src/` is not shipped.
-- `web-src/` — the dev source tree for the visualizer (multi-file JS/HTML). Run
-  `web-src/tools/build-inline.mjs` to rebuild `lib/Network_Visualizer.html` as a
-  single self-contained file after making changes here.
-- `Network_Maps/` — crawl output: one timestamped snapshot per run (`.json` or
-  `.json.enc`), used for history/diffing and reopened by "Load Folder of Snapshots"
-  in the viewer.
+- `Start-NetworkMapper.ps1` — entry point.
+- `lib/` — crawl engine, SSH/Junos helpers, encryption, web server, and the built single-file
+  visualizer (`Network_Visualizer.html`). This is everything a release needs; `web-src/` is not shipped.
+- `web-src/` — dev source for the visualizer. Run `web-src/tools/build-inline.mjs` to rebuild
+  `lib/Network_Visualizer.html` after changing anything here.
+- `Network_Maps/` — crawl output: one timestamped snapshot per run, used for history/diffing.
 
-### Notes
+Device metadata (map pin coordinates, building/room, notes), Juniper credentials and map/alert
+thresholds live in `Configuration.json.enc` next to the script, editable from the web UI's Settings
+tab.
 
-- The web server only binds to `localhost` — it's not exposed on the LAN.
-- Snapshots are keyed by device serial number across crawls (not IP), so history and
-  diffing survive IP changes.
+Snapshots are keyed by device serial across crawls, not IP, so history and diffing survive
+renumbering. The web server binds to `localhost` only.
 
 ### Encrypting/decrypting files offline (`Protect-MapperFile.ps1`)
 
-`lib/Protect-MapperFile.ps1` is a standalone CLI for encrypting or decrypting a
-topology snapshot (`Network_Maps\NetworkMap_*.json[.enc]`) or `Configuration.json[.enc]`
-outside of a live crawl/webserver session — e.g. to inspect an encrypted file offline,
-re-encrypt a plaintext snapshot captured under `-NoEncryption`, rotate a file onto a
-new password, or hand a decrypted copy to another tool. It's not part of the app's
-runtime (nothing calls it automatically); run it directly:
+`lib/Protect-MapperFile.ps1` encrypts or decrypts a snapshot or `Configuration.json[.enc]` outside a
+live session — to inspect an encrypted file, re-encrypt a `-NoEncryption` snapshot, rotate onto a new
+password, or hand a decrypted copy to another tool. Nothing calls it automatically:
 
 ```powershell
 cd PS_NetworkMapper\lib
 
-# Encrypt a plaintext snapshot (default action)
-.\Protect-MapperFile.ps1 -InputFile .\Network_Maps\NetworkMap_2026-08-28_120000.json
-
-# Decrypt a snapshot back to plaintext
+.\Protect-MapperFile.ps1 -InputFile .\Network_Maps\NetworkMap_2026-08-28_120000.json          # encrypt
 .\Protect-MapperFile.ps1 -InputFile .\Network_Maps\NetworkMap_2026-08-28_120000.json.enc -Decrypt
-
-# Decrypt to a specific output path
 .\Protect-MapperFile.ps1 -InputFile .\Configuration.json.enc -Decrypt -OutputFile plain.json
 ```
 
-It uses the exact same AES-256-CBC + PBKDF2-SHA256 (600,000 iterations) +
-HMAC-SHA256 encrypt-then-MAC envelope as the rest of the app (shared via
-`TopologyCrypto.ps1`), so anything it produces opens normally in
-`Start-NetworkMapper.ps1`/the web UI, and vice versa.
+It uses the same AES-256-CBC + PBKDF2-SHA256 (600,000 iterations) + HMAC-SHA256 encrypt-then-MAC
+envelope as the rest of the app (shared via `TopologyCrypto.ps1`), so its output opens normally in
+`Start-NetworkMapper.ps1` and the web UI.
 
 | Parameter | Default | Description |
 |---|---|---|
 | `-InputFile` | *(required)* | File to encrypt or decrypt. |
-| `-OutputFile` | *(derived)* | Encrypting: input path + `.enc`. Decrypting: input path with `.enc` stripped, or `<input>.decrypted.json` if it didn't end in `.enc`. |
-| `-Decrypt` | off | Reverses the default action (encrypt → decrypt). |
-| `-Type` | `Auto` | Envelope format to stamp when encrypting: `Auto` detects `Configuration.json(.enc)` as `Config` and anything else as `Topology`. Only override this if the file doesn't follow the app's own naming — `Start-NetworkMapper.ps1` refuses to load a config file stamped with the wrong format. |
-| `-Password` | *(prompted)* | Pass a `[securestring]` for non-interactive/scripted use instead of the interactive prompt. |
-| `-Force` | off | Skip the overwrite confirmation if the output file already exists. |
+| `-OutputFile` | *(derived)* | Encrypting: input + `.enc`. Decrypting: `.enc` stripped, or `<input>.decrypted.json`. |
+| `-Decrypt` | off | Reverses the default action. |
+| `-Type` | `Auto` | Envelope format to stamp when encrypting. `Auto` detects `Configuration.json(.enc)` as `Config`, anything else as `Topology`; a config stamped with the wrong format is rejected at load. |
+| `-Password` | *(prompted)* | A `[securestring]`, for non-interactive use. |
+| `-Force` | off | Skip the overwrite confirmation. |
 
-Safety behavior worth knowing:
-- Refuses to encrypt a file that's already an encrypted envelope (would otherwise
-  silently double-wrap ciphertext into something nothing can decrypt back to the
-  original data).
-- On decrypt, the HMAC is verified before decryption — a wrong password or corrupted
-  file fails with a clear error instead of a padding exception or garbage output.
-- Supports `-WhatIf`/`-Confirm` (it's `SupportsShouldProcess`) in addition to `-Force`.
+It refuses to double-wrap an already-encrypted file, verifies the HMAC before decrypting (so a wrong
+password fails cleanly rather than as a padding exception), and supports `-WhatIf`/`-Confirm`.
 
 ---
 
 ## PS_IPv4Scanner
 
-Async IPv4 scanner (`Ipv4Scan.ps1`) for a start/end address range or a subnet given as
-address + mask/CIDR, with optional port check, DNS resolution, and MAC/vendor lookup
-(via `oui.txt`, refreshed by `getOUI.ps1`).
-
-### Usage
+Async IPv4 scanner (`Ipv4Scan.ps1`) for an address range or a subnet given as address + mask/CIDR,
+with optional port check, DNS resolution, and MAC/vendor lookup (via `oui.txt`, refreshed by
+`getOUI.ps1`).
 
 ```powershell
 cd PS_IPv4Scanner
 
-# Address range
 .\Ipv4Scan.ps1 -StartIPv4Address 192.168.178.0 -EndIPv4Address 192.168.178.20
-
-# Subnet by mask, skip DNS lookups
 .\Ipv4Scan.ps1 -IPv4Address 192.168.178.0 -Mask 255.255.255.0 -DisableDNSResolving
-
-# Subnet by CIDR, check a specific port
 .\Ipv4Scan.ps1 -IPv4Address 192.168.178.0 -CIDR 24 -Port 22
-
-# Subnet by CIDR with MAC/vendor resolution
 .\Ipv4Scan.ps1 -IPv4Address 192.168.178.0 -CIDR 25 -EnableMACResolving
+
+.\getOUI.ps1          # refresh oui.txt from the IEEE registry
 ```
 
-Run `Get-Help .\Ipv4Scan.ps1 -Full` for the complete parameter list — the script's
-comment-based help documents every option and example.
-
-### Refreshing the vendor database
-
-`oui.txt` (MAC OUI → vendor name) is used for `-EnableMACResolving`. Refresh it from
-the IEEE registry with:
-
-```powershell
-.\getOUI.ps1
-```
+`Get-Help .\Ipv4Scan.ps1 -Full` documents every option.
 
 ---
 
 ## Windows Server
 
-Two standalone WinForms GUIs for running a MAC Authentication Bypass (MAB) setup on
-Windows Server: one registers device MACs as AD accounts, the other reads back what
-NPS actually did with them. They share no code and neither depends on the other —
-they just pair naturally.
+Two standalone WinForms GUIs for running a MAC Authentication Bypass (MAB) setup on Windows Server:
+one registers device MACs as AD accounts, the other reads back what NPS did with them. They share no
+code and neither depends on the other.
 
 ### `Register-MacDevice.ps1`
 
-Registers MAC-based device accounts in Active Directory. Enter a single MAC, or pick a
-text file with one MAC per line; each account is created in the configured OU, added to
-the device group, and (optionally) stripped of every other group membership so the
-device group is primary. Any separator style is accepted (`aa:bb:...`, `aa-bb-...`,
-`aabb.ccdd.eeff`, bare hex) — the script normalizes before checking. A checkbox switches
-on overwrite (delete + recreate) for MACs that already exist; results are tallied per
-run and for the session.
+Registers MAC-based device accounts in Active Directory. Enter a single MAC, or pick a text file with
+one per line; each account is created in the configured OU, added to the device group, and optionally
+stripped of every other group membership. Any separator style is accepted (`aa:bb:...`, `aa-bb-...`,
+`aabb.ccdd.eeff`, bare hex). A checkbox switches on overwrite (delete + recreate) for existing MACs;
+results are tallied per run and for the session.
 
-Edit the CONFIG block at the top of the script — `$OUPath`, `$GroupName`,
-`$TempPassword`, `$StripOtherGroups` — before first use. The OU and group must already
-exist. Needs RSAT (the `ActiveDirectory` module) and rights to create users in the target
-OU; without them the GUI still opens and reports why it can't connect.
-
-```powershell
-.\Register-MacDevice.ps1
-```
+Edit the CONFIG block at the top — `$OUPath`, `$GroupName`, `$TempPassword`, `$StripOtherGroups` —
+before first use; the OU and group must already exist. Needs RSAT and rights to create users in the
+target OU; without them the GUI still opens and reports why it can't connect.
 
 ### `Show-NpsMacAuth.ps1`
 
-Reads NPS audit events from the Security log — 6272 (granted), 6273 (denied), 6274
-(discarded), 6276 (quarantined), 6277 (probation), 6278 (full access) — pulls the
-RADIUS Calling-Station-ID out of each, normalizes it to a MAC, and de-duplicates into
-two sortable lists: authenticated and denied. Denied rows carry the NPS reason code and
-text. Double-click any row for the full raw event; per-pane buttons copy the MAC list to
-the clipboard or export to CSV.
+Reads NPS audit events from the Security log — 6272 (granted), 6273 (denied), 6274 (discarded), 6276
+(quarantined), 6277 (probation), 6278 (full access) — pulls the RADIUS Calling-Station-ID out of each,
+normalizes it to a MAC, and de-duplicates into two sortable lists: authenticated and denied. Denied
+rows carry the NPS reason code and text. Double-click a row for the raw event; per-pane buttons copy
+the MAC list or export to CSV.
 
-Query runs on a background runspace, so the window stays responsive. The server box
-accepts a remote NPS host (Event Log RPC — TCP 135 + dynamic RPC, not WinRM) with
-optional alternate credentials. Run elevated: reading the Security log needs it, and the
-title bar says so if you didn't.
+The query runs on a background runspace, so the window stays responsive. The server box accepts a
+remote NPS host (Event Log RPC — TCP 135 + dynamic RPC, not WinRM) with optional alternate
+credentials. Run elevated: reading the Security log needs it, and the title bar says so if you didn't.
 
 ```powershell
-# Local server, last 24h
-.\Show-NpsMacAuth.ps1
-
-# A remote NPS server, last week
+.\Show-NpsMacAuth.ps1                              # local server, last 24h
 .\Show-NpsMacAuth.ps1 -ComputerName NPS01 -Hours 168
 ```
 

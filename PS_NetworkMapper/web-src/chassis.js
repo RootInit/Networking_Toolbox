@@ -1,17 +1,10 @@
-// Front-panel drawing for the drawer's Interfaces tab: one SVG per stack member, drawn in
-// millimetres from Juniper's front-view photos, with two LED lenses per port (left = link,
-// right = recent activity). Two-tone line art only - fills/strokes come from
-// --chassis-bg/--chassis-fg so it inverts with the theme.
+// Front-panel drawing for the drawer's Interfaces tab: one SVG per stack member, drawn in millimetres
+// from Juniper's front-view photos, with two LED lenses per port (left = link, right = activity).
+// Two-tone line art only - fills/strokes come from --chassis-bg/--chassis-fg.
 //
-// Three parameterised families cover every fixed-config switch style; a MODELS entry picks a
-// family and passes measured positions. An unknown model string is normalised (case, port
-// suffix, -AFI/-DC style trailers) and, failing that, drawn generically from the interface
-// names the device reports, so a new SKU still gets a usable panel. Modular chassis have
-// vertical line cards and no meaningful 1U front, so they render a one-line note.
-//
-// Dual-mode like graph-layout.js: node:test gets the pure string builders through
-// module.exports, the browser gets window.Chassis plus the DOM-facing render/highlight entry
-// points drawer.js calls.
+// Three parameterised families cover every fixed-config style; a MODELS entry picks one and passes
+// measured positions. An unknown model is normalised and, failing that, drawn from the interface
+// names reported. Modular chassis render a note. Dual-mode: module.exports for node, window.Chassis.
 
 (function () {
 'use strict';
@@ -28,7 +21,6 @@ function escHtml(val) {
     return String(val).replace(/[&<>"']/g, function (c) { return HTML_ESCAPES[c]; });
 }
 
-/* ---------- primitives ---------- */
 function svgOpen(uid, vbW, vbH) {
     var hexes = [[2.3, 2], [0, 6], [4.6, 6]].map(function (c) {
         var pts = [0, 1, 2, 3, 4, 5].map(function (k) { var a = Math.PI / 3 * k + Math.PI / 6; return f(c[0] + 1.35 * Math.cos(a)) + ',' + f(c[1] + 1.35 * Math.sin(a)); }).join(' ');
@@ -59,8 +51,7 @@ function wordmark(x, y, opts) {
         (opts.model ? '<text class="model-text' + (opts.big ? ' big' : '') + '" x="' + f(opts.modelX == null ? 0 : opts.modelX) + '" y="' + f(opts.modelY == null ? 5.2 : opts.modelY) + '">' + escHtml(opts.model) + '</text>' : '') + '</g>';
 }
 var junosMark = function (x, y) { return '<g transform="translate(' + f(x) + ',' + f(y) + ')"><circle cx="1.8" cy="-1.2" r="1.6" fill="var(--chassis-fg)"></circle><text class="junos-sub" x="4.2" y="-2.2">RUNNING</text><text class="junos-text" x="4.2" y="0.4">JUNOS</text></g>'; };
-// The glow filter id is per-SVG, so two stacked members never share a <defs> reference that
-// only the first SVG in the document defines.
+// The glow filter id is per-SVG, so two stacked members never share a <defs> only the first defines.
 var curUid = 'u';
 function lens(x, y, w, h, key, role) {
     var bind = key ? ' data-lightfor="' + escHtml(key) + '" data-role="' + role + '"' : '';
@@ -76,23 +67,18 @@ function dot(cx, cy, r, key, role, state) {
         '<circle class="light-base" cx="0" cy="0" r="' + f(r) + '"></circle>' +
         '<circle class="light-core" cx="0" cy="0" r="' + f(r * .55) + '"></circle></g>';
 }
-// Port groups carry data-port for click selection plus a data-tip detail string. A port the
-// artwork has but the device never reported gets .port-absent, so it reads as physically
-// present but missing from the data.
+// data-port for click selection plus a data-tip detail string; an unreported port gets .port-absent.
 function portBind(unit, key, kind) {
     if (!key) return '';
     var known = unit && unit.hasPort ? unit.hasPort(key) : true;
     return ' class="port-el' + (known ? '' : ' port-absent') + '" data-port="' + escHtml(key) + '" data-kind="' + kind + '"';
 }
-// Carried as a data attribute for the custom hover tooltip: the native SVG <title> tooltip
-// is too slow to appear and too easy to miss on a 10px jack.
+// The native SVG <title> tooltip is too slow to appear and too easy to miss on a 10px jack.
 function portTitle(unit, key) {
     var t = key && unit && unit.title ? unit.title(key) : '';
     return t ? ' data-tip="' + escHtml(t) + '"' : '';
 }
-// Keyboard/screen-reader access for a jack: tabindex, role and a name are all a non-native
-// SVG element needs. Activation is wired to the delegated keydown listener in
-// window.renderChassisView.
+// Keyboard/screen-reader access for a jack; activation is wired in window.renderChassisView.
 function portA11y(key) {
     return key ? ' tabindex="0" role="button" aria-label="Port ' + escHtml(key) + '"' : '';
 }
@@ -116,8 +102,7 @@ function rj45(x, y, g, key, id, opts, unit) {
 function rj45Block(x, y, cols, pitch, firstN, unit, opts) {
     opts = opts || {};
     var g = JACK, H = JACK_H, pic = opts.pic || 0;
-    // opts.prefix is usually a fixed string, but inferModel() passes a per-port function so a
-    // block mixing mge and ge ports names each jack from its own interface.
+    // inferModel() passes a per-port function so a block mixing mge and ge names each jack itself.
     var prefixOf = typeof opts.prefix === 'function' ? opts.prefix : function () { return opts.prefix || 'ge'; };
     var out = '';
     for (var c = 0; c < cols; c++) {
@@ -194,10 +179,7 @@ function moduleBay(x, y, w, h, inner, name) {
         inner + (name ? label(x + w / 2, y + h - .8, name, 'middle') : '');
 }
 
-/* ---------- right-hand sections shared by the RJ45 rack family ---------- */
 var RIGHT = {
-    /* EX2200/2300/3300/3400: model text, RUNNING JUNOS, status+mode LEDs with bracket, hex patch,
-       4x SFP(+) in a row (lens+number under each), menu button, mini-USB console. */
     ex2300: function (u, s) {
         var ux = B + 365.4;
         var sfps = '';
@@ -209,14 +191,12 @@ var RIGHT = {
             statusCluster(B + 427, 6.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 4.6, { bracket: true }) +
             menuButton(B + 434.5, 33, 1.9) + usbSmall(B + 426.5, 37.8, 6.5, 3.2) + label(B + 434.4, 40.6, 'CON') + sfps;
     },
-    /* EX4200/EX4300: mini-USB CON, model text, LCD + menu/enter, SYS/ALM/MST, SFP+ uplink module. */
+    /* EX4200/EX4300. */
     lcd: function (u, s) {
         var cages = '';
         for (var i = 0; i < 4; i++) { var cx0 = B + 378.5 + i * 14.7, key = u.key(pn(s.upPrefix || 'xe', u.fpc, 2, i), true); cages += sfpCage(cx0, 26.4, 11, 10.4, key, u.id + '_u' + i, {}, u) + cageLabel(cx0 + 5.5, 37.7, key, i); }
         return ex4300RightCluster(u, s, cages);
     },
-    /* EX4400 / EX4300-MP: sub-panel with model text, RUNNING JUNOS, console (USB-C or mini),
-       2x4 LED cluster, mode button, uplink-module bay drawn populated with a 4x SFP+ module. */
     ex4400: function (u, s) {
         var panelX = s.panelX || 361, px = B + panelX, w = BODY_W - panelX - 2;
         var bayX = px + 3, bayW = w - 6, pitch = (bayW - 12) / 4, cw = Math.min(10, pitch - 3.2);
@@ -230,7 +210,6 @@ var RIGHT = {
             statusCluster(px + w - 25, 4.6, s.leds || [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 2.9) +
             (wide ? '<circle class="btn" cx="' + f(px + w - 5) + '" cy="9" r="1.4"></circle>' : '') + bay;
     },
-    /* EX4100-48: 2x2 SFP+ uplinks (PIC 2) + 2x2 SFP28 VC ports, sub-panel with 8 LEDs, button, USB-C. */
     ex4100: function (u, s) {
         var gx = [B + 361, B + 393.3], cw = 13.2, ch = 8.6;
         var out = '';
@@ -244,7 +223,6 @@ var RIGHT = {
             statusCluster(px + 7.2, 12.2, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 4.55) +
             menuButton(px + 8.1, 32.9, 2.6) + usbSmall(px + 4.5, 37.7, 7.6, 3.1) + label(px + 13.5, 40.4, 'CON');
     },
-    /* EX4000-48: 2x2 SFP+ uplinks, SYS/MST/CLD pill top-right, USB, reset. */
     ex4000: function (u, s) {
         var gx = B + 372, cw = 13.2, ch = 8.6;
         var out = '';
@@ -254,7 +232,7 @@ var RIGHT = {
             dot(B + 408, 5.1, .9, null, null, 'green') + label(B + 409.8, 5.7, 'SYS') + dot(B + 419, 5.1, .9, null, null, u.master ? 'green' : null) + label(B + 420.8, 5.7, 'MST') + dot(B + 430, 5.1, .9) + label(B + 431.8, 5.7, 'CLD') +
             usbA(B + 412, 24, 11, 5.4) + label(B + 417.5, 34, 'USB', 'middle') + '<circle class="btn" cx="' + f(B + 434) + '" cy="34" r="1.1"></circle>';
     },
-    /* QFX5100-48T: 2x3 QSFP+ (48..53) on the right, dots+numbers above/below. */
+    /* QFX5100-48T: 2x3 QSFP+ (48..53). */
     qsfp6: function (u, s) {
         var out = '';
         for (var c = 0; c < 3; c++) out += cageColumn(B + 378 + c * 19, 8.4, 22.8, 16.9, 11, u, 'et', 0, 48 + 2 * c, 49 + 2 * c, 'dots');
@@ -262,7 +240,6 @@ var RIGHT = {
     },
 };
 
-/* ================= family 1: RJ45 rack ================= */
 function rj45Rack(u) {
     var s = u.spec, uid = u.id, yTop = s.yTop || 9.3, pitch = s.pitch || 14.15;
     var labelsY = yTop + 2 * JACK_H + ROWBAR + 2.9;
@@ -276,9 +253,7 @@ function rj45Rack(u) {
     return svgOpen(uid, RACK_W, RACK_H) + rackBody() + rackEars() + vents + brand + blocks + RIGHT[s.right](u, s) + '</svg>';
 }
 
-// The EX4300 right-hand cluster, shared by the RJ45 family's `lcd` variant and the all-SFP
-// EX4300-32F: both chassis carry the same console/LCD/LED furniture and the same uplink
-// module bay, and only the bay's contents differ.
+// Shared by the RJ45 `lcd` variant and the all-SFP EX4300-32F; only the bay's contents differ.
 function ex4300RightCluster(u, s, cages) {
     var mx = B + 372.5, my = 24.4, mw = 69, mh = 16.6;
         return usbSmall(B + 361, 2.4, 9, 3.6) + label(B + 360.2, 5.2, 'CON', 'end') +
@@ -296,7 +271,6 @@ function ex4300RightCluster(u, s, cages) {
         screw(mx + 3, 27.6, 1.3) + screw(mx + mw - 3, 27.6, 1.3) + cages;
 }
 
-/* ================= family 2: SFP / QSFP rack ================= */
 function sfpRack(u) {
     var s = u.spec, uid = u.id;
     var yT = s.yT || 9.4, yB = s.yB || 23.4, style = s.labels || 'dots';
@@ -332,13 +306,10 @@ function sfpRack(u) {
         extras += mgmtConPair(B + 12, 8.8, uid).replace('CON', '') + '<circle class="coax" cx="' + f(B + 34) + '" cy="14" r="2.2"></circle><circle class="coax" cx="' + f(B + 34) + '" cy="14" r=".8"></circle>' + label(B + 34, 9.6, 'PPS', 'middle') + '<circle class="coax" cx="' + f(B + 44) + '" cy="14" r="2.2"></circle><circle class="coax" cx="' + f(B + 44) + '" cy="14" r=".8"></circle>' + label(B + 44, 9.6, '10M', 'middle') + ventHex(uid, B + 2, 20, 50, 20) + ventHex(uid, B + 400, 8, 38, 28) + warnTri(B + 412, 16);
     }
     if (s.left === 'esd') extras += esdMark(B + 4, 20) + '<circle class="btn" cx="' + f(B + 6.5) + '" cy="33" r="1.1"></circle>';
-    // EX4300-32F: same console/LCD/LED furniture and uplink bay as the RJ45 EX4300s, over an
-    // all-SFP port field. The bay is drawn from what the switch reports rather than assumed:
-    // the slot ships with a cover panel, and takes either an 8x SFP+ or a 2x QSFP+ module.
+    // The uplink bay is drawn from what the switch reports: the slot ships with a cover panel.
     if (s.left === 'ex4300f') {
         var upCages = '';
-        // Any port in the bay, not just port 0: device.Interfaces is a filtered subset, so a
-        // populated module whose first cage is empty or omitted would otherwise draw as a cover.
+        // Any port in the bay: Interfaces is a filtered subset, so a populated module can start empty.
         var anyAt = function (pfx, count) {
             for (var i = 0; i < count; i++) if (u.hasPort(pn(pfx, u.fpc, 1, i))) return true;
             return false;
@@ -365,16 +336,13 @@ function sfpRack(u) {
         extras += RIGHT.ex4400(u, Object.assign({ panelX: 355, modelText: 'EX4400-24X', leds: [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', '']] }, s));
     }
     var vents = '';
-    // hexX lets a face whose port field does not start at the left edge put its bands in the
-    // gap it actually has: an SFP column's numbers sit above the top cage, so a band running
-    // the full width would print over them.
+    // hexX puts the bands in the gap a face actually has - an SFP column's numbers sit above the cage.
     if (s.vents === 'hexBands') { var hx = B + (s.hexX == null ? 6 : s.hexX); vents = ventHex(uid, hx, 1.0, s.hexW || 430, 4.4) + ventHex(uid, hx, 38.6, s.hexW || 430, 4.4); }
     else if (s.vents === 'holesBands') vents = ventHoles(uid, B + 8, 1.2, s.hexW || 425, 5.6) + ventHoles(uid, B + 8, 37.4, s.hexW || 425, 5.6);
     else if (s.vents === 'hexTop') vents = ventHex(uid, B + 62, 1.2, s.hexW || 340, 6);
     return svgOpen(uid, RACK_W, RACK_H) + rackBody() + rackEars() + vents + out + extras + '</svg>';
 }
 
-/* ================= family 3: compact desktop ================= */
 function compact(u) {
     var s = u.spec, uid = u.id;
     var BUMP = 12.4, W = 267, TOTAL = W + 2 * BUMP, HT = 43.7, R = BUMP;
@@ -391,8 +359,7 @@ function compact(u) {
     var bumper = function (x) { var fins = ''; for (var i = 0; i < 5; i++) { var fx = x + 2.4 + i * 2.0; fins += '<line class="bumper-fin" x1="' + f(fx) + '" y1="4" x2="' + f(fx) + '" y2="' + f(HT - 4) + '"></line>'; } return '<rect class="bumper" x="' + f(x + .2) + '" y=".2" width="' + f(BUMP - .4) + '" height="' + f(HT - .4) + '" rx="2.6"></rect>' + fins; };
     var sfps = '', right = '';
     if (s.variant === 'ex4100f') {
-        /* EX4100-F-12: 4x SFP+ in a row (PIC 1) right of the block, labels under, SYS..PoE cluster,
-           menu button, USB-C CON, warning triangle, green base stripe (drawn as a thick lip). */
+        /* EX4100-F-12: 4x SFP+ right of the block, SYS..PoE cluster, USB-C CON, green base stripe. */
         for (var i = 0; i < 4; i++) { var x = R + 180 + i * 15, key = u.key(pn('xe', u.fpc, 1, i), true); sfps += sfpCage(x, 23.3, 13.8, 10.5, key, uid + '_u' + i, {}, u) + cageLabel(x + 6.9, 35.2, key, i); }
         sfps += '<rect class="block-frame" x="' + f(R + 179) + '" y="22.3" width="' + f(3 * 15 + 13.8 + 2) + '" height="12.5" rx=".5"></rect>';
         right = statusCluster(R + 248, 7.5, [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['CLD', 'PoE']], { SYS: true, MST: u.master, PoE: u.poe, ALM: u.alarm }, 5.0)
@@ -400,7 +367,7 @@ function compact(u) {
             + esdMark(R + 6, 27) + '<circle class="btn" cx="' + f(R + 8) + '" cy="21" r="1.1"></circle>' + cornerMarks(R + 17, 20, 16.5, 15)
             + '<line class="lip thick" x1="' + f(R + .3) + '" y1="39.6" x2="' + f(R + W - .3) + '" y2="39.6"></line>';
     } else {
-        /* EX2300-C / EX2200-C: 2x SFP with LINK/ST dots, USB-A, MGMT over CON (+ mini-USB), RUNNING JUNOS cluster. */
+        /* EX2300-C / EX2200-C: 2x SFP with LINK/ST dots, USB-A, MGMT over CON. */
         [{ x: R + 135.5, ledX: R + 128.6 }, { x: R + 171.2, ledX: R + 164 }].forEach(function (c, i) {
             var key = u.key(pn(s.upPrefix || 'xe', u.fpc, 1, i), true);
             sfps += sfpCage(c.x, 23, 14.2, 9.4, key, uid + '_u' + i, {}, u) + dot(c.ledX, 25.2, 1.0, key, 'link') + label(c.ledX - 2.2, 25.8, 'LINK', 'end') + dot(c.ledX, 29.2, 1.0, key, 'act') + label(c.ledX - 2.2, 29.8, 'ST', 'end') + '<text class="port-num" x="' + f(c.x + 7.1) + '" y="35.6" text-anchor="middle">' + i + '</text>';
@@ -425,10 +392,8 @@ function compact(u) {
         '</svg>';
 }
 
-/* ================= model catalogue =================
-   style: which family draws it. Measured = positions taken from Juniper's front-view photo;
-   the legacy EX2200/3300/4200 entries reuse their successor's measured layout (same panel
-   family, no photo). Keys are upper-case; resolveModel() normalises what Junos reports. */
+/* Model catalogue. `style` picks the family; measured = positions from Juniper's photo, and the
+   legacy EX2200/3300/4200 entries reuse their successor's layout. resolveModel() normalises keys. */
 var RJ = function (blocks, right, extra) { return Object.assign({ blocks: blocks, right: right, vents: 'hexTopSlots' }, extra || {}); };
 var FAMILY_BLOCKS = [9.3, 98.6, 187.9, 277.2].map(function (x) { return { x: x, cols: 6 }; });
 var MODELS = {
@@ -464,8 +429,7 @@ var MODELS = {
     'EX4200-24T': { style: 'rj45', label: '2x6 RJ45 rack + LCD (legacy)', spec: RJ(FAMILY_BLOCKS.slice(2), 'lcd', { modelText: 'EX4200', lcd2: '24x1G 4x1G', upPrefix: 'ge' }), poe: false },
     'EX4200-48T': { style: 'rj45', label: '2x6 RJ45 rack + LCD (legacy)', spec: RJ(FAMILY_BLOCKS, 'lcd', { modelText: 'EX4200', lcd2: '48x1G 4x1G', upPrefix: 'ge' }), poe: false },
     'EX4200-48P': { style: 'rj45', label: '2x6 RJ45 rack + LCD (legacy)', spec: RJ(FAMILY_BLOCKS, 'lcd', { modelText: 'EX4200 PoE', lcd2: '48x1G PoE 4x1G', upPrefix: 'ge' }), poe: true },
-    // 32x 1G SFP front ports; the built-in 10G/40G ports are on the REAR (VCPs by default) and
-    // are deliberately not drawn. Front geometry is proportional, not measured from this SKU.
+    // The built-in 10G/40G ports are on the REAR (VCPs by default) and deliberately not drawn.
     'EX4300-32F': { style: 'sfp', label: '32x 1G SFP rack + LCD, uplink module bay', spec: { groups: [{ x: 10, cols: 4 }, { x: 78, cols: 4 }, { x: 146, cols: 4 }, { x: 214, cols: 4 }], vents: 'hexBands', hexX: 278, hexW: 74, left: 'ex4300f', prefix: 'ge', modelText: 'EX4300-32F', lcd2: '32x1G SFP' }, poe: false },
     'EX4300-48MP': { style: 'rj45', label: '2x6 RJ45 rack, mGig, module bay', spec: RJ([{ x: 8, cols: 6 }, { x: 97.6, cols: 6 }, { x: 189, cols: 6, mgig: true, prefix: 'mge' }, { x: 282.6, cols: 6, mgig: true, prefix: 'mge' }], 'ex4400', { modelText: 'EX4300-48MP', console: 'mini', panelX: 372, moduleName: 'EX-UM-4SFPP-MR', slotsTo: 365, hexW: 335, leds: [['SYS', 'SPD'], ['ALM', 'DX'], ['MST', 'EN'], ['', 'PoE']] }), poe: true },
     // ---- RJ45 rack: EX4400 (fully perforated) ----
@@ -498,9 +462,7 @@ var STYLE_GEN = { rj45: rj45Rack, sfp: sfpRack, compact: compact };
 // Modular / chassis-based platforms: vertical line cards, no 1U front to draw.
 var MODULAR_RE = /^(EX92|EX82|EX62|QFX10|MX|PTX|SRX[1-9]\d{3})/;
 
-// Maps whatever Junos reports onto a catalogue key. `show virtual-chassis` gives lower-case
-// ("ex2300-24t") while `show chassis hardware` gives upper ("EX4300-48P"), and either may
-// carry an ordering trailer. Returns { key, model } or null.
+// Maps what Junos reports onto a catalogue key (case and ordering trailers vary). {key,model}|null.
 function resolveModel(modelStr) {
     if (!modelStr) return null;
     var m = String(modelStr).trim().toUpperCase();
@@ -527,10 +489,8 @@ function parsePort(name) {
     return m ? { prefix: m[1], fpc: +m[2], pic: +m[3], n: +m[4] } : null;
 }
 
-// Fallback for a model the catalogue doesn't know: infer the panel from the interfaces this
-// member reports. Copper access on PIC 0 gives the 2x6 RJ45 rack in 12-port blocks (LCD-style
-// right section when PIC 2 has uplinks, plain otherwise); fibre access gives SFP columns.
-// Returns a spec-bearing model like a catalogue entry, or null.
+// Fallback for an unknown model: infer the panel from the reported interfaces - copper on PIC 0 gives
+// the 2x6 RJ45 rack, fibre gives SFP columns. Returns a spec-bearing model, or null.
 function inferModel(modelStr, fpc, interfaces) {
     var access = [], uplinkPics = {};
     (interfaces || []).forEach(function (intf) {
@@ -544,8 +504,7 @@ function inferModel(modelStr, fpc, interfaces) {
     var text = String(modelStr || '').toUpperCase() || 'JUNIPER';
     if (copper) {
         var nBlocks = Math.min(4, Math.max(1, Math.ceil((maxN + 1) / 12)));
-        // Per-port, not per-block: mge ports need not align to a 12-port boundary, so
-        // flagging a whole block would mislabel the ge ports sharing it.
+        // Per-port, not per-block: mge ports need not align to a 12-port boundary.
         var mgigPorts = {};
         access.forEach(function (p) { if (p.prefix === 'mge') mgigPorts[p.n] = true; });
         var prefixOf = function (n) { return mgigPorts[n] ? 'mge' : 'ge'; };
@@ -564,10 +523,8 @@ function inferModel(modelStr, fpc, interfaces) {
         spec: { groups: groups, vents: 'holesBands', left: 'esd', prefix: access[0].prefix } };
 }
 
-// Activity lens: green = traffic now or a flap within 72h, amber = 72h to 6 months, off =
-// older, never, or unknown. LastFlappedSeconds is frozen at the snapshot's scan time and does
-// not keep counting while the snapshot sits loaded, so ageSec (elapsed since that scan) is
-// added before thresholding - otherwise a two-month-old snapshot still shows green.
+// Activity lens: green = a flap within 72h, amber = 72h to 6 months, off = older or unknown.
+// LastFlappedSeconds is frozen at scan time, so ageSec is added before thresholding.
 var H72_S = 72 * 3600, H6MO_S = 182 * 24 * 3600;
 function activityState(intf, ageSec) {
     if (!intf) return 'off';
@@ -579,15 +536,13 @@ function activityState(intf, ageSec) {
     if (elapsed <= H6MO_S) return 'amber';
     return 'off';
 }
-// 'red' mirrors the down badge the Interfaces table shows for the same intf.Link check;
-// 'off' stays reserved for a port the device never reported.
+// 'off' stays reserved for a port the device never reported; 'red' mirrors the table's down badge.
 function linkState(intf) {
     if (!intf) return 'off';
     return String(intf.Link).toLowerCase() === 'up' ? 'green' : 'red';
 }
 
-// Builds one device's members in FPC order: [{fpc, role, model, master, multi, catalogueKey,
-// inferred, label, html} | {..., note}]. Pure - no DOM.
+// Builds one device's members in FPC order. Pure - no DOM.
 function buildMembers(device) {
     var asArr = function (v) { return Array.isArray(v) ? v.filter(function (item) { return item !== null && item !== undefined; }) : (v === null || v === undefined ? [] : [v]); };
     var interfaces = asArr(device && device.Interfaces);
@@ -605,10 +560,7 @@ function buildMembers(device) {
     }
     members.sort(function (a, b) { return a.fpc - b.fpc; });
     var multi = members.length > 1;
-    // Drafted first, then judged, because the "does the catalogue art fit reality?" ratio
-    // below is pooled across the device rather than decided per member: device.Interfaces is a
-    // filtered subset, so one member of a stack can report a handful of port names the art has
-    // no jacks for while its identical sibling reports none at all.
+    // Drafted first, then judged: the "does the art fit?" ratio below is pooled across the device.
     var drafts = members.map(function (m) {
         var out = { fpc: m.fpc, role: m.role || '', model: m.model || 'Unknown', master: multi ? /master/i.test(m.role || '') : true, multi: multi };
         var draft = { out: out, m: m };
@@ -619,12 +571,8 @@ function buildMembers(device) {
         if (!model) { out.note = 'No front-panel drawing for ' + (m.model || 'this model') + '.'; return draft; }
         var reported = interfaces.filter(function (intf) { var p = parsePort(intf && intf.Port); return p && p.fpc === m.fpc; }).map(function (intf) { return String(intf.Port); });
         var bound = {};
-        // A pluggable cage's interface prefix follows the OPTIC, not the cage: a 1G optic in an
-        // SFP+ port reports as ge-, a 10G one as xe-, a 25G one as et-. The catalogue art can
-        // only name one of them, so a cage resolves to whichever sibling the switch actually
-        // reports; an unbound cage counts against coverage and can demote the whole pool to the
-        // inferred panel, which would draw RJ45 jacks on an all-fiber switch.
-        // mge is excluded - it is copper-only, never a pluggable cage.
+        // A cage's interface prefix follows the OPTIC, not the cage (1G ge-, 10G xe-, 25G et-), so a
+        // cage binds to whichever sibling is reported. mge is excluded - copper-only, never a cage.
         var SFP_PREFIXES = ['ge', 'xe', 'et'];
         var reportedName = function (ifname) {
             if (byPort.has(ifname)) return ifname;
@@ -638,9 +586,7 @@ function buildMembers(device) {
         };
         var makeUnit = function (mdl) { return {
             id: 'fpc' + m.fpc, fpc: m.fpc, model: out.model, master: out.master, poe: mdl.poe, alarm: hasAlarm, spec: mdl.spec,
-            // cage=true only where the art draws a PLUGGABLE cage. An RJ45 jack is fixed
-            // copper, so a ge-/xe- mismatch there is real evidence the art is wrong for this
-            // device and must still count against coverage.
+            // On a fixed RJ45 jack a ge-/xe- mismatch is real evidence the art is wrong for this device.
             key: function (ifname, cage) { var actual = cage ? reportedName(ifname) : ifname; bound[actual] = true; return actual; },
             hasPort: function (ifname) { return byPort.has(ifname); },
             // Detail line only: the tooltip prints the interface name from data-port.
@@ -658,15 +604,13 @@ function buildMembers(device) {
         draft.html = STYLE_GEN[model.style](makeUnit(model));
         draft.reported = reported;
         draft.covered = reported.filter(function (p) { return bound[p]; }).length;
-        // A member with no reported ports has nothing to infer a layout from, so it cannot be
-        // demoted at all - which is what the verdict below has to know before demoting anyone.
+        // A member with no reported ports has nothing to infer from, so it cannot be demoted at all.
         draft.fallback = res ? inferModel(m.model, m.fpc, interfaces) : null;
         draft.render = function (mdl) { bound = {}; curUid = 'fpc' + m.fpc; return STYLE_GEN[mdl.style](makeUnit(mdl)); };
         return draft;
     });
 
-    // Pooled per catalogue key, not per device, so a mixed stack's bad fit for one model
-    // cannot condemn another model's good art.
+    // Pooled per catalogue key, so a mixed stack's bad fit for one model can't condemn another's.
     var pools = {};
     drafts.forEach(function (d) {
         if (!d.res) return;
@@ -677,12 +621,8 @@ function buildMembers(device) {
     });
     Object.keys(pools).forEach(function (k) {
         var p = pools[k];
-        // Artwork covering under half the reported ports (a misidentified model, or a naming
-        // scheme the measured SKU doesn't use) would light almost nothing; the
-        // interface-derived layout is the more honest picture. Sample size matters as much as
-        // the ratio - a couple of uplink names say nothing about a 48-port panel - and
-        // allInferable keeps it all-or-nothing, since demoting only the members that happen to
-        // have interfaces to infer from is what made one chassis render as two switches.
+        // Art covering under half the reported ports would light almost nothing. Sample size matters
+        // too, and allInferable keeps it all-or-nothing - partial demotion rendered one chassis as two.
         p.demote = p.allInferable && p.reported >= 8 && (p.covered / p.reported) < 0.5;
     });
 
@@ -729,10 +669,7 @@ if (typeof module !== 'undefined' && module.exports) {
     var renderedFor = null;   // the device object the current SVGs were built from
     var zoomed = false;       // double-width panels in a sideways-scrolling strip (session only)
 
-    // Seconds since this device's LastFlappedSeconds fields were captured. A rescan stamps
-    // device.RescannedAt without touching the snapshot's own scanTimestamp, so that per-device
-    // stamp wins when present. The globals it reads load after this file, but this only runs
-    // on user interaction.
+    // A rescan stamps device.RescannedAt without touching scanTimestamp, so that stamp wins.
     function snapshotAgeSeconds(device) {
         try {
             var ts = (device && device.RescannedAt) || (window.loadedSnapshots && window.loadedSnapshots[window.activeSnapshotIndex] && window.loadedSnapshots[window.activeSnapshotIndex].scanTimestamp);
@@ -750,8 +687,7 @@ if (typeof module !== 'undefined' && module.exports) {
         if (btn) btn.textContent = zoomed ? 'Fit' : 'Zoom';
     };
 
-    // Draws the front panels into #chassis-view, or just re-lights them when handed the same
-    // device object - so a sort click re-lights while a rescan merge (a new object) rebuilds.
+    // Re-lights when handed the same device object; a rescan merge (a new object) rebuilds.
     window.renderChassisView = function (device, selectedPort) {
         var root = document.getElementById('chassis-view');
         if (!root) return;
@@ -801,9 +737,7 @@ if (typeof module !== 'undefined' && module.exports) {
         if (body) body.classList.add('selected');
     };
 
-    // Delegated once: the SVGs are rebuilt per device but #chassis-view is permanent. The
-    // tooltip is a single fixed-position element on <body>, so the drawer's overflow can't
-    // clip it.
+        // Delegated once; the tooltip is a fixed-position element on <body> so the drawer can't clip it.
     document.addEventListener('DOMContentLoaded', function () {
         var root = document.getElementById('chassis-view');
         if (!root) return;
@@ -834,14 +768,10 @@ if (typeof module !== 'undefined' && module.exports) {
         root.addEventListener('mousemove', function (ev) { if (!tip.hidden) place(ev); });
         root.addEventListener('mouseout', function (ev) {
             var g = portOf(ev);
-            // Moving between sibling jacks fires mouseover for the new one immediately after,
-            // so only hide when the pointer left for something that isn't a jack.
+            // Moving between sibling jacks fires mouseover next, so only hide when leaving for a non-jack.
             if (g && !(ev.relatedTarget && ev.relatedTarget.closest && ev.relatedTarget.closest('.port-el[data-port]') === g)) tip.hidden = true;
         });
-        // While a button is held, Chromium keeps delivering events to the element the press
-        // started on and never fires mouseout for it, stranding the tooltip on a drag off a
-        // jack. Hiding on press and on any move not over a jack also covers a release
-        // outside the panel.
+        // Chromium keeps delivering to the press target and never fires mouseout during a drag.
         root.addEventListener('mousedown', function () { tip.hidden = true; });
         document.addEventListener('mousemove', function (ev) {
             if (tip.hidden) return;

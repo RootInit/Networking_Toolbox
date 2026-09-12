@@ -1,20 +1,16 @@
 <#
 .SYNOPSIS
-    Show-NpsMacAuth.ps1 - GUI viewer for Windows Server Network Policy Server audit events,
-    grouped by unique MAC address.
- 
+    GUI viewer for Windows Server NPS audit events, grouped by unique MAC address.
+
 .DESCRIPTION
-    Reads Security log events 6272 (granted), 6273 (denied), 6274 (discarded),
-    6276 (quarantined), 6277 (probation) and 6278 (full access), extracts the
-    Calling-Station-ID / identity, normalizes it to a MAC address, de-duplicates,
-    and displays results in two scrollable, sortable lists.
- 
-    Denied entries include the NPS Reason Code and Reason text.
- 
+    Reads Security log events 6272 (granted), 6273 (denied), 6274 (discarded), 6276
+    (quarantined), 6277 (probation) and 6278 (full access), extracts the Calling-Station-ID /
+    identity, normalizes it to a MAC, de-duplicates, and displays two sortable lists. Denied
+    entries include the NPS Reason Code and text.
+
 .NOTES
-    Run elevated (Security log access required).
-    Remote queries use the Event Log RPC channel (TCP 135 + dynamic RPC),
-    not WinRM.
+    Run elevated (Security log access required). Remote queries use the Event Log RPC channel
+    (TCP 135 + dynamic RPC), not WinRM.
 #>
  
 #Requires -Version 5.1
@@ -31,13 +27,10 @@ Add-Type -AssemblyName System.Drawing
  
 #region ------------------------------------------------------------ Worker
  
-# Runs inside a background runspace so the UI never freezes.
-#
-# $Shared is a [hashtable]::Synchronized() the UI thread polls for progress and
-# partial results. Only ever WRITE whole replacement objects into it -- a fresh
-# array, a scalar. Never hand it a collection this loop is still mutating: the
-# docs are explicit that enumerating a synchronized Hashtable from another
-# thread while it changes throws, and the UI enumerates whatever it reads.
+# Runs inside a background runspace so the UI never freezes. $Shared is a
+# [hashtable]::Synchronized() the UI thread polls for progress and partial results. Only ever WRITE
+# whole replacement objects into it - never a collection this loop is still mutating: enumerating a
+# synchronized Hashtable from another thread while it changes throws, and the UI enumerates it.
 $WorkerScript = {
     param(
         [string]$ComputerName,
@@ -113,9 +106,8 @@ $WorkerScript = {
     $denied  = [ordered]@{}
     $fetched = 0
 
-    # Snapshot the buckets into the shared table as fresh arrays. Sorting here
-    # matches what the final result used to do, so a partial paint is ordered
-    # the same way the finished one is.
+    # Snapshot the buckets as fresh arrays. Sorted here so a partial paint is ordered the same way
+    # the finished one is.
     $publish = {
         $Shared['Granted']   = @($granted.Values | Sort-Object LastSeenRaw -Descending)
         $Shared['Denied']    = @($denied.Values  | Sort-Object LastSeenRaw -Descending)
@@ -129,9 +121,8 @@ $WorkerScript = {
     $interval    = [TimeSpan]::FromMilliseconds(1200)
 
     try {
-        # Piped, not @(...)-collected: Get-WinEvent yields newest-first as the
-        # service walks the log, so rows reach the screen while the scan is
-        # still running instead of after it.
+        # Piped, not @(...)-collected: Get-WinEvent yields newest-first as the service walks the
+        # log, so rows reach the screen while the scan is still running.
         Get-WinEvent @p | ForEach-Object {
             $evt = $_
             $fetched++
@@ -181,9 +172,8 @@ $WorkerScript = {
             if ([string]::IsNullOrWhiteSpace($client)) { $client = $d['ClientIPAddress'] }
             if ([string]::IsNullOrWhiteSpace($client)) { $client = $d['NASIPv4Address'] }
  
-            # The detail text used to be composed here, for every event, and then
-            # thrown away for all but the newest event of each MAC. Keep the parsed
-            # fields instead and let Format-Detail render on double-click.
+            # Keep the parsed fields and let Format-Detail render on double-click, rather than
+            # composing detail text for every event and throwing all but the newest away.
             $bucket = if ($isGranted) { $granted } else { $denied }
  
             if ($bucket.Contains($mac)) {
@@ -196,9 +186,7 @@ $WorkerScript = {
                     $row.Client      = $client
                     $row.AuthType    = $d['AuthenticationType']
                     $row.Identity    = $d['SubjectUserName']
-                    # Detail describes the newest event, so its inputs move together
-                    # with it. EventId used to be left behind on granted rows, which
-                    # made the detail header and the CSV column disagree.
+                    # Detail describes the newest event, so its inputs move together with it.
                     $row.Data        = $d
                     $row.Machine     = $evt.MachineName
                     $row.EventId     = $id
@@ -468,8 +456,7 @@ function Get-FilteredRows {
 function Update-Pane {
     param($Pane, $Cols, $Rows, $SortIdx, $SortAsc)
  
-    # Not '$rows' -- PowerShell variable names are case-insensitive, so that name would
-    # overwrite the $Rows parameter and make the unfiltered total below equal $shown.
+    # Not '$rows': PowerShell names are case-insensitive and it would shadow the $Rows parameter.
     $key  = $Cols[$SortIdx].S
     $view = @(Get-FilteredRows -Rows $Rows | Sort-Object -Property $key -Descending:(-not $SortAsc))
  
@@ -582,8 +569,7 @@ function Start-Query {
 }
  
 $timer.Add_Tick({
-    # Paint whatever the worker has published so far. Reads named keys only --
-    # never enumerates $script:Shared, which would race the worker's writes.
+    # Reads named keys only - never enumerates $script:Shared, which would race the worker's writes.
     if ($script:Shared -and [int]$script:Shared['Version'] -ne $script:SeenVersion) {
         $script:SeenVersion = [int]$script:Shared['Version']
         $script:GrantedAll  = @($script:Shared['Granted'])
@@ -707,8 +693,7 @@ $form.Add_FormClosing({
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    # The status strip is overwritten by the first query a moment later, so the warning
-    # goes on the title bar where it survives every refresh.
+    # The status strip is overwritten by the first query, so the warning goes on the title bar.
     $form.Text = "$($form.Text)  [NOT ELEVATED - reading the Security log will likely fail]"
 }
  

@@ -1,18 +1,14 @@
 // Global search: prebuilt index, the search handler, the shared results-list renderer, and
-// "jump to this result" navigation. Operates on app.js's globals (loadedSnapshots,
-// activeSnapshotIndex, searchIndex, ...).
+// "jump to this result" navigation. Operates on app.js's globals.
 
-// 'client_ip' stays distinct from 'ip' so a client match doesn't read as a hit on the
-// switch's own management IP.
+// 'client_ip' stays distinct from 'ip' so a client match doesn't read as a hit on the switch's own IP.
 var SEARCH_FIELD_LABELS = { ip: 'IP Address', client_ip: 'Client IP', hostname: 'Hostname', mac: 'MAC Address', user: 'Username', serial: 'Serial Number' };
 // Which tab to jump to for a match in each field - null leaves the active tab as-is.
 var SEARCH_FIELD_TABS = { ip: null, client_ip: 'tab-interfaces', hostname: null, mac: 'tab-interfaces', user: 'tab-interfaces', serial: 'tab-stack' };
-// Maps an index field to the checkbox gating it; one "IP Address" checkbox covers both
-// the device's own IP and a client's.
+// One "IP Address" checkbox covers both the device's own IP and a client's.
 var SEARCH_FIELD_CHECKBOX = { ip: 'ip', client_ip: 'ip', hostname: 'hostname', mac: 'mac', user: 'user', serial: 'serial' };
 
-// Indexes ALL loaded snapshots and, as a side effect, refreshes each snapshot's deviceByIp
-// map, so setActiveSnapshot is a reassignment rather than a rebuild.
+// Also refreshes each snapshot's deviceByIp, so setActiveSnapshot is a reassignment, not a rebuild.
 window.buildSearchIndex = function() {
     searchIndex = [];
 
@@ -100,10 +96,8 @@ window.performGlobalSearch = function() {
     window.renderResultsList(rows, { emptyText: `No matches for "${query}".` });
 };
 
-// Shared .search-result renderer for global search, dashboard drill-downs and drawer.js's
-// compare search. Callers pass pre-escaped line1Html/line2Html.
-// opts: targetId (default 'searchResults'), headerText (adds a sticky bar with Clear),
-// emptyText.
+// Shared .search-result renderer for global search, dashboard drill-downs and drawer.js's compare
+// search. Callers pass pre-escaped line1Html/line2Html. opts: targetId, headerText, emptyText.
 window.renderResultsList = function(rows, opts) {
     opts = opts || {};
     var resultsEl = document.getElementById(opts.targetId || 'searchResults');
@@ -131,9 +125,8 @@ window.renderResultsList = function(rows, opts) {
     }
 };
 
-// Generation claim: each goToSearchResult call takes the next number and bails if it is no
-// longer current after an await. globalTopologyData/deviceByIp/primaryTree/expandedNodes are
-// plain globals, so without it a superseded click finishes against a newer snapshot's tree.
+// Generation claim: each call takes the next number and bails if superseded after an await, or a
+// stale click finishes against a newer snapshot's tree.
 var goToSearchResultGeneration = 0;
 
 window.revealDeviceInActiveView = function(ip) {
@@ -144,9 +137,8 @@ window.revealDeviceInActiveView = function(ip) {
         return;
     }
     try {
-        // An isolated device (no LLDP neighbors) is never in the visible tree, and
-        // vis-network throws when selecting it. Swallowed so a failed camera animation
-        // can't block the caller's drawer.
+        // An isolated device is never in the visible tree and vis-network throws when selecting it.
+        // Swallowed so a failed camera animation can't block the caller's drawer.
         network.selectNodes([ip]);
         network.focus(ip, { scale: 1.0, animation: { duration: 500 } });
     } catch (e) {
@@ -154,8 +146,7 @@ window.revealDeviceInActiveView = function(ip) {
     }
 };
 
-// Optional `focus` names what the result is about - {port: 'ge-0/0/5'} or
-// {client: '<ip|mac|user>'} - so the drawer expands that row and lights its front-panel jack.
+// Optional `focus` - {port} or {client} - so the drawer expands that row and lights its jack.
 window.goToSearchResult = function(targetIp, tab, snapshotIndex, focus) {
     var myGeneration = ++goToSearchResultGeneration;
     (async () => {
@@ -163,8 +154,7 @@ window.goToSearchResult = function(targetIp, tab, snapshotIndex, focus) {
             await window.setActiveSnapshot(snapshotIndex);
         }
         if (myGeneration !== goToSearchResultGeneration) return; // superseded by a newer click
-        // Drawer first: the layout pass below can take seconds on a large visible set, and
-        // the device info the user asked for doesn't depend on it.
+        // Drawer first: the layout pass below can take seconds and the device info doesn't need it.
         window.openRightDrawer(targetIp);
         if (tab) window.switchTab(tab);
         if (focus && currentSelectedNodeData) {

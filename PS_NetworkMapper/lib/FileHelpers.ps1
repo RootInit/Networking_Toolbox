@@ -1,11 +1,8 @@
-# Shared filesystem-write helpers. Not meant to be run directly - dot-source it:
-# `. (Join-Path $PSScriptRoot "FileHelpers.ps1")`
+# Shared filesystem-write helpers. Dot-source it rather than running it.
 
-# Raw .NET static calls ([System.IO.File]::...) resolve a relative path against
-# [Environment]::CurrentDirectory, which PowerShell does NOT keep in step with $PWD - so a
-# relative path handed to one can land in a completely different directory. Everything below
-# routes through here first. The leaf is rejoined rather than resolved because the target file
-# often doesn't exist yet, which Convert-Path rejects.
+# Raw [System.IO.File] calls resolve a relative path against [Environment]::CurrentDirectory, which
+# PowerShell does NOT keep in step with $PWD. The leaf is rejoined rather than resolved because the
+# target often doesn't exist yet, which Convert-Path rejects.
 function Resolve-PathForDotNetIo {
     param([Parameter(Mandatory = $true)][string]$Path)
 
@@ -15,14 +12,10 @@ function Resolve-PathForDotNetIo {
     return Join-Path $ResolvedDir $Leaf
 }
 
-# Swaps an already-written temp file into place in a single rename, so a crash/disk-full
-# mid-write can never leave $DestinationPath truncated.
-#
-# File.Replace rather than the 3-arg File.Move(overwrite) overload: that overload doesn't
-# exist on .NET Framework, so it would throw under Windows PowerShell 5.1 (a real deployment
-# target). Replace's quirk is that it requires $dst to already exist, hence the placeholder.
-# [NullString]::Value (not a bare $null) for the backup-path argument: $null coerces to an
-# empty string across the PowerShell/.NET boundary and Replace rejects that.
+# Swaps an already-written temp file into place in a single rename, so a crash mid-write can never
+# leave $DestinationPath truncated. File.Replace rather than File.Move(overwrite), which doesn't
+# exist on .NET Framework; Replace requires $dst to already exist, hence the placeholder.
+# [NullString]::Value for the backup argument: a bare $null coerces to "" and Replace rejects that.
 function Move-FileAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$SourcePath,
@@ -38,10 +31,8 @@ function Move-FileAtomic {
     [System.IO.File]::Replace($ResolvedSource, $ResolvedDestination, [NullString]::Value)
 }
 
-# Write-then-Move-FileAtomic wrapper. The temp name mixes $PID with a GUID so two
-# near-simultaneous writers (separate processes, or racing operations in one) can't collide
-# on the same temp path. -LiteralPath throughout avoids glob-interpreting bracket characters
-# that can legitimately appear in a topology/config path.
+# Write-then-Move-FileAtomic wrapper. The temp name mixes $PID with a GUID so two near-simultaneous
+# writers can't collide. -LiteralPath throughout avoids glob-interpreting bracket characters.
 function Set-FileContentAtomic {
     param(
         [Parameter(Mandatory = $true)][string]$DestinationPath,

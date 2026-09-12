@@ -2,10 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-// vis-network redraws the whole canvas synchronously on every DataSet change and queues a
-// repeat through requestAnimationFrame, so the cost of populating the diagram is set by how
-// many times the datasets are written, not by how many nodes there are. doRenderVisibleGraph
-// is lifted out and run against stub datasets to count those writes.
+// vis-network redraws the whole canvas synchronously on every DataSet change, so the cost is set by
+// how many times the datasets are written. doRenderVisibleGraph is run against stubs to count them.
 const src = fs.readFileSync(new URL('../graph.js', import.meta.url), 'utf8');
 
 function makeDataset() {
@@ -15,8 +13,7 @@ function makeDataset() {
   return ds;
 }
 
-// A star: one root with `leaves` children, plus one secondary (non-tree) link between the
-// first two leaves so the secondary-edge branch is exercised too.
+// A star, plus one secondary (non-tree) link between two leaves to exercise that branch.
 function fixture(leaves) {
   const ids = ['root', ...Array.from({ length: leaves }, (_, i) => `n${i}`)];
   const visibleEdges = ids.slice(1).map(id => ({ from: 'root', to: id }));
@@ -32,10 +29,8 @@ function fixture(leaves) {
   };
 }
 
-// doRenderVisibleGraph reads its collaborators as free variables, so they are supplied as
-// parameters. `fitOnNextRender` is a module-level `var` it also writes back to, which a
-// parameter cannot model - the surrounding `var` declaration is lifted in with it, and the
-// caller seeds it through a getter/setter pair on `state`.
+// doRenderVisibleGraph reads its collaborators as free variables, supplied here as parameters.
+// `fitOnNextRender` is a module-level var it writes back to, seeded through a getter/setter.
 const BODY = src.match(/var fitOnNextRender = false;/)[0] + '\n' +
   'fitOnNextRender = state.fit;\n' +
   src.match(/async function doRenderVisibleGraph\(\)[\s\S]*?\n\}/)[0] +
