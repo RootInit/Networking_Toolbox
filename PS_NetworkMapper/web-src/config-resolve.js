@@ -1,0 +1,50 @@
+// Matches a scanned device to its Configuration.json location entry. Keyed by chassis serial first
+// (survives IP/hostname changes and reimaging), then hostname, then DeviceIP.
+
+// Local copy of utils.js's window.asArray - this file also runs under Node, where window is absent.
+function asArray(val) {
+  if (Array.isArray(val)) return val.filter(function (item) { return item !== null && item !== undefined; });
+  if (val === null || val === undefined) return [];
+  return [val];
+}
+
+function extractDeviceKeys(device) {
+  var serial = null;
+  asArray(device.StackMembers).forEach(function (member) {
+    if (serial === null && member && (member.Role === 'Standalone' || member.Role === 'Master') && member.Serial) {
+      serial = member.Serial;
+    }
+  });
+  var hostname = (device.Hostname && device.Hostname !== 'Unknown') ? device.Hostname : null;
+  return { serial: serial, hostname: hostname, ip: device.DeviceIP ? String(device.DeviceIP) : null };
+}
+
+function resolveDeviceLocation(device, configEntries) {
+  var keys = extractDeviceKeys(device);
+  var byKeyType = { serial: [], hostname: [], ip: [] };
+  configEntries.forEach(function (entry) {
+    if (byKeyType[entry.keyType]) byKeyType[entry.keyType].push(entry);
+  });
+
+  var tiers = [['serial', keys.serial], ['hostname', keys.hostname], ['ip', keys.ip]];
+  for (var i = 0; i < tiers.length; i++) {
+    var keyType = tiers[i][0], value = tiers[i][1];
+    if (!value) continue;
+    var match = byKeyType[keyType].find(function (e) { return e.key === value; });
+    if (match) return match;
+  }
+  return null;
+}
+
+function bestKeyForSave(device) {
+  var keys = extractDeviceKeys(device);
+  if (keys.serial) return { key: keys.serial, keyType: 'serial' };
+  if (keys.hostname) return { key: keys.hostname, keyType: 'hostname' };
+  return { key: keys.ip, keyType: 'ip' };
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { extractDeviceKeys: extractDeviceKeys, resolveDeviceLocation: resolveDeviceLocation, bestKeyForSave: bestKeyForSave };
+} else if (typeof window !== 'undefined') {
+    window.ConfigResolve = { extractDeviceKeys: extractDeviceKeys, resolveDeviceLocation: resolveDeviceLocation, bestKeyForSave: bestKeyForSave };
+}

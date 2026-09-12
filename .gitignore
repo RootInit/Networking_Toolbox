@@ -1,0 +1,40 @@
+# Real device-location data and credentials (.json is the -NoEncryption plaintext equivalent).
+PS_NetworkMapper/Configuration.json.enc
+PS_NetworkMapper/Configuration.json
+
+# Crawl output - real internal topology/IP data. A demo fleet comes from
+# web-src/tools/generate-fixture.mjs, never from checked-in snapshots.
+PS_NetworkMapper/Network_Maps/NetworkMap_*.json
+PS_NetworkMapper/Network_Maps/NetworkMap_*.json.enc
+PS_NetworkMapper/**/Configuration.fixture.json
+
+PS_NetworkMapper/Mapper_Debug.log
+PS_NetworkMapper/RawDumps/
+
+# Local git worktrees used for isolated feature-plan execution.
+.worktrees/
+
+# Claude Code working directory: per-session state, not source.
+.claude/
+
+# Raw switch session captures - real device output, same sensitivity as Network_Maps/. The archive
+# extensions are listed because the .txt rule alone let a Raw_compressed.tar through once.
+PS_NetworkMapper/Raw_*.txt
+PS_NetworkMapper/Raw_*.tar
+PS_NetworkMapper/Raw_*.tar.*
+PS_NetworkMapper/Raw_*.zip
+PS_NetworkMapper/Raw_*.7z
+
+# Atomic-write temps from lib/FileHelpers.ps1. Under -NoEncryption the Configuration.json temp is
+# plaintext SSH credentials, and the exact-name rule above does not match it.
+PS_NetworkMapper/**/*.tmp
+
+# Runtime debug logs; WebServer.ps1 also writes Network_Maps/ScanNetwork_Debug.log.
+PS_NetworkMapper/**/*.log
+
+# Get-JunosNodeData.ps1 derives RawDumps/ from the debug-log directory, so it does not always land
+# at PS_NetworkMapper/RawDumps/.
+PS_NetworkMapper/**/RawDumps/
+
+# Protect-MapperFile.ps1's derived decrypt output - plaintext credentials.
+PS_NetworkMapper/**/*.decrypted.json

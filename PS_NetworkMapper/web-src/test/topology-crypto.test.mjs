@@ -1,0 +1,241 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { TopologyCrypto } from '../topology-crypto.js';
+
+const PASSWORD = 'correct-horse-battery-staple';
+const ITERATIONS = 1000; // MIN_ITERATIONS in topology-crypto.js; keeps tests fast
+
+function b64(bytes) { return Buffer.from(bytes).toString('base64'); }
+
+async function buildEnvelope(plainJson, password, format, iterations = ITERATIONS) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(16));
+
+  const baseKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', salt, iterations, hash: 'SHA-256' }, baseKey, 512);
+  const keyMaterial = new Uint8Array(bits);
+  const encKeyBytes = keyMaterial.slice(0, 32), macKeyBytes = keyMaterial.slice(32, 64);
+
+  const encKey = await crypto.subtle.importKey('raw', encKeyBytes, { name: 'AES-CBC' }, false, ['encrypt']);
+  const cipherBuf = await crypto.subtle.encrypt({ name: 'AES-CBC', iv }, encKey, new TextEncoder().encode(plainJson));
+  const cipherBytes = new Uint8Array(cipherBuf);
+
+  const macKey = await crypto.subtle.importKey('raw', macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const macBuf = await crypto.subtle.sign('HMAC', macKey, new Uint8Array([...iv, ...cipherBytes]));
+
+  return {
+    format, version: 1, kdf: 'PBKDF2-SHA256', iterations,
+    cipher: 'AES-256-CBC', macAlgorithm: 'HMAC-SHA256',
+    salt: b64(salt), iv: b64(iv), mac: b64(new Uint8Array(macBuf)), ciphertext: b64(cipherBytes),
+  };
+}
+
+test('decryptEnvelope round-trips a real envelope built independently (cross-implementation check)', async () => {
+  const envelope = await buildEnvelope('{"hello":"world"}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  const plain = await TopologyCrypto.decryptEnvelope(envelope, PASSWORD);
+  assert.equal(plain, '{"hello":"world"}');
+});
+
+test('decryptEnvelope round-trips a genuinely empty topology ("[]") byte-for-byte', async () => {
+  const envelope = await buildEnvelope('[]', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  const plain = await TopologyCrypto.decryptEnvelope(envelope, PASSWORD);
+  assert.equal(plain, '[]');
+});
+
+test('decryptEnvelope defaults expectedFormats to the topology format (backward compatible)', async () => {
+  const envelope = await buildEnvelope('{"a":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  const plain = await TopologyCrypto.decryptEnvelope(envelope, PASSWORD); // no third arg
+  assert.equal(plain, '{"a":1}');
+});
+
+test('decryptEnvelope accepts a config envelope when PSNetworkMapper-EncryptedConfig is in expectedFormats', async () => {
+  const envelope = await buildEnvelope('{"devices":[]}', PASSWORD, 'PSNetworkMapper-EncryptedConfig');
+  const plain = await TopologyCrypto.decryptEnvelope(envelope, PASSWORD, ['PSNetworkMapper-EncryptedConfig']);
+  assert.equal(plain, '{"devices":[]}');
+});
+
+test('decryptEnvelope rejects a config envelope when only the topology format is expected', async () => {
+  const envelope = await buildEnvelope('{"devices":[]}', PASSWORD, 'PSNetworkMapper-EncryptedConfig');
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD), // default expectedFormats = topology only
+    /Not a recognized encrypted file/
+  );
+});
+
+test('decryptEnvelope rejects the wrong password with a clear error, not a crypto exception', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, 'wrong-password'),
+    /Incorrect password, or the file is corrupted/
+  );
+});
+
+test('decryptEnvelope normalizes a non-base64 field (corrupted file) instead of throwing a raw DOMException', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  envelope.ciphertext = 'not-valid-base64!!!not-valid-base64!!!'; // '!' is not in the base64 alphabet
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    (err) => err instanceof Error && err.message === 'Incorrect password, or the file is corrupted.'
+  );
+});
+
+test('decryptEnvelope normalizes a missing envelope field instead of throwing a raw exception', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  delete envelope.salt;
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    (err) => err instanceof Error && err.message === 'Incorrect password, or the file is corrupted.'
+  );
+});
+
+test('decryptEnvelope normalizes a ciphertext length that is not a multiple of the AES block size', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  // Valid base64 decoding to a non-multiple of 16 - AES-CBC throws a raw OperationError on this.
+  envelope.ciphertext = b64(new Uint8Array([1, 2, 3, 4, 5]));
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    (err) => err instanceof Error && err.message === 'Incorrect password, or the file is corrupted.'
+  );
+});
+
+test('decryptEnvelope rejects a wrong envelope version', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  envelope.version = 2;
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Unsupported envelope version: 2/
+  );
+});
+
+test('decryptEnvelope rejects a wrong kdf', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  envelope.kdf = 'PBKDF2-SHA1';
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Unsupported encryption parameters/
+  );
+});
+
+test('decryptEnvelope rejects a missing kdf', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  delete envelope.kdf;
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Unsupported encryption parameters/
+  );
+});
+
+test('decryptEnvelope rejects a wrong cipher', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  envelope.cipher = 'AES-128-CBC';
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Unsupported encryption parameters/
+  );
+});
+
+test('decryptEnvelope rejects a missing cipher', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  delete envelope.cipher;
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Unsupported encryption parameters/
+  );
+});
+
+test('decryptEnvelope rejects a wrong macAlgorithm', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  envelope.macAlgorithm = 'HMAC-SHA1';
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Unsupported encryption parameters/
+  );
+});
+
+test('decryptEnvelope rejects a missing macAlgorithm', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  delete envelope.macAlgorithm;
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Unsupported encryption parameters/
+  );
+});
+
+test('decryptEnvelope rejects an iterations count below the minimum', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  envelope.iterations = 999; // MIN_ITERATIONS in topology-crypto.js is 1000
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Iteration count out of range: 999/
+  );
+});
+
+test('decryptEnvelope rejects an iterations count above the maximum', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  envelope.iterations = 5000001; // MAX_ITERATIONS in topology-crypto.js is 5,000,000
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Iteration count out of range: 5000001/
+  );
+});
+
+test('decryptEnvelope rejects a non-integer iterations value', async () => {
+  const envelope = await buildEnvelope('{"x":1}', PASSWORD, 'PSNetworkMapper-EncryptedTopology');
+  envelope.iterations = 1000.5;
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(envelope, PASSWORD),
+    /Iteration count out of range: 1000\.5/
+  );
+});
+
+// Fixed cross-runtime vector produced by lib/TopologyCrypto.ps1. Run-Tests.ps1 decrypts this same
+// envelope from its own copy, so the two implementations must stay byte-compatible; every other
+// test here builds its envelope with the SAME Web Crypto code it then verifies, so none would
+// notice them drifting. Non-ASCII in both password (incl. a surrogate pair) and plaintext, because
+// that is where PBKDF2 password encoding and UTF-8 decoding differ if either side gets it wrong.
+const PS_INTEROP_ENVELOPE = {
+  format: 'PSNetworkMapper-EncryptedTopology', version: 1, kdf: 'PBKDF2-SHA256', iterations: 1000,
+  cipher: 'AES-256-CBC', macAlgorithm: 'HMAC-SHA256',
+  salt: 'AQIDBAUGBwgJCgsMDQ4PEA==',
+  iv: 'b+iBnE7OTNxUHdbMJLgqNA==',
+  mac: 'ZPIp4GkNDGJeBU0QZ1VLLci2HQGC482oBvInAG1G5tw=',
+  ciphertext: 'k1v8NbYk+p0Qm04nui5MVixuNLLTPAxZyxnlc0vwyvgCnckpR+qhdOu9xhXCE2L2sDIZVf75RyOZ3oE2RdLWeJtbJjgk7Ub+lA/5hzA+HJPzSFNulBOHlKPCTVbyGEknwmUyA+7tu8l4JHNBkwk6cw==',
+};
+const PS_INTEROP_PASSWORD = 'Correct Horse Battery Stapleäöü😀';
+const PS_INTEROP_PLAINTEXT = '{"Topology":[{"DeviceIP":"10.55.1.1","Hostname":"swutch-e"}],"ScanTimestamp":"2026-01-01T00:00:00Z"}';
+
+test('decrypts a fixed envelope produced by the PowerShell implementation (interop)', async () => {
+  const plain = await TopologyCrypto.decryptEnvelope(PS_INTEROP_ENVELOPE, PS_INTEROP_PASSWORD);
+  assert.equal(plain, PS_INTEROP_PLAINTEXT);
+});
+
+test('rejects the PowerShell interop envelope under the wrong password', async () => {
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(PS_INTEROP_ENVELOPE, 'not the password'),
+    /Incorrect password, or the file is corrupted/
+  );
+});
+
+const base = {
+  format: 'PSNetworkMapper-EncryptedTopology', version: 1, kdf: 'PBKDF2-SHA256',
+  cipher: 'AES-256-CBC', macAlgorithm: 'HMAC-SHA256', iterations: ITERATIONS,
+  salt: b64(new Uint8Array(16)), iv: b64(new Uint8Array(16)),
+  ciphertext: b64(new Uint8Array(32)), mac: b64(new Uint8Array(32)),
+};
+async function rejectionOf(env) {
+  try { await TopologyCrypto.decryptEnvelope(env, 'pw'); assert.fail('should have rejected'); }
+  catch (err) { return err; }
+}
+
+// The re-prompt loops gate on this flag: an untagged rejection must exit through the error path.
+test('decryptEnvelope tags only the retryable wrong-password/corrupt failure', async () => {
+  assert.equal((await rejectionOf(base)).wrongPassword, true);
+  assert.equal((await rejectionOf({ ...base, salt: '!!!not base64!!!' })).wrongPassword, true);
+});
+
+test('decryptEnvelope leaves password-independent structural failures untagged', async () => {
+  for (const env of [{ ...base, version: 2 }, { ...base, cipher: 'AES-128-GCM' }, { ...base, iterations: 5 }]) {
+    assert.equal((await rejectionOf(env)).wrongPassword, undefined);
+  }
+});
+

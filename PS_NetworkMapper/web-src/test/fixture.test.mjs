@@ -1,0 +1,494 @@
+import test from 'node:test';
+import assert from 'node:assert';
+import { execFileSync, spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import Chassis from '../chassis.js';
+import { computeNeighborEdges } from '../topology-graph.js';
+
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const ROOT = path.join(HERE, '..', '..');
+const GENERATOR = path.join(ROOT, 'web-src', 'tools', 'generate-fixture.mjs');
+
+function generate(args) {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_fixture_'));
+    execFileSync(process.execPath, [GENERATOR, '--out', out, ...args], { stdio: ['ignore', 'ignore', 'ignore'] });
+    // Sorted by name, which for NetworkMap_<iso-ish> is chronological order.
+    const names = fs.readdirSync(out).filter(f => /^NetworkMap_.*\.fixture\.json$/.test(f)).sort();
+    const snapshots = names.map(n => JSON.parse(fs.readFileSync(path.join(out, n), 'utf8')));
+    return {
+        dir: out, names, snapshots,
+        map: snapshots[snapshots.length - 1],
+        config: JSON.parse(fs.readFileSync(path.join(out, 'Configuration.fixture.json'), 'utf8')),
+        raw: Buffer.concat(names.map(n => fs.readFileSync(path.join(out, n)))),
+    };
+}
+
+// One generation shared by most cases: it's deterministic, and per-test runs would dominate the suite.
+const fixture = generate(['--devices', '120', '--seed', '3']);
+const topology = fixture.map.Topology;
+
+test('the fixture is a snapshot the app can load', () => {
+    assert.equal(topology.length, 120);
+    assert.ok(fixture.map.ScanTimestamp, 'ScanTimestamp is what the crawl-age badge reads');
+    // The server and the folder loader both match on NetworkMap_*.json and exclude *.tmp.json.
+    for (const name of fixture.names) {
+        assert.ok(/^NetworkMap_.*\.json$/.test(name) && !/\.tmp\.json$/.test(name), `${name} would not be picked up`);
+    }
+});
+
+// A fall back to the inferred panel means the catalogue's port names or the scrape have drifted.
+test('every drawn member renders from its own catalogue art, never the inferred panel', () => {
+    const offenders = [];
+    for (const device of topology) {
+        if (device.ScanStatus !== 'Ok') continue;
+        for (const member of Chassis.buildMembers(device)) {
+            if (member.note) continue;
+            if (member.inferred) offenders.push(`${device.Hostname} fpc${member.fpc} ${member.model}`);
+        }
+    }
+    assert.deepEqual(offenders, []);
+});
+
+test('a modular chassis reports ports but carries a no-drawing note', () => {
+    const modular = topology.find(d => d.StackMembers.some(m => /EX9200/i.test(m.Model)));
+    assert.ok(modular, 'the fixture keeps one undrawable chassis');
+    assert.ok(modular.Interfaces.length > 0, 'missing art is a rendering decision, not missing scan data');
+    assert.ok(Chassis.buildMembers(modular)[0].note);
+});
+
+test('port counts match the real hardware, not a token handful', () => {
+    const fortyEightPort = topology.find(d =>
+        d.ScanStatus === 'Ok' && d.StackMembers.length === 1 && /-48[PT]$/.test(d.StackMembers[0].Model));
+    assert.ok(fortyEightPort, 'the fixture includes 48-port access switches');
+    assert.ok(fortyEightPort.Interfaces.length >= 48,
+        `${fortyEightPort.StackMembers[0].Model} reported only ${fortyEightPort.Interfaces.length} ports`);
+});
+
+test('LLDP is reported from both ends of every link', () => {
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+    for (const device of topology) {
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            if (!peer || peer.ScanStatus !== 'Ok') continue;
+            const back = peer.Neighbors.find(n => String(n.ManagementIP) === String(device.DeviceIP));
+            assert.ok(back, `${peer.Hostname} does not report ${device.Hostname} back`);
+            assert.equal(back.RemotePort, neighbor.LocalPort);
+            assert.equal(back.LocalPort, neighbor.RemotePort);
+        }
+    }
+});
+
+test('the graph is connected and carries redundant links, not just a tree', () => {
+    const edges = computeNeighborEdges(topology);
+    const adjacency = new Map(topology.map(d => [String(d.DeviceIP), []]));
+    for (const e of edges) {
+        adjacency.get(String(e.from))?.push(String(e.to));
+        adjacency.get(String(e.to))?.push(String(e.from));
+    }
+    const seen = new Set([String(topology[0].DeviceIP)]);
+    const queue = [String(topology[0].DeviceIP)];
+    while (queue.length) {
+        for (const next of adjacency.get(queue.pop()) || []) {
+            if (!seen.has(next)) { seen.add(next); queue.push(next); }
+        }
+    }
+    const scanned = topology.filter(d => d.ScanStatus === 'Ok').length;
+    assert.ok(seen.size >= scanned * 0.95, `only ${seen.size} of ${topology.length} devices are reachable`);
+    assert.ok(edges.length > topology.length, 'a pure tree never reaches the secondary-edge rendering');
+
+    // An unpatched switch reads as a layout quirk, not a failure. A placeholder is exempt - unreadable.
+    const orphans = topology.filter(d => d.ScanStatus === 'Ok' && d.Neighbors.length === 0);
+    assert.deepEqual(orphans.map(d => d.Hostname), [], 'scanned devices with no neighbours at all');
+});
+
+test('interface rows carry the fields the table, faceplate and sort all read', () => {
+    const rows = topology.flatMap(d => d.Interfaces);
+    for (const field of ['Port', 'Admin', 'Link', 'Desc', 'STP', 'PoE']) {
+        assert.ok(rows.every(r => r[field] !== undefined), `every row needs ${field}`);
+    }
+    // "Longest inactive" excludes rows with no LastFlappedSeconds, so both kinds must be present.
+    assert.ok(rows.some(r => r.LastFlappedSeconds === null));
+    assert.ok(rows.some(r => Number.isFinite(r.LastFlappedSeconds)));
+    // The activity lens bands at 72h and 6 months; all three must be represented.
+    const flaps = rows.map(r => r.LastFlappedSeconds).filter(Number.isFinite);
+    assert.ok(flaps.some(s => s <= Chassis.H72_S));
+    assert.ok(flaps.some(s => s > Chassis.H72_S && s <= Chassis.H6MO_S));
+    assert.ok(flaps.some(s => s > Chassis.H6MO_S));
+});
+
+test('clients span VLANs and leave some IPs for ARP correlation to backfill', () => {
+    const clients = topology.flatMap(d => d.Clients);
+    assert.ok(new Set(clients.map(c => c.VLAN_Tag)).size >= 4, 'the VLAN filter needs several VLANs');
+    const unknown = clients.filter(c => c.IP === 'Unknown');
+    assert.ok(unknown.length > 0, 'an all-resolved fixture never exercises MAC->IP correlation');
+    const arpMacs = new Set(topology.flatMap(d => d.ArpEntries).map(a => a.MAC));
+    assert.ok(unknown.some(c => arpMacs.has(c.MAC)), 'an unresolved client needs its ARP entry on another device');
+});
+
+test('ports shared by two MACs produce all three daisy-chain confidences', () => {
+    const verdicts = new Set();
+    for (const device of topology) {
+        const med = new Map(device.MedNeighbors.map(m => [m.LocalPort, m]));
+        const byPort = new Map();
+        for (const client of device.Clients) {
+            const port = client.Port.replace(/\.\d+$/, '');
+            if (!byPort.has(port)) byPort.set(port, []);
+            byPort.get(port).push(client);
+        }
+        for (const [port, clients] of byPort) {
+            if (new Set(clients.map(c => c.MAC)).size < 2) continue;
+            verdicts.add(med.has(port) ? 'confirmed' : new Set(clients.map(c => c.VLAN_Tag)).size >= 2 ? 'likely' : 'possible');
+        }
+    }
+    assert.deepEqual([...verdicts].sort(), ['confirmed', 'likely', 'possible']);
+});
+
+// Anything neither "Unknown" nor "Authenticated" counts as a violation, so all three must appear.
+test('dot1x states cover unobserved, authenticated and failed', () => {
+    const states = new Set(topology.flatMap(d => d.Clients).map(c => c.Dot1x_State));
+    assert.ok(states.has('Unknown'));
+    assert.ok(states.has('Authenticated'));
+    assert.ok([...states].some(s => s !== 'Unknown' && s !== 'Authenticated'), 'no dot1x violations to count');
+});
+
+test('failed scans appear as placeholder nodes carrying a status and an error', () => {
+    const failed = topology.filter(d => d.ScanStatus !== 'Ok');
+    assert.ok(failed.length > 0);
+    for (const device of failed) {
+        assert.ok(device.ScanError, `${device.ScanStatus} needs an error string`);
+        assert.equal(device.Interfaces.length, 0, 'a device the crawler could not read has no interface data');
+    }
+});
+
+// A key the crawler always writes but the fixture omits reaches the UI as `undefined`.
+test('fixture devices carry every key Get-JunosNodeData.ps1 initializes', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'lib', 'Get-JunosNodeData.ps1'), 'utf8');
+    const init = source.match(/\$NodeData = @\{([\s\S]*?)\n\}/);
+    assert.ok(init, 'could not locate the $NodeData initializer - has it moved?');
+    const expected = [...init[1].matchAll(/(?:^|;)\s*([A-Za-z][A-Za-z0-9]*)\s*=/gm)].map(m => m[1]).sort();
+    assert.ok(expected.length > 10, `only found ${expected.length} keys`);
+    for (const device of [topology.find(d => d.ScanStatus === 'Ok'), topology.find(d => d.ScanStatus !== 'Ok')]) {
+        assert.deepEqual(Object.keys(device).sort(), expected, `${device.ScanStatus} node key set`);
+    }
+});
+
+test('placed devices are keyed by serial so the Map can find them', () => {
+    assert.ok(fixture.config.devices.length > 0);
+    for (const placed of fixture.config.devices) {
+        assert.equal(placed.keyType, 'serial');
+        assert.ok(Math.abs(placed.lat) <= 90 && Math.abs(placed.lng) <= 180);
+        assert.ok(placed.building, 'a pin with no building cannot be grouped');
+    }
+    assert.ok(new Set(fixture.config.devices.map(d => d.building)).size > 1, 'clustering needs more than one building');
+
+    // Not all of it: a switch commissioned since the location file was written has no pin yet.
+    const placedKeys = new Set(fixture.config.devices.map(d => d.key));
+    const scanned = topology.filter(d => d.ScanStatus === 'Ok');
+    const placedCount = scanned.filter(d => d.StackMembers.some(m => placedKeys.has(m.Serial))).length;
+    assert.ok(placedCount > scanned.length * 0.9, `only ${placedCount} of ${scanned.length} scanned devices are placed`);
+    assert.ok(placedCount < scanned.length, 'an entirely placed fleet never shows the unplaced-devices panel');
+});
+
+/* ---- geography: a closet uplinks to the nearest distribution frame, a closet fed from another
+   closet is elsewhere in the same building, and nothing reaches across campus. ---- */
+
+const metres = (a, b) => {
+    const dLat = (a.lat - b.lat) * 111320;
+    const dLng = (a.lng - b.lng) * 111320 * Math.cos(a.lat * Math.PI / 180);
+    return Math.sqrt(dLat * dLat + dLng * dLng);
+};
+const placedBySerial = () => new Map(fixture.config.devices.map(d => [d.key, d]));
+const pinOf = (device, placed) => {
+    for (const m of device.StackMembers || []) if (placed.has(m.Serial)) return placed.get(m.Serial);
+    return null;   // a device the crawler could not read has no serial, so no pin
+};
+const roleOf = (device) => (/-core\d/.test(device.Hostname) ? 'CORE' : /-dist\d/.test(device.Hostname) ? 'DIST' : 'ACC');
+
+test('every pin sits on the UW Seattle campus', () => {
+    for (const placed of fixture.config.devices) {
+        assert.ok(placed.lat > 47.646 && placed.lat < 47.665, `${placed.key} at lat ${placed.lat}`);
+        assert.ok(placed.lng > -122.322 && placed.lng < -122.296, `${placed.key} at lng ${placed.lng}`);
+        assert.match(placed.building, /\(([A-Z]{2,4})\)$/, 'a building name should carry its UW abbreviation');
+    }
+    const buildings = new Set(fixture.config.devices.map(d => d.building));
+    assert.ok(buildings.size >= 20, `only ${buildings.size} distinct buildings`);
+});
+
+test('a stack is in one room, not spread across campus', () => {
+    const placed = placedBySerial();
+    for (const device of topology) {
+        const pins = (device.StackMembers || []).map(m => placed.get(m.Serial)).filter(Boolean);
+        for (const pin of pins) assert.ok(metres(pins[0], pin) < 150, `${device.Hostname} members are ${Math.round(metres(pins[0], pin))} m apart`);
+    }
+});
+
+// Zone first, distance second - a building is fed from its own zone's frame even where another
+// zone's is physically nearer (Fishery Sciences). The zone leads each placement's notes.
+const zoneOfPin = (pin) => String(pin.notes).split(' - ')[0];
+
+// Stated here rather than imported, so widening the fibre plant is a deliberate edit to both.
+const ADJACENT = {
+    'West Campus': ['Central Campus', 'North Campus'],
+    'Central Campus': ['West Campus', 'North Campus', 'South Campus', 'East Campus'],
+    'South Campus': ['Central Campus', 'East Campus'],
+    'North Campus': ['Central Campus', 'West Campus'],
+    'East Campus': ['Central Campus', 'South Campus'],
+};
+
+test('an access switch uplinks to the nearest frame in its own zone', () => {
+    const placed = placedBySerial();
+    const frames = topology.filter(d => roleOf(d) === 'DIST')
+        .map(d => ({ ip: String(d.DeviceIP), pin: pinOf(d, placed) })).filter(f => f.pin);
+    assert.ok(frames.length >= 4, 'campus needs several distribution frames for this to mean anything');
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+
+    // Pins are jittered by about a footprint, so assert only that nothing is patched much further.
+    const TIE_M = 120;
+    const nearestOf = (pin, candidates) => Math.min(...candidates.map(f => metres(pin, f.pin)));
+
+    let primaries = 0, secondaries = 0;
+    for (const device of topology) {
+        if (roleOf(device) !== 'ACC') continue;
+        const pin = pinOf(device, placed);
+        if (!pin) continue;
+        const zone = zoneOfPin(pin);
+        const inZone = frames.filter(f => zoneOfPin(f.pin) === zone);
+
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            if (!peer || roleOf(peer) !== 'DIST') continue;
+            const peerZone = zoneOfPin(pinOf(peer, placed));
+            const chosen = metres(pin, pinOf(peer, placed));
+
+            if (peerZone === zone) {
+                primaries++;
+                assert.ok(chosen <= nearestOf(pin, inZone) + TIE_M,
+                    `${device.Hostname} is patched to ${peer.Hostname} at ${Math.round(chosen)} m when its zone has one at ${Math.round(nearestOf(pin, inZone))} m`);
+                continue;
+            }
+            // The only out-of-zone uplink is the deliberate dual-homing, to a bordering zone.
+            secondaries++;
+            assert.ok(ADJACENT[zone].includes(peerZone),
+                `${device.Hostname} (${zone}) dual-homes to ${peer.Hostname} in ${peerZone}, which does not border it`);
+            const bordering = frames.filter(f => ADJACENT[zone].includes(zoneOfPin(f.pin)));
+            assert.ok(chosen <= nearestOf(pin, bordering) + TIE_M,
+                `${device.Hostname} dual-homes to ${peer.Hostname} at ${Math.round(chosen)} m when a bordering zone has one at ${Math.round(nearestOf(pin, bordering))} m`);
+        }
+    }
+    assert.ok(primaries > 20, `only ${primaries} primary uplinks checked`);
+    assert.ok(secondaries > 0, 'no dual-homed closets, so the secondary-edge rendering is untested');
+});
+
+test('a switch fed from another switch is in the same building', () => {
+    const placed = placedBySerial();
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+    let daisies = 0;
+    for (const device of topology) {
+        if (roleOf(device) !== 'ACC') continue;
+        const pin = pinOf(device, placed);
+        if (!pin) continue;
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            if (!peer || roleOf(peer) !== 'ACC') continue;
+            const peerPin = pinOf(peer, placed);
+            if (!peerPin) continue;
+            daisies++;
+            assert.equal(peerPin.building, pin.building, `${device.Hostname} is daisy-chained to ${peer.Hostname} in another building`);
+        }
+    }
+    assert.ok(daisies > 0, 'no daisy chains to check');
+});
+
+test('links are campus-length, not wishful', () => {
+    const placed = placedBySerial();
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+    const seen = new Set();
+    const lengths = [];
+    for (const device of topology) {
+        const pin = pinOf(device, placed);
+        if (!pin) continue;
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            const peerPin = peer && pinOf(peer, placed);
+            if (!peerPin) continue;
+            const key = [String(device.DeviceIP), String(neighbor.ManagementIP)].sort().join('|');
+            if (seen.has(key)) continue;
+            seen.add(key);
+            lengths.push(metres(pin, peerPin));
+        }
+    }
+    lengths.sort((a, b) => a - b);
+    assert.ok(lengths.length > 50);
+    // The campus is ~1.5 km corner to corner, so nothing can legitimately exceed that.
+    assert.ok(lengths[lengths.length - 1] < 2000, `longest link is ${Math.round(lengths[lengths.length - 1])} m`);
+    assert.ok(lengths[Math.floor(lengths.length / 2)] < 400, `median link is ${Math.round(lengths[Math.floor(lengths.length / 2)])} m`);
+});
+
+// Four dashboard tabs are snapshot comparisons, so a one-snapshot fixture leaves them untestable.
+test('successive daily snapshots differ the way a fleet does between crawls', () => {
+    assert.ok(fixture.snapshots.length >= 3, 'the default is several snapshots');
+    const times = fixture.snapshots.map(s => new Date(s.ScanTimestamp).getTime());
+    for (let i = 1; i < times.length; i++) assert.ok(times[i] > times[i - 1], 'snapshots must be ordered in time');
+
+    const [first, last] = [fixture.snapshots[0].Topology, fixture.map.Topology];
+    const ipsOf = t => new Set(t.map(d => String(d.DeviceIP)));
+    const [firstIps, lastIps] = [ipsOf(first), ipsOf(last)];
+    assert.ok([...lastIps].some(x => !firstIps.has(x)), 'no device was ever commissioned');
+    assert.ok([...firstIps].some(x => !lastIps.has(x)), 'no device was ever retired');
+
+    const configOf = t => new Map(t.map(d => [String(d.DeviceIP), d.Configuration]));
+    const [firstCfg, lastCfg] = [configOf(first), configOf(last)];
+    assert.ok([...lastCfg].some(([ip, cfg]) => firstCfg.has(ip) && firstCfg.get(ip) !== cfg), 'no configuration changed');
+
+    // Reboot detection compares boot timestamps, so a fleet whose Uptime never moves reports none.
+    const bootOf = t => new Map(t.map(d => [String(d.DeviceIP), d.Uptime]));
+    const [firstBoot, lastBoot] = [bootOf(first), bootOf(last)];
+    assert.ok([...lastBoot].some(([ip, up]) => firstBoot.has(ip) && firstBoot.get(ip) !== up && up !== 'Unknown'),
+        'no device rebooted between the first and last snapshot');
+});
+
+// Identity falls back to hostname for a placeholder, so a re-rolled failing set reads as churn.
+test('the set of unreachable devices is stable across snapshots', () => {
+    const failedIn = fixture.snapshots.map(s => new Set(s.Topology.filter(d => d.ScanStatus !== 'Ok').map(d => String(d.DeviceIP))));
+    for (let i = 1; i < failedIn.length; i++) {
+        const churn = [...failedIn[i]].filter(x => !failedIn[i - 1].has(x)).length
+            + [...failedIn[i - 1]].filter(x => !failedIn[i].has(x)).length;
+        assert.ok(churn <= 4, `${churn} devices changed reachability between snapshots ${i - 1} and ${i}`);
+        assert.ok(churn > 0, 'a fleet where nothing ever changes state has no reliability signal');
+    }
+});
+
+test('the same seed produces a byte-identical map', () => {
+    const again = generate(['--devices', '120', '--seed', '3']);
+    assert.ok(fixture.raw.equals(again.raw));
+    fs.rmSync(again.dir, { recursive: true, force: true });
+});
+
+test('a different seed produces a different map', () => {
+    const other = generate(['--devices', '120', '--seed', '4']);
+    assert.ok(!fixture.raw.equals(other.raw));
+    fs.rmSync(other.dir, { recursive: true, force: true });
+});
+
+test.after(() => fs.rmSync(fixture.dir, { recursive: true, force: true }));
+
+/* ---- pins land indoors: closets ring inside each building's OSM footprint, because jitter wide
+   enough to separate two closets also threw pins onto the lawn. ---- */
+
+const CAMPUS_ROWS = new Map([...fs.readFileSync(GENERATOR, 'utf8')
+    .matchAll(/\{ abbr: '([^']+)', name: '[^']+', lat: ([\d.]+), lng: (-[\d.]+), r: (\d+), closets: \d+/g)]
+    .map(m => [m[1], { lat: +m[2], lng: +m[3], r: +m[4] }]));
+
+test('the campus table declares a footprint radius for every building', () => {
+    assert.equal(CAMPUS_ROWS.size, 48, 'the regex above must keep matching the table');
+    for (const [abbr, b] of CAMPUS_ROWS) {
+        assert.ok(b.r >= 5 && b.r <= 25, `${abbr} has an implausible footprint radius of ${b.r} m`);
+    }
+});
+
+test('every pin is inside the footprint of the building it names', () => {
+    // The rack ring nudges stack members off their closet's spot by up to 1.2 m.
+    const RACK_ALLOWANCE = 1.3;
+    for (const placed of fixture.config.devices) {
+        const abbr = placed.building.match(/\(([A-Z]+)\)$/)[1];
+        const b = CAMPUS_ROWS.get(abbr);
+        assert.ok(b, `${placed.building} is not in the campus table`);
+        const d = metres(placed, b);
+        assert.ok(d <= b.r + RACK_ALLOWANCE,
+            `${placed.key} is ${d.toFixed(1)} m from ${abbr}'s interior point, outside its ${b.r} m footprint`);
+    }
+});
+
+test('no two devices share a pin', () => {
+    const pins = fixture.config.devices;
+    let closest = Infinity, pair = null;
+    for (let i = 0; i < pins.length; i++) {
+        for (let j = i + 1; j < pins.length; j++) {
+            const d = metres(pins[i], pins[j]);
+            if (d < closest) { closest = d; pair = [pins[i].key, pins[j].key]; }
+        }
+    }
+    // Two members of one virtual chassis are the closest legitimate pair, about a metre apart.
+    assert.ok(closest > 0.3, `${pair && pair.join(' and ')} are ${closest.toFixed(2)} m apart - effectively one dot`);
+});
+
+test("a building's distribution frame sits at its interior point, with the closets around it", () => {
+    // The main frame is the one piece of kit whose location in a building is not arbitrary.
+    const byBuilding = new Map();
+    for (const placed of fixture.config.devices) {
+        const abbr = placed.building.match(/\(([A-Z]+)\)$/)[1];
+        if (!byBuilding.has(abbr)) byBuilding.set(abbr, []);
+        byBuilding.get(abbr).push(placed);
+    }
+    let checked = 0;
+    for (const [abbr, pins] of byBuilding) {
+        // The room suffix 'A' is how the generator marks a frame rather than a closet.
+        const frames = pins.filter(p => /A$/.test(p.room));
+        if (!frames.length || pins.length < 3) continue;
+        const b = CAMPUS_ROWS.get(abbr);
+        const closets = pins.filter(p => !/A$/.test(p.room));
+        const nearestFrame = Math.min(...frames.map(p => metres(p, b)));
+        const medianCloset = closets.map(p => metres(p, b)).sort((x, y) => x - y)[Math.floor(closets.length / 2)];
+        assert.ok(nearestFrame <= medianCloset,
+            `${abbr}: the frame is ${nearestFrame.toFixed(1)} m out but the typical closet only ${medianCloset.toFixed(1)} m`);
+        checked++;
+    }
+    assert.ok(checked >= 5, `only ${checked} buildings had both a frame and closets to compare`);
+});
+
+test('the default fleet size is the documented one', () => {
+    const src = fs.readFileSync(GENERATOR, 'utf8');
+    const dflt = src.match(/flag\('devices', '(\d+)'\)/)[1];
+    assert.equal(dflt, '350');
+    assert.match(src, new RegExp(`# ${dflt} devices ->`), 'the usage comment must match the default');
+});
+
+/* ---- stale-config guard: the app reads Configuration.json but the generator writes
+   Configuration.fixture.json, so an uncopied regeneration resolves serials against the old fleet. ---- */
+
+function generateInto(parent, args) {
+    const maps = path.join(parent, 'Network_Maps');
+    fs.mkdirSync(maps, { recursive: true });
+    const res = spawnSync(process.execPath, [GENERATOR, '--out', maps, '--snapshots', '1', ...args],
+        { encoding: 'utf8' });
+    assert.equal(res.status, 0, res.stderr);
+    return { maps, stderr: res.stderr };
+}
+const tmpParent = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_cfg_'));
+
+test('regenerating over a stale server config warns that every pin will be wrong', () => {
+    const parent = tmpParent();
+    fs.writeFileSync(path.join(parent, 'Configuration.json'), JSON.stringify({
+        devices: [{ key: 'SYN99999', building: 'Nowhere (NWH)', lat: 1, lng: 1 }],
+        credentials: {}, settings: {},
+    }));
+    const { stderr } = generateInto(parent, ['--devices', '40']);
+    assert.match(stderr, /WARNING/);
+    assert.match(stderr, /Configuration\.json still holds the previous fixture's placements/);
+});
+
+test('the guard stays quiet when there is nothing to warn about', () => {
+    // No server config at all.
+    assert.doesNotMatch(generateInto(tmpParent(), ['--devices', '40']).stderr, /WARNING/);
+
+    // A config already matching the fleet just written.
+    const fresh = tmpParent();
+    const first = generateInto(fresh, ['--devices', '40']);
+    const written = JSON.parse(fs.readFileSync(path.join(first.maps, 'Configuration.fixture.json'), 'utf8'));
+    fs.writeFileSync(path.join(fresh, 'Configuration.json'),
+        JSON.stringify({ devices: written.devices, credentials: {}, settings: {} }));
+    assert.doesNotMatch(generateInto(fresh, ['--devices', '40']).stderr, /WARNING/);
+});
+
+test("the guard never comments on an operator's real placements", () => {
+    // Real serials are not SYN-prefixed, and a fixture run must not call the operator's config stale.
+    const real = tmpParent();
+    fs.writeFileSync(path.join(real, 'Configuration.json'), JSON.stringify({
+        devices: [{ key: 'JN123REAL', building: 'A real site', lat: 1, lng: 1 }],
+        credentials: {}, settings: {},
+    }));
+    assert.doesNotMatch(generateInto(real, ['--devices', '40']).stderr, /WARNING/);
+});
