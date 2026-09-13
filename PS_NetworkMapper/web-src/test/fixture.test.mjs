@@ -524,3 +524,57 @@ test('a --out that is not a Network_Maps directory writes no Configuration.json'
     assert.match(res.stderr, /no Configuration\.json was written/);
     assert.equal(fs.existsSync(path.join(parent, 'Configuration.json')), false);
 });
+
+// The device-level parity test above has an interface-level twin, and the gap there is much wider:
+// accessRow emits 7 of the 30 fields the worker initializes, so every diagnostic field added in
+// Phase 1 reaches the UI as `undefined` in fixture-driven work. This locks the gap rather than
+// closing it - the fixture's values have to mean something (consistent with link state, spread
+// across the bands the sorts rely on), and inventing 23 fields of plausible-looking data before the
+// initializer settles would bake in assumptions Phase 1 is still moving.
+//
+// It fails usefully in BOTH directions: a new initializer field nobody accounted for widens the
+// gap, and filling one in narrows it. Either way this list is the thing to edit, deliberately.
+const ACCESS_ROW_GAP = [
+    'ActiveAlarms', 'ActiveDefects', 'AutoNegotiation', 'Bundle', 'BundleMembers',
+    'CarrierTransitions', 'Duplex', 'DuplexNegotiated', 'InputBps', 'InputBytes', 'InputErrors',
+    'LinkLevelType', 'MacAddress', 'MediaType', 'Mtu', 'NegotiationStatus', 'OutputBps',
+    'OutputBytes', 'OutputErrors', 'SpeedConfigured', 'SpeedNegotiated', 'StpDetail', 'Vlans',
+];
+
+function interfaceInitializerKeys() {
+    const source = fs.readFileSync(path.join(ROOT, 'lib', 'Get-JunosNodeData.ps1'), 'utf8');
+    // Anchored on the opening line's own indentation via a backreference, NOT on a brace at column
+    // zero: this initializer's closing brace is indented 16 spaces, so the device-level test's
+    // regex matches nothing here and its length guard would be what fired.
+    const init = source.match(/^([ \t]*)\$NodeData\.Interfaces\[\$p\] = @\{\r?\n([\s\S]*?)\r?\n\1\}/m);
+    assert.ok(init, 'could not locate the interface initializer - has it moved?');
+    // Comment lines carry prose with semicolons and would otherwise contribute stray keys.
+    const body = init[2].split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+    return [...body.matchAll(/(?:^|;)\s*([A-Za-z][A-Za-z0-9]*)\s*=/gm)].map(m => m[1]).sort();
+}
+
+test('the interface initializer is still where the parity test looks for it', () => {
+    const expected = interfaceInitializerKeys();
+    assert.ok(expected.length > 20, `only found ${expected.length} interface keys`);
+    assert.ok(expected.includes('Port') && expected.includes('StpDetail'), 'parsed the wrong block');
+});
+
+test('fixture interfaces match Get-JunosNodeData.ps1, except for a known and enumerated gap', () => {
+    const expected = interfaceInitializerKeys();
+    const device = topology.find(d => d.ScanStatus === 'Ok' && d.Interfaces.length > 0);
+    assert.ok(device, 'no scanned device with interfaces in the fixture');
+
+    // Every generated row, not just the first: accessRow has branches (cage, PoE, live) and a field
+    // set that varies by branch is the same defect as one that is missing outright.
+    const perRow = new Set(topology.flatMap(d => d.Interfaces).map(i => Object.keys(i).sort().join(',')));
+    assert.equal(perRow.size, 1, `accessRow emits different field sets by branch:\n  ${[...perRow].join('\n  ')}`);
+
+    const actual = Object.keys(device.Interfaces[0]).sort();
+    const extra = actual.filter(k => !expected.includes(k));
+    const missing = expected.filter(k => !actual.includes(k));
+
+    assert.deepEqual(extra, [], `the fixture emits interface fields the worker never initializes: ${extra.join(', ')}`);
+    assert.deepEqual(missing, ACCESS_ROW_GAP.slice().sort(),
+        'the accessRow parity gap changed. Update ACCESS_ROW_GAP in this file to match, ' +
+        `removing what generate-fixture.mjs now emits.\n  now missing: ${missing.join(', ')}`);
+});
