@@ -270,8 +270,8 @@ function blankNode(deviceIp) {
         Uptime: 'Unknown', LastConfigured: 'Unknown', LastConfiguredBy: 'Unknown', Alarms: [],
         MasterCpuUtilization: 'Unknown', MasterMemoryUtilization: 'Unknown', MedNeighbors: [],
         Configuration: 'Unknown', ScanStatus: 'Ok', ScanError: null, Vlans: [],
-        // R15/R12. Both empty on a node that never answered, as New-PlaceholderNodeLocal has them.
-        SectionsCaptured: [], CaptureTimestamp: null,
+        // R15/R12/R3. All empty on a node that never answered, as New-PlaceholderNodeLocal has them.
+        SectionsCaptured: [], CaptureTimestamp: null, MacTable: [],
     };
 }
 
@@ -294,12 +294,42 @@ const SECTION_SUPPLIES = {
     INTERFACES_EXT: () => {},
 };
 
+// R3. Derived from the clients already on the device rather than invented: an empty MacTable beside a
+// populated Clients list is a state no switch produces, and every rule tested against it would
+// inherit that contradiction (spec 8.2). Clients is the de-duplicated view, so the table is at least
+// as long - the interesting extra rows (one MAC on two ports) are added deliberately below.
+function buildMacTable(node) {
+    const rows = [];
+    for (const c of node.Clients || []) {
+        rows.push({
+            RoutingInstance: 'default-switch',
+            VlanName: c.VLAN_Name, MacAddress: c.MAC,
+            // 'D' is what a learned entry shows; the raw character is the point of R3.
+            Flags: 'D', Age: null,
+            // Clients carry the logical unit already; the physical port is that with the unit
+            // stripped, exactly as ConvertTo-JunosPhysicalPort does on the worker side.
+            Interface: c.Port, PhysicalPort: String(c.Port).replace(/\.\d+$/, ''),
+        });
+    }
+    // One MAC aged-in on a second port is what duplicate-MAC detection looks for, and a fixture
+    // without one lets a rule that never fires pass its own test.
+    if (rows.length > 2 && chance(0.2)) {
+        const moved = rows[int(0, rows.length - 1)];
+        const elsewhere = rows.find(r => r.PhysicalPort !== moved.PhysicalPort);
+        if (elsewhere) {
+            rows.push({ ...moved, Interface: `${elsewhere.PhysicalPort}.0`, PhysicalPort: elsewhere.PhysicalPort });
+        }
+    }
+    return rows;
+}
+
 // R12 + R15, applied per snapshot because both depend on when that snapshot was taken.
 function stampCapture(node, scanTime) {
     // A fleet crawl spans minutes and scanTime is when the snapshot was written, so each device was
     // read somewhere in the window before it. That spread is the whole point of R12: one
     // ScanTimestamp is too coarse to compare counters or last-seen times across devices.
     node.CaptureTimestamp = new Date(scanTime.getTime() - int(0, 14 * 60000)).toISOString();
+    node.MacTable = buildMacTable(node);
     const dropped = chance(0.07) ? int(1, 3) : 0;
     node.SectionsCaptured = CAPTURE_SECTIONS.slice(0, CAPTURE_SECTIONS.length - dropped);
     for (const name of CAPTURE_SECTIONS.slice(CAPTURE_SECTIONS.length - dropped)) {

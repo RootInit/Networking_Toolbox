@@ -124,7 +124,7 @@ function Invoke-FleetCrawl {
             MedNeighbors = @(); Configuration = "Unknown"; Vlans = @();
             # Both empty by definition: this node exists because the device produced nothing, so no
             # section was captured and there is no capture instant to record.
-            SectionsCaptured = @(); CaptureTimestamp = $null
+            MacTable = @(); SectionsCaptured = @(); CaptureTimestamp = $null
             ScanStatus = $Status
             ScanError  = $ScanErrorText
         }

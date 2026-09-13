@@ -536,12 +536,14 @@ test('a --out that is not a Network_Maps directory writes no Configuration.json'
 // gap, and filling one in narrows it. Either way this list is the thing to edit, deliberately.
 const ACCESS_ROW_GAP = [
     'ActiveAlarms', 'ActiveDefects', 'AutoNegotiation', 'BpduError', 'Bundle', 'BundleMembers',
-    'CarrierTransitions', 'DeviceFlags', 'Duplex', 'DuplexNegotiated', 'EthernetSwitchingError',
-    'FecStatistics', 'InputBps', 'InputBytes', 'InputErrors', 'InputPackets', 'InterfaceFlags',
-    'LinkLevelType', 'LoopDetectPduError', 'MacAddress', 'MacRewriteError', 'MacStatistics',
-    'MediaType', 'Mtu', 'NegotiationStatus', 'OutputBps', 'OutputBytes', 'OutputErrors',
-    'OutputPackets', 'PcsStatistics', 'RemoteFault', 'SpeedConfigured', 'SpeedNegotiated',
-    'StatisticsLastCleared', 'StpDetail', 'Vlans',
+    'CarrierTransitions', 'DeviceFlags', 'Dot1x', 'Duplex', 'DuplexNegotiated',
+    'EthernetSwitchingError', 'FecStatistics', 'InputBps', 'InputBytes', 'InputErrors',
+    'InputPackets', 'InterfaceFlags', 'LinkLevelType', 'LoopDetectPduError', 'MacAddress',
+    'MacRewriteError', 'MacStatistics', 'MediaType', 'Mtu', 'NegotiationStatus', 'OutputBps',
+    'OutputBytes', 'OutputErrors', 'OutputPackets', 'PcsStatistics', 'PoeAdminStatus',
+    'PoeClass', 'PoeMaxPower', 'PoeOperStatus', 'PoePairMode', 'PoePowerConsumption',
+    'PoePriority', 'RemoteFault', 'SpeedConfigured', 'SpeedNegotiated', 'StatisticsLastCleared',
+    'StpDetail', 'Vlans',
 ];
 
 function interfaceInitializerKeys() {
@@ -636,3 +638,35 @@ test('R15: captured-section lists are real, tail-truncated, and consistent with 
         assert.deepEqual(d.SectionsCaptured, [], `${d.DeviceIP} never answered, so it captured nothing`);
     }
 });
+
+// R3: MacTable is the un-collapsed view Clients is derived from. A fixture with clients but an empty
+// table, or a table naming ports the device does not have, is a state no switch produces.
+test('R3: the MAC table is consistent with Clients and contains a duplicate to detect', () => {
+    const scanned = topology.filter(d => d.ScanStatus === 'Ok');
+    let withDuplicate = 0;
+    for (const d of scanned) {
+        assert.ok(Array.isArray(d.MacTable), `${d.DeviceIP} MacTable must be an array`);
+        const clients = window_asArray(d.Clients);
+        assert.ok(d.MacTable.length >= clients.length,
+            `${d.DeviceIP} has ${clients.length} clients but only ${d.MacTable.length} MAC-table rows`);
+        const ports = new Set(d.Interfaces.map(i => i.Port));
+        for (const row of d.MacTable) {
+            assert.ok(ports.has(row.PhysicalPort), `${d.DeviceIP} MAC table names port ${row.PhysicalPort}, which the device does not have`);
+            assert.ok(/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(row.MacAddress), `bad MAC ${row.MacAddress}`);
+            assert.ok(row.Flags, 'the raw flag character is the point of R3');
+        }
+        const byMac = new Map();
+        for (const row of d.MacTable) {
+            if (!byMac.has(row.MacAddress)) byMac.set(row.MacAddress, new Set());
+            byMac.get(row.MacAddress).add(row.PhysicalPort);
+        }
+        if ([...byMac.values()].some(ports => ports.size > 1)) withDuplicate++;
+    }
+    assert.ok(withDuplicate > 0, 'no device shows one MAC on two ports - duplicate-MAC detection would have nothing to find');
+    for (const d of topology.filter(x => x.ScanStatus !== 'Ok')) {
+        assert.deepEqual(d.MacTable, [], `${d.DeviceIP} never answered, so it has no MAC table`);
+    }
+});
+
+// Mirrors window.asArray, which is what the app uses for every PowerShell-emitted collection.
+function window_asArray(v) { return Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]); }

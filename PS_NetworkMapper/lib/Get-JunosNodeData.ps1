@@ -211,6 +211,9 @@ $NodeData = @{
     # just stops, so the later sections are simply absent, and this list is what tells "no LLDP
     # neighbours here" apart from "never got as far as asking". Read it through asArray(): an empty
     # array serializes as null and a single entry as a bare string, per this project's convention.
+    # R3. Every row of the switching table, not the MAC-keyed collapse Clients needs. Duplicate-MAC
+    # and sticky-MAC detection and transit sightings all need the rows Clients throws away.
+    MacTable = @()
     SectionsCaptured = @()
     # R12. When THIS device was read. One ScanTimestamp covers a crawl that can span many minutes,
     # which is too coarse to compare counters or last-seen times between devices. $null on a device
@@ -303,7 +306,7 @@ try {
         elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+(?:{[^}]+}[\r\n]+)?\S+@\S+[>#](?s).*)?\z') { $DataDict["CONFIG"] = $Matches.content }
     }
 
-    $NodeData.SectionsCaptured = Get-JunosCapturedSections -DataDict $DataDict
+    $NodeData.SectionsCaptured = @(Get-JunosCapturedSections -DataDict $DataDict)
 
     # A virtual chassis emits one "fpcN:" block per member, so a bare -match takes fpc0's, which is not
     # necessarily the master. The prompt's {master:N} marker names the RE that answered - otherwise a
@@ -428,6 +431,14 @@ try {
                     # R4. Fixed-width statistics tables the error-counter parser cannot reach; this is
                     # where CRC/Align errors, Jabber, Fragment frames and Code violations live.
                     MacStatistics = @{}; PcsStatistics = @{}; FecStatistics = @{}
+                    # R6. Every dot1x row on this port, including Initialize rows that carry no MAC -
+                    # a configured port with nothing authenticated is the state worth alerting on, and
+                    # the MAC-keyed parse could not represent it.
+                    Dot1x = @()
+                    # R7. The PoE row in full. PoE above stays the collapsed display string; without
+                    # AdminStatus, "administratively disabled" and "nothing drawing power" both read OFF.
+                    PoeAdminStatus = $null; PoeOperStatus = $null; PoePairMode = $null
+                    PoeMaxPower = $null; PoePriority = $null; PoePowerConsumption = $null; PoeClass = $null
                 }
             }
         }
@@ -536,6 +547,24 @@ try {
             $p = $Matches.port -replace "\.\d+$",""
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].PoE = "$($Matches.oper) ($($Matches.power))" }
         }
+    }
+    # R7. The full row alongside the display string above, which stays as-is for existing consumers.
+    $PoeDetail = ConvertFrom-JunosPoeInterface -Text $DataDict["POE"]
+    foreach ($PoePort in $PoeDetail.Keys) {
+        if (-not $NodeData.Interfaces.ContainsKey($PoePort)) { continue }
+        $Row = $PoeDetail[$PoePort]
+        $Iface = $NodeData.Interfaces[$PoePort]
+        $Iface.PoeAdminStatus = $Row.AdminStatus; $Iface.PoeOperStatus = $Row.OperStatus
+        $Iface.PoePairMode = $Row.PairMode; $Iface.PoeMaxPower = $Row.MaxPower
+        $Iface.PoePriority = $Row.Priority; $Iface.PoePowerConsumption = $Row.PowerConsumption
+        $Iface.PoeClass = $Row.Class
+    }
+
+    # R6. Per-port view, keyed by interface. The MAC-keyed dict below stays for the client join, but
+    # it structurally cannot hold a row without a MAC, and every Initialize row is one.
+    $Dot1xByPort = ConvertFrom-JunosDot1xInterface -Text $DataDict["DOT1X"]
+    foreach ($D1xPort in $Dot1xByPort.Keys) {
+        if ($NodeData.Interfaces.ContainsKey($D1xPort)) { $NodeData.Interfaces[$D1xPort].Dot1x = @($Dot1xByPort[$D1xPort]) }
     }
 
     $Dot1xDict = @{}
@@ -680,6 +709,11 @@ try {
             }
         }
     }
+
+    # R3. The untouched row set, parsed separately from the loop above rather than by widening it:
+    # that loop's job is to pick ONE port per MAC for Clients, and mixing "keep everything" into it
+    # is how the two requirements would start fighting.
+    $NodeData.MacTable = @(ConvertFrom-JunosMacTable -Text $DataDict["MAC_TABLE"])
 
     # Also exported raw, so the orchestrator can build a network-wide MAC->IP map.
     $ArpDict = @{}

@@ -1615,27 +1615,138 @@ Test-Case "every field the extensive merge copies exists in the interface initia
     $MergeKeys.Count -gt 15 -and @($MergeKeys | Where-Object { $InitKeys -notcontains $_ }).Count -eq 0
 }
 
+Write-Host "`n--- 15. MAC table, dot1x and PoE retention (R3, R6, R7) ---" -ForegroundColor Cyan
+
+# Column layout from the real output: the GBP Tag column is empty, which is why the parser anchors on
+# the MAC address rather than counting fields. Age is "-" when the switch does not age the entry.
+$MacTableText = @"
+MAC flags (S - static MAC, D - dynamic MAC, L - locally learned, P - Persistent static, C - Control MAC
+           SE - statistics enabled, NM - non configured MAC, R - remote PE MAC, O - ovsdb MAC)
+Ethernet switching table : 5 entries, 5 learned
+Routing instance : default-switch
+    Vlan                MAC                 MAC         Age   GBP     Logical                NH        RTR
+    name                address             flags             Tag     interface              Index     ID
+    VOICE               aa:bb:cc:00:00:01   D             -            ge-0/0/1.0             0         0
+    VOICE               aa:bb:cc:00:00:02   S             -            ge-0/0/2.0             0         0
+    DATA                aa:bb:cc:00:00:03   SE          300            ge-0/0/3.0             0         0
+    DATA                aa:bb:cc:00:00:01   D             -            ge-0/0/9.0             0         0
+    DATA                aa:bb:cc:00:00:04   NM            -            ae0.0                  0         0
+"@
+
+$MacRows = @(ConvertFrom-JunosMacTable -Text $MacTableText)
+
+Test-Case "R3: every row is retained, including a MAC that appears twice" {
+    # The Clients view keeps one row per MAC; this is the view that can see a loop or a stale entry.
+    $MacRows.Count -eq 5 -and @($MacRows | Where-Object { $_.MacAddress -eq 'aa:bb:cc:00:00:01' }).Count -eq 2
+}
+Test-Case "R3: the raw flag character survives instead of collapsing to Dynamic/Static" {
+    ((($MacRows | ForEach-Object { $_.Flags }) | Sort-Object -Unique) -join ',') -eq 'D,NM,S,SE'
+}
+Test-Case "R3: an unaged entry is null rather than zero, and a real age is kept" {
+    $Unaged = @($MacRows | Where-Object { $_.MacAddress -eq 'aa:bb:cc:00:00:02' })[0]
+    $Aged = @($MacRows | Where-Object { $_.MacAddress -eq 'aa:bb:cc:00:00:03' })[0]
+    $null -eq $Unaged.Age -and $Aged.Age -eq '300'
+}
+Test-Case "R3: the logical unit is kept and the physical port derived alongside it" {
+    $Row = @($MacRows | Where-Object { $_.MacAddress -eq 'aa:bb:cc:00:00:04' })[0]
+    $Row.Interface -eq 'ae0.0' -and $Row.PhysicalPort -eq 'ae0' -and $Row.RoutingInstance -eq 'default-switch'
+}
+Test-Case "R3: header and flag-legend lines are not mistaken for rows" {
+    # The legend mentions "static MAC" and the header has "MAC address"; neither is an entry.
+    -not @($MacRows | Where-Object { $_.VlanName -match '(?i)flags|name' }).Count
+}
+Test-Case "R3: an empty table yields an empty array once wrapped by the caller" {
+    $E = @(ConvertFrom-JunosMacTable -Text '')
+    $null -ne $E -and $E -is [array] -and $E.Count -eq 0
+}
+Test-Case "the worker wraps both array-returning parsers at the call site" {
+    $JunosNodeDataSrc -match '@\(Get-JunosCapturedSections' -and $JunosNodeDataSrc -match '@\(ConvertFrom-JunosMacTable'
+}
+
+# Real layout: a second MAC on the same port leaves the Role column blank, and an Initialize row has
+# neither MAC nor user - which is exactly why the MAC-keyed parse dropped 25 rows in the capture.
+$Dot1xText = @"
+802.1X Information:
+Interface     Role           State           MAC address          User
+ge-0/0/1.0    Authenticator  Authenticated   aa:bb:cc:00:00:01    host/WS-ONE.example.test
+ge-0/0/1.0                   Authenticated   aa:bb:cc:00:00:02    aabbcc000002
+ge-0/0/2.0    Authenticator  Initialize
+ge-0/0/3.0    Authenticator  Held            aa:bb:cc:00:00:03
+"@
+
+$D1x = ConvertFrom-JunosDot1xInterface -Text $Dot1xText
+
+Test-Case "R6: an Initialize row with no MAC is retained" {
+    # The whole point of R6: a port where dot1x is configured and nothing authenticated.
+    @($D1x['ge-0/0/2']).Count -eq 1 -and @($D1x['ge-0/0/2'])[0].State -eq 'Initialize' -and
+        $null -eq @($D1x['ge-0/0/2'])[0].MacAddress
+}
+Test-Case "R6: two MACs on one port both survive, and the blank Role is null not a guess" {
+    $Rows = @($D1x['ge-0/0/1'])
+    $Rows.Count -eq 2 -and $Rows[0].Role -eq 'Authenticator' -and $null -eq $Rows[1].Role -and
+        $Rows[1].MacAddress -eq 'aa:bb:cc:00:00:02'
+}
+Test-Case "R6: keyed by physical port, with the unit dropped from the key but kept in the row" {
+    $D1x.ContainsKey('ge-0/0/3') -and @($D1x['ge-0/0/3'])[0].Interface -eq 'ge-0/0/3.0'
+}
+Test-Case "R6: a row with a MAC but no user leaves User null rather than empty-string" {
+    $null -eq @($D1x['ge-0/0/3'])[0].User -and @($D1x['ge-0/0/3'])[0].State -eq 'Held'
+}
+Test-Case "R6: the header row is not parsed as an interface" {
+    -not $D1x.ContainsKey('Interface')
+}
+
+$PoeText = @"
+Interface    Admin       Oper    Pair/Mode  Max        Priority       Power          Class
+             status      status  status     power                     consumption
+ ge-0/0/1    Enabled      ON     4P/AT      7.0W       Low            3.2W            1
+ ge-0/0/2    Disabled    OFF     2P/AT      15.4W      High           0.0W           not-applicable
+ ge-0/0/3    Enabled     OFF
+"@
+
+$Poe = ConvertFrom-JunosPoeInterface -Text $PoeText
+
+Test-Case "R7: admin status is distinguished from oper status" {
+    # Without this, "administratively disabled" and "nothing drawing power" both read OFF.
+    $Poe['ge-0/0/1'].AdminStatus -eq 'Enabled' -and $Poe['ge-0/0/1'].OperStatus -eq 'ON' -and
+        $Poe['ge-0/0/2'].AdminStatus -eq 'Disabled' -and $Poe['ge-0/0/2'].OperStatus -eq 'OFF'
+}
+Test-Case "R7: pair/mode, max power, priority, consumption and class are all kept" {
+    $R = $Poe['ge-0/0/2']
+    $R.PairMode -eq '2P/AT' -and $R.MaxPower -eq '15.4W' -and $R.Priority -eq 'High' -and
+        $R.PowerConsumption -eq '0.0W' -and $R.Class -eq 'not-applicable'
+}
+Test-Case "R7: a short row still yields admin and oper rather than being skipped" {
+    # The column count between Oper and Class varies by release; these two never move.
+    $Poe['ge-0/0/3'].AdminStatus -eq 'Enabled' -and $Poe['ge-0/0/3'].OperStatus -eq 'OFF' -and
+        $null -eq $Poe['ge-0/0/3'].MaxPower
+}
+Test-Case "R7: the two-line column header is not parsed as a port" {
+    -not $Poe.ContainsKey('Interface') -and $Poe.Count -eq 3
+}
+
 Write-Host "`n--- 13. Get-JunosCapturedSections (R15) ---" -ForegroundColor Cyan
 
 # The truncation signal for section 2.4's integrity gate: a cut-off session reports no error, it just
 # stops, so which sections arrived is the only thing that separates "nothing to report" from
 # "never asked".
 Test-Case "captured sections are the section keys, sorted" {
-    $R = Get-JunosCapturedSections -DataDict ([ordered]@{ VLANS = 'x'; VERSION = 'y'; POE = 'z' })
+    $R = @(Get-JunosCapturedSections -DataDict ([ordered]@{ VLANS = 'x'; VERSION = 'y'; POE = 'z' }))
     ($R -join ',') -eq 'POE,VERSION,VLANS'
 }
 Test-Case "a section whose body is blank does not count as captured" {
     # An echoed command with no output is exactly the shape a cut-off session leaves behind.
-    $R = Get-JunosCapturedSections -DataDict @{ VERSION = 'ok'; LLDP = ''; STP = "  `n `t "; POE = $null }
+    $R = @(Get-JunosCapturedSections -DataDict @{ VERSION = 'ok'; LLDP = ''; STP = "  `n `t "; POE = $null })
     ($R -join ',') -eq 'VERSION'
 }
-Test-Case "an empty dictionary yields an empty array, not null" {
-    # `return @()` unwraps to $null on assignment; the function returns `,@()` to prevent that.
-    $R = Get-JunosCapturedSections -DataDict @{}
+Test-Case "an empty dictionary yields an empty array once wrapped by the caller" {
+    # The ARRAY CONTRACT: the parser returns plain and the caller wraps in @(), which is what turns
+    # "nothing" into an empty array and a lone value into a one-element one.
+    $R = @(Get-JunosCapturedSections -DataDict @{})
     $null -ne $R -and $R -is [array] -and $R.Count -eq 0
 }
 Test-Case "a single captured section stays an array rather than unwrapping to a string" {
-    $R = Get-JunosCapturedSections -DataDict @{ VERSION = 'only one' }
+    $R = @(Get-JunosCapturedSections -DataDict @{ VERSION = 'only one' })
     $R -is [array] -and $R.Count -eq 1 -and $R[0] -eq 'VERSION'
 }
 Test-Case "a null dictionary is tolerated rather than a binding failure" {
@@ -1643,7 +1754,7 @@ Test-Case "a null dictionary is tolerated rather than a binding failure" {
 }
 # The worker must record the sections it actually keyed, or the gate reads a stale list.
 Test-Case "the worker populates SectionsCaptured from the same dictionary it parses" {
-    $JunosNodeDataSrc -match '\$NodeData\.SectionsCaptured\s*=\s*Get-JunosCapturedSections\s+-DataDict\s+\$DataDict'
+    $JunosNodeDataSrc -match '\$NodeData\.SectionsCaptured\s*=\s*@\(Get-JunosCapturedSections\s+-DataDict\s+\$DataDict\)'
 }
 # R12: a crawl spans minutes, so a single ScanTimestamp cannot date any individual device.
 Test-Case "the worker timestamps the capture as soon as the batch returns, before inspecting output" {

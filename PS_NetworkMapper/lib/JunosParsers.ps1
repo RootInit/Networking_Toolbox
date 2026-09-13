@@ -368,16 +368,18 @@ function Get-JunosCapturedSections {
     # produced nothing should get an empty array rather than a binding exception.
     param([AllowNull()]$DataDict)
 
-    # The leading comma on every return is load-bearing: `return @()` unwraps to $null on the way
-    # out, so a caller assigning the result gets $null rather than an empty array and .Count throws
-    # on 5.1. `,$x` hands the array back as a single object, which the pipeline then yields intact.
-    if ($null -eq $DataDict) { return ,@() }
+    # ARRAY CONTRACT, shared by every array-returning parser here: the value is returned plainly and
+    # the CALLER wraps it in @(). PowerShell enumerates a returned collection on the way out, so an
+    # empty result reaches the caller as nothing and a single result as a bare scalar; @() at the call
+    # site normalizes both. Returning `,$array` to dodge that instead breaks the callers that do wrap,
+    # handing them one element containing the whole array.
+    if ($null -eq $DataDict) { return @() }
     $Captured = @()
     foreach ($Key in $DataDict.Keys) {
         if (-not [string]::IsNullOrWhiteSpace([string]$DataDict[$Key])) { $Captured += [string]$Key }
     }
-    if ($Captured.Count -eq 0) { return ,@() }
-    return ,@($Captured | Sort-Object)
+    if ($Captured.Count -eq 0) { return @() }
+    return @($Captured | Sort-Object)
 }
 
 # R4. The fixed-width statistics tables inside a "show interfaces extensive" block: "MAC statistics:"
@@ -427,4 +429,123 @@ function ConvertFrom-JunosStatisticsTable {
         $Result[$RowMatch.Groups['label'].Value.Trim()] = $Row
     }
     return $Result
+}
+
+# R3. Every row of "show ethernet-switching table", not the de-duplicated view Clients needs.
+#
+# The client list is keyed by MAC and keeps one row per address, deliberately: it answers "what is
+# plugged in where". That collapse destroys three things a diagnostic needs - the same MAC appearing
+# on two ports (a loop, or a moved device still aged-in on the old port), the raw flag character
+# (S/D/L/P/C/SE/NM distinguish a statically configured MAC from a learned one, where Clients keeps
+# only "Dynamic" vs "Static/Other"), and transit sightings of a MAC whose access port is elsewhere.
+function ConvertFrom-JunosMacTable {
+    param([string]$Text)
+
+    # See the ARRAY CONTRACT note in Get-JunosCapturedSections: returned plain, wrapped by the caller.
+    $Rows = @()
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Rows }
+
+    $Instance = $null
+    foreach ($Line in ($Text -split "`r?`n")) {
+        if ($Line -match '(?i)^\s*Routing instance\s*:\s*(?<inst>\S+)') { $Instance = $Matches.inst; continue }
+        # Anchored on the MAC address rather than on column positions: the GBP Tag column is empty on
+        # this platform, so counting fields from the left mis-assigns everything after it.
+        if ($Line -notmatch ('(?i)^\s*(?<vlan>\S+)\s+(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<flags>[A-Za-z]{1,3})\s+(?<age>\S+)\s+.*?(?<iface>' + $Script:JunosAnyPortPattern + ')')) { continue }
+        $Rows += [PSCustomObject]@{
+            RoutingInstance = $Instance
+            VlanName        = $Matches.vlan
+            MacAddress      = $Matches.mac.ToLower()
+            # Verbatim. "D" is dynamic, "S" static, "SE" statistics-enabled, "NM" non-configured;
+            # collapsing them is what made sticky-MAC and duplicate-MAC undetectable.
+            Flags           = $Matches.flags
+            # "-" is the switch saying it does not age this entry, which is not the same as 0 seconds.
+            Age             = if ($Matches.age -eq '-') { $null } else { $Matches.age }
+            Interface       = $Matches.iface
+            PhysicalPort    = (ConvertTo-JunosPhysicalPort -Port $Matches.iface)
+        }
+    }
+    return $Rows
+}
+
+# R6. Per-port dot1x, keyed by physical port.
+#
+# The existing parse keys by MAC, which drops every row that has no MAC - and "Initialize" rows never
+# have one. Those are precisely the ports where dot1x is configured and nothing has authenticated,
+# which is the state worth alerting on. A port can also carry several rows: the second and later ones
+# leave the Role column blank, so Role is optional rather than required.
+function ConvertFrom-JunosDot1xInterface {
+    param([string]$Text)
+
+    $ByPort = @{}
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $ByPort }
+
+    foreach ($Line in ($Text -split "`r?`n")) {
+        if ($Line -notmatch ('(?i)^\s*(?<iface>' + $Script:JunosPhysPortPattern + ')\s+(?<rest>\S.*)$')) { continue }
+        $Rest = $Matches.rest
+        $Iface = $Matches.iface
+        # Role is optional: a continuation row for a second MAC on the same port omits it.
+        if ($Rest -notmatch '(?i)^(?:(?<role>Authenticator|Supplicant)\s+)?(?<state>Authenticated|Initialize|Connecting|Held|Auto|Disconnected|Failed)\b\s*(?<tail>.*)$') { continue }
+        $Tail = $Matches.tail
+        $Entry = [PSCustomObject]@{
+            Interface  = $Iface
+            Role       = if ($Matches.role) { $Matches.role } else { $null }
+            State      = $Matches.state
+            MacAddress = $null
+            User       = $null
+        }
+        if ($Tail -match '(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s*(?<user>\S+)?') {
+            $Entry.MacAddress = $Matches.mac.ToLower()
+            if ($Matches.user) { $Entry.User = $Matches.user }
+        }
+        $Port = ConvertTo-JunosPhysicalPort -Port $Iface
+        if (-not $ByPort.ContainsKey($Port)) { $ByPort[$Port] = @() }
+        $ByPort[$Port] += $Entry
+    }
+    return $ByPort
+}
+
+# R7. The whole PoE row, keyed by physical port.
+#
+# Admin status was captured and thrown away, which left "administratively disabled" and "enabled but
+# nothing drawing power" both reading as OFF - a distinction that decides whether a dead access point
+# is a config error or a dead access point. Max power and Priority matter when a budget is
+# oversubscribed; Pair/Mode says whether the port is 2-pair or 4-pair.
+function ConvertFrom-JunosPoeInterface {
+    param([string]$Text)
+
+    $ByPort = @{}
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $ByPort }
+
+    $PortPat = $Script:JunosPhysPortPattern
+    foreach ($Line in ($Text -split "`r?`n")) {
+        $Trimmed = $Line.Trim()
+        $Full = [regex]::Match($Trimmed, "(?i)^(?<port>$PortPat)\s+(?<admin>Enabled|Disabled)\s+(?<oper>\S+)\s+(?<pair>\S+)\s+(?<maxpower>[\d.]+W?)\s+(?<priority>\S+)\s+(?<consumption>[\d.]+W?)\s+(?<class>\S+)$")
+        if ($Full.Success) {
+            $ByPort[(ConvertTo-JunosPhysicalPort -Port $Full.Groups['port'].Value)] = [PSCustomObject]@{
+                AdminStatus      = $Full.Groups['admin'].Value
+                OperStatus       = $Full.Groups['oper'].Value
+                PairMode         = $Full.Groups['pair'].Value
+                MaxPower         = $Full.Groups['maxpower'].Value
+                Priority         = $Full.Groups['priority'].Value
+                PowerConsumption = $Full.Groups['consumption'].Value
+                Class            = $Full.Groups['class'].Value
+            }
+            continue
+        }
+        # The column count between Oper and Class varies by release, so a row that does not match the
+        # full shape still yields the two fields every release prints in the same place.
+        $Min = [regex]::Match($Trimmed, "(?i)^(?<port>$PortPat)\s+(?<admin>Enabled|Disabled)\s+(?<oper>\S+)")
+        if ($Min.Success) {
+            $ByPort[(ConvertTo-JunosPhysicalPort -Port $Min.Groups['port'].Value)] = [PSCustomObject]@{
+                AdminStatus      = $Min.Groups['admin'].Value
+                OperStatus       = $Min.Groups['oper'].Value
+                PairMode         = $null
+                MaxPower         = $null
+                Priority         = $null
+                PowerConsumption = $null
+                Class            = $null
+            }
+        }
+    }
+    return $ByPort
 }
