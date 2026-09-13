@@ -58,7 +58,13 @@ function Protect-TopologyPayload {
     $Aes.Dispose()
 
     $Hmac = [System.Security.Cryptography.HMACSHA256]::new($MacKey)
-    $MacBytes = $Hmac.ComputeHash($IvBytes + $CipherBytes)
+    # Hashed in two blocks rather than over ($IvBytes + $CipherBytes): PowerShell's + on byte[]
+    # builds an Object[] and boxes every byte, which costs ~30x the ciphertext in memory and throws
+    # "Array dimensions exceeded supported range" on a fleet-sized snapshot. The bytes fed to
+    # HMACSHA256 are identical, so the envelope stays compatible with topology-crypto.js.
+    $null = $Hmac.TransformBlock($IvBytes, 0, $IvBytes.Length, $null, 0)
+    $null = $Hmac.TransformFinalBlock($CipherBytes, 0, $CipherBytes.Length)
+    $MacBytes = $Hmac.Hash
     $Hmac.Dispose()
 
     return [ordered]@{
@@ -135,7 +141,10 @@ function Unprotect-TopologyPayload {
     $KeyMaterial = Get-TopologyKeyMaterial -Password $Password -Salt $SaltBytes -Iterations $IterCheck
 
     $Hmac = [System.Security.Cryptography.HMACSHA256]::new($KeyMaterial.MacKey)
-    $ComputedMac = $Hmac.ComputeHash($IvBytes + $CipherBytes)
+    # Two blocks, not ($IvBytes + $CipherBytes) - see the note in Protect-TopologyPayload.
+    $null = $Hmac.TransformBlock($IvBytes, 0, $IvBytes.Length, $null, 0)
+    $null = $Hmac.TransformFinalBlock($CipherBytes, 0, $CipherBytes.Length)
+    $ComputedMac = $Hmac.Hash
     $Hmac.Dispose()
 
     # Not constant-time - acceptable for a localhost-only server with a single local operator.

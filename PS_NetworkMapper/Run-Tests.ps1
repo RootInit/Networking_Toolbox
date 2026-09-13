@@ -328,6 +328,23 @@ Test-Case "the wrong password is rejected" {
     Unprotect-TopologyPayload -Envelope $CryptoEnvelope -Password "wrong password"
 } -ExpectThrowMatch 'Incorrect password, or the file is corrupted'
 
+# A fleet-sized snapshot is tens of MB. Hashing over ($IvBytes + $CipherBytes) boxed every byte
+# into an Object[] - about 32 bytes of allocation per ciphertext byte - and a real 350-device crawl
+# died with "Array dimensions exceeded supported range" before it could write anything. The two
+# assertions below cover the two halves: the block form still produces a verifiable MAC at size,
+# and the concatenation cannot come back.
+Test-Case "a multi-megabyte payload round-trips (exercises the blockwise HMAC at size)" {
+    $BigPlain = New-Object string ([char]'x'), (8 * 1mb)
+    $BigEnvelope = Protect-TopologyPayload -PlainJson $BigPlain -EncKey $CryptoKeys.EncKey -MacKey $CryptoKeys.MacKey -Salt $CryptoSalt -Iterations $CryptoIter
+    (Unprotect-TopologyPayload -Envelope $BigEnvelope -Password $CryptoPassword) -eq $BigPlain
+}
+$TopologyCryptoSrc = Get-Content -LiteralPath (Join-Path $LibDir 'TopologyCrypto.ps1') -Raw
+Test-Case "neither MAC is computed over a PowerShell byte-array concatenation" {
+    # Guards the shape, not the timing: + on byte[] yields an Object[], which is the whole defect.
+    ([byte[]](1, 2) + [byte[]](3, 4)) -is [object[]] -and
+        $TopologyCryptoSrc -notmatch '(?m)ComputeHash\([^)]*\+'
+}
+
 # The HMAC is checked BEFORE decrypting, so all three must fail with the same clean error.
 function New-TamperedEnvelope {
     param($Source, [string]$Field)
