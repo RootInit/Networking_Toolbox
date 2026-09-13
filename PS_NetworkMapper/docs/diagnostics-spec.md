@@ -688,6 +688,14 @@ less than a clean fleet. Deviations from the plan above:
   manifest named after its map would be offered to the operator as a snapshot to open.
 - **F11 (a VLAN missing from a trunk) has no injector.** `Vlans[]` is empty on every fixture device, so
   there is no membership to remove. It lands with the VLAN retention work.
+- **A fault kind §7 does not catalogue carries an empty `failureModes`**, not a label chosen to fill the
+  field: the label is what item 11 maps a finding to, so a wrong one is a wrong oracle.
+  `off-subnet-client`, `dot1x-held` and `autoneg-asymmetric` have none and say why at their injectors;
+  `duplicate-ip` is F7 (ambiguous, not resolvable by picking one), not F4. A test reads the F-numbers
+  out of §7 and rejects any label that is not there.
+- **The manifest is written on every run**, `Faults: []` at `--faults 0`. A file that appeared only
+  sometimes would leave a stale manifest from an earlier run describing faults the current one did not
+  inject, and deleting it is not this tool's business.
 - `stp-unconverged` only ever relabels an already-blocked port, so the forwarding subgraph the
   generator asserted is untouched; the test states that as an equality against the clean run rather
   than as `devices - 1`, because a placeholder device's links are unobservable in the written snapshot.
@@ -718,6 +726,15 @@ arrives these are its inputs.
   adding a misspelled key and watching it fail.
 - **`node web-src/tools/micro-topologies.mjs --out <dir>`** writes each one as a loadable
   `NetworkMap_micro_*.fixture.json`, so a case can be opened in the visualizer by hand.
+- **The `Partial` node drops what the lost sections supplied**, the same rule `SECTION_SUPPLIES` applies
+  in the generator: truncating at `STP` also empties `Neighbors`, `Clients`, `MacTable`, `ArpEntries`
+  and `Vlans` and blanks `Uptime`, `LastConfigured*`, the RE counters and `Configuration`. Without that
+  it asserted a state no switch produces — a guard-gated LLDP rule reading `NOT_EVALUATED` beside
+  neighbours that are plainly there. The one-sided LLDP that remains (the healthy side still reports
+  it) is what a session dying mid-capture actually leaves.
+- **Only six cases carry a §7 label.** The LAG pair, the VC, the out-of-scope neighbour and the
+  `Partial` node model shapes and guarantees §7 does not catalogue, and say so at their builders; a
+  label invented to satisfy the test would mis-train item 11.
 
 ### 8.5 PowerShell tests
 

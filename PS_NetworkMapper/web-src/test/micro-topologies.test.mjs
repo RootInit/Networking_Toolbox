@@ -72,13 +72,24 @@ function connects(topology, edges) {
     return seen.size === devices(topology).length;
 }
 
-test('every micro-topology is named, described, and tied to a section 7 failure mode', () => {
+const catalogued = new Set([...fs.readFileSync(path.join(ROOT, 'docs', 'diagnostics-spec.md'), 'utf8')
+    .matchAll(/^\| (F\d+) \|/gm)].map(m => m[1]));
+
+test('every micro-topology is named, described, and labelled only with real failure modes', () => {
+    assert.ok(catalogued.size >= 14, `only ${catalogued.size} failure modes read from the spec`);
     assert.equal(MICRO_TOPOLOGIES.length, 10);
+    // The cases that do carry a label must cover the ones section 8.4 names by number.
+    const labelled = new Set(MICRO_TOPOLOGIES.flatMap(t => t.failureModes));
+    for (const mode of ['F5', 'F10', 'F13', 'F14']) assert.ok(labelled.has(mode), `no topology covers ${mode}`);
     const names = MICRO_TOPOLOGIES.map(t => t.name);
     assert.equal(new Set(names).size, names.length);
     for (const topology of MICRO_TOPOLOGIES) {
         assert.ok(topology.description.length > 40, `${topology.name} has no usable description`);
-        assert.ok(topology.failureModes.length && topology.failureModes.every(f => /^F\d+$/.test(f)));
+        // An empty list is the honest answer for the cases section 8.4 lists without a failure mode;
+        // each one says why at its builder. A label invented to satisfy a test would mis-train item 11.
+        assert.ok(Array.isArray(topology.failureModes));
+        assert.ok(topology.failureModes.every(f => catalogued.has(f)),
+            `${topology.name}: ${topology.failureModes} is not all in section 7`);
         assert.ok(devices(topology).length >= 1 && devices(topology).length <= 4,
             `${topology.name} has ${devices(topology).length} devices; these are meant to be readable by hand`);
         assert.ok(topology.snapshot.ScanTimestamp);
@@ -318,8 +329,20 @@ test('a Partial node carries data and is missing the section a rule would need',
     const topology = byName('partial-node-missing-stp-section');
     const partial = byIp(topology).get(topology.partialIp);
     assert.equal(partial.ScanStatus, 'Partial');
-    assert.ok(partial.Interfaces.length > 0, 'Partial is not a placeholder: it captured real data');
-    assert.ok(partial.Clients.length > 0);
+    // Partial is not a placeholder: it captured everything up to the point the session died.
+    assert.ok(partial.Interfaces.length > 0);
+    assert.ok(partial.StackMembers.length > 0);
+    assert.equal(partial.DefaultRoute.State, 'Parsed');
+    // And dropping a section drops what that section supplies, or the node asserts a state no switch
+    // produces and a guard-gated rule reads NOT_EVALUATED beside data that is plainly there.
+    assert.deepEqual(partial.Clients, []);
+    assert.deepEqual(partial.MacTable, []);
+    assert.deepEqual(partial.Neighbors, [], 'LLDP is past the truncation point');
+    assert.equal(partial.Configuration, 'Unknown');
+    assert.equal(partial.MasterCpuUtilization, 'Unknown');
+    // One-sided LLDP is what a session dying mid-capture leaves behind, and is its own interesting case.
+    const other = devices(topology).find(d => d !== partial);
+    assert.ok(other.Neighbors.some(n => n.ManagementIP === partial.DeviceIP));
     assert.ok(!partial.SectionsCaptured.includes(topology.missingSection));
     assert.ok(partial.SectionsCaptured.length > 0 && partial.SectionsCaptured.length < CAPTURE_SECTIONS.length);
     // The false clean the guard exists to prevent: empty containers, not null or absent ones.

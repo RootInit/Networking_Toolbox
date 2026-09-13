@@ -75,8 +75,14 @@ test('a manifest is not picked up by the snapshot loaders', () => {
     }
 });
 
-test('--faults 0 writes no manifest at all', () => {
-    assert.deepEqual(clean.manifests, []);
+// Written every run, so a manifest always describes the snapshot beside it and no run can leave a
+// stale one behind claiming faults it did not inject.
+test('--faults 0 writes an empty manifest rather than none', () => {
+    assert.equal(clean.manifests.length, clean.names.length);
+    for (const m of clean.faults) {
+        assert.deepEqual(m.Faults, []);
+        assert.equal(m.Requested, 0);
+    }
 });
 
 test('every fault kind places, and each entry carries an oracle a rule can be checked against', () => {
@@ -88,9 +94,20 @@ test('every fault kind places, and each entry carries an oracle a rule can be ch
     const ids = entries.map(f => f.id);
     assert.equal(new Set(ids).size, ids.length, 'ids must be unique across snapshots');
     for (const f of entries) {
-        assert.ok(/^F\d+$/.test(f.failureMode), `${f.id} names no section 7 failure mode`);
+        // A kind section 7 does not catalogue carries an empty list rather than a label invented to
+        // satisfy this check: the label is what item 11 maps a finding to, so a wrong one is a wrong
+        // oracle. Every kind that is missing one says why at its injector.
+        assert.ok(Array.isArray(f.failureModes), `${f.id} has no failureModes list`);
+        assert.ok(f.failureModes.every(m => /^F\d+$/.test(m)), `${f.id}: ${f.failureModes} is not a section 7 label`);
         assert.ok(f.expected && f.expected.finding, `${f.id} has no expected finding`);
         assert.equal(f.expected.deviceIp, f.deviceIp);
+    }
+    // And the labels that do appear must be ones section 7 actually lists.
+    const catalogued = new Set([...fs.readFileSync(path.join(ROOT, 'docs', 'diagnostics-spec.md'), 'utf8')
+        .matchAll(/^\| (F\d+) \|/gm)].map(m => m[1]));
+    assert.ok(catalogued.size >= 14, `only ${catalogued.size} failure modes read from the spec`);
+    for (const f of entries) {
+        for (const mode of f.failureModes) assert.ok(catalogued.has(mode), `${f.id}: ${mode} is not in section 7`);
     }
 });
 

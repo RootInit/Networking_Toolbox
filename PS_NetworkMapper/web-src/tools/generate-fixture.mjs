@@ -1154,7 +1154,7 @@ function injectDuplicateMac(rng, fleet) {
     host.Clients.push(copy);
     host.MacTable.push(macRow(copy, row.Port));
     return {
-        kind: 'duplicate-mac', failureMode: 'F1', deviceIp: host.DeviceIP, port: row.Port, mac: copy.MAC,
+        kind: 'duplicate-mac', failureModes: ['F1'], deviceIp: host.DeviceIP, port: row.Port, mac: copy.MAC,
         params: { alsoOn: donor.DeviceIP, alsoOnPort: String(client.Port).replace(/\.\d+$/, '') },
         expected: { finding: 'duplicate-mac-across-devices', deviceIp: host.DeviceIP, port: row.Port },
     };
@@ -1170,7 +1170,9 @@ function injectDuplicateIp(rng, fleet) {
     const mac = faultClientMac(rng);
     host.ArpEntries.push({ MAC: mac, IP: entry.IP });
     return {
-        kind: 'duplicate-ip', failureMode: 'F4', deviceIp: host.DeviceIP, port: null, mac: mac,
+        // F7: the endpoint becomes findable twice over, which the correlation has to report as
+        // ambiguous rather than resolve by picking one.
+        kind: 'duplicate-ip', failureModes: ['F7'], deviceIp: host.DeviceIP, port: null, mac: mac,
         params: { ip: entry.IP, alsoClaimedBy: entry.MAC },
         expected: { finding: 'duplicate-ip-two-macs', deviceIp: host.DeviceIP, port: null },
     };
@@ -1193,7 +1195,8 @@ function injectOffSubnetClient(rng, fleet) {
     host.MacTable.push(macRow(client, row.Port));
     host.ArpEntries.push({ MAC: client.MAC, IP: client.IP });
     return {
-        kind: 'off-subnet-client', failureMode: 'F4', deviceIp: host.DeviceIP, port: row.Port, mac: client.MAC,
+        // No section 7 row: an address outside every scope is a section 6.4 gateway question.
+        kind: 'off-subnet-client', failureModes: [], deviceIp: host.DeviceIP, port: row.Port, mac: client.MAC,
         params: { ip: client.IP, vlanTag: vlan.tag },
         expected: { finding: 'client-outside-scope', deviceIp: host.DeviceIP, port: row.Port },
     };
@@ -1210,7 +1213,8 @@ function injectDot1xHeld(rng, fleet) {
     client.Dot1x_State = 'Held';
     if (client.Dot1x_User === 'Unknown') client.Dot1x_User = `lab\\user${fInt(rng, 100, 999)}`;
     return {
-        kind: 'dot1x-held', failureMode: 'F4', deviceIp: host.DeviceIP,
+        // No section 7 row: R6 data, and a rule of its own rather than a path failure.
+        kind: 'dot1x-held', failureModes: [], deviceIp: host.DeviceIP,
         port: String(client.Port).replace(/\.\d+$/, ''), mac: client.MAC,
         params: { previousState: before, user: client.Dot1x_User },
         expected: { finding: 'dot1x-held', deviceIp: host.DeviceIP, port: String(client.Port).replace(/\.\d+$/, '') },
@@ -1228,7 +1232,7 @@ function injectStpUnconverged(rng, fleet) {
     row.STP = 'LRN';
     for (const scope of Object.keys(row.StpDetail || {})) row.StpDetail[scope].State = 'LRN';
     return {
-        kind: 'stp-unconverged', failureMode: 'F9', deviceIp: host.DeviceIP, port: row.Port, mac: null,
+        kind: 'stp-unconverged', failureModes: ['F9'], deviceIp: host.DeviceIP, port: row.Port, mac: null,
         params: { previousState: 'BLK' },
         expected: { finding: 'stp-port-not-converged', deviceIp: host.DeviceIP, port: row.Port },
     };
@@ -1257,7 +1261,8 @@ function injectAutonegAsymmetric(rng, fleet) {
     near.Info = 'Autonegotiation disabled, 1000BaseTFD';
     far.Info = 'Autonegotiation enabled, 1000BaseTFD';
     return {
-        kind: 'autoneg-asymmetric', failureMode: 'F4', deviceIp: device.DeviceIP,
+        // No section 7 row: the 802.3 TLVs R2 retains are what make it visible at all.
+        kind: 'autoneg-asymmetric', failureModes: [], deviceIp: device.DeviceIP,
         port: String(neighbor.LocalPort).replace(/\.\d+$/, ''), mac: null,
         params: { peerIp: peer.DeviceIP, peerPort: String(back.LocalPort).replace(/\.\d+$/, '') },
         expected: { finding: 'autoneg-mismatch', deviceIp: device.DeviceIP, port: String(neighbor.LocalPort).replace(/\.\d+$/, '') },
@@ -1286,7 +1291,7 @@ function injectSharedSegment(rng, fleet) {
         ends.push({ deviceIp: node.DeviceIP, port: row.Port });
     }
     return {
-        kind: 'unmanaged-bridge-shared-segment', failureMode: 'F14',
+        kind: 'unmanaged-bridge-shared-segment', failureModes: ['F6', 'F14'],
         deviceIp: ends[0].deviceIp, port: ends[0].port, mac: mac,
         params: { otherIp: ends[1].deviceIp, otherPort: ends[1].port },
         expected: { finding: 'shared-segment-not-a-link', deviceIp: ends[0].deviceIp, port: ends[0].port },
@@ -1334,16 +1339,14 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));
     // Not NetworkMap_*: both loaders match /^NetworkMap_.*\.json$/, so a manifest named after its map
     // would be offered as a snapshot to open.
+    // Written on every run, empty at --faults 0: a manifest that describes every snapshot is a
+    // contract, and one that appears only sometimes would leave a stale file from an earlier run
+    // describing faults this one did not inject.
     const manifestPath = path.join(OUT_DIR, `FaultManifest_${stamp}.fixture.json`);
-    if (FAULT_COUNT) {
-        fs.writeFileSync(manifestPath, JSON.stringify({
-            Map: path.basename(mapPath), ScanTimestamp: scanTime.toISOString(),
-            Seed: SEED, Requested: FAULT_COUNT, Faults: manifest,
-        }, null, 2));
-    } else if (fs.existsSync(manifestPath)) {
-        // A stale manifest from an earlier --faults run describes faults this one did not inject.
-        fs.unlinkSync(manifestPath);
-    }
+    fs.writeFileSync(manifestPath, JSON.stringify({
+        Map: path.basename(mapPath), ScanTimestamp: scanTime.toISOString(),
+        Seed: SEED, Requested: FAULT_COUNT, Faults: manifest,
+    }, null, 2));
     written.push({ mapPath, fleet, tree, manifest });
 }
 

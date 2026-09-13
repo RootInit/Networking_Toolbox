@@ -74,6 +74,26 @@ export function microNode(deviceIp, hostname, { ports = [], members = 1, model =
 
 const rowOf = (node, port) => node.Interfaces.find(r => r.Port === port);
 
+// ConvertFrom-JunosVlanTable's shape: members are objects under Interfaces[], not a list of names, and
+// the per-port view the worker derives from them carries the tag rather than only the VLAN name.
+export function vlan(name, tag, unitNames, routingInstance = 'default-switch') {
+    return {
+        RoutingInstance: routingInstance, Name: name, Tag: tag,
+        Interfaces: unitNames.map(unit => ({ Port: unit.replace(/\.\d+$/, ''), Unit: unit, Active: true })),
+    };
+}
+
+// What Get-JunosNodeData.ps1 pushes onto each physical row for every VLAN that names it.
+function applyVlanMembership(node) {
+    for (const row of node.Interfaces) row.Vlans = [];
+    for (const v of node.Vlans) {
+        for (const member of v.Interfaces) {
+            const row = rowOf(node, member.Port);
+            if (row) row.Vlans.push({ Name: v.Name, Tag: v.Tag, Unit: member.Unit, Active: member.Active });
+        }
+    }
+}
+
 // Per-scope spanning-tree state plus the collapsed field the worker derives from it, set together:
 // setting one without the other is the class of fixture lie section 8.2 exists to forbid.
 export function setStp(node, port, scopes) {
@@ -148,10 +168,8 @@ function triangleVstp() {
     for (const node of [a, b, c]) {
         node.Configuration = node.Configuration.replace('set protocols rstp\n',
             'set protocols vstp vlan 10\nset protocols vstp vlan 20\n');
-        node.Vlans = [
-            { Name: 'DATA', Tag: 10, RoutingInstance: 'default-switch', Members: [] },
-            { Name: 'VOICE', Tag: 20, RoutingInstance: 'default-switch', Members: [] },
-        ];
+        node.Vlans = [vlan('DATA', 10, ['xe-0/0/0.0', 'xe-0/0/1.0']), vlan('VOICE', 20, ['xe-0/0/0.0', 'xe-0/0/1.0'])];
+        applyVlanMembership(node);
     }
     link(a, 'xe-0/0/0', b, 'xe-0/0/0', 'TRUNK');
     link(a, 'xe-0/0/1', c, 'xe-0/0/0', 'TRUNK');
@@ -170,7 +188,7 @@ function triangleVstp() {
 
     return {
         name: 'triangle-vstp-leg-blocked-in-one-vlan',
-        failureModes: ['F5'],
+        failureModes: ['F5', 'F12'],
         description: 'Three bridges in a triangle under VSTP. The B-C leg is blocked in VLAN 10 and '
             + 'forwarding in VLAN 20, so C\'s collapsed STP field reads BLK on a port VLAN 20 forwards on.',
         blockedLeg: { deviceIp: c.DeviceIP, port: 'xe-0/0/1', blockedIn: 'VLAN 10', forwardingIn: 'VLAN 20' },
@@ -187,11 +205,11 @@ function vlanWithoutStpInstance() {
     for (const node of [a, b]) {
         node.Configuration = node.Configuration.replace('set protocols rstp\n', 'set protocols vstp vlan 10\n');
         node.Vlans = [
-            { Name: 'DATA', Tag: 10, RoutingInstance: 'default-switch', Members: ['xe-0/0/0.0', 'ge-0/0/1.0'] },
+            vlan('DATA', 10, ['xe-0/0/0.0', 'ge-0/0/1.0']),
             // Configured, carried on the trunk, and in no spanning-tree instance.
-            { Name: 'LEGACY', Tag: 30, RoutingInstance: 'default-switch', Members: ['xe-0/0/0.0', 'ge-0/0/1.0'] },
+            vlan('LEGACY', 30, ['xe-0/0/0.0', 'ge-0/0/1.0']),
         ];
-        for (const row of node.Interfaces) row.Vlans = ['DATA', 'LEGACY'];
+        applyVlanMembership(node);
     }
     link(a, 'xe-0/0/0', b, 'xe-0/0/0', 'TRUNK');
     setStp(a, 'xe-0/0/0', { 'VLAN 10': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
@@ -286,7 +304,8 @@ function lag(memberDown) {
     }
     return {
         name: memberDown ? 'lag-two-members-one-down' : 'lag-two-members-up',
-        failureModes: ['F10'],
+        // No section 7 row: an aggregate is a shape the graph has to collapse, not a failure mode.
+        failureModes: [],
         description: memberDown
             ? 'A two-member aggregate with one member down: the bundle still forwards, and the '
             + 'remaining capacity is half what the configuration implies.'
@@ -311,7 +330,8 @@ function virtualChassis() {
     addClient(vc, 'ge-1/0/0', { mac: 'aa:bb:00:00:04:01', tag: 10, vlanName: 'DATA' });
     return {
         name: 'virtual-chassis-across-fpcs',
-        failureModes: ['F14'],
+        // No section 7 row: port identity inside one node, not a path failure.
+        failureModes: [],
         description: 'One device, two FPCs, a client on the same port number of each. Port identity is '
             + 'fpc/pic/port, never the trailing number.',
         snapshot: snapshot([vc, upstream]),
@@ -341,7 +361,7 @@ function unscannedWaypoint() {
     };
     return {
         name: 'unscanned-waypoint',
-        failureModes: ['F14'],
+        failureModes: ['F7', 'F8'],
         description: 'A path whose middle hop is a device that never answered. The link is real - both '
             + 'ends report it over LLDP - but there is no port state on the hop itself.',
         waypointIp: b.DeviceIP,
@@ -366,7 +386,7 @@ function addresslessBridge() {
     }
     return {
         name: 'addressless-bridge-shared-segment',
-        failureModes: ['F14'],
+        failureModes: ['F6', 'F14'],
         description: 'Two switches either side of an unmanaged bridge. Both ports read DESG FWD and '
             + 'neither neighbour has an address, so no node exists between them.',
         bridgeMac,
@@ -388,7 +408,8 @@ function outOfScopeNeighbor() {
     rowOf(a, 'xe-0/0/0').Desc = 'UPLINK to partner-core';
     return {
         name: 'out-of-scope-neighbor',
-        failureModes: ['F14'],
+        // No section 7 row: a neighbour we were never meant to crawl is not a failure at all.
+        failureModes: [],
         description: 'An LLDP neighbour with a management address outside allowedScopes. It has an '
             + 'address and is reachable, and still no node exists for it.',
         outOfScopeIp: '172.31.9.1',
@@ -404,15 +425,33 @@ function partialNode() {
     const b = microNode('10.30.8.11', 'micro-partial-b.example.net', { ports: ['xe-0/0/0', 'ge-0/0/1'] });
     link(a, 'xe-0/0/0', b, 'xe-0/0/0');
     setStp(a, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
-    addClient(b, 'ge-0/0/1', { mac: 'aa:bb:00:00:08:01', tag: 10, vlanName: 'DATA' });
     b.ScanStatus = 'Partial';
-    b.ScanError = 'session closed after 7 of 18 sections';
     // Truncated at STP, so everything from there on is absent - the tail order is the worker's.
     b.SectionsCaptured = CAPTURE_SECTIONS.slice(0, CAPTURE_SECTIONS.indexOf('STP'));
-    for (const row of b.Interfaces) { row.StpDetail = {}; row.STP = 'Unknown'; }
+    b.ScanError = `session closed after ${b.SectionsCaptured.length} of ${CAPTURE_SECTIONS.length} sections`;
+    // Dropping a section has to drop what that section supplies, or the node asserts a state no real
+    // switch produces (section 8.2) and a guard-gated rule reads NOT_EVALUATED beside visible data.
+    // The one-sided LLDP that leaves is exactly what a session dying mid-capture produces: A still
+    // reports B, and B reports nothing.
+    for (const row of b.Interfaces) { row.StpDetail = {}; row.STP = 'Unknown'; row.PoE = 'Unknown'; }
+    b.Neighbors = [];
+    b.MedNeighbors = [];
+    b.Clients = [];
+    b.MacTable = [];
+    b.ArpEntries = [];
+    b.Vlans = [];
+    // Uptime and both LastConfigured fields all come out of the one UPTIME section.
+    b.Uptime = 'Unknown';
+    b.LastConfigured = 'Unknown';
+    b.LastConfiguredBy = 'Unknown';
+    b.Alarms = [];
+    b.MasterCpuUtilization = 'Unknown';
+    b.MasterMemoryUtilization = 'Unknown';
+    b.Configuration = 'Unknown';
     return {
         name: 'partial-node-missing-stp-section',
-        failureModes: ['F13'],
+        // Not a section 7 row: the failure being modelled is the NOT_EVALUATED guarantee of section 3.2.
+        failureModes: [],
         description: 'A Partial node whose capture stopped before the spanning-tree section. Its ports '
             + 'carry no state at all, which is not the same as carrying no problem.',
         partialIp: b.DeviceIP,
