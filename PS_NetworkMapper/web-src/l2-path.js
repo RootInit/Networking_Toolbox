@@ -218,7 +218,8 @@ function adjacencyOf(assessments) {
 
 // Every simple path, bounded twice: by how many paths are reported and by how much walking is done. The
 // count is the answer, so the limit has to be visible when it bites - a truncated enumeration cannot be
-// reported as "exactly two paths".
+// reported as "exactly two paths". Callers ask for one more than they intend to report, so that finding
+// exactly `limit` paths is a fact and not an unknown; see computePath.
 function enumerateSimplePaths(adjacency, fromIp, toIp, limit, stepBudget) {
     var paths = [];
     var onPath = new Set([fromIp]);
@@ -306,7 +307,10 @@ function reasonsAtFrontier(reachable, pruned, terminals, segments) {
         var edge = assessment.edge;
         var aIn = reachable.has(edge.a.ip);
         var bIn = reachable.has(edge.b.ip);
-        if (!aIn && !bIn) return;
+        // Strictly the frontier. A pruned edge with BOTH ends already reachable adds no device if it is
+        // unpruned, so it cannot be why the target was not reached - and listing every blocked Alternate
+        // leg inside the reachable component buries the one reason that matters.
+        if (aIn === bIn) return;
         reasons.push({
             kind: assessment.pruned.reason,
             failureMode: assessment.pruned.failureMode,
@@ -320,6 +324,9 @@ function reasonsAtFrontier(reachable, pruned, terminals, segments) {
         var segment = segments.find(function (candidate) {
             return candidate.ends.some(function (end) { return end.ip === terminal.ip && end.port === terminal.port; });
         });
+        // A shared segment whose other side is reachable anyway joins two devices we already have, so it
+        // is inside the component rather than on its edge - the same frontier rule as above.
+        if (segment && segment.ends.every(function (end) { return reachable.has(end.ip); })) return;
         reasons.push({
             kind: 'terminal',
             failureMode: terminal.kind === 'addressless-bridge' || terminal.kind === 'inferred-segment' ? 'F14' : 'F8',
@@ -353,6 +360,13 @@ function computePath(input, options) {
         status: 'NO_PATH', paths: [], truncated: false, reasons: [], lastReachedHop: null,
         notes: [],
     };
+    // Without this, a missing tag is NaN, no port matches it, and every hop is pruned with a plausible
+    // "VLAN NaN is not on ..." - a wrong answer that reads like a real diagnosis.
+    if (!isFinite(tag)) {
+        result.notes.push('no-vlan-given');
+        result.reasons.push({ kind: 'no-vlan-given', failureMode: null, detail: 'a path is per VLAN; none was given', ends: [] });
+        return result;
+    }
     if (!graph.deviceByIp.has(fromIp)) result.notes.push('unknown-device:' + fromIp);
     if (!graph.deviceByIp.has(toIp)) result.notes.push('unknown-device:' + toIp);
     if (result.notes.length) {
@@ -378,9 +392,13 @@ function computePath(input, options) {
         return result;
     }
 
-    var found = enumerateSimplePaths(adjacency, fromIp, toIp, limit, stepBudget);
-    result.truncated = found.truncated;
-    result.paths = found.paths.map(function (trail) {
+    // One past the limit, so finding exactly `limit` paths is a fact rather than an unknown - and so a
+    // limit of 1 on a topology with two paths still reports AMBIGUOUS, which is the answer that matters.
+    var found = enumerateSimplePaths(adjacency, fromIp, toIp, limit + 1, stepBudget);
+    var overLimit = found.paths.length > limit;
+    result.truncated = overLimit || (found.truncated && found.paths.length <= limit);
+    var enumerated = found.paths.length;
+    result.paths = found.paths.slice(0, limit).map(function (trail) {
         var hops = [];
         var cursor = fromIp;
         var confidence = 'VERIFIED';
@@ -401,11 +419,13 @@ function computePath(input, options) {
         return { hops: hops, confidence: confidence, notes: notes, captureSpreadSeconds: spread, macCoherent: coherent };
     });
 
-    if (result.paths.length === 1) {
+    // Status comes from how many paths were FOUND, not from how many are reported: knowing a second path
+    // exists is the finding, and reporting one of two as an answer is the mistake this guards against.
+    if (enumerated === 1) {
         result.status = 'PATH';
         return result;
     }
-    if (result.paths.length > 1) {
+    if (enumerated > 1) {
         // F10. Two surviving paths is the fault, not an invitation to choose one.
         result.status = 'AMBIGUOUS';
         return result;

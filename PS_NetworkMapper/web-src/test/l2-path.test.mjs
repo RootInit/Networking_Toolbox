@@ -23,6 +23,29 @@ const pathIn = (name, options) =>
 const route = (result) => (result.paths[0] ? result.paths[0].hops.map(h => `${h.from.ip} ${h.from.port} -> ${h.to.ip} ${h.to.port}`) : []);
 const visited = (candidate) => [candidate.hops[0].from.ip, ...candidate.hops.map(h => h.to.ip)];
 
+// The devices reachable from one device in one VLAN, computed here rather than read off the result, so
+// the frontier property below is asserted against an independent walk.
+function reachedSet(graph, fromIp, tag) {
+    const adjacency = new Map();
+    for (const edge of graph.edges) {
+        if (L2Path.assessEdge(edge, tag).pruned) continue;
+        for (const [x, y] of [[edge.a.ip, edge.b.ip], [edge.b.ip, edge.a.ip]]) {
+            if (!adjacency.has(x)) adjacency.set(x, []);
+            adjacency.get(x).push(y);
+        }
+    }
+    const seen = new Set([fromIp]);
+    const queue = [fromIp];
+    for (let head = 0; head < queue.length; head++) {
+        for (const next of adjacency.get(queue[head]) || []) {
+            if (seen.has(next)) continue;
+            seen.add(next);
+            queue.push(next);
+        }
+    }
+    return seen;
+}
+
 // A deliberately wrong pruner: the one section 2.2 forbids, kept here so the F5 regression asserts that
 // the wrong answer really is wrong rather than merely asserting the right one.
 function pathOnCollapsedField(topology, fromIp, toIp) {
@@ -226,13 +249,31 @@ test('the enumeration is bounded, and says when the bound bit', () => {
     const [, , , acc] = topology.snapshot.Topology.map(d => String(d.DeviceIP));
     const root = String(topology.snapshot.Topology[0].DeviceIP);
     const capped = pathIn(topology.name, { from: acc, to: root, vlanTag: 30, limit: 1 });
-    assert.equal(capped.paths.length, 1);
+    assert.equal(capped.paths.length, 1, 'the limit is what is reported');
     assert.equal(capped.truncated, true);
-    assert.equal(capped.status, 'PATH', 'one path was reported; truncated says it may not be the only one');
+    // The count is the finding, so the status follows what was FOUND rather than what fits: reporting
+    // one of two paths as the answer is the mistake the enumeration exists to prevent.
+    assert.equal(capped.status, 'AMBIGUOUS');
+
+    // And a limit the enumeration does not reach is not truncation: exactly two paths at limit 2 is a
+    // fact, because the walk looks for a third.
+    const exact = pathIn(topology.name, { from: acc, to: root, vlanTag: 30, limit: 2 });
+    assert.equal(exact.paths.length, 2);
+    assert.equal(exact.truncated, false);
+    assert.equal(exact.status, 'AMBIGUOUS');
 
     const starved = pathIn(topology.name, { from: acc, to: root, vlanTag: 30, stepBudget: 1 });
     assert.equal(starved.truncated, true);
     assert.deepEqual(starved.paths, []);
+});
+
+test('a path is per VLAN, and asking without one is not answered with a fabricated absence', () => {
+    const topology = byName('vlan-with-no-stp-instance');
+    const [a, b] = topology.snapshot.Topology.map(d => String(d.DeviceIP));
+    const result = pathIn(topology.name, { from: a, to: b });
+    assert.equal(result.status, 'NO_PATH');
+    assert.deepEqual(result.reasons.map(r => r.kind), ['no-vlan-given']);
+    assert.ok(result.notes.includes('no-vlan-given'));
 });
 
 // F12, the case a device-level protocol guess gets wrong: one device running VSTP for some VLANs and RSTP
@@ -328,5 +369,45 @@ test('on the generated fleet, a pruned VLAN leaves exactly one path between scan
     if (otherTag !== undefined) {
         const fine = computePath(graph, { from: near, to: far, vlanTag: otherTag });
         assert.equal(fine.status, 'PATH', 'the trunk still carries every other VLAN');
+    }
+
+    // The reasons are a frontier, not a survey: every one of them has exactly one end among the devices
+    // actually reached. A pruned leg with both ends already reachable adds no device and cannot be why
+    // the target was missed, so listing it would only bury the reason that is.
+    if (blocked.status === 'NO_PATH') {
+        assert.ok(blocked.lastReachedHop, 'something was reached');
+        assert.ok(blocked.reasons.some(r => r.kind === 'vlan-absent'));
+        const reached = reachedSet(graph, near, f11.params.vlanTag);
+        const prunedEdges = graph.edges.filter(e => L2Path.assessEdge(e, f11.params.vlanTag).pruned);
+        for (const reason of blocked.reasons) {
+            const inside = reason.ends.filter(e => reached.has(e.ip)).length;
+            assert.equal(inside, 1, `${reason.kind} on ${JSON.stringify(reason.ends)} is not on the frontier`);
+        }
+        assert.ok(blocked.reasons.length < prunedEdges.length,
+            'the frontier must be narrower than the set of every pruned edge in the snapshot');
+    }
+
+    // F9 as an oracle, the same way: the injected learning port is either the reason a path stops or a
+    // port no reported path crosses. A path computer reading only FWD/BLK has a third state to account
+    // for, and this is where it is accounted for.
+    const f9 = manifest.Faults.find(f => f.kind === 'stp-unconverged');
+    const learning = String(f9.deviceIp);
+    const learningEdge = graph.edges.find(e => (e.a.ip === learning && e.a.port === f9.port) || (e.b.ip === learning && e.b.port === f9.port));
+    assert.ok(learningEdge, 'the LRN port is an end of a real edge');
+    const otherEnd = learningEdge.a.ip === learning ? learningEdge.b : learningEdge.a;
+    const sharedTag = (byIp.get(learning).Vlans || []).map(v => v.Tag)
+        .find(tag => (byIp.get(otherEnd.ip).Vlans || []).some(v => v.Tag === tag));
+    assert.ok(sharedTag !== undefined, 'the two ends share a VLAN to ask about');
+    const across = computePath(graph, { from: learning, to: otherEnd.ip, vlanTag: sharedTag });
+    if (across.status === 'NO_PATH') {
+        const reason = across.reasons.find(r => r.kind === 'stp-not-converged');
+        assert.ok(reason, `no F9 reason: ${JSON.stringify(across.reasons)}`);
+        assert.equal(reason.failureMode, 'F9');
+        assert.ok(reason.ends.some(e => e.ip === learning && e.port === f9.port && e.state === 'LRN'));
+    } else {
+        for (const candidate of across.paths) {
+            assert.ok(!candidate.hops.some(h => h.from.ip === learning && h.from.port === f9.port),
+                'a port still learning is not a hop');
+        }
     }
 });

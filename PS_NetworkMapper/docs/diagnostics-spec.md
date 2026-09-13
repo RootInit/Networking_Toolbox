@@ -598,7 +598,21 @@ l2Path(a, b, T):
   decides. The ladder is unchanged.
 - **`VERIFIED` is unreachable on the generated fleet**, by construction: it runs a single RSTP instance
   (§8.2), so every fixture-scale path is honestly `VLAN_ONLY`. The VSTP micro-topologies are where
-  `VERIFIED` is exercised, which is what they were built for.
+  `VERIFIED` is exercised, which is what they were built for. **`INFERRED` is unreachable everywhere**,
+  not only there: every edge in the graph is LLDP-derived (§5.2), so adjacency from MAC-table or STP
+  evidence alone has no producer yet. The level stays in the ladder; nothing emits it.
+- **The reasons are a frontier, not a survey.** Only a pruned edge with exactly one end among the devices
+  actually reached can be why the target was missed — unpruning one whose ends are both reachable adds no
+  device. Without that rule a `NO_PATH` in a sparsely-carried VLAN listed thirty blocked legs and buried
+  the one absence that mattered. The same applies to a shared segment whose other side is reachable
+  anyway.
+- **A path is per VLAN, and no VLAN is not a VLAN.** A missing tag would otherwise be `NaN`, match no
+  member anywhere, and prune every hop with a fabricated `VLAN NaN is not on …` — a wrong answer in the
+  shape of a real diagnosis. It is refused with `no-vlan-given` instead.
+- **Still device-to-device, which item 14 has to close.** §6.2's `a` and `b` are resolver outputs —
+  `(device, port)` pairs — and an access port's own membership and spanning-tree state are therefore
+  never assessed: a path to a host whose port is not in the VLAN, or whose supplicant is `Held`, reads as
+  clean up to the last switch. That belongs where the resolver result is wired into the path call.
 
 ### 6.3 Symmetry
 
@@ -764,6 +778,15 @@ accidentally faulty:
 - **A trunk's two ends take the intersection of what the two devices configure.** That is what makes
   F11 injectable rather than ambient: the two ends of a link cannot disagree unless something
   deliberately removes a tag, and the test asserts the clean fleet has no disagreement anywhere.
+
+**One §8.2 divergence left standing deliberately.** A fixture device whose scan "failed" keeps its real
+`Hostname` beside an empty `SectionsCaptured`, which is a shape the crawler never produces: a true
+placeholder has `Hostname = "Unknown"` (`FleetCrawl.ps1`, `New-PlaceholderNodeLocal`), and a failure that
+preserved data is a `$LastFailedNode` with real sections. The generator keeps the name on purpose — a
+placeholder has no serial, so cross-snapshot identity in the inventory diff falls back to the hostname
+(`generate-fixture.mjs:1066`). The consumer side is closed instead: nothing treats a node that captured
+nothing as having spoken for itself, which is why the L2 graph's hostname confirmation tier now tests
+`SectionsCaptured` rather than the name alone.
 
 Membership is rebuilt per snapshot, after `computeSpanningTree`, because the `*` marking a member as
 currently forwarding for a VLAN moves when the tree does. `Vlans` accordingly left `ACCESS_ROW_GAP`
