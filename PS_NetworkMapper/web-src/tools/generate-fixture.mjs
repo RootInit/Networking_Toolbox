@@ -943,18 +943,150 @@ function assertForwardingIsSpanningTree(fleet) {
     }
 }
 
+// VLAN membership, section 8.2 and the data section 6.2's first filter reads. Two rules, both derived
+// rather than invented: a trunk carries exactly the tags of the switches behind it, and an access port
+// exactly the tags of the clients standing on it. Anything looser makes F11 - a VLAN missing from one
+// end of a trunk - the fixture's normal state, and a rule tested against that learns nothing.
+const ALL_VLAN_TAGS = VLANS.map(v => v.tag);
+
+// The voice VLAN is on every closet whether the draw picked it or not: addClients puts phones in it
+// unconditionally, and a phone in a VLAN its own switch does not configure is not a state to test on.
+const accessTags = (drawn) => (drawn.includes(VOICE_TAG) ? drawn : [...drawn, VOICE_TAG]);
+
+// One entry per switch-to-switch link, deduplicated on the port pair so a symmetric LLDP pair is one
+// link and a LAG's members stay separate (each member is its own row and carries its own membership).
+function switchLinksOf(fleet) {
+    const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
+    const links = [];
+    const seen = new Set();
+    for (const d of fleet) {
+        for (const n of d.Neighbors) {
+            const peer = byIp.get(String(n.ManagementIP));
+            if (!peer || peer === d) continue;
+            const aPort = String(n.LocalPort).replace(/\.\d+$/, '');
+            const bPort = String(n.RemotePort).replace(/\.\d+$/, '');
+            const key = [`${d.DeviceIP}|${aPort}`, `${peer.DeviceIP}|${bPort}`].sort().join('~');
+            if (seen.has(key)) continue;
+            seen.add(key);
+            links.push({ a: d, aPort: aPort, b: peer, bPort: bPort });
+        }
+    }
+    return links;
+}
+
+// Sets node.vlanTags (what the device configures) and node._trunkVlans (port -> tags it trunks). No
+// rnd(): the tag sets are already drawn, and this only propagates them.
+function assignVlanTags(fleet) {
+    const links = switchLinksOf(fleet);
+    const adj = new Map(fleet.map(d => [d, []]));
+    for (const l of links) { adj.get(l.a).push(l); adj.get(l.b).push(l); }
+
+    // Frames and cores carry the whole campus set - that is what makes them frames.
+    const tags = new Map(fleet.map(d => [d, new Set(d.role === 'ACC' ? d._ownTags : ALL_VLAN_TAGS)]));
+
+    // The access tree hangs off the frames, so a closet's uplink is the link that first reached it.
+    const parentLink = new Map();
+    const order = [];
+    const queue = fleet.filter(d => d.role !== 'ACC');
+    const seen = new Set(queue);
+    for (let head = 0; head < queue.length; head++) {
+        for (const l of adj.get(queue[head])) {
+            const far = l.a === queue[head] ? l.b : l.a;
+            if (seen.has(far)) continue;
+            seen.add(far);
+            parentLink.set(far, l);
+            order.push(far);
+            queue.push(far);
+        }
+    }
+    // A redundant leg (a dual-home, the second link of a daisy loop) has to carry what its partner does,
+    // or moving the tree onto it would strand a VLAN. Both ends learn the union - before the upward
+    // propagation below, so a closet that grew this way is still covered by the trunk above it.
+    for (const l of links) {
+        if (parentLink.get(l.a) === l || parentLink.get(l.b) === l) continue;
+        const union = new Set([...tags.get(l.a), ...tags.get(l.b)]);
+        for (const end of [l.a, l.b]) for (const tag of union) tags.get(end).add(tag);
+    }
+
+    // Deepest closet first, so a chain's tags reach every trunk above it.
+    for (const node of order.slice().reverse()) {
+        const l = parentLink.get(node);
+        const up = l.a === node ? l.b : l.a;
+        for (const tag of tags.get(node)) tags.get(up).add(tag);
+    }
+    for (const d of fleet) d.vlanTags = [...tags.get(d)].sort((x, y) => x - y);
+}
+
+// Rebuilt per snapshot, after computeSpanningTree: the "*" that marks a member as currently forwarding
+// for a VLAN moves when the tree does. Mirrors Vlans[] onto the port rows exactly as the worker's second
+// pass over ConvertFrom-JunosVlanTable output does (Get-JunosNodeData.ps1).
+function applyVlanMembership(fleet) {
+    // A trunk carries the VLANs both ends configure. Taken as the intersection rather than assigned from
+    // one side, so the two ends of a link can never disagree unless something deliberately removes a tag
+    // - which is exactly what the F11 injector does.
+    const trunkTags = new Map();   // device -> Map(port -> tags[])
+    for (const d of fleet) trunkTags.set(d, new Map());
+    for (const l of switchLinksOf(fleet)) {
+        const carried = l.a.vlanTags.filter(t => l.b.vlanTags.includes(t));
+        trunkTags.get(l.a).set(l.aPort, carried);
+        trunkTags.get(l.b).set(l.bPort, carried);
+    }
+    for (const node of fleet) {
+        const rows = byPort(node);
+        const trunks = trunkTags.get(node);
+        for (const row of node.Interfaces) row.Vlans = [];
+        const members = new Map(node.vlanTags.map(t => [t, []]));
+        const claim = (tag, row, active) => {
+            if (!members.has(tag)) return;
+            if (members.get(tag).some(m => m.Port === row.Port)) return;
+            members.get(tag).push({ Port: row.Port, Unit: `${row.Port}.0`, Active: active });
+        };
+        for (const [port, carried] of trunks) {
+            const row = rows.get(port);
+            if (!row || String(row.Link).toLowerCase() !== 'up') continue;   // a dark trunk has no members
+            for (const tag of carried) claim(tag, row, row.STP === 'FWD');
+        }
+        for (const client of node.Clients) {
+            const port = String(client.Port).replace(/\.\d+$/, '');
+            if (trunks.has(port)) continue;
+            const row = rows.get(port);
+            if (row) claim(client.VLAN_Tag, row, String(row.Link).toLowerCase() === 'up');
+        }
+        // A configured VLAN with no member port still prints in "show vlans", which is why the list comes
+        // from vlanTags and not from the membership.
+        node.Vlans = node.vlanTags.map(tag => ({
+            RoutingInstance: 'default-switch',
+            Name: VLANS.find(v => v.tag === tag).name,
+            Tag: tag,
+            Interfaces: members.get(tag).slice().sort((a, b) => a.Port.localeCompare(b.Port)),
+        }));
+        for (const vlan of node.Vlans) {
+            for (const m of vlan.Interfaces) {
+                rows.get(m.Port).Vlans.push({ Name: vlan.Name, Tag: vlan.Tag, Unit: m.Unit, Active: m.Active });
+            }
+        }
+    }
+}
+
 assertNothingOrphaned(topology);
 
 const gatewayFor = (node) => (node.role === 'ACC' ? topology.find(d => d.DeviceIP === node.Gateway) : cores[0]);
 
 for (const node of topology) {
-    const vlanTags = shuffled(VLANS.map(v => v.tag)).slice(0, int(2, 5));
-    if (node.role === 'ACC') addClients(node, gatewayFor(node), vlanTags);
+    node._ownTags = accessTags(shuffled(VLANS.map(v => v.tag)).slice(0, int(2, 5)));
+    if (node.role === 'ACC') addClients(node, gatewayFor(node), node._ownTags);
     const extra = [];
     if (node.role !== 'ACC') extra.push(`set protocols rstp bridge-priority ${node.role === 'CORE' ? '4k' : '8k'}`);
     if (chance(0.3)) extra.push('set system services netconf ssh');
     if (chance(0.2)) extra.push(`set interfaces ${node.Interfaces[0].Port} description "${node.bldg.abbr} patch"`);
-    node.Configuration = configText(node.Hostname, node.zone, node.bldg, vlanTags, extra);
+    node._extraConfig = extra;
+}
+// Written after the propagation below, not in the loop above: an access switch that trunks a downstream
+// closet's VLANs configures them too, and a config text listing only its own would contradict the
+// membership the same run emits.
+assignVlanTags(topology);
+for (const node of topology) {
+    node.Configuration = configText(node.Hostname, node.zone, node.bldg, node.vlanTags, node._extraConfig);
 }
 
 const M_PER_DEG_LAT = 111320;
@@ -1056,11 +1188,15 @@ function ageFleet(days) {
     const bldg = pick(ALL_BUILDINGS.filter(b => nearestWithPort(b, distsInZone(b.zone.short))));
     const parent = nearestWithPort(bldg, distsInZone(bldg.zone.short));
     const arrival = place(bldg, 'ACC', [pick(ACCESS_MODELS)], parent.DeviceIP);
-    const arrivalVlans = shuffled(VLANS.map(v => v.tag)).slice(0, 3);
-    arrival.Configuration = configText(arrival.Hostname, bldg.zone, bldg, arrivalVlans, []);
-    addClients(arrival, parent, arrivalVlans);
+    arrival._ownTags = accessTags(shuffled(VLANS.map(v => v.tag)).slice(0, 3));
+    addClients(arrival, parent, arrival._ownTags);
     linkDevices(arrival, parent, 'UPLINK');
     topology.push(arrival);
+    // Patched in rather than re-propagated over the whole fleet: the arrival is a leaf on a frame that
+    // already carries every campus VLAN, and rewriting every device's tags here would leave the config
+    // text this pass has already appended to describing a different set.
+    arrival.vlanTags = arrival._ownTags.slice();
+    arrival.Configuration = configText(arrival.Hostname, bldg.zone, bldg, arrival.vlanTags, []);
 }
 
 // A placeholder has no serial, so identity falls back to hostname. Re-rolling the failing set each
@@ -1076,7 +1212,8 @@ function withFailures(fleet, snapshotIndex, scanTime) {
         failing.add(stillUp[(snapshotIndex * 97) % stillUp.length].DeviceIP);            // newly down
     }
     // Dropped before the clone: bldg.zone.buildings points back at bldg, so a clone would recurse.
-    const SCRATCH = ['zone', 'bldg', 'role', 'bridgeMac', 'bridgePriority', '_freeUplinks', '_byPort'];
+    const SCRATCH = ['zone', 'bldg', 'role', 'bridgeMac', 'bridgePriority', '_freeUplinks', '_byPort',
+        '_ownTags', '_extraConfig', 'vlanTags'];
     return fleet.map(node => {
         const copy = JSON.parse(JSON.stringify(node, (key, value) => (SCRATCH.includes(key) ? undefined : value)));
         if (failing.has(node.DeviceIP)) {
@@ -1134,6 +1271,17 @@ const scanned = (fleet) => fleet.filter(d => d.ScanStatus === 'Ok');
 const clientPorts = (node) => node.Interfaces.filter(r =>
     String(r.Link).toLowerCase() === 'up' &&
     !node.Neighbors.some(n => String(n.LocalPort).replace(/\.\d+$/, '') === r.Port));
+// A client on a port implies that port is a member of the client's VLAN: the MAC table row and the
+// membership are one fact seen twice, and a fault that adds one without the other asserts a state no
+// switch produces (spec 8.2).
+const claimMembership = (node, row, tag) => {
+    const vlan = (node.Vlans || []).find(v => v.Tag === tag);
+    if (!vlan) return;
+    const unit = `${row.Port}.0`;
+    if (!vlan.Interfaces.some(m => m.Port === row.Port)) vlan.Interfaces.push({ Port: row.Port, Unit: unit, Active: true });
+    row.Vlans = row.Vlans || [];
+    if (!row.Vlans.some(v => v.Tag === tag)) row.Vlans.push({ Name: vlan.Name, Tag: tag, Unit: unit, Active: true });
+};
 const macRow = (client, port) => ({
     RoutingInstance: 'default-switch', VlanName: client.VLAN_Name, MacAddress: client.MAC,
     Flags: 'D', Age: null, Interface: client.Port, PhysicalPort: port,
@@ -1146,13 +1294,17 @@ function injectDuplicateMac(rng, fleet) {
     if (!donors.length) return null;
     const donor = fPick(rng, donors);
     const client = fPick(rng, donor.Clients);
-    const hosts = scanned(fleet).filter(d => d !== donor && clientPorts(d).length);
+    // The second switch has to configure the same VLAN: one MAC cannot appear twice in a VLAN that only
+    // one of the two switches carries.
+    const hosts = scanned(fleet).filter(d => d !== donor && clientPorts(d).length
+        && d.Vlans.some(v => v.Tag === client.VLAN_Tag));
     if (!hosts.length) return null;
     const host = fPick(rng, hosts);
     const row = fPick(rng, clientPorts(host));
     const copy = { ...client, Port: `${row.Port}.0`, PortDesc: row.Desc };
     host.Clients.push(copy);
     host.MacTable.push(macRow(copy, row.Port));
+    claimMembership(host, row, copy.VLAN_Tag);
     return {
         kind: 'duplicate-mac', failureModes: ['F1'], deviceIp: host.DeviceIP, port: row.Port, mac: copy.MAC,
         params: { alsoOn: donor.DeviceIP, alsoOnPort: String(client.Port).replace(/\.\d+$/, '') },
@@ -1181,23 +1333,25 @@ function injectDuplicateIp(rng, fleet) {
 // A resolved client address outside every allowedScopes prefix. 192.0.2.0/24 is documentation space and
 // is not one of the fleet's 10.<zone>. nets, so it cannot collide with a legitimate client.
 function injectOffSubnetClient(rng, fleet) {
-    const hosts = scanned(fleet).filter(d => clientPorts(d).length);
+    const hosts = scanned(fleet).filter(d => clientPorts(d).length && d.Vlans.length);
     if (!hosts.length) return null;
     const host = fPick(rng, hosts);
     const row = fPick(rng, clientPorts(host));
-    const vlan = fPick(rng, VLANS);
+    // One of the host's own VLANs: a client in a VLAN the switch does not carry is a different fault.
+    const vlan = fPick(rng, host.Vlans);
     const client = {
         IP: `192.0.2.${fInt(rng, 2, 250)}`, MAC: faultClientMac(rng), Port: `${row.Port}.0`,
-        PortDesc: row.Desc, VLAN_Name: vlan.name, VLAN_Tag: vlan.tag, Type: 'Dynamic',
+        PortDesc: row.Desc, VLAN_Name: vlan.Name, VLAN_Tag: vlan.Tag, Type: 'Dynamic',
         Dot1x_User: 'Unknown', Dot1x_State: 'Unknown',
     };
     host.Clients.push(client);
     host.MacTable.push(macRow(client, row.Port));
     host.ArpEntries.push({ MAC: client.MAC, IP: client.IP });
+    claimMembership(host, row, vlan.Tag);
     return {
         // No section 7 row: an address outside every scope is a section 6.4 gateway question.
         kind: 'off-subnet-client', failureModes: [], deviceIp: host.DeviceIP, port: row.Port, mac: client.MAC,
-        params: { ip: client.IP, vlanTag: vlan.tag },
+        params: { ip: client.IP, vlanTag: vlan.Tag },
         expected: { finding: 'client-outside-scope', deviceIp: host.DeviceIP, port: row.Port },
     };
 }
@@ -1298,13 +1452,45 @@ function injectSharedSegment(rng, fleet) {
     };
 }
 
+// F11. One VLAN removed from ONE end of a trunk. The link still carries every other VLAN and both ends
+// still forward, so nothing about the port looks wrong; only comparing the two ends' membership finds it,
+// and a path computer that skips the VLAN filter reports a route frames in that VLAN cannot take.
+function injectVlanMissingFromTrunk(rng, fleet) {
+    const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
+    const candidates = [];
+    for (const d of scanned(fleet)) {
+        for (const n of d.Neighbors) {
+            const peer = byIp.get(String(n.ManagementIP));
+            if (!peer || peer.ScanStatus !== 'Ok') continue;
+            const port = String(n.LocalPort).replace(/\.\d+$/, '');
+            const peerPort = String(n.RemotePort).replace(/\.\d+$/, '');
+            // Both ends must currently agree on the tag, or removing it proves nothing.
+            for (const vlan of d.Vlans) {
+                if (!vlan.Interfaces.some(m => m.Port === port)) continue;
+                const far = peer.Vlans.find(v => v.Tag === vlan.Tag);
+                if (!far || !far.Interfaces.some(m => m.Port === peerPort)) continue;
+                candidates.push({ device: d, port: port, vlan: vlan, peer: peer, peerPort: peerPort });
+            }
+        }
+    }
+    if (!candidates.length) return null;
+    const hit = fPick(rng, candidates);
+    hit.vlan.Interfaces = hit.vlan.Interfaces.filter(m => m.Port !== hit.port);
+    const row = hit.device.Interfaces.find(r => r.Port === hit.port);
+    if (row) row.Vlans = (row.Vlans || []).filter(v => v.Tag !== hit.vlan.Tag);
+    return {
+        kind: 'vlan-missing-from-trunk', failureModes: ['F11'],
+        deviceIp: hit.device.DeviceIP, port: hit.port, mac: null,
+        params: { vlanTag: hit.vlan.Tag, vlanName: hit.vlan.Name, peerIp: hit.peer.DeviceIP, peerPort: hit.peerPort },
+        expected: { finding: 'vlan-absent-on-one-trunk-end', deviceIp: hit.device.DeviceIP, port: hit.port },
+    };
+}
+
 const INJECTORS = [
     injectDuplicateMac, injectDuplicateIp, injectOffSubnetClient, injectDot1xHeld,
-    injectStpUnconverged, injectAutonegAsymmetric, injectSharedSegment,
+    injectStpUnconverged, injectAutonegAsymmetric, injectSharedSegment, injectVlanMissingFromTrunk,
 ];
 
-// F11 (a VLAN missing from a trunk) has no injector: the fixture's Vlans[] is empty on every device, so
-// there is no membership to remove. It lands with the VLAN retention work, not here.
 function injectFaults(fleet, snapshotIndex, count) {
     // Derived from the seed rather than taken from it, so two snapshots of one run do not inject the
     // same faults in the same places.
@@ -1334,6 +1520,8 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     // the pass mutates the interface rows withFailures is about to clone.
     const tree = computeSpanningTree(topology);
     assertForwardingIsSpanningTree(topology);
+    // After the tree, because the "*" marking a member as currently forwarding for a VLAN follows it.
+    applyVlanMembership(topology);
     const fleet = withFailures(topology, i, scanTime);
     const manifest = injectFaults(fleet, i, FAULT_COUNT);
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));

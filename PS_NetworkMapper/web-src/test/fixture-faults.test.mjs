@@ -26,7 +26,7 @@ function generate(args) {
 }
 
 const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
-// Nine against seven kinds, so the cycle wraps and a second instance of a kind has to place as well.
+// Nine against eight kinds, so the cycle wraps and a second instance of a kind has to place as well.
 const faulted = generate([...ARGS, '--faults', '9']);
 const clean = generate(ARGS);
 
@@ -90,6 +90,7 @@ test('every fault kind places, and each entry carries an oracle a rule can be ch
     assert.deepEqual([...kinds].sort(), [
         'autoneg-asymmetric', 'dot1x-held', 'duplicate-ip', 'duplicate-mac',
         'off-subnet-client', 'stp-unconverged', 'unmanaged-bridge-shared-segment',
+        'vlan-missing-from-trunk',
     ]);
     const ids = entries.map(f => f.id);
     assert.equal(new Set(ids).size, ids.length, 'ids must be unique across snapshots');
@@ -219,6 +220,60 @@ test('unmanaged-bridge-shared-segment gives two switches one address-less neighb
             assert.equal(String(neighbor.LocalPort).replace(/\.\d+$/, ''), port);
         }
         assert.notEqual(f.deviceIp, f.params.otherIp);
+    }
+});
+
+// F11, and the strongest form of "the manifest is the oracle" available: the clean fleet's trunk ends
+// agree on VLAN membership everywhere, so every disagreement in the faulted fleet must be one the
+// manifest names - and each named one must actually be there, on the end the manifest says.
+test('vlan-missing-from-trunk removes a tag from exactly one end, and nothing else disagrees', () => {
+    const tagsOn = (row) => new Set((row.Vlans || []).map(v => v.Tag));
+    const disagreements = (snapshot) => {
+        const devices = byIp(snapshot);
+        const found = [];
+        for (const d of snapshot.Topology) {
+            if (d.ScanStatus !== 'Ok') continue;
+            for (const n of d.Neighbors) {
+                const peer = devices.get(String(n.ManagementIP));
+                if (!peer || peer.ScanStatus !== 'Ok') continue;
+                const near = rowOf(d, String(n.LocalPort).replace(/\.\d+$/, ''));
+                const far = rowOf(peer, String(n.RemotePort).replace(/\.\d+$/, ''));
+                if (!near || !far) continue;
+                const a = tagsOn(near);
+                const b = tagsOn(far);
+                for (const tag of new Set([...a, ...b])) {
+                    // Recorded from the end that is MISSING the tag, which is the end a rule reports.
+                    if (!a.has(tag) && b.has(tag)) found.push(`${d.DeviceIP}|${near.Port}|${tag}`);
+                }
+            }
+        }
+        return found.sort();
+    };
+
+    for (const snapshot of clean.snapshots) {
+        assert.deepEqual(disagreements(snapshot), [], 'an uninjected fleet must carry no F11 of its own');
+    }
+    for (const manifest of faulted.faults) {
+        const expected = manifest.Faults
+            .filter(f => f.kind === 'vlan-missing-from-trunk')
+            .map(f => `${f.deviceIp}|${f.port}|${f.params.vlanTag}`).sort();
+        assert.ok(expected.length > 0, `${manifest.Map}: the F11 injector placed nothing`);
+        assert.deepEqual(disagreements(mapFor(manifest)), expected);
+    }
+    for (const f of find('vlan-missing-from-trunk')) {
+        const devices = byIp(snapshotOf(f));
+        const device = devices.get(String(f.deviceIp));
+        const peer = devices.get(String(f.params.peerIp));
+        // Removed from the node's own Vlans[] as well as from the port row: the worker derives one from
+        // the other, so a snapshot carrying only one of them is a shape no capture produces.
+        const vlan = device.Vlans.find(v => v.Tag === f.params.vlanTag);
+        assert.ok(vlan, `${f.id}: the VLAN itself must still be configured on the device`);
+        assert.ok(!vlan.Interfaces.some(m => m.Port === f.port), `${f.id}: ${f.port} is still a member`);
+        assert.ok(peer.Vlans.find(v => v.Tag === f.params.vlanTag).Interfaces
+            .some(m => m.Port === f.params.peerPort), `${f.id}: the far end must still carry the VLAN`);
+        // The link is otherwise healthy - that is what makes it worth testing.
+        assert.equal(rowOf(device, f.port).Link, 'up');
+        assert.equal(rowOf(peer, f.params.peerPort).Link, 'up');
     }
 });
 

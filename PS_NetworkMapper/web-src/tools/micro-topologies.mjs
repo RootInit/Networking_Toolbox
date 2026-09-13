@@ -94,6 +94,14 @@ function applyVlanMembership(node) {
     }
 }
 
+// Membership on a node, mirrored onto its port rows. Every topology a path test runs on needs it on both
+// ends of every hop: section 6.2 filters a hop on VLAN membership before it looks at STP at all, so a
+// port with no members prunes the hop and the state actually under test is never reached.
+export function setVlans(node, vlans) {
+    node.Vlans = vlans;
+    applyVlanMembership(node);
+}
+
 // Per-scope spanning-tree state plus the collapsed field the worker derives from it, set together:
 // setting one without the other is the class of fixture lie section 8.2 exists to forbid.
 export function setStp(node, port, scopes) {
@@ -223,6 +231,7 @@ function vlanWithoutStpInstance() {
         description: 'VLAN 30 is configured and carried on the trunk, but only VLAN 10 has a VSTP '
             + 'instance. A path in VLAN 30 has no per-VLAN state to prune on.',
         unscopedVlanTag: 30,
+        stpVlanTag: 10,
         snapshot: snapshot([a, b]),
     };
 }
@@ -243,6 +252,23 @@ function diamondTwoPaths() {
     link(root, 'xe-0/0/1', d2, 'xe-0/0/0');
     link(d1, 'xe-0/0/1', acc, 'xe-0/0/0');
     link(d2, 'xe-0/0/1', acc, 'xe-0/0/1');
+
+    // VLAN 30 is carried on all four trunks and has no VSTP instance anywhere, so it is the one VLAN in
+    // which both legs survive pruning: two paths, neither of them verified. Pruning per VLAN on 10 or 20
+    // leaves one path each and a breadth-first search would look correct on those alone.
+    const trunkVlans = (ports) => [
+        vlan('DATA', 10, ports.map(p => `${p}.0`)),
+        vlan('VOICE', 20, ports.map(p => `${p}.0`)),
+        vlan('LEGACY', 30, ports.map(p => `${p}.0`)),
+    ];
+    setVlans(root, trunkVlans(['xe-0/0/0', 'xe-0/0/1']));
+    setVlans(d1, trunkVlans(['xe-0/0/0', 'xe-0/0/1']));
+    setVlans(d2, trunkVlans(['xe-0/0/0', 'xe-0/0/1']));
+    setVlans(acc, [
+        vlan('DATA', 10, ['xe-0/0/0.0', 'xe-0/0/1.0', 'ge-0/0/2.0']),
+        vlan('VOICE', 20, ['xe-0/0/0.0', 'xe-0/0/1.0']),
+        vlan('LEGACY', 30, ['xe-0/0/0.0', 'xe-0/0/1.0']),
+    ]);
 
     const D = (State, Role) => ({ State, Role, Cost: 2000 });
     for (const [node, port, roles] of [
@@ -291,6 +317,8 @@ function lag(memberDown) {
     link(a, 'ge-0/0/1', b, 'ge-0/0/1', 'LAG');
     for (const node of [a, b]) {
         setStp(node, 'ae0', { 'instance 0': { State: 'FWD', Role: node === a ? 'Designated' : 'Root', Cost: 20000 } });
+        // On the bundle, as "show vlans" reports it: an aggregate's members are not members of the VLAN.
+        setVlans(node, [vlan('DATA', 10, ['ae0.0'])]);
     }
     if (memberDown) {
         for (const node of [a, b]) {
@@ -328,6 +356,8 @@ function virtualChassis() {
     setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
     addClient(vc, 'ge-0/0/0', { mac: 'aa:bb:00:00:04:00', tag: 10, vlanName: 'DATA' });
     addClient(vc, 'ge-1/0/0', { mac: 'aa:bb:00:00:04:01', tag: 10, vlanName: 'DATA' });
+    setVlans(vc, [vlan('DATA', 10, ['xe-0/2/0.0', 'ge-0/0/0.0', 'ge-1/0/0.0'])]);
+    setVlans(upstream, [vlan('DATA', 10, ['xe-0/0/0.0'])]);
     return {
         name: 'virtual-chassis-across-fpcs',
         // No section 7 row: port identity inside one node, not a path failure.
@@ -348,6 +378,9 @@ function unscannedWaypoint() {
     link(c, 'xe-0/0/0', b, 'xe-0/0/1');
     setStp(a, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
     setStp(c, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
+    // Both real ends carry the VLAN. The hop in the middle carries no membership because it carries no
+    // data at all, which is the point: unknown is not absent.
+    for (const node of [a, c]) setVlans(node, [vlan('DATA', 10, ['xe-0/0/0.0'])]);
     // What New-PlaceholderNodeLocal leaves behind, keeping only the identity the neighbours supplied.
     const placeholder = {
         ...microNode(b.DeviceIP, b.Hostname),
@@ -383,6 +416,7 @@ function addresslessBridge() {
             MacAddress: bridgeMac, ManagementIP: 'Unknown', Description: 'Unmanaged 8-port switch',
             ...structuredClone(LLDP_COMMON), Reachable: false,
         });
+        setVlans(node, [vlan('DATA', 10, ['ge-0/0/0.0'])]);
     }
     return {
         name: 'addressless-bridge-shared-segment',
@@ -406,6 +440,7 @@ function outOfScopeNeighbor() {
         ...structuredClone(LLDP_COMMON),
     });
     rowOf(a, 'xe-0/0/0').Desc = 'UPLINK to partner-core';
+    setVlans(a, [vlan('DATA', 10, ['xe-0/0/0.0'])]);
     return {
         name: 'out-of-scope-neighbor',
         // No section 7 row: a neighbour we were never meant to crawl is not a failure at all.
@@ -426,6 +461,8 @@ function transitSighting() {
     link(access, 'xe-0/0/1', upstream, 'xe-0/0/0');
     setStp(access, 'xe-0/0/1', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
     setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
+    setVlans(access, [vlan('DATA', 10, ['ge-0/0/0.0', 'xe-0/0/1.0'])]);
+    setVlans(upstream, [vlan('DATA', 10, ['xe-0/0/0.0', 'ge-0/0/1.0'])]);
     const mac = 'aa:bb:00:00:09:01';
     addClient(access, 'ge-0/0/0', { mac, ip: '10.30.209.5', tag: 10, vlanName: 'DATA' });
     // The upstream switch learned it too, on the port facing the access switch. The worker keeps this
@@ -456,6 +493,8 @@ function inferredSegment() {
     setStp(a, 'xe-0/0/1', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
     setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
     setStp(a, 'ge-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 20000 } });
+    setVlans(a, [vlan('DATA', 10, ['ge-0/0/0.0', 'xe-0/0/1.0'])]);
+    setVlans(upstream, [vlan('DATA', 10, ['xe-0/0/0.0'])]);
     for (const suffix of ['01', '02', '03', '04']) {
         addClient(a, 'ge-0/0/0', { mac: `aa:bb:00:00:0a:${suffix}`, tag: 10, vlanName: 'DATA' });
     }
@@ -477,6 +516,7 @@ function partialNode() {
     const b = microNode('10.30.8.11', 'micro-partial-b.example.net', { ports: ['xe-0/0/0', 'ge-0/0/1'] });
     link(a, 'xe-0/0/0', b, 'xe-0/0/0');
     setStp(a, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
+    setVlans(a, [vlan('DATA', 10, ['xe-0/0/0.0'])]);
     b.ScanStatus = 'Partial';
     // Truncated at STP, so everything from there on is absent - the tail order is the worker's.
     b.SectionsCaptured = CAPTURE_SECTIONS.slice(0, CAPTURE_SECTIONS.indexOf('STP'));

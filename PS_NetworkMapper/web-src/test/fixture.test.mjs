@@ -543,7 +543,6 @@ const ACCESS_ROW_GAP = [
     'OutputBytes', 'OutputErrors', 'OutputPackets', 'PcsStatistics', 'PoeAdminStatus',
     'PoeClass', 'PoeMaxPower', 'PoeOperStatus', 'PoePairMode', 'PoePowerConsumption',
     'PoePriority', 'RemoteFault', 'SpeedConfigured', 'SpeedNegotiated', 'StatisticsLastCleared',
-    'Vlans',
 ];
 
 function interfaceInitializerKeys() {
@@ -582,6 +581,62 @@ test('fixture interfaces match Get-JunosNodeData.ps1, except for a known and enu
     assert.deepEqual(missing, ACCESS_ROW_GAP.slice().sort(),
         'the accessRow parity gap changed. Update ACCESS_ROW_GAP in this file to match, ' +
         `removing what generate-fixture.mjs now emits.\n  now missing: ${missing.join(', ')}`);
+});
+
+// Section 8.2, and the data section 6.2's first filter reads. Three things have to hold together or the
+// VLAN filter is either vacuous (no membership anywhere) or F11 everywhere (ends that disagree by
+// accident), and neither state can carry a test of the filter itself.
+test('VLAN membership is coherent: trunk ends agree, clients sit in VLANs their port carries', () => {
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+    const rowOf = (device, port) => device.Interfaces.find(r => r.Port === String(port).replace(/\.\d+$/, ''));
+    const tagsOn = (row) => new Set((row.Vlans || []).map(v => v.Tag));
+
+    const scannedDevices = topology.filter(d => d.ScanStatus === 'Ok');
+    assert.ok(scannedDevices.every(d => d.Vlans.length > 0), 'every scanned device configures VLANs');
+
+    let checked = 0;
+    for (const device of scannedDevices) {
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            if (!peer || peer.ScanStatus !== 'Ok') continue;
+            const near = rowOf(device, neighbor.LocalPort);
+            const far = rowOf(peer, neighbor.RemotePort);
+            if (!near || !far) continue;
+            checked++;
+            const a = tagsOn(near);
+            const b = tagsOn(far);
+            const differ = [...new Set([...a, ...b])].filter(tag => a.has(tag) !== b.has(tag));
+            assert.deepEqual(differ, [],
+                `${device.DeviceIP} ${near.Port} and ${peer.DeviceIP} ${far.Port} disagree on VLAN(s) ${differ}`);
+        }
+    }
+    assert.ok(checked > 50, `only ${checked} trunk ends checked`);
+
+    for (const device of scannedDevices) {
+        for (const client of device.Clients) {
+            const row = rowOf(device, client.Port);
+            if (!row) continue;
+            assert.ok(tagsOn(row).has(client.VLAN_Tag),
+                `${device.DeviceIP} ${row.Port} holds a client in VLAN ${client.VLAN_Tag} it does not carry`);
+        }
+        // The membership and the config text are one fact: "set vlans" lists what the device carries.
+        // Unless the CONFIG section was one of the ones a truncated capture lost, in which case there is
+        // no config text to compare against - which is the point of blanking it with the section.
+        const configured = new Set([...device.Configuration.matchAll(/^set vlans \S+ vlan-id (\d+)$/gm)].map(m => Number(m[1])));
+        for (const vlan of device.Configuration === 'Unknown' ? [] : device.Vlans) {
+            assert.ok(configured.has(vlan.Tag), `${device.DeviceIP} carries VLAN ${vlan.Tag} its configuration never sets`);
+        }
+        // A member marked as currently forwarding must be a port the spanning tree is forwarding on.
+        for (const vlan of device.Vlans) {
+            for (const member of vlan.Interfaces) {
+                const row = rowOf(device, member.Port);
+                if (member.Active && row.STP !== 'Unknown') {
+                    assert.equal(row.STP, 'FWD',
+                        `${device.DeviceIP} ${member.Port} is active in VLAN ${vlan.Tag} while ${row.STP}`);
+                }
+            }
+        }
+    }
 });
 
 // Item 7 / section 8.2. The generator builds real cycles - the core ICL, every zone's first frame

@@ -111,6 +111,48 @@ test('an unscanned waypoint keeps both links, one-sided and with no far-end stat
     assert.deepEqual(graph.terminals, [], 'a device in the snapshot is an edge end, never a terminal');
 });
 
+// Section 5.2's second tier is corroboration, and corroboration that contradicts itself is none. Both
+// halves are checked on the same topology: two reporters agreeing confirm, two camps disagreeing do not.
+test('chassis consensus needs agreement, and a hostname only confirms a device that spoke for itself', () => {
+    const base = byName('unscanned-waypoint').snapshot.Topology;
+    const waypointIp = byName('unscanned-waypoint').waypointIp;
+
+    // Two more reporters naming a different chassis for the same address. Both camps clear the
+    // two-reporter bar, so whichever iterates last would become "consensus" on its own.
+    const split = structuredClone(base);
+    for (const host of ['10.30.5.20', '10.30.5.21']) {
+        const intruder = structuredClone(split.find(d => d.ScanStatus === 'Ok'));
+        intruder.DeviceIP = host;
+        intruder.Hostname = `micro-wp-${host.split('.')[3]}.example.net`;
+        intruder.Neighbors = [{
+            ...structuredClone(split[0].Neighbors[0]),
+            MacAddress: '02:AB:99:99:99:99', ManagementIP: waypointIp,
+        }];
+        split.push(intruder);
+    }
+    for (const edge of edgesFor(buildPortGraph(split, { allowedScopes: ALLOWED_SCOPES }), waypointIp)) {
+        assert.notEqual(edge.confirmation, 'chassis-consensus',
+            'reporters naming two different chassis for one address agree on nothing');
+    }
+
+    // With the MACs stripped, the only tier left is the hostname - and the waypoint's hostname is the one
+    // its neighbours supplied, so matching it would be comparing a datum to a copy of itself.
+    const nameOnly = structuredClone(base);
+    for (const device of nameOnly) {
+        for (const neighbor of device.Neighbors) neighbor.MacAddress = 'Unknown';
+    }
+    for (const edge of edgesFor(buildPortGraph(nameOnly, { allowedScopes: ALLOWED_SCOPES }), waypointIp)) {
+        assert.equal(edge.confirmation, 'unconfirmed',
+            'a node that captured nothing cannot corroborate its own name');
+    }
+    // The same tier does fire when the far device answered for itself: the Partial node reported its
+    // hostname out of the VERSION section and lost only the tail.
+    const partial = graphOf('partial-node-missing-stp-section');
+    const oneSided = partial.edges.filter(e => !e.reciprocal);
+    assert.equal(oneSided.length, 1);
+    assert.equal(oneSided[0].confirmation, 'hostname');
+});
+
 // F14. The case the whole edge/terminal split exists for.
 test('an address-less bridge yields no edge and two terminals that group into one segment', () => {
     const topology = byName('addressless-bridge-shared-segment');
@@ -169,9 +211,19 @@ test('each end of an edge carries the VLAN membership of its own port', () => {
     const graph = graphOf('vlan-with-no-stp-instance');
     assert.equal(graph.edges.length, 1);
     for (const end of [graph.edges[0].a, graph.edges[0].b]) {
-        assert.deepEqual(end.vlans.map(v => v.Tag).sort((x, y) => x - y), [10, 30]);
-        for (const vlan of end.vlans) assert.equal(typeof vlan.Tag, 'number', 'C4: tags are integers');
+        assert.equal(end.vlans.captured, true, 'the VLANS section arrived on both ends');
+        assert.deepEqual(end.vlans.members.map(v => v.Tag).sort((x, y) => x - y), [10, 30]);
+        for (const vlan of end.vlans.members) assert.equal(typeof vlan.Tag, 'number', 'C4: tags are integers');
     }
+
+    // Absent is not unknown: the Partial node's capture stopped before the VLANS section, so its end
+    // reports no members AND says so, which is the distinction section 6.2's VLAN filter turns on.
+    const partial = graphOf('partial-node-missing-stp-section');
+    const ends = partial.edges.flatMap(e => [e.a, e.b]);
+    const truncated = ends.find(e => e.scanStatus === 'Partial');
+    assert.ok(truncated, 'the Partial node is an edge end');
+    assert.deepEqual(truncated.vlans, { members: [], captured: false });
+    assert.deepEqual(ends.find(e => e.scanStatus === 'Ok').vlans.members.map(v => v.Tag), [10]);
 });
 
 test('a VSTP edge exposes every scope both ends report', () => {

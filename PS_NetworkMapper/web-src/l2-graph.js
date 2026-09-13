@@ -71,7 +71,17 @@ function stpEndFor(device, row) {
     return { scopes: scopes, captured: captured, collapsed: row ? row.STP : null };
 }
 
-function vlansFor(row) {
+// Same absent-versus-empty distinction stpEndFor draws, for the same reason: section 6.2 filters a hop on
+// VLAN membership first, and a port with no members because the VLANS section never arrived
+// (VLAN_UNKNOWN) is not a port the VLAN is genuinely absent from (VLAN_ABSENT, F11).
+function vlanEndFor(device, row) {
+    return {
+        members: vlanMembersFor(row),
+        captured: asList(device.SectionsCaptured).indexOf('VLANS') !== -1,
+    };
+}
+
+function vlanMembersFor(row) {
     return asList(row && row.Vlans).map(function (entry) {
         // Pre-C4 snapshots and hand-built inputs can carry a bare VLAN name; keep the shape uniform.
         if (entry && typeof entry === 'object') return { Name: entry.Name, Tag: entry.Tag, Unit: entry.Unit, Active: entry.Active };
@@ -94,7 +104,7 @@ function endFor(device, index, port, memberPorts) {
         desc: row ? row.Desc : null,
         link: row ? row.Link : null,
         members: members,
-        vlans: vlansFor(row),
+        vlans: vlanEndFor(device, row),
         stp: stpEndFor(device, row),
         scanStatus: device.ScanStatus,
     };
@@ -129,11 +139,22 @@ function chassisConsensus(topology) {
     });
     var consensus = new Map();
     reporters.forEach(function (byMac, ip) {
+        var agreed = null;
         byMac.forEach(function (who, mac) {
-            if (who.size >= 2) consensus.set(ip, mac);
+            if (who.size < 2) return;
+            // Two camps of reporters each naming a different chassis for one address is the absence of
+            // consensus, not the later camp winning.
+            agreed = agreed === null ? mac : false;
         });
+        if (agreed) consensus.set(ip, agreed);
     });
     return consensus;
+}
+
+// A device that captured at least one section answered for itself; one that captured none exists only
+// because a neighbour named it.
+function selfReported(device) {
+    return asList(device.SectionsCaptured).length > 0;
 }
 
 function buildPortGraph(topology, options) {
@@ -250,7 +271,11 @@ function buildPortGraph(topology, options) {
             var far = byIp.get(farIp);
             if (reporterHalf.mac && consensus.get(farIp) === reporterHalf.mac) {
                 confirmation = 'chassis-consensus';
-            } else if (reporterHalf.hostname && far && reporterHalf.hostname === far.Hostname) {
+            } else if (reporterHalf.hostname && far && selfReported(far)
+                       && reporterHalf.hostname === far.Hostname) {
+                // Only a device that answered for itself can confirm its own name. A node that captured
+                // nothing is a placeholder whose Hostname was filled in by whoever enqueued it, so
+                // matching against it would compare the reporter's datum to a copy of itself.
                 confirmation = 'hostname';
             }
         }
