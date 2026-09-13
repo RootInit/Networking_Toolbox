@@ -89,6 +89,10 @@ function ConvertFrom-JunosVlanTable {
         }
 
         $Current = [PSCustomObject]@{
+            # R14. The L2 switching instance ("default-switch" on a single-instance box), NOT an L3
+            # VRF. Two VLANs in different routing instances can carry the same tag and still be
+            # separate broadcast domains, but this field says nothing about L3 reachability - do not
+            # read it as a VRF name when deciding whether two addresses can reach each other.
             RoutingInstance = $Inst
             Name            = $Name
             # "None" is the switch saying this VLAN has no 802.1Q tag, not a tag whose value is zero.
@@ -302,4 +306,29 @@ function ConvertFrom-JunosInterfaceExtensive {
     }
 
     return $ByPort
+}
+
+# R15. Which command sections actually came back, as a sorted array of the section keys used by
+# Get-JunosNodeData.ps1's $DataDict.
+#
+# A truncated session does not report an error - it simply stops producing output, so the later
+# sections are absent from $DataDict entirely. That absence is the only truncation signal that
+# survives once the command set is trimmed, and it is what tells "this switch has no LLDP
+# neighbours" apart from "the session died before it was asked". A section whose body is blank does
+# not count as captured: an echoed command with no output is the shape a cut-off session leaves.
+function Get-JunosCapturedSections {
+    # Not Mandatory: binding rejects $null before the body runs, and a caller whose section split
+    # produced nothing should get an empty array rather than a binding exception.
+    param([AllowNull()]$DataDict)
+
+    # The leading comma on every return is load-bearing: `return @()` unwraps to $null on the way
+    # out, so a caller assigning the result gets $null rather than an empty array and .Count throws
+    # on 5.1. `,$x` hands the array back as a single object, which the pipeline then yields intact.
+    if ($null -eq $DataDict) { return ,@() }
+    $Captured = @()
+    foreach ($Key in $DataDict.Keys) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$DataDict[$Key])) { $Captured += [string]$Key }
+    }
+    if ($Captured.Count -eq 0) { return ,@() }
+    return ,@($Captured | Sort-Object)
 }

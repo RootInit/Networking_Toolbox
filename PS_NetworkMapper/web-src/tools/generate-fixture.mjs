@@ -270,7 +270,41 @@ function blankNode(deviceIp) {
         Uptime: 'Unknown', LastConfigured: 'Unknown', LastConfiguredBy: 'Unknown', Alarms: [],
         MasterCpuUtilization: 'Unknown', MasterMemoryUtilization: 'Unknown', MedNeighbors: [],
         Configuration: 'Unknown', ScanStatus: 'Ok', ScanError: null, Vlans: [],
+        // R15/R12. Both empty on a node that never answered, as New-PlaceholderNodeLocal has them.
+        SectionsCaptured: [], CaptureTimestamp: null,
     };
+}
+
+// The $DataDict keys of Get-JunosNodeData.ps1, in the order the batch issues the commands. The order
+// is what makes a truncated capture realistic: a timed-out session loses its TAIL, and the worker
+// deliberately asks for "show interfaces extensive" last because it is the largest.
+const CAPTURE_SECTIONS = [
+    'VERSION', 'VIRTUAL_CHASSIS', 'CHASSIS_HARDWARE', 'ROUTE', 'INTERFACES_TERSE',
+    'INTERFACES_DESC', 'STP', 'POE', 'DOT1X', 'LLDP', 'VLANS', 'MAC_TABLE', 'ARP_TABLE',
+    'UPTIME', 'ALARMS', 'ROUTING_ENGINE', 'CONFIG', 'INTERFACES_EXT',
+];
+
+// Dropping a section has to drop what that section supplies, or the fixture asserts a state no real
+// switch can produce (see spec 8.2) and every rule tested against it inherits the contradiction.
+const SECTION_SUPPLIES = {
+    CONFIG: (node) => { node.Configuration = 'Unknown'; },
+    ROUTING_ENGINE: (node) => { node.MasterCpuUtilization = 'Unknown'; node.MasterMemoryUtilization = 'Unknown'; },
+    // INTERFACES_EXT supplies only fields accessRow does not emit yet (ACCESS_ROW_GAP in
+    // test/fixture.test.mjs). When that gap closes, this must blank them here too.
+    INTERFACES_EXT: () => {},
+};
+
+// R12 + R15, applied per snapshot because both depend on when that snapshot was taken.
+function stampCapture(node, scanTime) {
+    // A fleet crawl spans minutes and scanTime is when the snapshot was written, so each device was
+    // read somewhere in the window before it. That spread is the whole point of R12: one
+    // ScanTimestamp is too coarse to compare counters or last-seen times across devices.
+    node.CaptureTimestamp = new Date(scanTime.getTime() - int(0, 14 * 60000)).toISOString();
+    const dropped = chance(0.07) ? int(1, 3) : 0;
+    node.SectionsCaptured = CAPTURE_SECTIONS.slice(0, CAPTURE_SECTIONS.length - dropped);
+    for (const name of CAPTURE_SECTIONS.slice(CAPTURE_SECTIONS.length - dropped)) {
+        if (SECTION_SUPPLIES[name]) SECTION_SUPPLIES[name](node);
+    }
 }
 
 const AP_DESC = n => `AP-${1000 + n}`;
@@ -694,7 +728,7 @@ function ageFleet(days) {
 const chronicallyFailing = shuffled(topology.filter(d => d.role === 'ACC'))
     .slice(0, Math.max(1, Math.round(topology.length * 0.025))).map(d => d.DeviceIP);
 
-function withFailures(fleet, snapshotIndex) {
+function withFailures(fleet, snapshotIndex, scanTime) {
     const failing = new Set(chronicallyFailing);
     if (snapshotIndex > 0) {
         failing.delete(chronicallyFailing[snapshotIndex % chronicallyFailing.length]);   // recovered
@@ -712,7 +746,9 @@ function withFailures(fleet, snapshotIndex) {
             blank.ScanError = FAILURE_TEXT[status].replace('{ip}', node.DeviceIP);
             blank.Hostname = node.Hostname;
             Object.assign(copy, blank);
+            return copy; // a device that never answered captured nothing - blankNode's values stand
         }
+        stampCapture(copy, scanTime);
         return copy;
     });
 }
@@ -727,7 +763,7 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     const stamp = scanTime.toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '');
     // NetworkMap_* so the loaders pick it up, .fixture.json so it can be gitignored separately.
     const mapPath = path.join(OUT_DIR, `NetworkMap_${stamp}.fixture.json`);
-    const fleet = withFailures(topology, i);
+    const fleet = withFailures(topology, i, scanTime);
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));
     written.push({ mapPath, fleet });
 }

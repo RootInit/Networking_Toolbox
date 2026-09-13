@@ -122,6 +122,9 @@ function Invoke-FleetCrawl {
             Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
             MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
             MedNeighbors = @(); Configuration = "Unknown"; Vlans = @();
+            # Both empty by definition: this node exists because the device produced nothing, so no
+            # section was captured and there is no capture instant to record.
+            SectionsCaptured = @(); CaptureTimestamp = $null
             ScanStatus = $Status
             ScanError  = $ScanErrorText
         }

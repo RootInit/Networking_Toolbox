@@ -207,12 +207,24 @@ $NodeData = @{
     Vlans = @()
     # Tells "empty because unreachable" apart from "empty because this is an isolated leaf switch".
     ScanStatus = "Ok"; ScanError = $null
+    # R15. Section keys whose output actually arrived. A truncated CLI session reports no error - it
+    # just stops, so the later sections are simply absent, and this list is what tells "no LLDP
+    # neighbours here" apart from "never got as far as asking". Read it through asArray(): an empty
+    # array serializes as null and a single entry as a bare string, per this project's convention.
+    SectionsCaptured = @()
+    # R12. When THIS device was read. One ScanTimestamp covers a crawl that can span many minutes,
+    # which is too coarse to compare counters or last-seen times between devices. $null on a device
+    # that never answered - a placeholder has no capture to timestamp.
+    CaptureTimestamp = $null
 }
 
 try {
     if ($HumanReadable) { Write-Host "`nGathering node data for $TargetIP..." -ForegroundColor Cyan }
 
     $Result = Invoke-InteractiveBatch
+    # Set before the output is even inspected: a session that timed out still produced its partial
+    # data at this moment, and an age is exactly what makes partial data usable.
+    $NodeData.CaptureTimestamp = (Get-Date).ToUniversalTime().ToString("o")
 
     $RawOutput = $Result.Output
     # Normalize to bare LF so no regex below has to tolerate a mix.
@@ -290,6 +302,8 @@ try {
         # a timeout mid-config and stops a login banner's prompt-shaped text from false-matching.
         elseif ($Sec -match '^(?i)configuration\s*\|\s*display\s+set\b[^\r\n]*[\r\n]+(?<content>(?s).*?)(?:[\r\n]+(?:{[^}]+}[\r\n]+)?\S+@\S+[>#](?s).*)?\z') { $DataDict["CONFIG"] = $Matches.content }
     }
+
+    $NodeData.SectionsCaptured = Get-JunosCapturedSections -DataDict $DataDict
 
     # A virtual chassis emits one "fpcN:" block per member, so a bare -match takes fpc0's, which is not
     # necessarily the master. The prompt's {master:N} marker names the RE that answered - otherwise a
@@ -381,6 +395,9 @@ try {
             # Strip the trailing ".N" logical unit so "ge-0/0/1.100" collapses onto "ge-0/0/1".
             $p = $Matches.port -replace "\.\d+$",""
             if (-not $NodeData.Interfaces.ContainsKey($p)) {
+                # R14. A row's identity is the PHYSICAL port: the key has any ".unit" suffix stripped,
+                # and window.normalizePort joins (utils.js:199,273 / drawer.js:667) depend on that.
+                # Unit-level data belongs in LogicalUnits[] (R1), never in a re-keyed Interfaces.
                 $NodeData.Interfaces[$p] = @{
                     Port = $p; Admin = $Matches.admin; Link = $Matches.link; Desc = "Unknown"
                     STP = "Unknown"; PoE = "Unknown"; LastFlappedSeconds = $null

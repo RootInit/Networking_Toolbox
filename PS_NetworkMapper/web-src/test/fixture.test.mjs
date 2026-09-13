@@ -578,3 +578,58 @@ test('fixture interfaces match Get-JunosNodeData.ps1, except for a known and enu
         'the accessRow parity gap changed. Update ACCESS_ROW_GAP in this file to match, ' +
         `removing what generate-fixture.mjs now emits.\n  now missing: ${missing.join(', ')}`);
 });
+
+// R12: one ScanTimestamp covers a crawl spanning many minutes, so per-device capture times are what
+// make cross-device comparison meaningful. A fixture where they were all identical, or all equal to
+// ScanTimestamp, would let a rule that ignores the field pass.
+test('R12: capture timestamps are per-device, inside the crawl window, and absent when unreachable', () => {
+    const scanMs = Date.parse(fixture.map.ScanTimestamp);
+    const scanned = topology.filter(d => d.ScanStatus === 'Ok');
+    const stamps = scanned.map(d => d.CaptureTimestamp);
+    assert.ok(stamps.every(s => typeof s === 'string' && !Number.isNaN(Date.parse(s))), 'every scanned device needs a parseable capture time');
+    assert.ok(new Set(stamps).size > 10, `capture times barely vary (${new Set(stamps).size} distinct) - a rule ignoring the field would still pass`);
+    for (const d of scanned) {
+        const ms = Date.parse(d.CaptureTimestamp);
+        assert.ok(ms <= scanMs, `${d.DeviceIP} was captured after the snapshot was written`);
+        assert.ok(scanMs - ms <= 30 * 60000, `${d.DeviceIP} capture time is implausibly far before the snapshot`);
+    }
+    for (const d of topology.filter(x => x.ScanStatus !== 'Ok')) {
+        assert.equal(d.CaptureTimestamp, null, `${d.DeviceIP} never answered, so it has no capture instant`);
+    }
+});
+
+// R15: the truncation signal. Section names must be real, a truncated capture must lose its TAIL
+// (the worker asks for the largest command last), and dropping a section must drop what it supplies
+// - otherwise the fixture asserts a state no switch can produce.
+test('R15: captured-section lists are real, tail-truncated, and consistent with the data present', () => {
+    const source = fs.readFileSync(path.join(ROOT, 'lib', 'Get-JunosNodeData.ps1'), 'utf8');
+    const workerKeys = new Set([...source.matchAll(/\$DataDict\["([A-Z0-9_]+)"\]/g)].map(m => m[1]));
+    assert.ok(workerKeys.size > 10, `only found ${workerKeys.size} DataDict keys in the worker`);
+
+    const scanned = topology.filter(d => d.ScanStatus === 'Ok');
+    const full = scanned.map(d => d.SectionsCaptured.length).reduce((a, b) => Math.max(a, b), 0);
+    let truncated = 0;
+    for (const d of scanned) {
+        for (const name of d.SectionsCaptured) {
+            assert.ok(workerKeys.has(name), `${d.DeviceIP} claims section "${name}", which the worker never produces`);
+        }
+        assert.equal(new Set(d.SectionsCaptured).size, d.SectionsCaptured.length, `${d.DeviceIP} lists a section twice`);
+        if (d.SectionsCaptured.length === full) continue;
+        truncated++;
+        // A prefix of the full list: a real timeout cuts the tail, it does not drop from the middle.
+        const fullList = scanned.find(x => x.SectionsCaptured.length === full).SectionsCaptured;
+        assert.deepEqual(d.SectionsCaptured, fullList.slice(0, d.SectionsCaptured.length),
+            `${d.DeviceIP}'s section list is not a prefix of the full one - truncation cut the middle`);
+        // The coupling that keeps the fixture physically possible.
+        if (!d.SectionsCaptured.includes('CONFIG')) {
+            assert.equal(d.Configuration, 'Unknown', `${d.DeviceIP} has config text but never captured CONFIG`);
+        }
+        if (!d.SectionsCaptured.includes('ROUTING_ENGINE')) {
+            assert.equal(d.MasterCpuUtilization, 'Unknown', `${d.DeviceIP} has CPU data but never captured ROUTING_ENGINE`);
+        }
+    }
+    assert.ok(truncated > 0, 'no truncated capture in the fixture - the integrity gate would have nothing to catch');
+    for (const d of topology.filter(x => x.ScanStatus !== 'Ok')) {
+        assert.deepEqual(d.SectionsCaptured, [], `${d.DeviceIP} never answered, so it captured nothing`);
+    }
+});

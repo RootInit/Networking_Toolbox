@@ -1523,6 +1523,42 @@ if (-not $ArpRegexMatch.Success) {
     }
 }
 
+Write-Host "`n--- 13. Get-JunosCapturedSections (R15) ---" -ForegroundColor Cyan
+
+# The truncation signal for section 2.4's integrity gate: a cut-off session reports no error, it just
+# stops, so which sections arrived is the only thing that separates "nothing to report" from
+# "never asked".
+Test-Case "captured sections are the section keys, sorted" {
+    $R = Get-JunosCapturedSections -DataDict ([ordered]@{ VLANS = 'x'; VERSION = 'y'; POE = 'z' })
+    ($R -join ',') -eq 'POE,VERSION,VLANS'
+}
+Test-Case "a section whose body is blank does not count as captured" {
+    # An echoed command with no output is exactly the shape a cut-off session leaves behind.
+    $R = Get-JunosCapturedSections -DataDict @{ VERSION = 'ok'; LLDP = ''; STP = "  `n `t "; POE = $null }
+    ($R -join ',') -eq 'VERSION'
+}
+Test-Case "an empty dictionary yields an empty array, not null" {
+    # `return @()` unwraps to $null on assignment; the function returns `,@()` to prevent that.
+    $R = Get-JunosCapturedSections -DataDict @{}
+    $null -ne $R -and $R -is [array] -and $R.Count -eq 0
+}
+Test-Case "a single captured section stays an array rather than unwrapping to a string" {
+    $R = Get-JunosCapturedSections -DataDict @{ VERSION = 'only one' }
+    $R -is [array] -and $R.Count -eq 1 -and $R[0] -eq 'VERSION'
+}
+Test-Case "a null dictionary is tolerated rather than a binding failure" {
+    (Get-JunosCapturedSections -DataDict $null).Count -eq 0
+}
+# The worker must record the sections it actually keyed, or the gate reads a stale list.
+Test-Case "the worker populates SectionsCaptured from the same dictionary it parses" {
+    $JunosNodeDataSrc -match '\$NodeData\.SectionsCaptured\s*=\s*Get-JunosCapturedSections\s+-DataDict\s+\$DataDict'
+}
+# R12: a crawl spans minutes, so a single ScanTimestamp cannot date any individual device.
+Test-Case "the worker timestamps the capture as soon as the batch returns, before inspecting output" {
+    $Idx = $JunosNodeDataSrc.IndexOf('$NodeData.CaptureTimestamp = (Get-Date)')
+    $Idx -gt 0 -and $Idx -lt $JunosNodeDataSrc.IndexOf('if ([string]::IsNullOrWhiteSpace($RawOutput))')
+}
+
 Write-Host "`n--- 13. Script-file encoding ---" -ForegroundColor Cyan
 
 # 5.1 decodes a BOM-less .ps1 as the system ANSI code page, pwsh 7 as UTF-8, and both parse
