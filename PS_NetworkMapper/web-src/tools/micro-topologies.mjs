@@ -417,6 +417,58 @@ function outOfScopeNeighbor() {
     };
 }
 
+// F4. The same client MAC on an access port of one switch and on the uplink of the switch above it.
+// Both sightings are real - a switch learns every MAC it forwards - so a resolver that counts rows
+// reports two locations for one host. Only the transit predicate separates them.
+function transitSighting() {
+    const access = microNode('10.30.9.10', 'micro-transit-access.example.net', { ports: ['ge-0/0/0', 'xe-0/0/1'] });
+    const upstream = microNode('10.30.9.11', 'micro-transit-up.example.net', { ports: ['xe-0/0/0', 'ge-0/0/1'], model: 'EX4600-40F' });
+    link(access, 'xe-0/0/1', upstream, 'xe-0/0/0');
+    setStp(access, 'xe-0/0/1', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
+    setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
+    const mac = 'aa:bb:00:00:09:01';
+    addClient(access, 'ge-0/0/0', { mac, ip: '10.30.209.5', tag: 10, vlanName: 'DATA' });
+    // The upstream switch learned it too, on the port facing the access switch. The worker keeps this
+    // out of Clients (the uplink exclusion) and keeps the row in MacTable, which is the point of R3.
+    upstream.MacTable.push({
+        RoutingInstance: 'default-switch', VlanName: 'DATA', MacAddress: mac,
+        Flags: 'D', Age: null, Interface: 'xe-0/0/0.0', PhysicalPort: 'xe-0/0/0',
+    });
+    upstream.ArpEntries.push({ MAC: mac, IP: '10.30.209.5' });
+    return {
+        name: 'transit-sighting',
+        failureModes: ['F4'],
+        description: 'One client MAC seen on an access port of one switch and on the uplink of the '
+            + 'switch above it. Two rows, one host, and only the transit predicate tells them apart.',
+        clientMac: mac.toUpperCase(),
+        accessIp: access.DeviceIP, accessPort: 'ge-0/0/0',
+        transitIp: upstream.DeviceIP, transitPort: 'xe-0/0/0',
+        snapshot: snapshot([access, upstream]),
+    };
+}
+
+// Section 5.3's fourth fleet-edge case. Several MACs behind one port, no MED endpoint and no LLDP of any
+// kind: an unmanaged switch somebody patched in. It can be inferred and reported, never traversed.
+function inferredSegment() {
+    const a = microNode('10.30.10.10', 'micro-inferred-a.example.net', { ports: ['ge-0/0/0', 'xe-0/0/1'] });
+    const upstream = microNode('10.30.10.11', 'micro-inferred-up.example.net', { ports: ['xe-0/0/0'], model: 'EX4600-40F' });
+    link(a, 'xe-0/0/1', upstream, 'xe-0/0/0');
+    setStp(a, 'xe-0/0/1', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
+    setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
+    setStp(a, 'ge-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 20000 } });
+    for (const suffix of ['01', '02', '03', '04']) {
+        addClient(a, 'ge-0/0/0', { mac: `aa:bb:00:00:0a:${suffix}`, tag: 10, vlanName: 'DATA' });
+    }
+    return {
+        name: 'inferred-unmanaged-segment',
+        failureModes: ['F14'],
+        description: 'Four client MACs on one access port with no MED endpoint and no LLDP neighbour: '
+            + 'an unmanaged switch that no scan will ever record, inferred from the MAC table alone.',
+        segmentIp: a.DeviceIP, segmentPort: 'ge-0/0/0', macCount: 4,
+        snapshot: snapshot([a, upstream]),
+    };
+}
+
 // A Partial node: real data, and the section a rule needs is the one that never arrived. The answer is
 // NOT_EVALUATED. Reading the empty StpDetail as "nothing blocked" is the false clean the guard exists
 // to prevent, and it is indistinguishable from a healthy tree without SectionsCaptured.
@@ -464,6 +516,7 @@ export const MICRO_TOPOLOGIES = [
     triangleVstp(), vlanWithoutStpInstance(), diamondTwoPaths(),
     lag(false), lag(true), virtualChassis(), unscannedWaypoint(),
     addresslessBridge(), outOfScopeNeighbor(), partialNode(),
+    transitSighting(), inferredSegment(),
 ];
 
 export const byName = (name) => MICRO_TOPOLOGIES.find(t => t.name === name);

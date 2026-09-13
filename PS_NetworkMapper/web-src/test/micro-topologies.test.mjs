@@ -77,7 +77,7 @@ const catalogued = new Set([...fs.readFileSync(path.join(ROOT, 'docs', 'diagnost
 
 test('every micro-topology is named, described, and labelled only with real failure modes', () => {
     assert.ok(catalogued.size >= 14, `only ${catalogued.size} failure modes read from the spec`);
-    assert.equal(MICRO_TOPOLOGIES.length, 10);
+    assert.equal(MICRO_TOPOLOGIES.length, 12);
     // The cases that do carry a label must cover the ones section 8.4 names by number.
     const labelled = new Set(MICRO_TOPOLOGIES.flatMap(t => t.failureModes));
     for (const mode of ['F5', 'F10', 'F13', 'F14']) assert.ok(labelled.has(mode), `no topology covers ${mode}`);

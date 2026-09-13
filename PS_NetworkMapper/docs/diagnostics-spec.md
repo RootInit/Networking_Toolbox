@@ -453,6 +453,36 @@ debug file only — **the reason never reaches the topology**, which is a gap wo
 address-less bridge (R5, gated on capability); and an inferred unmanaged segment (≥3 client MACs on a
 non-uplink port with no MED and no `Neighbors` entry) reported at `INFERRED` and never traversed.
 
+**Done 2026-09-13 (work order item 9, graph half).** `web-src/l2-graph.js`: `buildPortGraph(topology,
+{allowedScopes})` → `{edges, terminals, deviceByIp, transitPorts}`, with the twelve micro-topologies as
+its acceptance tests. `computeNeighborEdges` is untouched; the diagram keeps it.
+
+- **Edges and terminals are separate collections, and a test asserts no port is in both.** An edge joins
+  two devices in the snapshot and may be traversed; a terminal is where the topology ends. All four
+  §5.3 fleet-edge cases are terminal kinds — `unscanned`, `out-of-scope`, `addressless-bridge`,
+  `inferred-segment` — because chaining two of them would invent a link (F14).
+- **A device in the snapshot is always an edge end, never a terminal**, even when its scan failed. The
+  item-7 correction applies here too: a switch we could not log into is still a bridge, and the link to
+  it is real because the other end reported it. Those edges come out `reciprocal: false`.
+- **Chassis-ID confirmation had to change shape.** §5.2's second tier needs the far end's own chassis
+  MAC, and no node field carries one — `show chassis hardware` has no MAC line. What is available is
+  agreement between *other* devices' LLDP about one management address, so the tier is
+  `chassis-consensus` and requires two distinct reporters. That is corroboration from third parties, not
+  the far end confirming, which is why `reciprocal` stays a separate field instead of being folded in.
+  Confirmation is `reciprocal` → `chassis-consensus` → `hostname` → `unconfirmed`.
+- **`stp` per end is `{scopes, captured, collapsed}`.** An empty `StpDetail` means two different things
+  — the section arrived and no instance covers the port (`NO_STP_INSTANCE`), or the section never
+  arrived (`NOT_EVALUATED`) — and only `SectionsCaptured` separates them. Item 10's
+  `bothEndsHaveScopeFor(T)` needs both answers.
+- **The transit predicate is the worker's**, including `$InterconnectPortPattern`: a port facing a
+  switch/router LLDP neighbour plus the bundle it belongs to. It is returned as `transitPorts` so
+  endpoint resolution uses the same definition — a MAC on one of those ports is a sighting in passing,
+  not a location (F4).
+- **The generated fixture has no LAG at all**, so bundle collapse is covered only by the micros. That is
+  an `accessRow` gap, not a graph gap; it lands with the interface-field work.
+- Two micro-topologies were added for this item: `transit-sighting` (F4) and
+  `inferred-unmanaged-segment` (F14, §5.3's fourth case), taking the set to twelve.
+
 ---
 
 ## 6. Endpoint resolution and path computation
