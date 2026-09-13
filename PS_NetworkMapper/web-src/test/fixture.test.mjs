@@ -592,24 +592,28 @@ test('fixture interfaces match Get-JunosNodeData.ps1, except for a known and enu
 // This is the test the whole pass exists for: the forwarding graph must be a tree, which means it has
 // exactly one fewer edge than it has nodes AND is connected. Either alone is satisfiable by a lie.
 test('item 7: the forwarding subgraph is a spanning tree, not a loop stamped FWD', () => {
-    const bridges = topology.filter(d => d.ScanStatus === 'Ok');
+    // Every device, not just the scanned ones: a scan failure describes our ssh attempt, and a switch we
+    // could not log into is still running RSTP. Its own rows are blank, so its end of a link is simply
+    // unobservable - a link forwards when every end we CAN read says FWD.
+    const bridges = topology;
     const byIp = new Map(bridges.map(d => [String(d.DeviceIP), d]));
     const stpOf = (d, port) => {
         const row = d.Interfaces.find(r => r.Port === String(port).replace(/\.\d+$/, ''));
         return row ? row.STP : null;
     };
+    const linkForwards = (a, aPort, b, bPort) => {
+        const ends = [stpOf(a, aPort), stpOf(b, bPort)].filter(x => x !== null);
+        return ends.length > 0 && ends.every(x => x === 'FWD');
+    };
 
     const fwdEdges = new Set();
-    let totalLinks = 0;
     for (const d of bridges) {
         for (const n of d.Neighbors) {
             if (n.Reachable === false) continue;
             const peer = byIp.get(String(n.ManagementIP));
             if (!peer) continue;
             const key = [String(d.DeviceIP), String(peer.DeviceIP)].sort().join('~');
-            totalLinks++;
-            // A link forwards only if BOTH ends do; one FWD end and one BLK end is not a path.
-            if (stpOf(d, n.LocalPort) === 'FWD' && stpOf(peer, n.RemotePort) === 'FWD') fwdEdges.add(key);
+            if (linkForwards(d, n.LocalPort, peer, n.RemotePort)) fwdEdges.add(key);
         }
     }
     const allEdges = new Set();
@@ -649,14 +653,18 @@ test('item 7: exactly one root bridge, it has the best bridge ID, and only non-r
     const roleOf = (r) => (r.StpDetail && r.StpDetail['instance 0'] ? r.StpDetail['instance 0'].Role : null);
     const rootPortCount = (d) => d.Interfaces.filter(r => roleOf(r) === 'Root').length;
 
+    // A scan-failed device has no rows to read, so at most one OBSERVABLE bridge lacks a root port: the
+    // elected root, and then only if our ssh happened to reach it.
     const roots = bridges.filter(d => rootPortCount(d) === 0);
-    assert.equal(roots.length, 1, `${roots.length} bridges have no root port - exactly one is the root`);
-    // The root is elected on (priority, MAC), and the config writes 4k only on cores.
-    // role is generator scratch and never reaches a snapshot; the config text is what a reader has.
-    assert.match(roots[0].Configuration, /bridge-priority 4k/,
-        "the root's config must claim the 4k priority it won on - only cores are given it");
+    assert.ok(roots.length <= 1, `${roots.length} scanned bridges have no root port - at most one can be the root`);
+    for (const d of roots) {
+        // The root is elected on (priority, MAC) and only cores are given 4k. role is generator scratch
+        // and never reaches a snapshot, so the config text is what a reader has to go on.
+        assert.match(d.Configuration, /bridge-priority 4k/,
+            'a bridge with no root port must be the root, and only cores carry the 4k priority');
+    }
     for (const d of bridges) {
-        if (d === roots[0]) continue;
+        if (roots.includes(d)) continue;
         assert.equal(rootPortCount(d), 1, `${d.Hostname} has ${rootPortCount(d)} root ports - RSTP allows exactly one`);
     }
 });
@@ -676,6 +684,9 @@ test('item 7: every blocked port faces a designated one, and no link has two of 
             if (n.Reachable === false) continue;
             const peer = byIp.get(String(n.ManagementIP));
             if (!peer) continue;
+            // A scan-failed peer has no rows, so one end is unobservable - a real snapshot's shape,
+            // not a missing value to assert on.
+            if (peer.ScanStatus !== 'Ok') continue;
             const mine = detailOf(d, n.LocalPort);
             const theirs = detailOf(peer, n.RemotePort);
             assert.ok(mine && theirs, `a link between ${d.Hostname} and ${peer.Hostname} has no STP detail`);

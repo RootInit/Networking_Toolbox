@@ -756,9 +756,14 @@ function compareBridges(a, b) {
 }
 
 function computeSpanningTree(fleet) {
-    // A device that never answered is not a bridge we can hear BPDUs from, and neither is an R5
-    // unmanaged neighbour: ports facing them stay Designated, which is what a real switch shows.
-    const bridges = fleet.filter(d => d.ScanStatus === 'Ok');
+    // Every device is a bridge. A scan failure is a fact about OUR ssh attempt - AuthFailed, Refused and
+    // Timeout all describe the connection, not the switch - and a switch we cannot log into is still
+    // running RSTP and still sending BPDUs. Excluding one makes its neighbours' ports read Designated
+    // and orphans anything behind it as an island root, which is the fixture lying the other way.
+    //
+    // An R5 neighbour is different and is skipped below: it advertises Bridge capability with no
+    // management address, and modelling it as not participating is defensible.
+    const bridges = fleet;
     const byIp = new Map(bridges.map(d => [String(d.DeviceIP), d]));
 
     // Symmetric adjacency from the LLDP the generator already stamped, so the tree is computed over
@@ -877,16 +882,7 @@ function computeSpanningTree(fleet) {
                 portIdOf.get(String(d.DeviceIP)).get(row.Port) || null);
         }
     }
-    const rootLabel = `${root.Hostname} (${bridgeId(root)})`;
-    // withFailures hands this function CLONES, which is what gets serialized, so the identity fields the
-    // election needs cannot be in withFailures' SCRATCH list - they are dropped here instead. byPort's
-    // memo is a Map and would serialize as a stray {} key.
-    for (const d of fleet) {
-        delete d.bridgeMac;
-        delete d.bridgePriority;
-        delete d._byPort;
-    }
-    return { rootLabel: rootLabel, rootCost: rootCost, rootPort: rootPort };
+    return { rootLabel: `${root.Hostname} (${bridgeId(root)})`, rootCost: rootCost, rootPort: rootPort };
 }
 
 // An unlinked switch is just an orphan node beside the diagram, easy to miss - so it is fatal here.
@@ -899,6 +895,47 @@ function assertNothingOrphaned(fleet) {
         `lower UPLINKS_PER_FRAME (currently ${UPLINKS_PER_FRAME}).`
     );
 }
+// The invariant item 7 exists for, asserted where every generated fixture passes through it rather than
+// only in the one the test suite builds: the forwarding subgraph must be a spanning tree.
+function assertForwardingIsSpanningTree(fleet) {
+    const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
+    const stpOf = (d, port) => {
+        const row = byPort(d).get(String(port).replace(/\.\d+$/, ''));
+        return row ? row.STP : null;
+    };
+    const fwd = new Set();
+    for (const d of fleet) {
+        for (const n of d.Neighbors) {
+            if (n.Reachable === false) continue;
+            const peer = byIp.get(String(n.ManagementIP));
+            if (!peer) continue;
+            if (stpOf(d, n.LocalPort) === 'FWD' && stpOf(peer, n.RemotePort) === 'FWD') {
+                fwd.add([String(d.DeviceIP), String(peer.DeviceIP)].sort().join('~'));
+            }
+        }
+    }
+    const adj = new Map(fleet.map(d => [String(d.DeviceIP), []]));
+    for (const key of fwd) {
+        const [a, b] = key.split('~');
+        adj.get(a).push(b);
+        adj.get(b).push(a);
+    }
+    const seen = new Set([String(fleet[0].DeviceIP)]);
+    const queue = [String(fleet[0].DeviceIP)];
+    for (let head = 0; head < queue.length; head++) {
+        for (const next of adj.get(queue[head])) {
+            if (!seen.has(next)) { seen.add(next); queue.push(next); }
+        }
+    }
+    if (seen.size !== fleet.length || fwd.size !== fleet.length - 1) {
+        throw new Error(
+            `the forwarding subgraph is not a spanning tree: ${fwd.size} forwarding links and ` +
+            `${seen.size} of ${fleet.length} devices reachable, where a tree has ${fleet.length - 1} links ` +
+            `and reaches all of them.`
+        );
+    }
+}
+
 assertNothingOrphaned(topology);
 
 const gatewayFor = (node) => (node.role === 'ACC' ? topology.find(d => d.DeviceIP === node.Gateway) : cores[0]);
@@ -1032,7 +1069,7 @@ function withFailures(fleet, snapshotIndex, scanTime) {
         failing.add(stillUp[(snapshotIndex * 97) % stillUp.length].DeviceIP);            // newly down
     }
     // Dropped before the clone: bldg.zone.buildings points back at bldg, so a clone would recurse.
-    const SCRATCH = ['zone', 'bldg', 'role', '_freeUplinks', '_byPort'];
+    const SCRATCH = ['zone', 'bldg', 'role', 'bridgeMac', 'bridgePriority', '_freeUplinks', '_byPort'];
     return fleet.map(node => {
         const copy = JSON.parse(JSON.stringify(node, (key, value) => (SCRATCH.includes(key) ? undefined : value)));
         if (failing.has(node.DeviceIP)) {
@@ -1059,10 +1096,11 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     const stamp = scanTime.toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '');
     // NetworkMap_* so the loaders pick it up, .fixture.json so it can be gitignored separately.
     const mapPath = path.join(OUT_DIR, `NetworkMap_${stamp}.fixture.json`);
+    // Before withFailures, not after: every device is a bridge whether or not our ssh reached it, and
+    // the pass mutates the interface rows withFailures is about to clone.
+    const tree = computeSpanningTree(topology);
+    assertForwardingIsSpanningTree(topology);
     const fleet = withFailures(topology, i, scanTime);
-    // After withFailures, so a device that did not answer in THIS snapshot is not a bridge in its tree,
-    // and before the write, since the pass mutates the interface rows it is about to serialize.
-    const tree = computeSpanningTree(fleet);
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));
     written.push({ mapPath, fleet, tree });
 }

@@ -613,8 +613,13 @@ tree forwarding on a loop.
 means anything. This is a larger job than revision 1 budgeted and belongs in the work order.
 
 > **Done 2026-09-13 (work order item 7).** `computeSpanningTree` in `generate-fixture.mjs`, run per
-> snapshot after `withFailures` so a device that did not answer in *that* snapshot is not a bridge in
-> its tree. Root elected on `(bridge-priority, chassis MAC)`; least-cost tree by **Dijkstra, not BFS by
+> snapshot on the fleet **before** `withFailures`: **a scan failure is not a bridge failure.**
+> `AuthFailed`, `Refused` and `Timeout` all describe our ssh attempt, and a switch we cannot log into is
+> still running RSTP and still sending BPDUs. The first implementation excluded scan-failed devices from
+> the bridge graph, which made their neighbours' ports read `Designated` and would have orphaned
+> anything behind an unreachable distribution switch as an island root with no root port. A snapshot's
+> shape for such a device is that its own end of the link is **unobservable** (`Interfaces: []`), not
+> that the link is an endpoint. Root elected on `(bridge-priority, chassis MAC)`; least-cost tree by **Dijkstra, not BFS by
 > hops** — with 1G and 10G uplinks mixed the two differ, and the cost charged is the receiving port's,
 > as RSTP charges it. Per-link roles are Root/Designated on tree links and Designated/Alternate
 > elsewhere, with `BLK` on the Alternate end. `StpDetail` is now emitted, so it left `ACCESS_ROW_GAP`
@@ -630,6 +635,10 @@ means anything. This is a larger job than revision 1 budgeted and belongs in the
 > election turns on. And `withFailures` hands the pass *clones*, which are what get serialized, so the
 > identity fields it elects on are dropped after the tree is computed rather than being listed in
 > `SCRATCH`.
+>
+> The tree invariant - forwarding edges = devices - 1, and connected - is asserted inside the generator
+> beside `assertNothingOrphaned`, so every generated fixture passes through it rather than only the one
+> the test suite builds.
 >
 > One test premise here was wrong on the first try and is worth recording: a dual-homed access switch
 > can legitimately forward on two links — one up to the root, one down to a daisy-chained closet. The
