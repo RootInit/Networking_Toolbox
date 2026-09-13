@@ -517,9 +517,9 @@ function hasCentralizedAuth(configText) {
 
 // Grouped by username+class; `centralized` is per-device and deliberately not part of the key.
 function groupLocalAccounts(rows) {
-    var groups = new Map(); // "username class" -> {username, cls, entries: [{device, centralized}]}
+    var groups = new Map(); // "username\u0000class" (NUL separator: legal in neither field) -> {username, cls, entries: [{device, centralized}]}
     rows.forEach(r => {
-        var key = r.username + ' ' + r.cls;
+        var key = r.username + '\u0000' + r.cls;
         if (!groups.has(key)) groups.set(key, { username: r.username, cls: r.cls, entries: [] });
         groups.get(key).entries.push({ device: r.device, centralized: r.centralized });
     });

@@ -9,14 +9,38 @@ var TopologyCrypto = (function() {
         return bytes;
     }
 
-    function concatBytes(a, b) {
-        var out = new Uint8Array(a.length + b.length);
-        out.set(a, 0);
-        out.set(b, a.length);
+    // Decodes base64 straight into a buffer that already holds `prefix`, so the MAC input exists
+    // once instead of as a separate array plus a concatenated copy. At fleet size the ciphertext is
+    // tens of MB and that copy was pure waste - the same mistake lib/TopologyCrypto.ps1 made on the
+    // PowerShell side, where byte-array concatenation also built a second full buffer.
+    function prefixedB64ToBytes(prefix, b64) {
+        var bin = atob(b64);
+        var out = new Uint8Array(prefix.length + bin.length);
+        out.set(prefix, 0);
+        for (var i = 0; i < bin.length; i++) out[prefix.length + i] = bin.charCodeAt(i);
         return out;
     }
 
+    // Snapshots written by one crawl session share a salt and iteration count, so autoloading an
+    // archive re-derives the same key up to 20 times at 600,000 iterations each. Cached on the exact
+    // inputs that determine the result; the IV is per-envelope and is not part of the key, so this
+    // cannot cross envelopes. Small and bounded - it holds derived key material (and the password,
+    // as part of the cache key) for the page's lifetime, which is already true of the session
+    // password the server hands the browser.
+    var keyCache = [];
+    var KEY_CACHE_MAX = 4;
+
+    function bytesToB64(bytes) {
+        var s = '';
+        for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+        return btoa(s);
+    }
+
     async function deriveKeyMaterial(password, saltBytes, iterations) {
+        var cacheKey = iterations + ':' + bytesToB64(saltBytes) + ':' + password;
+        for (var i = 0; i < keyCache.length; i++) {
+            if (keyCache[i].k === cacheKey) return keyCache[i].v;
+        }
         var passBytes = new TextEncoder().encode(password);
         var baseKey = await crypto.subtle.importKey('raw', passBytes, 'PBKDF2', false, ['deriveBits']);
         var bits = await crypto.subtle.deriveBits(
@@ -25,7 +49,10 @@ var TopologyCrypto = (function() {
         );
         var keyMaterial = new Uint8Array(bits);
         // Same 32/32 split as Protect-TopologyPayload in lib/TopologyCrypto.ps1.
-        return { encKeyBytes: keyMaterial.slice(0, 32), macKeyBytes: keyMaterial.slice(32, 64) };
+        var derived = { encKeyBytes: keyMaterial.slice(0, 32), macKeyBytes: keyMaterial.slice(32, 64) };
+        keyCache.push({ k: cacheKey, v: derived });
+        if (keyCache.length > KEY_CACHE_MAX) keyCache.shift();
+        return derived;
     }
 
     // MIN must stay <= any real file's iteration count; MAX is a CPU-burn guard, not a boundary.
@@ -61,18 +88,22 @@ var TopologyCrypto = (function() {
         try {
             var saltBytes = b64ToBytes(envelope.salt);
             var ivBytes = b64ToBytes(envelope.iv);
-            var cipherBytes = b64ToBytes(envelope.ciphertext);
             var macBytes = b64ToBytes(envelope.mac);
+            // iv||ciphertext in one buffer: the MAC is computed over the whole thing and the cipher
+            // is a view into its tail, so the ciphertext is never materialized twice.
+            var macInput = prefixedB64ToBytes(ivBytes, envelope.ciphertext);
+            var cipherBytes = macInput.subarray(ivBytes.length);
 
             var keys = await deriveKeyMaterial(password, saltBytes, envelope.iterations);
 
             // MAC verified before decrypting: a wrong password fails clearly, not as a padding error.
             var macKey = await crypto.subtle.importKey('raw', keys.macKeyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']);
-            var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, concatBytes(ivBytes, cipherBytes));
+            var macOk = await crypto.subtle.verify('HMAC', macKey, macBytes, macInput);
             if (!macOk) throw wrongPasswordError();
 
             var encKey = await crypto.subtle.importKey('raw', keys.encKeyBytes, { name: 'AES-CBC' }, false, ['decrypt']);
             var plainBuf = await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, encKey, cipherBytes);
+            macInput = null; cipherBytes = null; // release before the plaintext is turned into a string
             return new TextDecoder().decode(plainBuf);
         } catch (err) {
             if (err instanceof Error && err.wrongPassword) throw err;
@@ -80,7 +111,11 @@ var TopologyCrypto = (function() {
         }
     }
 
-    var TopologyCryptoExports = { decryptEnvelope: decryptEnvelope };
+    var TopologyCryptoExports = {
+        decryptEnvelope: decryptEnvelope,
+        _clearKeyCache: function() { keyCache = []; },
+        _keyCacheSize: function() { return keyCache.length; }
+    };
     if (typeof module !== 'undefined' && module.exports) {
         module.exports = { TopologyCrypto: TopologyCryptoExports };
     } else if (typeof window !== 'undefined') {

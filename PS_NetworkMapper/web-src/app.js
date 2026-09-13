@@ -293,57 +293,89 @@ window.switchSidebarTab = async function(tabId) {
     }
 };
 
-// Reads and, if needed, decrypts one File. `batch` carries the last password that worked.
+// Parses, and if needed decrypts, one snapshot already in memory as text. `batch` carries the last
+// password that worked. Split out of readSnapshotFile so the autoload path - which fetches text
+// over HTTP - does not have to wrap it in a File and read it straight back out again; at fleet size
+// that round-trip doubled the peak for no benefit.
+window.parseSnapshotText = async function(name, text, batch) {
+    var data = JSON.parse(text);
+
+    if (data && data.format === 'PSNetworkMapper-EncryptedTopology') {
+        var decryptedText = null;
+        var errorMsg = null;
+        // The session password is tried silently first.
+        var sessionPassword = await window.getSessionEncryptionPassword();
+        var triedSessionPassword = false;
+        var triedBatchPassword = false;
+        while (decryptedText === null) {
+            var password;
+            if (sessionPassword && !triedSessionPassword) {
+                password = sessionPassword;
+                triedSessionPassword = true;
+            } else if (batch && batch.password && !triedBatchPassword) {
+                password = batch.password;
+                triedBatchPassword = true;
+            } else if (batch && batch.noPrompt) {
+                // Autoload must never raise a surprise password dialog. Abort the whole batch:
+                // one archive's password failing means the rest will fail the same way.
+                var silent = new Error('AutoloadPasswordUnavailable');
+                silent.abortBatch = true;
+                throw silent;
+            } else {
+                password = await window.promptForPassword(errorMsg); // rejects on Cancel, exiting the loop
+            }
+            try {
+                decryptedText = await window.TopologyCrypto.decryptEnvelope(data, password);
+                if (batch) batch.password = password;
+            } catch (decErr) {
+                // Only a wrong password is worth another attempt.
+                if (!decErr.wrongPassword) throw decErr;
+                errorMsg = decErr.message;
+            }
+        }
+        // Released before the plaintext is parsed: at fleet size the envelope's base64 ciphertext
+        // is tens of MB and would otherwise stay reachable through the whole parse.
+        data = null;
+        var parsed = JSON.parse(decryptedText);
+        decryptedText = null;
+        data = parsed;
+    }
+
+    if (!data.Topology) throw new Error(`"${name}": missing 'Topology' array.`);
+
+    // Clients arrive pre-correlated server-side.
+    data.Topology.forEach(device => { device.TrueClients = window.asArray(device.Clients); });
+
+    return { sourceFile: name, scanTimestamp: data.ScanTimestamp || null, topology: data.Topology };
+};
+
+// One snapshot from either source shape: a File the user picked, or a lazy {name, fetchText} the
+// autoload supplies. Lazy is what keeps the autoload's peak flat - the text is fetched, parsed and
+// dropped one snapshot at a time instead of every snapshot being held as text, then again as a
+// File, then again as a FileReader result.
+function readSnapshotSource(source, batch) {
+    if (source && typeof source.fetchText === 'function') {
+        return (async () => {
+            var text = await source.fetchText();
+            var parsed = await window.parseSnapshotText(source.name, text, batch);
+            return parsed; // `text` goes out of scope here, before the next source is fetched
+        })();
+    }
+    return readSnapshotFile(source, batch);
+}
+
+// Reads and, if needed, decrypts one File, for the manual Load / Load Folder paths.
 function readSnapshotFile(file, batch) {
     return new Promise((resolve, reject) => {
         var reader = new FileReader();
         reader.onerror = () => reject(new Error(`Browser blocked read access to "${file.name}".`));
-
         reader.onload = async (e) => {
             try {
-                var data = JSON.parse(e.target.result);
-
-                if (data && data.format === 'PSNetworkMapper-EncryptedTopology') {
-                    var decryptedText = null;
-                    var errorMsg = null;
-                    // The session password is tried silently first.
-                    var sessionPassword = await window.getSessionEncryptionPassword();
-                    var triedSessionPassword = false;
-                    var triedBatchPassword = false;
-                    while (decryptedText === null) {
-                        var password;
-                        if (sessionPassword && !triedSessionPassword) {
-                            password = sessionPassword;
-                            triedSessionPassword = true;
-                        } else if (batch && batch.password && !triedBatchPassword) {
-                            password = batch.password;
-                            triedBatchPassword = true;
-                        } else {
-                            password = await window.promptForPassword(errorMsg); // rejects on Cancel, exiting the loop
-                        }
-                        try {
-                            decryptedText = await window.TopologyCrypto.decryptEnvelope(data, password);
-                            if (batch) batch.password = password;
-                        } catch (decErr) {
-                            // Only a wrong password is worth another attempt.
-                            if (!decErr.wrongPassword) throw decErr;
-                            errorMsg = decErr.message;
-                        }
-                    }
-                    data = JSON.parse(decryptedText);
-                }
-
-                if (!data.Topology) throw new Error(`"${file.name}": missing 'Topology' array.`);
-
-                // Clients arrive pre-correlated server-side.
-                data.Topology.forEach(device => { device.TrueClients = window.asArray(device.Clients); });
-
-                resolve({ sourceFile: file.name, scanTimestamp: data.ScanTimestamp || null, topology: data.Topology });
+                resolve(await window.parseSnapshotText(file.name, e.target.result, batch));
             } catch (err) {
                 reject(err);
             }
         };
-
         // Explicit UTF-8 - platform default guess would mis-decode non-ASCII hostnames/notes.
         reader.readAsText(file, 'UTF-8');
     });
@@ -366,48 +398,38 @@ window.autoloadLastScan = async function() {
     }
     if (!Array.isArray(listing) || listing.length === 0) return;
 
-    // Bodies come one at a time: the server is single-threaded, so a bulk response would block it for
-    // minutes on a large archive, and the gaps between requests let it serve a scan started meanwhile.
-    var entries = [];
-    for (var i = 0; i < listing.length; i++) {
-        // Re-checked each iteration: scanNetworkPollActive moves when a scan STARTS, not finishes.
-        if (scanNetworkPollActive || loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0) return;
-        try {
-            var fileResp = await fetch('/api/snapshot?name=' + encodeURIComponent(listing[i].name));
-            // One unreadable snapshot skips that file rather than abandoning the autoload.
-            if (!fileResp.ok) continue;
-            var content = await fileResp.text();
-            if (content) entries.push({ name: listing[i].name, content: content });
-        } catch (err) {
-            // Keep what was retrieved: the multi-file path tolerates a partial batch.
-            console.warn('Autoload stopped after a transport error - continuing with the ' + entries.length + ' snapshot(s) already retrieved.', err);
-            break;
-        }
-    }
-    if (entries.length === 0) return;
-
-    var encryptedEntries = entries.filter(e => {
-        // The marker appears verbatim in the text, so its absence rules out an envelope cheaply.
-        if (e.content.indexOf('PSNetworkMapper-EncryptedTopology') === -1) return false;
-        try { return JSON.parse(e.content).format === 'PSNetworkMapper-EncryptedTopology'; }
-        catch (err) { return false; }
+    // Lazy sources, not pre-fetched bodies. Fetching all of them up front held every snapshot as
+    // text, then again as a File, then again as a FileReader result: measured at 3.5 GB of renderer
+    // RSS for 20 snapshots, against 725 MiB actually retained once loading finished. Bodies still
+    // arrive one at a time - the server is single-threaded, and the gaps let it serve a scan started
+    // meanwhile - but now each one is parsed and released before the next is requested.
+    var sources = listing.map(function(entry) {
+        return {
+            name: entry.name,
+            fetchText: async function() {
+                // Only the scan check belongs here - scanNetworkPollActive moves when a scan STARTS,
+                // not when it finishes. Supersession is already handled by processSelectedFiles,
+                // which claims loadFilesGeneration for itself and re-checks after every read; testing
+                // the pre-call generation here would compare against a number it has since bumped.
+                if (scanNetworkPollActive) {
+                    var stale = new Error('AutoloadSuperseded');
+                    stale.abortBatch = true;
+                    throw stale;
+                }
+                var fileResp = await fetch('/api/snapshot?name=' + encodeURIComponent(entry.name));
+                if (!fileResp.ok) throw new Error('Snapshot "' + entry.name + '" could not be retrieved.');
+                var text = await fileResp.text();
+                if (!text) throw new Error('Snapshot "' + entry.name + '" was empty.');
+                return text;
+            }
+        };
     });
-    if (encryptedEntries.length > 0) {
-        var sessionPassword = await window.getSessionEncryptionPassword();
-        if (!sessionPassword) return;
-        // The cached password must actually decrypt, or we fall through to the prompt this avoids.
-        try {
-            await window.TopologyCrypto.decryptEnvelope(JSON.parse(encryptedEntries[0].content), sessionPassword);
-        } catch (err) {
-            return;
-        }
-    }
 
     if (loadFilesGeneration !== myGenerationAtStart || loadedSnapshots.length > 0 || scanNetworkPollActive) return;
-    var files = entries.map(e => new File([e.content], e.name, { type: 'application/json' }));
+    // noPrompt: a password the session does not already hold must not surface a dialog at startup.
     // Nothing here was user-initiated, so a corrupt snapshot must not surface the fatal error state.
     try {
-        await window.processSelectedFiles(files);
+        await window.processSelectedFiles(sources, { noPrompt: true });
     } catch (err) {
         console.warn('Autoload of the last scan failed - leaving manual load available.', err);
     }
@@ -448,7 +470,7 @@ window.forceLoadFolder = async function() {
 };
 
 // Turns a list of File objects into loadedSnapshots plus the active graph/search state.
-window.processSelectedFiles = async function(files) {
+window.processSelectedFiles = async function(files, batchOptions) {
     var myGeneration = ++loadFilesGeneration;
     var btn = document.getElementById('loadBtn');
     var folderBtn = document.getElementById('loadFolderBtn');
@@ -469,24 +491,27 @@ window.processSelectedFiles = async function(files) {
     // A single file's failure aborts the load; in a folder batch one bad file must not discard the rest.
     var tolerateFailures = files.length > 1;
     // Scoped to this call, so a manually entered password is reused across the batch.
-    var batch = { password: null };
+    var batch = { password: null, noPrompt: !!(batchOptions && batchOptions.noPrompt) };
 
     try {
         for (var i = 0; i < files.length; i++) {
             window.setStatus(`Reading file ${i + 1} of ${files.length}: ${files[i].name}...`, "orange");
             window.showProgress(`Reading ${files[i].name}...`, Math.round((i / files.length) * 100));
+            // Yield between snapshots so the previous one's text is collectable before the next
+            // arrives; without it the loop can run several fetches deep on the microtask queue.
             await new Promise(r => setTimeout(r, 20)); // let the progress update paint
 
             if (tolerateFailures) {
                 try {
-                    newSnapshots.push(await readSnapshotFile(files[i], batch));
+                    newSnapshots.push(await readSnapshotSource(files[i], batch));
                 } catch (fileErr) {
                     // A cancelled prompt aborts the batch; otherwise Cancel re-prompts per file.
                     if (fileErr && fileErr.message === 'Cancelled') throw fileErr;
+                    if (fileErr && fileErr.abortBatch) throw fileErr;
                     skipped.push({ name: files[i].name, reason: fileErr.message });
                 }
             } else {
-                newSnapshots.push(await readSnapshotFile(files[i], batch));
+                newSnapshots.push(await readSnapshotSource(files[i], batch));
             }
             if (myGeneration !== loadFilesGeneration) return; // superseded mid-read
         }
@@ -542,6 +567,10 @@ window.processSelectedFiles = async function(files) {
         if (myGeneration !== loadFilesGeneration) return; // a newer call owns the status line
         if (err && err.message === 'Cancelled') {
             window.setStatus("Decryption cancelled.", "orange");
+        } else if (err && err.abortBatch) {
+            // Autoload only: no snapshot could be decrypted with the session password. Stay quiet
+            // and leave manual load available, exactly as the old pre-flight probe did.
+            window.setStatus("Load a snapshot to begin.", "orange");
         } else {
             window.setStatus(parseSucceeded ? "Render error - see details." : "JSON Parse Error.", "red");
             throw err;

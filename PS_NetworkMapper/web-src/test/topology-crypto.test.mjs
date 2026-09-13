@@ -7,8 +7,11 @@ const ITERATIONS = 1000; // MIN_ITERATIONS in topology-crypto.js; keeps tests fa
 
 function b64(bytes) { return Buffer.from(bytes).toString('base64'); }
 
-async function buildEnvelope(plainJson, password, format, iterations = ITERATIONS) {
-  const salt = crypto.getRandomValues(new Uint8Array(16));
+function buildEnvelope(plainJson, password, format, iterations = ITERATIONS) {
+  return buildEnvelopeWithSalt(plainJson, password, format, crypto.getRandomValues(new Uint8Array(16)), iterations);
+}
+
+async function buildEnvelopeWithSalt(plainJson, password, format, salt, iterations = ITERATIONS) {
   const iv = crypto.getRandomValues(new Uint8Array(16));
 
   const baseKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveBits']);
@@ -239,3 +242,43 @@ test('decryptEnvelope leaves password-independent structural failures untagged',
   }
 });
 
+
+// Autoloading an archive re-derives the same PBKDF2 key once per snapshot at 600,000 iterations.
+// The cache is keyed on password + salt + iterations; these assert it cannot widen that.
+test('the key cache reuses derivation for two envelopes sharing a salt, and both decrypt', async () => {
+  TopologyCrypto._clearKeyCache();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const a = await buildEnvelopeWithSalt('{"Topology":[1]}', PASSWORD, 'PSNetworkMapper-EncryptedTopology', salt);
+  const b = await buildEnvelopeWithSalt('{"Topology":[2]}', PASSWORD, 'PSNetworkMapper-EncryptedTopology', salt);
+  assert.equal(await TopologyCrypto.decryptEnvelope(a, PASSWORD), '{"Topology":[1]}');
+  assert.equal(TopologyCrypto._keyCacheSize(), 1);
+  // Distinct plaintexts prove the per-envelope IV is still honoured, not cached along with the key.
+  assert.equal(await TopologyCrypto.decryptEnvelope(b, PASSWORD), '{"Topology":[2]}');
+  assert.equal(TopologyCrypto._keyCacheSize(), 1);
+});
+
+test('a cached key is never applied to a different salt or a different password', async () => {
+  TopologyCrypto._clearKeyCache();
+  const saltA = crypto.getRandomValues(new Uint8Array(16));
+  const saltB = crypto.getRandomValues(new Uint8Array(16));
+  const a = await buildEnvelopeWithSalt('{"Topology":["a"]}', PASSWORD, 'PSNetworkMapper-EncryptedTopology', saltA);
+  const b = await buildEnvelopeWithSalt('{"Topology":["b"]}', PASSWORD, 'PSNetworkMapper-EncryptedTopology', saltB);
+  assert.equal(await TopologyCrypto.decryptEnvelope(a, PASSWORD), '{"Topology":["a"]}');
+  assert.equal(await TopologyCrypto.decryptEnvelope(b, PASSWORD), '{"Topology":["b"]}');
+  assert.equal(TopologyCrypto._keyCacheSize(), 2); // same password, different salts: two entries
+  // A wrong password must still fail even though a good key for this salt is cached.
+  await assert.rejects(
+    () => TopologyCrypto.decryptEnvelope(a, 'not-the-password'),
+    (err) => err.wrongPassword === true
+  );
+});
+
+test('the key cache is bounded', async () => {
+  TopologyCrypto._clearKeyCache();
+  for (let i = 0; i < 8; i++) {
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const e = await buildEnvelopeWithSalt(`{"Topology":[${i}]}`, PASSWORD, 'PSNetworkMapper-EncryptedTopology', salt);
+    assert.equal(await TopologyCrypto.decryptEnvelope(e, PASSWORD), `{"Topology":[${i}]}`);
+  }
+  assert.ok(TopologyCrypto._keyCacheSize() <= 4, `cache grew to ${TopologyCrypto._keyCacheSize()}`);
+});

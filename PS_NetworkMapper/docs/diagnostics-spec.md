@@ -753,9 +753,60 @@ representations of each snapshot are alive simultaneously (raw text → `File` �
 base64 ciphertext → binary string → `Uint8Array` → plaintext → parsed object), and `:396-403`
 decrypts the first snapshot **twice**, running 600,000-iteration PBKDF2 twice.
 
-**Requirement:** bound the autoload to the most recent snapshot, reuse the derived key across the
-batch, drop `entries[]` as it converts. This is a prerequisite for multi-snapshot analysis, not a
-consequence of it.
+#### Measured — 2026-09-13. The retention premise was wrong; the transient was the problem.
+
+Measured against the built `lib/Network_Visualizer.html` in headless Chromium 150, driven over CDP,
+with 20 synthetic 350-device x 48-port snapshots at the current field density (44.0 MiB plaintext /
+58.6 MiB enveloped each, matching the PowerShell-side figures to within 1%) served by a stand-in for
+`/api/snapshots`, `/api/snapshot` and `/api/session-password`.
+
+**Retained heap is not a problem.** All 20 snapshots load, and after a forced GC the V8 heap holds
+**725 MiB** — nowhere near a tab's limit. Attributed by dropping one section at a time with a
+collection between:
+
+| section (20 snapshots, 7,000 device-records, 336,000 interfaces) | MiB |
+|---|---|
+| `Configuration` | 274 |
+| `Interfaces` | 224 |
+| `Vlans` + `MedNeighbors` + `Neighbors` + `ArpEntries` + `StackMembers` | 162 |
+| `Clients` + `TrueClients` | 39 |
+| `searchIndex` (560,000 entries) | 20 |
+| **total** | **725** |
+
+So **bounding the autoload to the most recent snapshot is not needed and is dropped.** That would
+have cost the snapshot switcher, cross-snapshot search, the config/topology diffs and the
+reliability heatmap — `dashboard.js` reads `d.Configuration` per device per snapshot for the config
+history — to save memory that was never scarce. The `Vlans` line is the one surprise worth
+remembering: 162 MiB in the *small* collections, dominated by ~4.8 million short member-port strings.
+
+**The real cost was invisible to heap accounting.** `Runtime.getHeapUsage` sees only the V8 heap;
+fetch bodies, `Blob`/`File` backing stores and external strings sit outside it. Sampling the
+renderer process tree's RSS instead:
+
+| | before | after |
+|---|---|---|
+| plaintext, peak RSS during autoload | **3,499 MiB** | **1,948 MiB** |
+| enveloped, peak RSS during autoload | 3,058 MiB | 3,038 MiB |
+| settled RSS once loaded (either) | ~720 MiB | ~720 MiB |
+
+`autoloadLastScan` fetched all 20 bodies into `entries[]`, wrapped each in a `File`, and
+`processSelectedFiles` read them straight back out with a `FileReader` — every snapshot held three
+times over, for a peak 4.8x the 725 MiB actually retained. It now passes **lazy `{name, fetchText}`
+sources** through the same loader, so one body is fetched, parsed and released before the next is
+requested. The `File`/`FileReader` wrapper stays for the manual Load / Load Folder paths.
+
+Also landed: the pre-flight probe that decrypted the first snapshot a second time is gone (the first
+real parse is the probe, with a `noPrompt` batch flag so startup never raises a password dialog),
+and `deriveKeyMaterial` caches on password+salt+iterations, so an archive written by one crawl
+session costs **one** 600,000-iteration PBKDF2 instead of twenty.
+
+**Not fixed, and honestly reported:** the enveloped path still peaks near 3 GB. Removing
+`concatBytes(iv, cipher)` — a full second copy of the ciphertext built only to feed the HMAC, the
+same mistake §9.1 found in `lib/TopologyCrypto.ps1` — was kept because it is strictly less
+allocation, but it **did not measurably move the peak** (3,058 -> 3,038 MiB). The peak is set by how
+far GC falls behind across each snapshot's envelope text, its base64 `ciphertext` string, `atob`'s
+binary string and the decoded buffer, not by any single copy. Bringing it down needs a streaming
+base64 decode, which is a separate piece of work and is not required by any measurement here.
 
 ### 9.3 The build hazard
 
@@ -795,7 +846,11 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    and stopped the CLI pinning the topology behind the blocking web server. Against the production
    host's **16 GB**: live set ≈ 0.9 GB, ~6%. Encrypted write 4.7–9.5 s → 2.2–2.7 s; snapshots
    190 MiB → 41 MiB. **Per-device streaming is not needed — dropped.**
-2. **Bound the browser autoload** (§9.2).
+2. ~~**Bound the browser autoload** (§9.2).~~ **Done 2026-09-13**, though not as written: measurement
+   showed 20 snapshots retain only 725 MiB, so nothing was bounded and no feature was given up. The
+   autoload now streams lazily instead of triple-buffering every body (peak RSS 3,499 -> 1,948 MiB
+   plaintext), decrypts the first snapshot once instead of twice, and derives the PBKDF2 key once per
+   archive instead of once per snapshot. The enveloped path still peaks near 3 GB - see §9.2.
 3. **Test runner with host recording** (§8.6).
 4. **Parity-test mechanism** (§8.1) — ship the mechanism first; it will start failing usefully. Fill
    in `accessRow`'s values **after** Phase 1 settles the initializer, not before.
