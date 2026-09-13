@@ -535,6 +535,30 @@ Note the existing top-level parity test asserts **exact set equality in both dir
 one test pass": every site touching `$NodeData` or the interface initializer lands with its fixture
 counterpart.
 
+#### Built — 2026-09-13
+
+Two tests at the end of `web-src/test/fixture.test.mjs`. The gap is **locked, not closed**:
+`ACCESS_ROW_GAP` enumerates the 23 fields `accessRow` does not emit, and the assertion is exact set
+equality against it, so the test fails in **both** directions — a new initializer field nobody
+accounted for widens the list, filling one in narrows it, and either way that list is what gets
+edited, deliberately. Both directions were verified by injecting each kind of drift.
+
+Closing the gap now was deliberately declined: the fixture's values have to be meaningful
+(consistent with link state, spread across the bands the sorts depend on), and 23 fields of
+plausible-looking data invented before the initializer settles would bake in assumptions Phase 1 is
+still moving.
+
+Implementation notes worth keeping:
+
+- The regex anchors the closing brace on **the opening line's own indentation via a backreference**,
+  not on column zero — as this section warned.
+- **Comment lines are stripped before key extraction.** The initializer's prose contains semicolons,
+  and the key pattern treats `;` as a separator, so comments would contribute stray field names.
+  This one is not obvious from reading the device-level test, whose initializer has no comments.
+- The field set is compared across **every** generated row, not the first. `accessRow` branches on
+  cage / PoE / live, and a field set that varies by branch is the same defect as one missing
+  outright.
+
 ### 8.2 The fixture asserts an impossible topology
 
 Worse than "no blocked uplinks": the generator creates real cycles — core ICL (`:477`), every zone's
@@ -884,8 +908,11 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    host and edition, marks non-5.1 runs SECONDARY, and because no single host runs both suites,
    keeps a per-commit ledger that reports 5.1 verification and web-src separately. Also fails on a
    stale build artifact (§9.3).
-4. **Parity-test mechanism** (§8.1) — ship the mechanism first; it will start failing usefully. Fill
-   in `accessRow`'s values **after** Phase 1 settles the initializer, not before.
+4. ~~**Parity-test mechanism** (§8.1) — ship the mechanism first; it will start failing usefully. Fill
+   in `accessRow`'s values **after** Phase 1 settles the initializer, not before.~~ **Done
+   2026-09-13.** Mechanism shipped with the 23-field gap enumerated in `ACCESS_ROW_GAP`; it fails on
+   drift in either direction. `accessRow`'s values stay unfilled, as directed — Phase 1 (item 5)
+   narrows the list one field at a time.
 5. **Phase 1 retention R1–R15** (§4.1), each landing with its fixture counterpart.
 6. **Phase 2 correctness C1–C6** (§4.2).
 7. **Generator spanning-tree pass** (§8.2) — the blocker for everything path-related.
