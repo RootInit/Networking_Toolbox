@@ -832,3 +832,60 @@ function ConvertFrom-JunosInterfacesTerse {
     }
     return $Rows
 }
+
+# C1. What kind of failure ssh reported, from its stderr.
+#
+# "Unreachable" conflated four different facts. "Connection refused" means the device IS L3-reachable
+# and sshd answered - a service or ACL problem, not a dead box. "No route to host" is a fault in THIS
+# host's routing, not the target's. A DNS failure means nothing was ever contacted. Only a timeout
+# leaves the target's reachability genuinely unknown.
+#
+# Order is load-bearing: a hard failure's stderr can carry several lines (a connect error followed by
+# a banner), and the authentication case must win over anything that mentions a closed connection.
+function Get-JunosScanFailureClass {
+    param([string]$Stderr)
+
+    if ($Stderr -match "(?i)permission denied|authentication failed|too many authentication failures") { return "AuthFailed" }
+    if ($Stderr -match "(?i)connection refused") { return "Refused" }
+    if ($Stderr -match "(?i)could not resolve hostname|no address associated|name or service not known|nodename nor servname") { return "DnsFailed" }
+    if ($Stderr -match "(?i)no route to host|network is unreachable|host is down") { return "NoRoute" }
+    if ($Stderr -match "(?i)timed out") { return "Timeout" }
+    return "Error"
+}
+
+# C5. "Last flapped" from one "show interfaces extensive" block, as a duration and a state.
+#
+# The state exists because $null seconds meant two opposite things: "Never" - the port has not flapped
+# since boot, which is the healthy case - and a duration this parser could not decode, which is a bug
+# to chase. Only the relative "(... ago)" part is read: the absolute timestamp's abbreviated timezone
+# is not reliably resolvable and the switch clock may differ from the scan host's.
+function ConvertFrom-JunosLastFlapped {
+    param([string]$Block)
+
+    if ([string]::IsNullOrWhiteSpace($Block) -or $Block -notmatch '(?im)^\s*Last flapped\s*:') {
+        return @{ Seconds = $null; State = $null }
+    }
+    if ($Block -match '(?im)^\s*Last flapped\s*:\s*Never') {
+        return @{ Seconds = $null; State = 'Never' }
+    }
+    # The y unit precedes w, and an interface up for over a year matched neither branch below - so the
+    # longest-running ports in a fleet were the ones reported as unreadable.
+    if ($Block -match '(?im)^\s*Last flapped\s*:[^\(]*\(\s*(?:(?<y>\d+)y)?\s*(?:(?<w>\d+)w)?\s*(?:(?<d>\d+)d)?\s*(?:(?<h>\d+):(?<m>\d+)(?::(?<s>\d+))?)?\s*ago\s*\)') {
+        $TotalSeconds = 0
+        if ($Matches.y) { $TotalSeconds += [int]$Matches.y * 31536000 }
+        if ($Matches.w) { $TotalSeconds += [int]$Matches.w * 604800 }
+        if ($Matches.d) { $TotalSeconds += [int]$Matches.d * 86400 }
+        if ($Matches.h) { $TotalSeconds += [int]$Matches.h * 3600 }
+        if ($Matches.m) { $TotalSeconds += [int]$Matches.m * 60 }
+        if ($Matches.s) { $TotalSeconds += [int]$Matches.s }
+        # An empty parenthesis group matches every optional unit and yields zero, which is a real value
+        # for a port that flapped this second - so require that at least one unit was actually present.
+        if ($Matches.y -or $Matches.w -or $Matches.d -or $Matches.h) {
+            return @{ Seconds = $TotalSeconds; State = 'Parsed' }
+        }
+    }
+    if ($Block -match '(?im)^\s*Last flapped\s*:[^\(]*\(\s*(?<secs>\d+)\s*secs?\s*ago\s*\)') {
+        return @{ Seconds = [int]$Matches.secs; State = 'Parsed' }
+    }
+    return @{ Seconds = $null; State = 'Unparsed' }
+}

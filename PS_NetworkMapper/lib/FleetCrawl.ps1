@@ -46,6 +46,44 @@ function Stop-JunosOrphanProcessesLocal {
     }
 }
 
+# C2. The fleet-wide MAC -> IP map the client backfill reads.
+#
+# Two defects this replaces. The map was built last-write-wins over the topology list, which is in job
+# COMPLETION order, so a MAC held by two devices' ARP tables resolved to a different address on every
+# run of the same network. And a permanent entry on a bme interface is the switch's own internal VC
+# control-plane address, not an endpoint's - three of the four ARP entries in a real capture are
+# exactly those, so they were most of what the map contained.
+#
+# At file scope rather than inside Invoke-FleetCrawl so the order-independence can actually be tested:
+# the bug was invisible to any test that fed the devices in one order.
+function Get-FleetArpMap {
+    param($Topology)
+
+    $Candidates = @{}
+    foreach ($Device in $Topology) {
+        foreach ($Arp in $Device.ArpEntries) {
+            if (-not $Arp.MAC -or -not $Arp.IP) { continue }
+            if ($Arp.Interface -match '^bme' -and $Arp.Flags -eq 'permanent') { continue }
+            if (-not $Candidates.ContainsKey($Arp.MAC)) {
+                $Candidates[$Arp.MAC] = New-Object System.Collections.Generic.HashSet[string]
+            }
+            [void]$Candidates[$Arp.MAC].Add($Arp.IP)
+        }
+    }
+
+    $MacToIp = @{}
+    $Ambiguous = @()
+    # A MAC that genuinely holds two addresses is ambiguous, not a coin toss: the lowest wins so the
+    # answer is stable between runs, and the count is reported rather than hidden.
+    foreach ($Mac in ($Candidates.Keys | Sort-Object)) {
+        # Sorted as addresses, not as text: "10.9.0.1" sorts after "10.10.0.1" as a string.
+        $Addresses = @($Candidates[$Mac] | Sort-Object { [version]$_ })
+        if ($Addresses.Count -gt 1) { $Ambiguous += "$Mac -> $($Addresses -join ', ')" }
+        $MacToIp[$Mac] = $Addresses[0]
+    }
+    return @{ MacToIp = $MacToIp; Ambiguous = $Ambiguous }
+}
+
 function Invoke-FleetCrawl {
     param(
         [Parameter(Mandatory=$true)][string]$StartIP,
@@ -118,7 +156,9 @@ function Invoke-FleetCrawl {
         param([string]$IP, [string]$Status, [string]$ScanErrorText)
         return @{
             DeviceIP = $IP; Hostname = "Unknown"; JunosVersion = "Unknown"; Gateway = "Unknown";
-            StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+            # C3. @() not @{}: an empty hashtable serializes as {}, which window.asArray turns into a
+            # one-element array holding an empty object, and four consumers call it on this field.
+            StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @();
             Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
             MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
             MedNeighbors = @(); Configuration = "Unknown"; Vlans = @();
@@ -134,16 +174,15 @@ function Invoke-FleetCrawl {
     # A client's ARP entry often lives on the L3 gateway, so backfill from a fleet-wide MAC->IP map.
     function Update-ClientIpCorrelationLocal {
         param([System.Collections.Generic.List[object]]$Topology)
-        $GlobalArpMap = @{}
-        foreach ($Device in $Topology) {
-            foreach ($Arp in $Device.ArpEntries) {
-                if ($Arp.MAC -and $Arp.IP) { $GlobalArpMap[$Arp.MAC] = $Arp.IP }
-            }
+        $Map = Get-FleetArpMap -Topology $Topology
+        if ($Map.Ambiguous.Count -gt 0) {
+            Write-Host "[!] $($Map.Ambiguous.Count) MAC(s) hold more than one address in the fleet ARP tables; the lowest is used. e.g. $($Map.Ambiguous[0])" -ForegroundColor Yellow
+            Write-DebugLogLocal "AMBIGUOUS ARP: $($Map.Ambiguous -join '; ')"
         }
         foreach ($Device in $Topology) {
             foreach ($Client in $Device.Clients) {
-                if ($Client.IP -eq "Unknown" -and $GlobalArpMap.ContainsKey($Client.MAC)) {
-                    $Client.IP = $GlobalArpMap[$Client.MAC]
+                if ($Client.IP -eq "Unknown" -and $Map.MacToIp.ContainsKey($Client.MAC)) {
+                    $Client.IP = $Map.MacToIp[$Client.MAC]
                 }
             }
         }
@@ -173,7 +212,9 @@ function Invoke-FleetCrawl {
     # Retry pass for a device lost to a transient fault: the failed IP goes to the BACK of the same
     # queue, reusing dispatch, discovery, periodic writes and the circuit breaker. AuthFailed is
     # deliberately absent - retrying a bad credential locks the account out; Aborted, we're stopping.
-    $RetryableStatuses = @("Timeout", "Partial", "Error", "Unreachable")
+    # C1 split Unreachable into four; all four retry, because C1 is a classification change and
+    # Unreachable retried. Unreachable stays listed for a node carried over from an earlier attempt.
+    $RetryableStatuses = @("Timeout", "Partial", "Error", "Unreachable", "Refused", "NoRoute", "DnsFailed")
     $MaxAttempts = 2
     $Attempts = @{}
     # A Partial carries real data, so if the retry produces nothing the stashed node is still better.

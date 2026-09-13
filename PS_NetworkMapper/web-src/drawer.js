@@ -477,7 +477,7 @@ window.renderSummary = function() {
     // Surfaced prominently so the mostly-empty fields below can't pass as a fully-scanned device.
     var scanStatusHtml = (d.ScanStatus && d.ScanStatus !== "Ok")
         ? `<div style="grid-column:1/-1; background:var(--danger-bg); color:var(--danger-text); border:1px solid var(--danger-border); padding:8px 12px; border-radius:4px; font-size:0.85rem; margin-bottom:4px;">
-             <b>Scan ${esc(d.ScanStatus)}</b>${d.ScanError ? ` &mdash; ${esc(d.ScanError)}` : ''} - the data below may be incomplete or stale.
+             <b>Scan ${esc(d.ScanStatus)}</b>${window.scanStatusMeaning(d.ScanStatus) ? ` &mdash; ${esc(window.scanStatusMeaning(d.ScanStatus))}` : ''}${d.ScanError ? `<br><span style="font-family:monospace; font-size:0.78rem;">${esc(d.ScanError)}</span>` : ''}<br>The data below may be incomplete or stale.
            </div>`
         : '';
 
@@ -793,7 +793,7 @@ function renderClientSubRow(c, daisyChains, accessPointPorts) {
         <span class="csr-identity">${esc(c.IP)}</span>
         <span class="csr-mac">${esc(String(c.MAC).toUpperCase())}</span>
         ${vendorStr}
-        <span class="badge" style="background:var(--primary);">VLAN ${esc(c.VLAN_Tag)}</span>
+        <span class="badge" style="background:var(--primary);">VLAN ${esc(window.formatVlanTag(c.VLAN_Tag))}</span>
         ${typeStr}
         <span><b>${dotUserStr}</b>${dotStateStr}</span>
         ${descStr}
@@ -1132,7 +1132,7 @@ ${table(['Local Port', 'Neighbor', 'Remote Port', 'Description'], neighbors.map(
 ${table(['Port', 'Admin', 'Link', 'STP', 'PoE', 'Description', 'Inactive For'], interfaces.map(i => row([esc(i.Port), esc(i.Admin), esc(i.Link), esc(i.STP), esc(i.PoE), esc(i.Desc), esc(window.inactiveForText(i))])), 'No interface data')}
 
 <h2>Clients</h2>
-${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(c => row([esc(c.IP), esc(c.MAC), esc(c.Port), esc(c.VLAN_Tag), esc(c.Dot1x_User), esc(c.Dot1x_State)])), 'No clients')}
+${table(['IP', 'MAC', 'Port', 'VLAN', 'Dot1x User', 'Dot1x State'], clients.map(c => row([esc(c.IP), esc(c.MAC), esc(c.Port), esc(window.formatVlanTag(c.VLAN_Tag)), esc(c.Dot1x_User), esc(c.Dot1x_State)])), 'No clients')}
 
 </body></html>`;
 
@@ -1175,7 +1175,7 @@ window.exportClientsCsv = function() {
     var rows = [['IP', 'MAC', 'Vendor', 'Category', 'Port', 'VLAN_Tag', 'Type', 'PortDesc', 'Dot1x_User', 'Dot1x_State']];
     clients.forEach(c => {
         var vendorInfo = window.lookupVendor(c.MAC);
-        rows.push([c.IP, c.MAC, vendorInfo.vendor || '', vendorInfo.category, c.Port, c.VLAN_Tag, c.Type, c.PortDesc, c.Dot1x_User, c.Dot1x_State]);
+        rows.push([c.IP, c.MAC, vendorInfo.vendor || '', vendorInfo.category, c.Port, window.formatVlanTag(c.VLAN_Tag), c.Type, c.PortDesc, c.Dot1x_User, c.Dot1x_State]);
     });
 
     downloadCsv(`${currentSelectedNodeData.DeviceIP}_clients.csv`, rows);

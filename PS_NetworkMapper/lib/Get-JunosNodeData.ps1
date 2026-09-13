@@ -280,13 +280,7 @@ try {
         # This early return skips the hashtable-to-array conversion, so force @() or JSON emits "{}".
         $NodeData.Interfaces = @()
         # Matched against $Result.Error, not $ErrSummary - the latter now has $DiagTag prefixed.
-        $NodeData.ScanStatus = if ($Result.Error -match "(?i)permission denied|authentication failed|too many authentication failures") {
-            "AuthFailed"
-        } elseif ($Result.Error -match "(?i)connection refused|no route to host|network is unreachable|operation timed out|connection timed out|could not resolve hostname|host is down|no address associated") {
-            "Unreachable"
-        } else {
-            "Error"
-        }
+        $NodeData.ScanStatus = Get-JunosScanFailureClass -Stderr $Result.Error
         $NodeData.ScanError = $ErrSummary
         return @{ Node = $NodeData; Logs = $Logs }
     }
@@ -421,6 +415,10 @@ try {
                 $NodeData.Interfaces[$p] = @{
                     Port = $p; Admin = $Matches.admin; Link = $Matches.link; Desc = "Unknown"
                     STP = "Unknown"; PoE = "Unknown"; LastFlappedSeconds = $null
+                    # C5. Why LastFlappedSeconds is $null: "Never" (the port has not flapped since
+                    # boot, which is the healthy state) reads identically to a duration this parser
+                    # could not decode, and the two call for opposite actions.
+                    LastFlappedState = $null
                     # Filled from "show interfaces extensive"; $null where that section was absent or
                     # the platform does not report the field, which is distinct from a zero counter.
                     Mtu = $null; SpeedConfigured = $null; SpeedNegotiated = $null
@@ -480,8 +478,6 @@ try {
         }
     }
 
-    # Only the relative "(... ago)" part is parsed: the absolute timestamp's abbreviated timezone isn't
-    # reliably resolvable and the switch clock may differ. An unrecognized format leaves it unset.
     $ExtBlocks = $DataDict["INTERFACES_EXT"] -split "(?=Physical interface:)"
     foreach ($Block in $ExtBlocks) {
         if ($Block -notmatch "^Physical interface:\s*(?<port>(?:ge|xe|et|ae|mge)[^\s,]+)") { continue }
@@ -490,26 +486,13 @@ try {
             Write-LogMsg "INTERFACES_EXT: port '$p' not found in terse output, skipping flap data"
             continue
         }
-        if ($Block -match "(?im)^\s*Last flapped\s*:\s*Never") {
-            $NodeData.Interfaces[$p].LastFlappedSeconds = $null
-            continue
-        }
-        # Anchored to a line-start "Last flapped" label - Junos emits Description before it.
-        if ($Block -match "(?im)^\s*Last flapped\s*:[^\(]*\(\s*(?:(?<w>\d+)w)?\s*(?:(?<d>\d+)d)?\s*(?:(?<h>\d+):(?<m>\d+)(?::(?<s>\d+))?)?\s*ago\s*\)") {
-            $TotalSeconds = 0
-            if ($Matches.w) { $TotalSeconds += [int]$Matches.w * 604800 }
-            if ($Matches.d) { $TotalSeconds += [int]$Matches.d * 86400 }
-            if ($Matches.h) { $TotalSeconds += [int]$Matches.h * 3600 }
-            if ($Matches.m) { $TotalSeconds += [int]$Matches.m * 60 }
-            if ($Matches.s) { $TotalSeconds += [int]$Matches.s }
-            $NodeData.Interfaces[$p].LastFlappedSeconds = $TotalSeconds
-        } elseif ($Block -match "(?im)^\s*Last flapped\s*:[^\(]*\(\s*(?<secs>\d+)\s*secs?\s*ago\s*\)") {
-            $NodeData.Interfaces[$p].LastFlappedSeconds = [int]$Matches.secs
-        }
+        $Flap = ConvertFrom-JunosLastFlapped -Block $Block
+        $NodeData.Interfaces[$p].LastFlappedSeconds = $Flap.Seconds
+        $NodeData.Interfaces[$p].LastFlappedState = $Flap.State
     }
 
-    # Everything else the extensive output carries. Split from the flap loop above because that one
-    # has to `continue` past "Last flapped: Never", which would skip these fields.
+    # Everything else the extensive output carries. A second pass rather than a branch in the loop
+    # above: this one is keyed by the parser's own port dictionary, not by walking the blocks.
     $ExtDetail = ConvertFrom-JunosInterfaceExtensive -Text $DataDict["INTERFACES_EXT"]
     foreach ($ExtPort in $ExtDetail.Keys) {
         if (-not $NodeData.Interfaces.ContainsKey($ExtPort)) { continue }
@@ -665,7 +648,7 @@ try {
     }
 
     # "show vlans" is "VLAN name  Tag  Interfaces", but gains a leading "Routing instance" column under
-    # e.g. default-switch - detect the layout from the header, or VLAN_Tag is "Unknown" for every
+    # e.g. default-switch - detect the layout from the header, or VLAN_Tag is $null for every
     # client. $VlanDict is keyed "<instance>|<name>" there; $VlanNameTagIndex is a name-only fallback
     # for the MAC-table join, nulled the moment two instances disagree.
     $VlanDict = @{}
@@ -689,6 +672,9 @@ try {
                 $TagForRow = $Matches.tag
             }
             if ($null -ne $InstForRow) {
+                # C4. Int, not the regex's string: Vlans[].Tag is already an int and Clients[].VLAN_Tag
+                # read from this dictionary, so the two shapes disagreed for the same VLAN.
+                $TagForRow = [int]$TagForRow
                 $VlanDict["$InstForRow|$NameForRow"] = $TagForRow
                 if ($VlanNameTagIndex.ContainsKey($NameForRow)) {
                     if ($null -ne $VlanNameTagIndex[$NameForRow] -and $VlanNameTagIndex[$NameForRow] -ne $TagForRow) {
@@ -699,7 +685,7 @@ try {
                 }
             }
         } else {
-            if ($Line -match "^(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = $Matches.tag }
+            if ($Line -match "^(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = [int]$Matches.tag }
         }
     }
 
@@ -733,7 +719,9 @@ try {
         # Two-letter flags (SE, NM) must be tried first, or the line fails and the client is dropped.
         if ($Line -match "(?<vlan>\S+)\s+(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<flag>SE|NM|[SDLPCNO])\s+.+?(?<interface>(?:ge|xe|et|ae|mge|vcp|bme|reth|me|vme)[a-zA-Z0-9\-\/\.]+)") {
             $VlanName = $Matches.vlan
-            $VlanTag = "Unknown"
+            # C4. $null, not "Unknown": Vlans[].Tag uses $null for a VLAN with no 802.1Q tag, and a
+            # consumer joining the two had to know which of the pair it was holding.
+            $VlanTag = $null
             if ($CurrentMacInstance -and $VlanDict.ContainsKey("$CurrentMacInstance|$VlanName")) {
                 $VlanTag = $VlanDict["$CurrentMacInstance|$VlanName"]
             } elseif ($VlanNameTagIndex.ContainsKey($VlanName) -and $null -ne $VlanNameTagIndex[$VlanName]) {

@@ -245,12 +245,40 @@ identity is the physical port, so unit-level data lives in `LogicalUnits[]`.
 
 | # | Change | Site | Why |
 |---|---|---|---|
-| C1 | Split `Unreachable` into `Refused` / `NoRoute` / `Timeout` / `DnsFailed` | `:259-260` | `connection refused` means **the device is L3-reachable and sshd refused** — reported identically to a dead box. `no route to host` is a fault in *the scan host's* routing. Classification only; `ScanError` already holds the stderr |
-| C2 | Fleet ARP map: deterministic, and filter `Flags -eq 'permanent'` on `bme*` | `lib/FleetCrawl.ps1:125-140` | Last-write-wins in job-completion order, so a MAC in two ARP tables resolves differently between runs. **Three of the four ARP entries in the capture are exactly these internal entries** |
-| C3 | `Interfaces = @()` on placeholders | `lib/FleetCrawl.ps1:115` | `@{}` serializes as `{}`; `window.asArray` (`utils.js:13-17`) returns `[{}]`, and four consumers call it on `device.Interfaces` (`chassis.js:548,650`, `drawer.js:587,670`). Note `fixture.test.mjs:160-163` asserts `length === 0`, so **the fixture passes a shape assertion production would fail** |
-| C4 | Reconcile VLAN tag types | `:622-630` vs `lib/JunosParsers.ps1:95` | `Clients[].VLAN_Tag` is a string or `"Unknown"`; `Vlans[].Tag` is an int or `$null` |
-| C5 | Distinguish `LastFlappedSeconds` "Never" from unparseable | `:427-442` | Both yield `$null`. Also add a `y` unit — an interface up over a year silently fails both branches |
-| C6 | Frame `AuthFailed` as positive reachability evidence in the UI | — | TCP/22 completed and sshd responded |
+| C1 **[done]** | Split `Unreachable` into `Refused` / `NoRoute` / `Timeout` / `DnsFailed` | `:259-260` | `connection refused` means **the device is L3-reachable and sshd refused** — reported identically to a dead box. `no route to host` is a fault in *the scan host's* routing. Classification only; `ScanError` already holds the stderr |
+| C2 **[done]** | Fleet ARP map: deterministic, and filter `Flags -eq 'permanent'` on `bme*` | `lib/FleetCrawl.ps1:125-140` | Last-write-wins in job-completion order, so a MAC in two ARP tables resolves differently between runs. **Three of the four ARP entries in the capture are exactly these internal entries** |
+| C3 **[done]** | `Interfaces = @()` on placeholders | `lib/FleetCrawl.ps1:115` | `@{}` serializes as `{}`; `window.asArray` (`utils.js:13-17`) returns `[{}]`, and four consumers call it on `device.Interfaces` (`chassis.js:548,650`, `drawer.js:587,670`). Note `fixture.test.mjs:160-163` asserts `length === 0`, so **the fixture passes a shape assertion production would fail** |
+| C4 **[done]** | Reconcile VLAN tag types | `:622-630` vs `lib/JunosParsers.ps1:95` | `Clients[].VLAN_Tag` is a string or `"Unknown"`; `Vlans[].Tag` is an int or `$null` |
+| C5 **[done]** | Distinguish `LastFlappedSeconds` "Never" from unparseable | `:427-442` | Both yield `$null`. Also add a `y` unit — an interface up over a year silently fails both branches |
+| C6 **[done]** | Frame `AuthFailed` as positive reachability evidence in the UI | — | TCP/22 completed and sshd responded |
+
+> **Progress (2026-09-13): all of Phase 2 has landed.**
+>
+> **Migration notes.** §9.5 requires these, because C1 and C4 change *values* rather than adding
+> fields. Both are read-tolerant in the UI, not rewritten in old files:
+>
+> - **C1.** A snapshot written before this change carries `ScanStatus = "Unreachable"`. Every UI path
+>   already keys on `!== "Ok"`, so nothing breaks; `window.scanStatusMeaning` carries an entry for
+>   `Unreachable` that says what it was split into. The classifier now lives in
+>   `Get-JunosScanFailureClass` so its stderr shapes are testable without a live ssh.
+> - **C4.** A snapshot written before this change carries `Clients[].VLAN_Tag` as a **string**, with
+>   `"Unknown"` for no tag. The read pattern is `String()` on both sides, which every filter and the
+>   VLAN dropdown already used; `window.formatVlanTag` handles all three shapes (int, `null`, and a
+>   pre-C4 `"Unknown"`). `Vlans[].Tag` was already canonical and did not move.
+> - **C5** is additive: `LastFlappedState` is new, `LastFlappedSeconds` keeps its meaning. An old
+>   snapshot has no state field, which reads as `undefined` - the same "no extensive block" case as
+>   `$null`.
+> - **C2, C3, C6** need no migration. C2 changes only which address a backfill picks, C3 changes a
+>   placeholder's `{}` to `[]`, and C6 is UI wording.
+>
+> Two things landed differently from the table above. `Get-FleetArpMap` was lifted to file scope in
+> `FleetCrawl.ps1` so the order-independence C2 is *about* can be tested - a test that feeds the
+> devices in one order cannot fail on the bug. And `ConvertFrom-JunosLastFlapped` was extracted for the
+> same reason, which also removed the `continue` that had forced the extensive parse into two loops.
+>
+> C3 and C5 each had a test asserting the defect: `"placeholder node initializes Interfaces as a
+> hashtable"` pinned C3 in place, and the fixture stamped a flap duration onto uplink ports *after*
+> `accessRow` had recorded why there was none. Both were inverted rather than deleted.
 
 ### 4.3 Phase 3 — new commands
 
@@ -934,7 +962,8 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    collapsed `"Static/Other"`. The crawl enqueue loop gained a skip for both an `"Unknown"` management
    address and `Reachable = $false`, since it walks `Neighbors[]` to decide what to scan next and R5
    puts entries there that are not addresses.
-6. **Phase 2 correctness C1–C6** (§4.2).
+6. ~~**Phase 2 correctness C1–C6** (§4.2).~~ **Done 2026-09-13.** Migration notes for C1 and C4 are
+   with the table in §4.2.
 7. **Generator spanning-tree pass** (§8.2) — the blocker for everything path-related.
 8. **Fault injection + per-snapshot manifests** (§8.3), micro-topologies (§8.4).
 9. **Topology graph + endpoint resolution** (§5, §6.1).

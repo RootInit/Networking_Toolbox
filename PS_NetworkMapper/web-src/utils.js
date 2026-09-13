@@ -313,3 +313,27 @@ function nextPaint() {
 window.hideProgress = function() {
     document.getElementById('loadingBar').style.display = 'none';
 };
+
+// C4. Clients[].VLAN_Tag is an int or null, matching Vlans[].Tag. Null means the switch reported no
+// 802.1Q tag for that VLAN; a snapshot written before C4 carries the string "Unknown" instead.
+window.formatVlanTag = function(tag) {
+    if (tag === null || tag === undefined || tag === 'Unknown') return 'Unknown';
+    return String(tag);
+};
+
+// C6. AuthFailed is the one failure that is positive evidence ABOUT the device: TCP/22 completed and
+// sshd answered to reject the credentials, so the host is up and reachable. Every other status leaves
+// that unknown, and the four C1 classes each say something different about where the fault is.
+var SCAN_STATUS_MEANING = {
+    AuthFailed: 'the device is up and reachable - sshd answered and rejected the credentials',
+    Refused:    'the device is reachable at the IP layer - something refused the connection on port 22',
+    NoRoute:    "no route from the scan host to this address - a fault in the SCAN HOST's routing",
+    DnsFailed:  'the name could not be resolved, so nothing was contacted',
+    Timeout:    'no answer before the deadline - the device may be down, filtered, or just slow',
+    Unreachable: 'recorded before this build split the reason into Refused / NoRoute / Timeout / DnsFailed',
+    Partial:    'the session was cut short, so the data below is whatever arrived first',
+    Aborted:    'the crawl stopped before this device was read',
+};
+window.scanStatusMeaning = function(status) {
+    return SCAN_STATUS_MEANING[status] || null;
+};

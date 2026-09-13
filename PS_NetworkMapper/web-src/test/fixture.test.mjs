@@ -584,6 +584,83 @@ test('fixture interfaces match Get-JunosNodeData.ps1, except for a known and enu
         `removing what generate-fixture.mjs now emits.\n  now missing: ${missing.join(', ')}`);
 });
 
+// C3. @{} serialized as {} and window.asArray turned that into a one-element array holding an empty
+// object; four consumers call it on device.Interfaces. The fixture already asserted [] here, so it was
+// passing a shape production would have failed.
+test('C3: a placeholder node Interfaces is an empty array, the shape a real scan also returns', () => {
+    const failed = topology.filter(d => d.ScanStatus !== 'Ok');
+    assert.ok(failed.length > 0, 'the fixture needs some failed scans');
+    for (const d of failed) {
+        assert.ok(Array.isArray(d.Interfaces), `${d.DeviceIP} Interfaces is ${typeof d.Interfaces}, not an array`);
+        assert.equal(d.Interfaces.length, 0);
+    }
+});
+
+// C1. The four classes each say something different about where the fault is; the fixture's own error
+// text has to be a shape that classifies as the status it claims.
+test('C1: failure statuses are the post-split set, and each carries text consistent with it', () => {
+    const EXPECT = {
+        Refused: /connection refused/i,
+        NoRoute: /no route to host|network is unreachable|host is down/i,
+        Timeout: /timed out/i,
+        DnsFailed: /could not resolve|no address associated|name or service not known/i,
+        AuthFailed: /permission denied|too many authentication failures/i,
+    };
+    const failed = topology.filter(d => d.ScanStatus !== 'Ok');
+    const seen = new Set(failed.map(d => d.ScanStatus));
+    assert.equal(seen.has('Unreachable'), false, 'Unreachable was split into four and must not be emitted');
+    for (const d of failed) {
+        assert.ok(d.ScanError, `${d.ScanStatus} needs an error string`);
+        if (EXPECT[d.ScanStatus]) {
+            assert.match(d.ScanError, EXPECT[d.ScanStatus],
+                `${d.DeviceIP} claims ${d.ScanStatus} but its stderr would classify as something else`);
+        }
+    }
+    assert.ok(seen.size >= 2, `only ${seen.size} distinct failure statuses - a rule keyed on one would pass trivially`);
+    // A 120-device fixture will not draw every status, so the generator's own set is checked directly.
+    const genSrc = fs.readFileSync(GENERATOR, 'utf8');
+    const declared = genSrc.match(/const FAILURE_STATUSES = \[([^\]]*)\]/)[1];
+    for (const cls of ['Refused', 'NoRoute', 'Timeout', 'DnsFailed']) {
+        assert.match(declared, new RegExp(`'${cls}'`), `the generator cannot emit ${cls}`);
+    }
+    assert.equal(/'Unreachable'/.test(declared), false, 'the generator still lists the pre-split status');
+});
+
+// C4. Clients[].VLAN_Tag and Vlans[].Tag were a string-or-"Unknown" and an int-or-null for the same
+// VLAN, so a consumer joining them had to know which of the pair it held.
+test('C4: every client VLAN tag is a number or null, never a string and never "Unknown"', () => {
+    const clients = topology.flatMap(d => [...(d.Clients || []), ...(d.TrueClients || [])]);
+    assert.ok(clients.length > 500, `only ${clients.length} clients`);
+    for (const c of clients) {
+        assert.ok(c.VLAN_Tag === null || typeof c.VLAN_Tag === 'number',
+            `VLAN_Tag is ${JSON.stringify(c.VLAN_Tag)} (${typeof c.VLAN_Tag})`);
+    }
+    assert.ok(new Set(clients.map(c => c.VLAN_Tag)).size >= 4, 'the VLAN filter needs several VLANs');
+    // The filter and the dropdown both compare String(tag), so the round-trip has to be lossless.
+    for (const c of clients.slice(0, 200)) {
+        if (c.VLAN_Tag !== null) assert.equal(Number(String(c.VLAN_Tag)), c.VLAN_Tag);
+    }
+});
+
+// C5. null seconds meant both "Never" - the healthy state, the port has not flapped since boot - and
+// "this parser could not read the duration", which call for opposite actions.
+test('C5: every interface row states WHY LastFlappedSeconds is null', () => {
+    const rows = topology.filter(d => d.ScanStatus === 'Ok').flatMap(d => d.Interfaces);
+    assert.ok(rows.length > 5000, `only ${rows.length} interface rows`);
+    const states = new Set();
+    for (const r of rows) {
+        assert.ok('LastFlappedState' in r, 'an interface row is missing LastFlappedState');
+        states.add(r.LastFlappedState);
+        if (r.LastFlappedSeconds !== null) {
+            assert.equal(r.LastFlappedState, 'Parsed', 'a row with a duration must say it parsed one');
+        } else {
+            assert.notEqual(r.LastFlappedState, 'Parsed', 'a row with no duration must not claim it parsed one');
+        }
+    }
+    assert.ok(states.has('Never') && states.has('Parsed'),
+        `states present: ${[...states].join(', ')} - both the healthy and the measured case must occur`);
+});
+
 // R1. Interfaces[] is keyed by physical port, so a unit whose parent is irb/vme/me0 has nowhere to live
 // on a row - the node-level array is the one a gateway-candidate rule can read. The per-row array must
 // be a filtered view of it, not a second parse that can drift.

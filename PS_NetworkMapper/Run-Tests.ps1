@@ -1004,8 +1004,11 @@ if (-not $RealInitMatch.Success -or -not $PlaceholderMatch.Success) {
     Test-Case "placeholder node carries every key Get-JunosNodeData's real node initializer does" {
         ($RealKeys -join ',') -eq ($PlaceholderKeys -join ',')
     }
-    Test-Case "placeholder node initializes Interfaces as a hashtable, not an array (no 'Interfaces = @()' in FleetCrawl.ps1)" {
-        $FleetCrawlSrc -notmatch 'Interfaces\s*=\s*@\(\)'
+    # C3. This asserted the opposite until C1-C6: @{} serializes as {}, window.asArray turns that into
+    # a one-element array holding an empty object, and four consumers call it on device.Interfaces.
+    Test-Case "placeholder node initializes Interfaces as an array, like the node a real scan returns" {
+        $PlaceholderMatch.Groups[1].Value -match 'Interfaces\s*=\s*@\(\)' -and
+            $PlaceholderMatch.Groups[1].Value -notmatch 'Interfaces\s*=\s*@\{\}'
     }
 }
 
@@ -1018,7 +1021,7 @@ try {
 param([string]$TargetIP, [string]$Username, [string]$Password, [switch]$Log, [string]$DebugLogPath)
 $Base = @{
     DeviceIP = $TargetIP; Hostname = "sw-$TargetIP"; JunosVersion = "x"; Gateway = "x";
-    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @();
     Uptime = "x"; LastConfigured = "x"; LastConfiguredBy = "x"; Alarms = @();
     MasterCpuUtilization = "x"; MasterMemoryUtilization = "x"; MedNeighbors = @();
     Configuration = "x"; ScanStatus = "Ok"; ScanError = $null
@@ -1046,9 +1049,17 @@ return @{ Node = $Base; Logs = @() }
     Test-Case "jobs killed in flight by the circuit breaker get a ScanStatus='Aborted' node" {
         @($CrawlResult.Topology | Where-Object { $_.ScanStatus -eq 'Aborted' }).Count -eq 2
     }
-    Test-Case "an Aborted placeholder's Interfaces is a hashtable (serializes as {}, not [])" {
+    Test-Case "an Aborted placeholder's Interfaces is an array, not a hashtable" {
         $AbortedNode = @($CrawlResult.Topology | Where-Object { $_.ScanStatus -eq 'Aborted' })[0]
-        $AbortedNode.Interfaces -is [hashtable]
+        $AbortedNode.Interfaces -isnot [hashtable] -and @($AbortedNode.Interfaces).Count -eq 0
+    }
+    # The shape that actually reaches the browser is the serialized one, and an empty array is the
+    # case PowerShell's JSON writer is least reliable about.
+    Test-Case "an Aborted placeholder's Interfaces survives a JSON round-trip as an empty array" {
+        $AbortedNode = @($CrawlResult.Topology | Where-Object { $_.ScanStatus -eq 'Aborted' })[0]
+        $Json = @{ Topology = @($AbortedNode) } | ConvertTo-Json -Depth 100 -Compress
+        $Json -match '"Interfaces":\[\]' -and
+            $null -ne ($Json | ConvertFrom-Json).Topology[0].PSObject.Properties['Interfaces']
     }
     Test-Case "the aborted devices reach the on-disk snapshot, not just the in-memory result" {
         $SnapFile = Get-ChildItem -LiteralPath $CrawlDir -Filter 'NetworkMap_*.json' | Select-Object -First 1
@@ -1080,7 +1091,7 @@ New-Item -ItemType File -Path (Join-Path $AttemptDir "$TargetIP`_$Attempt") -For
 
 $Base = @{
     DeviceIP = $TargetIP; Hostname = "sw-$TargetIP"; JunosVersion = "x"; Gateway = "x";
-    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @();
     Uptime = "x"; LastConfigured = "x"; LastConfiguredBy = "x"; Alarms = @();
     MasterCpuUtilization = "x"; MasterMemoryUtilization = "x"; MedNeighbors = @();
     Configuration = "x"; ScanStatus = "Ok"; ScanError = $null
@@ -1090,7 +1101,8 @@ switch -Regex ($TargetIP) {
     # Transient: fails once, then succeeds - the case the retry exists for.
     '10\.1\.0\.2$' { if ($Attempt -eq 1) { $Base.ScanStatus = "Error"; $Base.ScanError = "empty payload" } }
     # Permanently down: burns both attempts and settles as a failure node.
-    '10\.1\.0\.3$' { $Base.ScanStatus = "Unreachable"; $Base.ScanError = "connection timed out" }
+    # C1: a connect timeout is "Timeout" now, not the four-way-conflated "Unreachable".
+    '10\.1\.0\.3$' { $Base.ScanStatus = "Timeout"; $Base.ScanError = "connection timed out" }
     # Must be tried exactly once, no matter what.
     '10\.1\.0\.4$' { $Base.ScanStatus = "AuthFailed"; $Base.ScanError = "bad creds" }
 }
@@ -1125,7 +1137,7 @@ return @{ Node = $Base; Logs = @() }
     }
     Test-Case "a device that fails every attempt still lands exactly one node in the topology" {
         $Nodes = @(Get-RetryNodes '10.1.0.3')
-        $Nodes.Count -eq 1 -and $Nodes[0].ScanStatus -eq 'Unreachable'
+        $Nodes.Count -eq 1 -and $Nodes[0].ScanStatus -eq 'Timeout'
     }
     Test-Case "retrying does not duplicate or drop devices - one node per visited IP" {
         $RetryResult.Topology.Count -eq $RetryResult.VisitedCount
@@ -1147,7 +1159,7 @@ try {
 param([string]$TargetIP, [string]$Username, [string]$Password, [switch]$Log, [string]$DebugLogPath)
 $Base = @{
     DeviceIP = $TargetIP; Hostname = "sw-$TargetIP"; JunosVersion = "x"; Gateway = "x";
-    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
+    StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @();
     Uptime = "x"; LastConfigured = "x"; LastConfiguredBy = "x"; Alarms = @();
     MasterCpuUtilization = "x"; MasterMemoryUtilization = "x"; MedNeighbors = @();
     Configuration = "x"; ScanStatus = "Ok"; ScanError = $null
@@ -2111,6 +2123,163 @@ Test-Case "R1: text with no header yields nothing rather than guessing at column
 Test-Case "R1: the worker keeps a node-level array and mirrors each unit onto its parent's row" {
     $JunosNodeDataSrc -match '\$NodeData\.LogicalUnits = @\(ConvertFrom-JunosInterfacesTerse' -and
         $JunosNodeDataSrc -match '\$NodeData\.Interfaces\[\$LogicalUnit\.Parent\]\.LogicalUnits \+= \$LogicalUnit'
+}
+
+Write-Host "`n--- 18. Phase 2 correctness (C1, C2, C4, C5) ---" -ForegroundColor Cyan
+
+# C1. "Unreachable" conflated four different facts about where the fault is. Each string below is a
+# real ssh stderr shape; the addresses are RFC 5737.
+$FailureCases = @(
+    @{ Class = "Refused";    Stderr = "ssh: connect to host 198.51.100.7 port 22: Connection refused" }
+    @{ Class = "NoRoute";    Stderr = "ssh: connect to host 198.51.100.7 port 22: No route to host" }
+    @{ Class = "NoRoute";    Stderr = "ssh: connect to host 198.51.100.7 port 22: Network is unreachable" }
+    @{ Class = "NoRoute";    Stderr = "ssh: connect to host 198.51.100.7 port 22: Host is down" }
+    @{ Class = "Timeout";    Stderr = "ssh: connect to host 198.51.100.7 port 22: Connection timed out" }
+    @{ Class = "Timeout";    Stderr = "ssh: connect to host 198.51.100.7 port 22: Operation timed out" }
+    @{ Class = "DnsFailed";  Stderr = "ssh: Could not resolve hostname sw-nowhere: Name or service not known" }
+    @{ Class = "DnsFailed";  Stderr = "ssh: Could not resolve hostname sw-nowhere: no address associated with name" }
+    @{ Class = "AuthFailed"; Stderr = "svc-mapper@198.51.100.7: Permission denied (publickey,password)." }
+    @{ Class = "AuthFailed"; Stderr = "Received disconnect from 198.51.100.7 port 22:2: Too many authentication failures" }
+    @{ Class = "Error";      Stderr = "Host key verification failed." }
+    @{ Class = "Error";      Stderr = "" }
+)
+foreach ($Case in $FailureCases) {
+    $Label = if ($Case.Stderr) { $Case.Stderr.Substring(0, [Math]::Min(58, $Case.Stderr.Length)) } else { "(empty stderr)" }
+    Test-Case "C1: '$Label' classifies as $($Case.Class)" {
+        (Get-JunosScanFailureClass -Stderr $Case.Stderr) -eq $Case.Class
+    }
+}
+# A hard failure's stderr often carries more than one line, and the order of the checks is what decides
+# which fact wins. A rejected credential is the most specific thing ssh can tell us.
+Test-Case "C1: authentication wins over a later line that also mentions a closed connection" {
+    $Multi = "svc-mapper@198.51.100.7: Permission denied (publickey,password).`nConnection closed by 198.51.100.7 port 22"
+    (Get-JunosScanFailureClass -Stderr $Multi) -eq "AuthFailed"
+}
+Test-Case "C1: a refused connection is not reported as a timeout when both words appear" {
+    $Multi = "ssh: connect to host 198.51.100.7 port 22: Connection refused`nssh: connect to host 198.51.100.8 port 22: Connection timed out"
+    (Get-JunosScanFailureClass -Stderr $Multi) -eq "Refused"
+}
+Test-Case "C1: the worker classifies through the shared function rather than its own regex chain" {
+    $JunosNodeDataSrc -match '\$NodeData\.ScanStatus = Get-JunosScanFailureClass -Stderr \$Result\.Error' -and
+        $JunosNodeDataSrc -notmatch 'ScanStatus = if \(\$Result\.Error -match'
+}
+# Classification only: Unreachable retried, so all four of its successors retry. Changing that would be
+# a behaviour change hiding inside a rename.
+Test-Case "C1: every status the split produces is still retryable, as Unreachable was" {
+    if ($FleetCrawlSrc -notmatch '\$RetryableStatuses\s*=\s*@\(([^\)]*)\)') { return $false }
+    $Listed = $Matches[1]
+    @("Refused", "NoRoute", "Timeout", "DnsFailed") | ForEach-Object { $Listed -match "`"$_`"" } |
+        Where-Object { -not $_ } | Measure-Object | ForEach-Object { $_.Count -eq 0 }
+}
+
+# C2. The fleet ARP map. Addresses are RFC 1918/5737; MACs are in the documentation range.
+$ArpDeviceA = @{
+    DeviceIP = "198.51.100.1"
+    ArpEntries = @(
+        [PSCustomObject]@{ MAC = "00:00:5e:00:53:01"; IP = "10.10.0.5"; Interface = "irb.10"; Flags = $null }
+        # The switch's own VC control-plane address, not an endpoint's.
+        [PSCustomObject]@{ MAC = "00:00:5e:00:53:99"; IP = "10.0.0.4";  Interface = "bme0.0"; Flags = "permanent" }
+    )
+    Clients = @()
+}
+$ArpDeviceB = @{
+    DeviceIP = "198.51.100.2"
+    ArpEntries = @(
+        [PSCustomObject]@{ MAC = "00:00:5e:00:53:01"; IP = "10.9.0.5";  Interface = "irb.20"; Flags = $null }
+        [PSCustomObject]@{ MAC = "00:00:5e:00:53:02"; IP = "10.10.0.6"; Interface = "irb.20"; Flags = $null }
+    )
+    Clients = @()
+}
+
+# The whole defect: the topology list is in job-COMPLETION order, so this is the only test shape that
+# can see it. One ordering alone passes either way.
+Test-Case "C2: the same fleet resolves a MAC to the same address whichever order the jobs finished in" {
+    $Forward = Get-FleetArpMap -Topology @($ArpDeviceA, $ArpDeviceB)
+    $Reverse = Get-FleetArpMap -Topology @($ArpDeviceB, $ArpDeviceA)
+    $Forward.MacToIp["00:00:5e:00:53:01"] -eq $Reverse.MacToIp["00:00:5e:00:53:01"]
+}
+Test-Case "C2: an ambiguous MAC resolves to the lowest ADDRESS, not the lowest string" {
+    # "10.9.0.5" sorts after "10.10.0.5" as text, so a string sort silently picks the other one.
+    (Get-FleetArpMap -Topology @($ArpDeviceA, $ArpDeviceB)).MacToIp["00:00:5e:00:53:01"] -eq "10.9.0.5"
+}
+Test-Case "C2: an ambiguous MAC is reported rather than resolved silently" {
+    $Map = Get-FleetArpMap -Topology @($ArpDeviceA, $ArpDeviceB)
+    $Map.Ambiguous.Count -eq 1 -and $Map.Ambiguous[0] -match '00:00:5e:00:53:01' -and
+        $Map.Ambiguous[0] -match '10\.9\.0\.5' -and $Map.Ambiguous[0] -match '10\.10\.0\.5'
+}
+Test-Case "C2: a MAC held by exactly one device is not reported as ambiguous" {
+    $Map = Get-FleetArpMap -Topology @($ArpDeviceA, $ArpDeviceB)
+    $Map.MacToIp["00:00:5e:00:53:02"] -eq "10.10.0.6" -and $Map.Ambiguous.Count -eq 1
+}
+# Three of the four ARP entries in a real capture are exactly these, so they were most of the map.
+Test-Case "C2: a permanent entry on a bme interface is the switch's own address and is excluded" {
+    -not (Get-FleetArpMap -Topology @($ArpDeviceA)).MacToIp.ContainsKey("00:00:5e:00:53:99")
+}
+Test-Case "C2: a NON-permanent bme entry is kept - the filter is the pair, not the interface" {
+    $Dev = @{ DeviceIP = "198.51.100.3"; Clients = @(); ArpEntries = @(
+        [PSCustomObject]@{ MAC = "00:00:5e:00:53:03"; IP = "10.11.0.7"; Interface = "bme0.0"; Flags = "none" }) }
+    (Get-FleetArpMap -Topology @($Dev)).MacToIp["00:00:5e:00:53:03"] -eq "10.11.0.7"
+}
+Test-Case "C2: an entry missing either half is skipped rather than mapping to nothing" {
+    $Dev = @{ DeviceIP = "198.51.100.4"; Clients = @(); ArpEntries = @(
+        [PSCustomObject]@{ MAC = "00:00:5e:00:53:04"; IP = $null; Interface = "irb.10"; Flags = $null }
+        [PSCustomObject]@{ MAC = $null; IP = "10.12.0.8"; Interface = "irb.10"; Flags = $null }) }
+    (Get-FleetArpMap -Topology @($Dev)).MacToIp.Count -eq 0
+}
+
+# C4. Clients[].VLAN_Tag was a string or "Unknown"; Vlans[].Tag was an int or $null. A consumer
+# joining the two had to know which of the pair it was holding.
+$C4VlanText = @"
+Routing instance        VLAN name             Tag          Interfaces
+default-switch          VLAN_VOICE            100
+                                                           ge-0/0/1.0*
+default-switch          VLAN_NATIVE           None
+                                                           ge-0/0/2.0*
+"@
+$C4Vlans = @(ConvertFrom-JunosVlanTable -Text $C4VlanText)
+Test-Case "C4: a tagged VLAN's Tag is an int, and an untagged one's is `$null" {
+    $Voice = @($C4Vlans | Where-Object { $_.Name -eq 'VLAN_VOICE' })[0]
+    $Native = @($C4Vlans | Where-Object { $_.Name -eq 'VLAN_NATIVE' })[0]
+    $Voice.Tag -is [int] -and $Voice.Tag -eq 100 -and $null -eq $Native.Tag
+}
+Test-Case "C4: the client join defaults to `$null, the same absent-tag value Vlans[].Tag uses" {
+    $JunosNodeDataSrc -match '(?m)^\s*\$VlanTag = \$null\s*$' -and
+        $JunosNodeDataSrc -notmatch '\$VlanTag = "Unknown"'
+}
+Test-Case "C4: the name-to-tag dictionaries the join reads hold ints, not the regex's strings" {
+    $JunosNodeDataSrc -match '\$TagForRow = \[int\]\$TagForRow' -and
+        $JunosNodeDataSrc -match '\$VlanDict\[\$Matches\.name\] = \[int\]\$Matches\.tag'
+}
+
+# C5. $null seconds meant both "Never" - the healthy state - and "this parser could not read it".
+$FlapCases = @(
+    @{ Label = "years, weeks, days and a clock"; Text = "Last flapped   : 2024-06-01 10:00:00 UTC (2y 3w 4d 05:06:07 ago)"; State = "Parsed"; Seconds = 65250367 }
+    @{ Label = "weeks, days and a clock";        Text = "Last flapped   : 2026-09-01 10:00:00 UTC (1w 2d 03:04:05 ago)";   State = "Parsed"; Seconds = 788645 }
+    @{ Label = "a clock alone";                  Text = "Last flapped   : 2026-09-13 10:00:00 UTC (00:05:00 ago)";         State = "Parsed"; Seconds = 300 }
+    @{ Label = "bare seconds";                   Text = "Last flapped   : 2026-09-13 10:00:00 UTC (42 secs ago)";          State = "Parsed"; Seconds = 42 }
+    @{ Label = "Never";                          Text = "Last flapped   : Never";                                         State = "Never";  Seconds = $null }
+    @{ Label = "an unreadable duration";         Text = "Last flapped   : 2026-09-13 10:00:00 UTC (some time ago)";        State = "Unparsed"; Seconds = $null }
+    @{ Label = "no Last flapped line at all";    Text = "Physical interface: ge-0/0/1, Enabled, Physical link is Up";      State = $null;    Seconds = $null }
+)
+foreach ($Case in $FlapCases) {
+    Test-Case "C5: $($Case.Label) reads as state '$($Case.State)'" {
+        $Flap = ConvertFrom-JunosLastFlapped -Block $Case.Text
+        $Flap.State -eq $Case.State -and $Flap.Seconds -eq $Case.Seconds
+    }
+}
+# The y unit precedes w, so before C5 the longest-running ports in a fleet were exactly the ones
+# reported as unreadable.
+Test-Case "C5: a year is 31536000 seconds and is not silently dropped from the total" {
+    $WithYear = ConvertFrom-JunosLastFlapped -Block "Last flapped : 2025-09-13 10:00:00 UTC (1y 00:00:00 ago)"
+    $WithYear.Seconds -eq 31536000 -and $WithYear.State -eq 'Parsed'
+}
+Test-Case "C5: Never and unreadable are distinguishable, which is the whole point of the field" {
+    (ConvertFrom-JunosLastFlapped -Block "Last flapped : Never").State -ne
+        (ConvertFrom-JunosLastFlapped -Block "Last flapped : 2026-01-01 (??? ago)").State
+}
+Test-Case "C5: the worker reads both halves through the shared parser" {
+    $JunosNodeDataSrc -match '\$Flap = ConvertFrom-JunosLastFlapped -Block \$Block' -and
+        $JunosNodeDataSrc -match '\$NodeData\.Interfaces\[\$p\]\.LastFlappedState = \$Flap\.State'
 }
 
 Write-Host "`n============================================" -ForegroundColor Cyan

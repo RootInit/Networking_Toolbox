@@ -182,3 +182,49 @@ test('detectDaisyChains still reports a phone port as a confirmed chain', () => 
   };
   assert.equal(global.window.detectDaisyChains(device).get('ge-0/0/10').confidence, 'confirmed');
 });
+
+const formatVlanTag = global.window.formatVlanTag;
+const scanStatusMeaning = global.window.scanStatusMeaning;
+
+// C4. Clients[].VLAN_Tag is an int or null now, matching Vlans[].Tag. Three display sites rendered it
+// straight, so null would read as the literal "null" to an operator.
+test('formatVlanTag renders a numeric tag as its digits', () => {
+  assert.equal(formatVlanTag(100), '100');
+});
+
+test('formatVlanTag renders an absent tag as Unknown rather than "null"', () => {
+  assert.equal(formatVlanTag(null), 'Unknown');
+  assert.equal(formatVlanTag(undefined), 'Unknown');
+});
+
+// A snapshot written before C4 carries the string, and it still has to render as itself.
+test('formatVlanTag passes a pre-C4 string tag through, and maps its "Unknown" to Unknown', () => {
+  assert.equal(formatVlanTag('110'), '110');
+  assert.equal(formatVlanTag('Unknown'), 'Unknown');
+});
+
+test('formatVlanTag does not mistake tag 0 for an absent tag', () => {
+  assert.equal(formatVlanTag(0), '0');
+});
+
+// C6. AuthFailed is the one failure that is positive evidence about the device: sshd answered.
+test('scanStatusMeaning frames AuthFailed as the device being reachable', () => {
+  assert.match(scanStatusMeaning('AuthFailed'), /reachable/);
+});
+
+// C1. Each of the four says something different about WHERE the fault is, which is why they were split.
+test('scanStatusMeaning distinguishes all four C1 classes', () => {
+  const four = ['Refused', 'NoRoute', 'DnsFailed', 'Timeout'].map(scanStatusMeaning);
+  assert.ok(four.every(Boolean), 'every C1 class needs a meaning');
+  assert.equal(new Set(four).size, 4, 'two classes share wording, so the split says nothing to a reader');
+  assert.match(scanStatusMeaning('NoRoute'), /scan host/i, 'NoRoute is a fault on the scan host, not the target');
+});
+
+test('scanStatusMeaning still explains the pre-C1 Unreachable an old snapshot carries', () => {
+  assert.match(scanStatusMeaning('Unreachable'), /Refused/);
+});
+
+test('scanStatusMeaning returns null for Ok and for an unknown status, so callers can omit it', () => {
+  assert.equal(scanStatusMeaning('Ok'), null);
+  assert.equal(scanStatusMeaning('SomethingNew'), null);
+});

@@ -188,20 +188,27 @@ const CAMPUS = [
     },
 ];
 
+const VOICE_TAG = 100;
+
+// C4. Numbers, not strings: Clients[].VLAN_Tag and Vlans[].Tag are both ints in the worker now.
 const VLANS = [
-    { tag: '10', name: 'VLAN_MGMT' }, { tag: '20', name: 'VLAN_STAFF' },
-    { tag: '30', name: 'VLAN_STUDENT' }, { tag: '100', name: 'VLAN_VOICE' },
-    { tag: '300', name: 'VLAN_WIFI' }, { tag: '400', name: 'VLAN_PRINTERS' },
-    { tag: '500', name: 'VLAN_CAMERAS' }, { tag: '666', name: 'VLAN_QUARANTINE' },
+    { tag: 10, name: 'VLAN_MGMT' }, { tag: 20, name: 'VLAN_STAFF' },
+    { tag: 30, name: 'VLAN_STUDENT' }, { tag: 100, name: 'VLAN_VOICE' },
+    { tag: 300, name: 'VLAN_WIFI' }, { tag: 400, name: 'VLAN_PRINTERS' },
+    { tag: 500, name: 'VLAN_CAMERAS' }, { tag: 666, name: 'VLAN_QUARANTINE' },
 ];
 
 const JUNOS_VERSIONS = ['21.4R3-S5.4', '22.2R3-S3.8', '22.4R3.25', '23.2R2-S1.5', '20.4R3-S9.2'];
-// Everything but Ok is a placeholder node - a device with a status and nothing else.
-const FAILURE_STATUSES = ['Unreachable', 'AuthFailed', 'Timeout', 'Aborted', 'ParseError'];
+// Everything but Ok is a placeholder node - a device with a status and nothing else. C1 split the old
+// catch-all Unreachable into four, and each text here is a shape Get-JunosScanFailureClass classifies
+// as that status: the fixture asserted a status its own error text no longer implies otherwise.
+const FAILURE_STATUSES = ['Refused', 'NoRoute', 'Timeout', 'DnsFailed', 'AuthFailed', 'Aborted', 'ParseError'];
 const FAILURE_TEXT = {
-    Unreachable: 'ssh: connect to host {ip} port 22: Connection timed out',
+    Refused: 'ssh: connect to host {ip} port 22: Connection refused',
+    NoRoute: 'ssh: connect to host {ip} port 22: No route to host',
+    Timeout: 'ssh: connect to host {ip} port 22: Connection timed out',
+    DnsFailed: 'ssh: Could not resolve hostname {ip}: Name or service not known',
     AuthFailed: 'Permission denied (publickey,password) for user svc-mapper',
-    Timeout: 'TIMEOUT on interactive batch after 120s; partial payload discarded',
     Aborted: 'Crawl aborted by circuit breaker while this job was in flight',
     ParseError: 'Switch returned empty payload [exit=255 elapsed=5.1s timedOut=False]',
 };
@@ -407,7 +414,11 @@ function accessRow(port, poe, isCage) {
         LastFlappedSeconds: live ? int(60, 72 * 3600)
             : chance(0.15) ? null
                 : chance(0.5) ? int(72 * 3600, 182 * 86400) : int(182 * 86400, 900 * 86400),
+        // C5. Why LastFlappedSeconds is null. "Never" is the healthy state - the port has not flapped
+        // since boot - and read identically to a duration the parser could not decode.
+        LastFlappedState: null,
     };
+    setFlap(row, row.LastFlappedSeconds);
     if (live && chance(0.35)) row.Desc = chance(0.5) ? AP_DESC(int(1, 400)) : PHONE_DESC(int(1, 900));
     // R1. A configured switch port has one eth-switch unit; a dark port often has none at all, which
     // is what makes an empty LogicalUnits[] a state the UI has to handle rather than an omission.
@@ -474,6 +485,13 @@ function freeUplinks(node) {
 
 const byPort = (node) => (node._byPort ||= new Map(node.Interfaces.map(r => [r.Port, r])));
 
+// C5. The duration and the reason it is absent are one fact; setting one without the other is how the
+// fixture came to hold rows that carried a duration while claiming the parser never read one.
+function setFlap(row, seconds) {
+    row.LastFlappedSeconds = seconds;
+    row.LastFlappedState = seconds !== null ? 'Parsed' : (chance(0.7) ? 'Never' : 'Unparsed');
+}
+
 // R2/R2b/R13/R5. The fields every LLDP neighbour row carries, switch or endpoint. Omitting them here
 // is how the fixture silently stops matching production shape, so both neighbour builders use this.
 function lldpCommon({ reachable = true, med = null } = {}) {
@@ -512,7 +530,7 @@ function linkDevices(a, b, descPrefix) {
             ...lldpCommon(),
         });
         const row = byPort(from).get(localPort);
-        if (row) { row.Link = 'up'; row.Admin = 'up'; row.STP = 'FWD'; row.LastFlappedSeconds = int(3600, 90 * 86400); row.Desc = `${descPrefix} to ${to.Hostname.replace('.local', '')}`; }
+        if (row) { row.Link = 'up'; row.Admin = 'up'; row.STP = 'FWD'; setFlap(row, int(3600, 90 * 86400)); row.Desc = `${descPrefix} to ${to.Hostname.replace('.local', '')}`; }
     };
     stamp(a, b, pa, pb);
     stamp(b, a, pb, pa);
@@ -522,11 +540,11 @@ function linkDevices(a, b, descPrefix) {
 // The MAC-table half and the ARP half sit on different devices, which is what exercises the backfill.
 function addClients(node, gatewayNode, vlanTags) {
     const accessPorts = node.Interfaces.filter(r => r.Link === 'up' && !r.Desc.startsWith('TRUNK') && !r.Desc.startsWith('UPLINK'));
-    const dataTags = vlanTags.filter(t => t !== '100');
+    const dataTags = vlanTags.filter(t => t !== VOICE_TAG);
     for (const row of shuffled(accessPorts).slice(0, Math.min(accessPorts.length, int(2, 14)))) {
         const isPhone = row.Desc.startsWith('PHONE-');
         const isAp = row.Desc.startsWith('AP-');
-        const first = addClient(node, gatewayNode, row, isPhone ? '100' : pick(vlanTags));
+        const first = addClient(node, gatewayNode, row, isPhone ? VOICE_TAG : pick(vlanTags));
         if (isPhone || isAp) {
             node.MedNeighbors.push({
                 LocalPort: row.Port, Hostname: row.Desc, MacAddress: first.MAC,
@@ -821,7 +839,7 @@ function ageFleet(days) {
         for (const row of shuffled(node.Interfaces).slice(0, int(1, 4))) {
             if (node.Neighbors.some(n => n.LocalPort === row.Port)) continue;   // a trunk that moves would desync LLDP
             row.Link = row.Link === 'up' ? 'down' : 'up';
-            row.LastFlappedSeconds = int(60, days * 86400);
+            setFlap(row, int(60, days * 86400));
         }
     }
     // A retirement and a commissioning, so New Devices has a departure as well as an arrival.

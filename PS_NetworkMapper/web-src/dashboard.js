@@ -886,7 +886,7 @@ window.drillDownStat = function(kind) {
         devices.filter(d => d.ScanStatus && d.ScanStatus !== "Ok").forEach(d => {
             rows.push({
                 line1Html: `${esc(d.Hostname || d.DeviceIP)} <span style="color:#999; font-weight:normal;">(${esc(d.DeviceIP)})</span>`,
-                line2Html: `<b style="color:#c0392b;">${esc(d.ScanStatus)}</b>${d.ScanError ? ` — ${esc(d.ScanError)}` : ''}`,
+                line2Html: `<b style="color:#c0392b;">${esc(d.ScanStatus)}</b>${window.scanStatusMeaning(d.ScanStatus) ? ` — ${esc(window.scanStatusMeaning(d.ScanStatus))}` : ''}${d.ScanError ? ` — ${esc(d.ScanError)}` : ''}`,
                 onClick: () => window.goToSearchResult(String(d.DeviceIP), null, activeSnapshotIndex),
             });
         });
