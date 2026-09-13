@@ -41,3 +41,6 @@ PS_NetworkMapper/**/RawDumps/
 
 # Protect-MapperFile.ps1's derived decrypt output - plaintext credentials.
 PS_NetworkMapper/**/*.decrypted.json
+
+# Test-run ledger: per-host run records, not source. Run-AllTests.ps1 appends to it.
+PS_NetworkMapper/test-results/
