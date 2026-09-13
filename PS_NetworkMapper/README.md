@@ -38,6 +38,48 @@ deliberately took.
 
 ---
 
+## Project Goals
+
+The work in progress is a **derived-analysis layer** over snapshots you have already taken: given two
+endpoints, say what the Layer 2 path between them is and what is wrong with it — *why can't switch A
+reach switch B, or client C reach the network?* It stays inside the limits above. Nothing polls,
+nothing alerts, nothing probes the network actively, and the collected running config stays out of the
+analysis entirely (it is kept for backup and manual review, not parsed into rules). Every output is
+evidence with a stated confidence, the same way the Local Accounts tab is a review aid rather than a
+verdict.
+
+Four pieces, none of them speculative about the data — they read what a crawl already captures:
+
+- **Endpoint resolution from whatever identifier you have.** Management IP, hostname, serial, client
+  IP, client MAC, 802.1X username, port description, switch-and-port, or an LLDP-MED endpoint. Every
+  ambiguity is an explicit outcome rather than a guess: the same MAC seen on two access ports, a
+  hostname that isn't unique, an IP with no MAC sighting, a device whose scan failed.
+- **L2 path computation between two endpoints.** Physical adjacency pruned per-VLAN by the spanning
+  tree state each port actually reports for that VLAN's scope, with a confidence level per hop —
+  down to "this VLAN has no spanning-tree instance here, so the hop is unpruned". Paths are
+  enumerated, not tie-broken: more than one surviving path is reported as `AMBIGUOUS`, and none is
+  `NO_PATH` with the last verified hop and a specific reason.
+- **A mostly table-driven rule engine** over the per-port data now retained. Most rules are a one- or
+  two-field comparison expressed as a table row; only genuinely multi-hop rules get a function. The
+  guarantee that matters is the negative one: each rule declares what it needs, and when that data
+  was never captured — a truncated scan, a device that didn't answer — the result is `NOT_EVALUATED`,
+  never a pass. Of roughly 117 catalogued rules, about 44 are answerable from today's data.
+- **An analysis view in the viewer**, with the computed path highlighted on the topology graph and
+  per-hop links into the device drawer.
+
+Built so far: the data retention work (the spec's Phase 1 items R1–R15) and the Phase 2 correctness
+fixes, so the per-port detail the rules need is in the snapshot; a test bed with a real spanning tree
+in the fixture generator, fault injection with a manifest per snapshot, and twelve hand-built
+micro-topologies; the port-level topology graph, which keeps LAG bundles and virtual chassis as single
+hops and marks where the fleet ends instead of inventing links past it; and endpoint resolution over
+all nine identifier types, with every ambiguity reported rather than resolved.
+
+Not built yet: path computation, the rule engine, the Phase 3 crawl command changes the Layer 2/3
+rules depend on, and the UI. The design, the evidence behind it, and the
+mistakes already caught in review are in [docs/diagnostics-spec.md](docs/diagnostics-spec.md).
+
+---
+
 ## Quick start
 
 ```powershell

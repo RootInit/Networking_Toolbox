@@ -499,6 +499,41 @@ report both); same MAC on two ports of one device (**silently collapsed today** 
 waypoint, never an endpoint — and `Partial` is the dangerous case because
 `lib/FleetCrawl.ps1:169,188-194` preserves partial data over a placeholder).
 
+**Done 2026-09-13 (work order item 9, resolution half).** `web-src/endpoint-resolution.js`:
+`createResolver(topology, {allowedScopes|graph})` → `resolve(query)` →
+`{status, matches, locations, claimants, interpretations, notes}`. All nine identifier types; the type
+is detected from the string shape and can be forced with `{type}`.
+
+- **`status` is one of `FOUND` / `AMBIGUOUS` / `TRANSIT_ONLY` / `NOT_FOUND`**, computed from *places*
+  rather than rows: one location is one `(device, port)` pair, however many tables named it. A client
+  that also appears in its own switch's MAC table is one endpoint, not two.
+- **`TRANSIT_ONLY` is the F4 outcome.** A switch learns every MAC it forwards, so a host three closets
+  away is in the uplink's table too. Transit rows are reported as evidence — they are the only thing
+  showing which way the traffic went — but they are not a location. Only a MAC sighting can be "in
+  passing": a port named directly is a place whatever crosses it, including a port facing an
+  address-less bridge, which is both transit and a real location.
+- **A free-text port label is the weakest match there is, so it is a lower tier.** Every uplink is
+  labelled `UPLINK to <peer hostname>`, so ranking a substring search alongside the exact identifiers
+  made resolving any switch by name come back ambiguous with the ports of everything patched to it.
+  Description search now runs only when hostname, serial, 802.1X user and MED system name all found
+  nothing. Where a label *is* the identifier the operator has, the ambiguity is real and reported:
+  `AP-1000` and `PHONE-2000` are reused across closets by design.
+- **`claimants` carries the MACs claiming a queried address even when one has no sighting**, which is
+  how the second claimant of a contested address usually appears — an ARP entry and nothing else.
+  Without it the reported ambiguity named nothing.
+- **A MAC reported verbatim, compared through `macKey`.** The data mixes cases; a normalized-only field
+  would have the UI print addresses in a case the drawer never shows.
+- **The `Partial`/failed distinction is a note, not a status**: `device-scan-partial:<ip>` or
+  `device-scan-failed:<ip>`. Such a device is resolvable — it can be a waypoint — and is never an
+  endpoint, and `Partial` is the dangerous one because it carries real data and otherwise reads as
+  complete.
+- **The item-8 manifests are the oracle for the fixture-scale cases**, as intended: an injected
+  duplicate MAC must resolve `AMBIGUOUS` to exactly the two `(device, port)` pairs the manifest names,
+  a duplicate IP must report both claimants, a held supplicant must be findable by the identity it
+  presented. A test also asserts that no *uninjected* MAC resolves to two **devices** — while one MAC on
+  two ports of one switch stays allowed, because `buildMacTable` creates that case deliberately and it
+  is R3's real ambiguity.
+
 ### 6.2 The algorithm
 
 ```
@@ -1096,7 +1131,12 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    hand-built micro-topologies. Both halves came out differently from revision 2's proposal and are
    noted at §8.3 and §8.4: injection runs on the cloned fleet (one site, not two), and the F11
    injector is deferred until `Vlans[]` carries trunk membership.
-9. **Topology graph + endpoint resolution** (§5, §6.1).
+9. ~~**Topology graph + endpoint resolution** (§5, §6.1).~~ **Done 2026-09-13.** `web-src/l2-graph.js`
+   and `web-src/endpoint-resolution.js`, with the twelve micro-topologies as acceptance tests and the
+   item-8 manifests as the fixture-scale oracle. Both halves deviated from revision 2 and are noted at
+   §5 and §6.1: chassis-ID confirmation became third-party consensus because no node field carries a
+   device's own chassis MAC, and a port-label search had to become a lower tier than the exact
+   identifiers.
 10. **Path computation** (§6.2) with the F5 and F10 regression tests.
 11. **Rule framework** (§3) and the L1 rules — the best-supported layer.
 12. **Phase 3 command changes** (§4.3): verify the two upgrades on real hardware, then land the three
