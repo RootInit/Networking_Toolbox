@@ -563,6 +563,43 @@ l2Path(a, b, T):
 > Use bounded simple-path enumeration and report the count. **Do not** use Dijkstra on STP cost — the
 > engine reads a converged election's result, and a cost tiebreak would hide the ambiguity.
 
+**Done 2026-09-13 (work order item 10).** `web-src/l2-path.js`:
+`computePath(snapshot|graph, {from, to, vlanTag, limit, stepBudget, macAgingSeconds, allowedScopes})` →
+`{status, paths, truncated, reasons, lastReachedHop, notes}`, with `status` one of
+`PATH` / `AMBIGUOUS` / `NO_PATH`. Deviations and decisions, in the order they were forced:
+
+- **The fixture had no VLAN membership, so the first filter was vacuous.** Every generated device
+  carried `Vlans: []` while `SectionsCaptured` claimed the VLANS section arrived — the honest reading
+  prunes every hop, and a fixture-scale path test against it would have asserted `NO_PATH` everywhere.
+  Membership is now derived in the generator (§8.2) and the F11 injector item 8 deferred exists (§8.3).
+- **Two bounds, and `truncated` when either bites.** The path limit (8) bounds what is reported; a step
+  budget bounds the walk, because an unpruned VLAN — F13's case — leaves the graph cyclic and a
+  fleet-sized cyclic graph holds far more simple paths than anyone will enumerate. "Exactly two paths"
+  and "the first two of an unknown number" are different answers and only one of them is safe.
+- **Scope lookup is per port and per VLAN, in one precedence (F12).** `VLAN <T>` where it exists, else
+  `instance 0` (RSTP covers every VLAN without a VSTP instance of its own, and caps the hop at
+  `VLAN_ONLY`), else any `MSTI *` — also `VLAN_ONLY`, because the VLAN→MSTI map lives in the
+  configuration and §4.4 decided not to parse it — else `NO_STP_INSTANCE` when the STP section arrived
+  and nothing covers this VLAN, else `NOT_CAPTURED`. VSTP and RSTP coexisting on one device resolves to
+  whichever applies to *that* VLAN, never to a device-level protocol guess.
+- **Blocking is one-ended.** RSTP leaves the far end Designated and forwarding, so a hop is traversable
+  only if *neither* end is in `{BLK, DIS, LRN, LST}`. `LRN`/`LST` prune with their own reason
+  (`stp-not-converged`, F9) rather than being folded into a settled block.
+- **`NO_PATH` names the frontier, not the destination.** The reasons are the pruned edges adjacent to
+  what *is* reachable from the source, plus the terminals there — a port facing an address-less bridge
+  is where the topology ends, and chaining across it would invent the hop the path is missing (F14).
+  `lastReachedHop` is the reachable device fewest unpruned hops from the target, with the route to it.
+- **F2's threshold is reported, not applied — measured.** Refusing `VERIFIED` when a path's hops span
+  more than one MAC aging interval would demote **71% of paths** on a 60-device fixture (99 of 139
+  sampled; 66% of even the two-hop paths; median spread 461 s against a 300 s interval) — because
+  `stampCapture` spreads capture over a 14-minute window, as a real crawl does. The threshold is sound
+  for MAC-table evidence, which is what ages out in 300 s; a hop's state comes from a spanning tree that
+  does not. Every path therefore carries `captureSpreadSeconds` and `macCoherent`, and the caller
+  decides. The ladder is unchanged.
+- **`VERIFIED` is unreachable on the generated fleet**, by construction: it runs a single RSTP instance
+  (§8.2), so every fixture-scale path is honestly `VLAN_ONLY`. The VSTP micro-topologies are where
+  `VERIFIED` is exercised, which is what they were built for.
+
 ### 6.3 Symmetry
 
 Within one VLAN a correctly pruned topology is a tree *when it is pruned at all* (§6.2), so L2
@@ -714,6 +751,26 @@ means anything. This is a larger job than revision 1 budgeted and belongs in the
 supplies a MAC 38 times out of 43". Per §5.2 the fixture is **correct** — it only creates
 switch-to-switch links, and reality supplies a real port name on 5 of 5 of those.)*
 
+**Done 2026-09-13 (work order item 10, prerequisite).** VLAN membership, which the fixture never had:
+every device carried `Vlans: []` while `SectionsCaptured` claimed the VLANS section arrived, so §6.2's
+first filter read every port as carrying nothing. Two derivation rules, chosen so the result cannot be
+accidentally faulty:
+
+- **A trunk carries what is behind it.** Cores and frames carry the whole campus set; a closet carries
+  its own draw, plus the voice VLAN unconditionally (`addClients` puts phones in it whether the draw
+  picked it or not, and a phone in a VLAN its own switch does not configure is not a state to test on),
+  plus everything the closets daisy-chained below it carry. A redundant leg learns the union of both
+  ends before that propagation, so moving the tree onto it strands nothing.
+- **A trunk's two ends take the intersection of what the two devices configure.** That is what makes
+  F11 injectable rather than ambient: the two ends of a link cannot disagree unless something
+  deliberately removes a tag, and the test asserts the clean fleet has no disagreement anywhere.
+
+Membership is rebuilt per snapshot, after `computeSpanningTree`, because the `*` marking a member as
+currently forwarding for a VLAN moves when the tree does. `Vlans` accordingly left `ACCESS_ROW_GAP`
+(43 → 42 fields). Access-port membership is exactly the VLANs of the clients standing on the port, so
+the MAC table and the membership are one fact told twice — the injectors that add a client add its
+membership too.
+
 ### 8.3 Fault injection
 
 - **Two injection sites, not one.** `assertNothingOrphaned` is at `:572` but `addClients` runs at
@@ -733,9 +790,9 @@ switch-to-switch links, and reality supplies a real port name on 5 of 5 of those
   edit.
 
 **Done 2026-09-13 (work order item 8, injection half).** `--faults N` in `generate-fixture.mjs`, one
-`FaultManifest_<stamp>.fixture.json` per snapshot, seven kinds: `duplicate-mac` (F1),
+`FaultManifest_<stamp>.fixture.json` per snapshot, eight kinds: `duplicate-mac` (F1),
 `duplicate-ip`/`off-subnet-client`/`dot1x-held`/`autoneg-asymmetric` (F4), `stp-unconverged` (F9),
-`unmanaged-bridge-shared-segment` (F14). Default is 0 — a fault nobody has a manifest for is worth
+`unmanaged-bridge-shared-segment` (F14), `vlan-missing-from-trunk` (F11). Default is 0 — a fault nobody has a manifest for is worth
 less than a clean fleet. Deviations from the plan above:
 
 - **One injection site, not two.** Injection runs on the fleet `withFailures` has already cloned, where
@@ -751,8 +808,13 @@ less than a clean fleet. Deviations from the plan above:
   Verified by making one injector call `int()` and watching the test fail.
 - **The manifest is not named `NetworkMap_*`.** Both loaders match `/^NetworkMap_.*\.json$/`, so a
   manifest named after its map would be offered to the operator as a snapshot to open.
-- **F11 (a VLAN missing from a trunk) has no injector.** `Vlans[]` is empty on every fixture device, so
-  there is no membership to remove. It lands with the VLAN retention work.
+- ~~**F11 (a VLAN missing from a trunk) has no injector.** `Vlans[]` is empty on every fixture device,
+  so there is no membership to remove. It lands with the VLAN retention work.~~ **Landed 2026-09-13
+  with item 10**, which is that work's consumer: `vlan-missing-from-trunk` removes one tag from one end
+  of one otherwise healthy trunk, from the node's `Vlans[]` and the port row alike. It is an eighth
+  kind, so `--faults 9` still wraps the cycle. The test is the strongest oracle in this file: the clean
+  fleet has **no** trunk whose two ends disagree, so every disagreement in the faulted fleet must be one
+  the manifest names, and every named one must be present on the end the manifest names.
 - **A fault kind §7 does not catalogue carries an empty `failureModes`**, not a label chosen to fill the
   field: the label is what item 11 maps a finding to, so a wrong one is a wrong oracle.
   `off-subnet-client`, `dot1x-held` and `autoneg-asymmetric` have none and say why at their injectors;
@@ -1137,7 +1199,10 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    §5 and §6.1: chassis-ID confirmation became third-party consensus because no node field carries a
    device's own chassis MAC, and a port-label search had to become a lower tier than the exact
    identifiers.
-10. **Path computation** (§6.2) with the F5 and F10 regression tests.
+10. ~~**Path computation** (§6.2) with the F5 and F10 regression tests.~~ **Done 2026-09-13.**
+    `web-src/l2-path.js`. Two prerequisites landed with it and are noted at §8.2 and §8.3: the fixture
+    had no VLAN membership at all, which made §6.2's first filter vacuous, and the F11 injector item 8
+    deferred now exists. F2's threshold is reported rather than applied — measured, see §6.2.
 11. **Rule framework** (§3) and the L1 rules — the best-supported layer.
 12. **Phase 3 command changes** (§4.3): verify the two upgrades on real hardware, then land the three
     in-place replacements and `show spanning-tree bridge`, measuring session time against the 120 s

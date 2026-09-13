@@ -91,7 +91,15 @@ function vlanMembersFor(row) {
 
 function endFor(device, index, port, memberPorts) {
     var row = index.rows.get(port) || null;
-    var members = memberPorts.map(function (memberPort) {
+    // The bundle's own member list, not only the members that carried an LLDP neighbour: a member whose
+    // link is down stops advertising, and reporting the aggregate as narrower than it is hides exactly
+    // the capacity loss that makes a half-down LAG worth noticing (section 5.3).
+    var ports = memberPorts.slice();
+    asList(row && row.BundleMembers).forEach(function (memberPort) {
+        if (ports.indexOf(memberPort) === -1) ports.push(memberPort);
+    });
+    ports.sort();
+    var members = ports.map(function (memberPort) {
         var memberRow = index.rows.get(memberPort) || null;
         return {
             port: memberPort,

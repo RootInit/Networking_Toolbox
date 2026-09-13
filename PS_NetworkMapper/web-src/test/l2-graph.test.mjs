@@ -72,9 +72,11 @@ test('a LAG with a down member is still one link, with the member marked down', 
     const edge = graph.edges[0];
     assert.equal(edge.a.port, 'ae0');
     assert.equal(edge.a.link, 'up', 'the bundle is up on one member');
-    // Only the surviving member carries a neighbour, so only it is named - and the L1 fan-out item 11
-    // will do reads the configured member list off the row, not off the edge.
-    assert.deepEqual(edge.a.members.map(m => m.port), ['ge-0/0/0']);
+    // Both configured members are named, not only the one still carrying a neighbour: a member whose
+    // link is down stops advertising LLDP, and an edge reporting the aggregate as narrower than it is
+    // would hide exactly the lost capacity that makes a half-down LAG worth noticing.
+    assert.deepEqual(edge.a.members.map(m => m.port), ['ge-0/0/0', 'ge-0/0/1']);
+    assert.deepEqual(edge.a.members.map(m => m.link), ['up', 'down']);
     const bundleRow = graph.deviceByIp.get(edge.a.ip).Interfaces.find(r => r.Port === 'ae0');
     assert.deepEqual(bundleRow.BundleMembers, ['ge-0/0/0', 'ge-0/0/1']);
 });
