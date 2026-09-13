@@ -393,7 +393,7 @@ Revision 1's §10.6 claimed "`resolveDeviceIdentity` handles the device half". I
 | **P5** | **Retain every MAC-table row with its raw flag character** | `lib/Get-JunosNodeData.ps1:616-649` | E2 cannot tell a dynamic entry (evidence) from a static or persistent one (none). **Promoted to prerequisite** — §8's E2 tests are unwritable without it |
 | P6 | PoE `Admin status` and `Power consumption` retained separately | `lib/Get-JunosNodeData.ps1:502-504` | E0b unavailable; admin-disabled and no-PD both read `OFF` |
 | P7 | Per-port dot1x state keyed by interface | `lib/Get-JunosNodeData.ps1:509-513` | E0c unavailable; `Initialize` rows dropped entirely |
-| P8 | MAC aging time from `Configuration`, else default | `lib/Get-JunosNodeData.ps1:311` | E2's bound is assumed. Note dot1x session pinning may override aging on this fleet — verify before quoting 300 s |
+| ~~P8~~ | ~~MAC aging time from `Configuration`~~ — **dropped.** The configuration is not parsed (`diagnostics-spec.md` §4.4). E2 assumes the 300 s default and says so in `caveats` | — | A nominal bound on one evidence source, which E2 already carries a caveat for. Note dot1x session pinning may override aging on this fleet, so the configured value would not have been authoritative either |
 | P9 | `y` (year) unit in the relative-duration regex | `lib/Get-JunosNodeData.ps1:432` | An interface or device up over a year yields `$null` silently. Inherited by P1 |
 
 Already retained: `InputBytes`, `OutputBytes`, `InputBps`, `OutputBps`, `CarrierTransitions`,
@@ -515,7 +515,8 @@ reboot.
    reads as a transmitter present; one carrying none reads idle even with a healthy device attached.
 4. **The rate floor is calibrated on one fleet.** 128 B / 0.5 pps separates the clusters observed
    here. It is a default, not a constant, and it must be configurable and displayed.
-5. **MAC aging time is assumed** (P8), and dot1x session pinning may override it.
+5. **MAC aging time is assumed** at the 300 s default — the configuration is not parsed — and dot1x
+   session pinning may override it in either direction.
 6. **A counter clear is only detectable after P2.**
 7. **"The port is active" says nothing about any particular device** behind an unmanaged switch.
 8. **Ports are identified by name, and names move.** §6 handles the device half; a port on a replaced

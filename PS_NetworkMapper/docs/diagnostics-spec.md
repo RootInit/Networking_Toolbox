@@ -297,20 +297,45 @@ rather than a prerequisite. Everything else is cut unless it earns a place.
 | `show ethernet-switching interface` | Its three wanted fields are now covered elsewhere: port mode and per-VLAN tagging by `show vlans extensive` above, and the blocking *reason* partly by R10's `BPDU Error` / `Loop Detect PDU Error` / `Ethernet-Switching Error` fields, which print on every port's link-level line in output already collected. **If the `show vlans extensive` upgrade fails its hardware check, this command comes back** |
 | `show interfaces filters`, `show firewall` | Speculative until filters are known to be in use — and that is checkable for free, by grepping the `Configuration` text already stored at `:311`. Add them only for a fleet that actually binds filters |
 
-### 4.4 Phase 4 — config parser
+### 4.4 The configuration is not parsed — decided, not deferred
 
-Deferred. After Phase 3 only ~5 of 117 rules remain config-only: filter term logic, mac-limit and
-storm-control thresholds, routing-instance interface membership, intended-VLAN-vs-actual.
+**`$NodeData.Configuration` stays collected and stored verbatim (`:311`) for backup and manual
+review, and contributes nothing to the rule engine.** There is no config-parsing phase.
 
-Two traps: `display set` emits `deactivate …` lines, and a naive parser reads a deactivated IRB as
-live, **inverting** the fault; and **`apply-groups` are not expanded**, so a fleet templating IRBs or
-filters through groups is missing the inherited statements entirely — which would require changing
-the collection command itself (`:162`) to `show configuration | display inheritance no-comments |
-display set`, lengthening the second-largest command in an already-loaded batch.
+This replaces revision 2's "Phase 4, deferred". Deferral implied it was eventually necessary. It is
+not, and the residue does not justify the failure modes.
+
+**The whole config-only residue, and why each one does not need a parser:**
+
+| Item | Disposition |
+|---|---|
+| Firewall filter bindings and term logic | A non-zero **discard counter** from `show firewall` is proof a filter is dropping; parsed term logic is a guess that one might. Whether a fleet binds filters at all is a substring test on stored text, not a parser — and that test is the trigger for adding the operational command, per §4.3 |
+| `mac-limit` / storm-control thresholds | The threshold is not the fault; the enforcement state is, and that is operational |
+| Routing-instance (VRF) membership | Moot on a single-instance fleet. Partly recoverable from the route-table names R9 captures |
+| Static routes | Rarely diagnosable from one end; on an access switch usually only the default route, which R9 already parses |
+| MSTP region / revision / VLAN→MSTI map | Only applies to MSTP fleets, and `show spanning-tree mstp configuration` supplies it operationally if one is ever in scope. Until then, MSTP degrades to `VLAN_ONLY` (§2.3), which is a stated confidence level, not a wrong answer |
+| MAC aging time | One statement; the default (300 s) with a caveat is sufficient to bound E2 in `port-last-used-spec.md` |
+| Intended VLAN per port | **Not in the config on a NAC fleet.** VLANs assigned by RADIUS at authentication time never appear in `show configuration`, so a config-derived "intent" would raise false findings on exactly the ports working correctly. §1.3 already requires intent-dependent rules to be peer-comparisons, which need no config |
+
+**The failure modes are the stronger argument.** `display set` emits `deactivate …` lines, so a
+parser that misses them reads a deactivated IRB as live and **inverts** the fault. `apply-groups` are
+not expanded, so a fleet templating IRBs or filters through groups is silently missing the inherited
+statements — and fixing that means changing the collection command (`:162`) to
+`show configuration | display inheritance no-comments | display set`, lengthening the
+second-largest command in a batch §4.3 works to keep short. Both produce **wrong** answers rather
+than absent ones, which §2.3 identifies as the failure this design most needs to avoid.
+
+**Existing config parsing in the UI is untouched** and is not diagnostics: port mode for interface
+classification (`web-src/drawer.js:604`), the local-account audit (`web-src/dashboard.js:508,515`),
+and config-change detection between snapshots (`web-src/dashboard.js:91,146-149`). These work, serve
+their own features, and are already the right shape — a handful of anchored regexes. If a specific,
+individually-justified statement is ever wanted, it is added there in that shape. What is ruled out
+is a config *evaluator* feeding the rule engine.
 
 *(Revision 1 said `Configuration` is "the first casualty of a timeout". It is the second — extensive
 is last. And R1's claim that the snapshot has "no prefix length anywhere" was overstated: the config
-text holds it, unparsed. The accurate claim is "no parsed address or prefix data".)*
+text holds it, unparsed. The accurate claim is "no parsed address or prefix data" — and since the
+config is not parsed, R1 remains the only route to it.)*
 
 ---
 
@@ -652,7 +677,8 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
     cap each time. The exact-matcher fix is worth doing alongside but no longer gates this.
 13. **L2 and L3 rules** gated on the commands they need.
 14. **UI**: analysis sub-tab, path highlighting, per-hop drawer links.
-15. **Phase 4 config parser** (§4.4), last.
+*(There is no config-parsing step. See §4.4 — the configuration is collected and stored for backup
+and manual review, and stays out of the rule engine.)*
 
 ---
 
@@ -661,7 +687,7 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
 From the six-way audit, before deduplication across layers. Treat as an order-of-magnitude estimate,
 not a plan: §3.1 scopes the build to the "supported today" column.
 
-| Layer | Rules | Supported today | Blocked on retention | Blocked on a command | Config-only | Undetectable passively |
+| Layer | Rules | Supported today | Blocked on retention | Blocked on a command | Not attempted (config-only) | Undetectable passively |
 |---|---|---|---|---|---|---|
 | L1 / link | 45 | 14 (+6 needing a delta) | 17 | 8 | — | — |
 | L2 switching | 33 | 15 | 11 | 7 | — | — |
@@ -669,6 +695,10 @@ not a plan: §3.1 scopes the build to the "supported today" column.
 | **Total** | **117** | **~44** | **~36** | **~26** | **5** | **6** |
 
 The shape is the finding: the largest category is data the tool already collects and discards.
+
+The "not attempted" column is the §4.4 decision — those 5 rules are out of scope, not pending. The
+buildable target is therefore **~106 of 117**, and §3.1 scopes the *first* build to the ~44 supported
+by today's data.
 
 ---
 
