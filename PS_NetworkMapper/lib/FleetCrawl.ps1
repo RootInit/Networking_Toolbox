@@ -115,7 +115,7 @@ function Invoke-FleetCrawl {
             StackMembers = @(); Neighbors = @(); Clients = @(); ArpEntries = @(); Interfaces = @{};
             Uptime = "Unknown"; LastConfigured = "Unknown"; LastConfiguredBy = "Unknown"; Alarms = @();
             MasterCpuUtilization = "Unknown"; MasterMemoryUtilization = "Unknown";
-            MedNeighbors = @(); Configuration = "Unknown";
+            MedNeighbors = @(); Configuration = "Unknown"; Vlans = @();
             ScanStatus = $Status
             ScanError  = $ScanErrorText
         }

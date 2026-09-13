@@ -20,6 +20,7 @@ param (
 
 $WorkerScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 . (Join-Path $WorkerScriptDir "SshHelpers.ps1")
+. (Join-Path $WorkerScriptDir "JunosParsers.ps1")
 
 # Everything below runs inside a try/finally so the plaintext askpass files are always removed.
 $AskPass = $null
@@ -201,6 +202,9 @@ $NodeData = @{
     MedNeighbors = @()
     # Full "show configuration | display set" text; redacted from RawDumps since it holds secrets.
     Configuration = "Unknown"
+    # "show vlans" in full: name, tag, routing instance and member interfaces. The per-client VLAN_Tag
+    # join only ever needed name->tag, but reachability work needs to know which ports carry a VLAN.
+    Vlans = @()
     # Tells "empty because unreachable" apart from "empty because this is an isolated leaf switch".
     ScanStatus = "Ok"; ScanError = $null
 }
@@ -377,7 +381,27 @@ try {
             # Strip the trailing ".N" logical unit so "ge-0/0/1.100" collapses onto "ge-0/0/1".
             $p = $Matches.port -replace "\.\d+$",""
             if (-not $NodeData.Interfaces.ContainsKey($p)) {
-                $NodeData.Interfaces[$p] = @{ Port = $p; Admin = $Matches.admin; Link = $Matches.link; Desc = "Unknown"; STP = "Unknown"; PoE = "Unknown"; LastFlappedSeconds = $null }
+                $NodeData.Interfaces[$p] = @{
+                    Port = $p; Admin = $Matches.admin; Link = $Matches.link; Desc = "Unknown"
+                    STP = "Unknown"; PoE = "Unknown"; LastFlappedSeconds = $null
+                    # Filled from "show interfaces extensive"; $null where that section was absent or
+                    # the platform does not report the field, which is distinct from a zero counter.
+                    Mtu = $null; SpeedConfigured = $null; SpeedNegotiated = $null
+                    Duplex = $null; DuplexNegotiated = $null; AutoNegotiation = $null
+                    NegotiationStatus = $null; MediaType = $null; MacAddress = $null
+                    LinkLevelType = $null; CarrierTransitions = $null
+                    InputBytes = $null; OutputBytes = $null; InputBps = $null; OutputBps = $null
+                    InputErrors = @{}; OutputErrors = @{}
+                    ActiveAlarms = $null; ActiveDefects = $null
+                    # Per-VLAN spanning tree, keyed by the scope string the switch reported (VSTP
+                    # "VLAN 110", RSTP "instance 0", MSTP "MSTI 1"). The STP field above stays the
+                    # worst-case collapse of these.
+                    StpDetail = @{}
+                    # LACP: "aeN" on a member link, the member list on the aeN interface itself.
+                    Bundle = $null; BundleMembers = @()
+                    # VLANs this port is a member of, from "show vlans".
+                    Vlans = @()
+                }
             }
         }
     }
@@ -418,31 +442,57 @@ try {
         }
     }
 
+    # Everything else the extensive output carries. Split from the flap loop above because that one
+    # has to `continue` past "Last flapped: Never", which would skip these fields.
+    $ExtDetail = ConvertFrom-JunosInterfaceExtensive -Text $DataDict["INTERFACES_EXT"]
+    foreach ($ExtPort in $ExtDetail.Keys) {
+        if (-not $NodeData.Interfaces.ContainsKey($ExtPort)) { continue }
+        $Iface = $NodeData.Interfaces[$ExtPort]
+        $Detail = $ExtDetail[$ExtPort]
+        foreach ($Field in @('Mtu','SpeedConfigured','SpeedNegotiated','Duplex','DuplexNegotiated',
+                             'AutoNegotiation','NegotiationStatus','MediaType','MacAddress',
+                             'LinkLevelType','CarrierTransitions','InputBytes','OutputBytes',
+                             'InputBps','OutputBps','InputErrors','OutputErrors',
+                             'ActiveAlarms','ActiveDefects')) {
+            $Iface[$Field] = $Detail[$Field]
+        }
+        # "show interfaces descriptions" omits a port whose link is down on some releases; extensive
+        # still carries its description. Only fills a gap - a value already read there stands.
+        if ($Iface.Desc -eq "Unknown" -and -not [string]::IsNullOrWhiteSpace($Detail.Description)) {
+            $Iface.Desc = $Detail.Description
+        }
+    }
+
     # LACP bundle membership (physical port -> "aeN"). LLDP runs on the member links, so without this
     # map the uplink exclusion misses "aeN" and trunk MACs leak into Clients.
-    $AeMemberOf = @{}
-    foreach ($Line in ($DataDict["INTERFACES_TERSE"] -split "`n")) {
-        $Line = $Line.Trim()
-        if ($Line -match "^(?<phys>(?:ge|xe|et|mge)\S+)\.\d+\s+(?:up|down)\s+(?:up|down)\s+aenet\s+-->\s+(?<ae>ae\d+)\.") {
-            $AeMemberOf[$Matches.phys] = $Matches.ae
-        }
+    $AeMemberOf = ConvertFrom-JunosAeMembership -Text $DataDict["INTERFACES_TERSE"]
+    foreach ($MemberPort in $AeMemberOf.Keys) {
+        $Bundle = $AeMemberOf[$MemberPort]
+        if ($NodeData.Interfaces.ContainsKey($MemberPort)) { $NodeData.Interfaces[$MemberPort].Bundle = $Bundle }
+        if ($NodeData.Interfaces.ContainsKey($Bundle)) { $NodeData.Interfaces[$Bundle].BundleMembers += $MemberPort }
     }
 
     # "show spanning-tree interface" repeats a port per VLAN, and a trunk can be BLK in some. The field
     # stays one state string, so repeats collapse by precedence rather than last-VLAN-wins.
     $StpStatePrecedence = @{ BLK = 5; LST = 4; LRN = 3; FWD = 2; DIS = 1 }
-    foreach ($Line in ($DataDict["STP"] -split "`n")) {
-        $Line = $Line.Trim()
-        if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+.*?(?<state>FWD|BLK|DIS|LRN|LST)") {
-            # Strip any trailing ".N" (not just ".0") to land on the collapsed physical-port key.
-            $p = $Matches.port -replace "\.\d+$",""
-            $NewState = $Matches.state
-            if ($NodeData.Interfaces.ContainsKey($p)) {
-                $CurrentRank = 0
-                $CurrentState = $NodeData.Interfaces[$p].STP
-                if ($StpStatePrecedence.ContainsKey($CurrentState)) { $CurrentRank = $StpStatePrecedence[$CurrentState] }
-                if ($StpStatePrecedence[$NewState] -gt $CurrentRank) { $NodeData.Interfaces[$p].STP = $NewState }
+    $StpByPort = ConvertFrom-JunosStpInterface -Text $DataDict["STP"]
+    foreach ($StpPort in $StpByPort.Keys) {
+        if (-not $NodeData.Interfaces.ContainsKey($StpPort)) { continue }
+        $Iface = $NodeData.Interfaces[$StpPort]
+        foreach ($Record in $StpByPort[$StpPort]) {
+            # Last scope wins on a repeat, matching the switch's own ordering. A port cannot appear
+            # twice under one scope.
+            $Iface.StpDetail[$Record.Scope] = [PSCustomObject]@{
+                State            = $Record.State
+                Role             = $Record.Role
+                Cost             = $Record.Cost
+                PortId           = $Record.PortId
+                DesignatedPortId = $Record.DesignatedPortId
+                DesignatedBridge = $Record.DesignatedBridge
             }
+            $CurrentRank = 0
+            if ($StpStatePrecedence.ContainsKey($Iface.STP)) { $CurrentRank = $StpStatePrecedence[$Iface.STP] }
+            if ($StpStatePrecedence[$Record.State] -gt $CurrentRank) { $Iface.STP = $Record.State }
         }
     }
 
@@ -540,6 +590,18 @@ try {
         }
     }
 
+    # The same section parsed for everything it carries, not just the name->tag join above. Kept as a
+    # second pass so the tag lookup the MAC-table join depends on is unchanged by this.
+    $NodeData.Vlans = @(ConvertFrom-JunosVlanTable -Text $DataDict["VLANS"])
+    foreach ($Vlan in $NodeData.Vlans) {
+        foreach ($Member in $Vlan.Interfaces) {
+            if (-not $NodeData.Interfaces.ContainsKey($Member.Port)) { continue }
+            $NodeData.Interfaces[$Member.Port].Vlans += [PSCustomObject]@{
+                Name = $Vlan.Name; Tag = $Vlan.Tag; Unit = $Member.Unit; Active = $Member.Active
+            }
+        }
+    }
+
     # Ports facing a switch/router LLDP neighbor (phones/APs are MedNeighbors and not excluded) - a
     # downstream uplink otherwise contributes hundreds of unrelated MACs. Membership needs a positive
     # Bridge/Router signal or a management IP: misclassifying a phone would drop its real clients.
@@ -589,10 +651,19 @@ try {
     # Also exported raw, so the orchestrator can build a network-wide MAC->IP map.
     $ArpDict = @{}
     foreach ($Line in ($DataDict["ARP_TABLE"] -split "`n")) {
-        if ($Line -match "(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)") {
+        # The Interface column names the L3 interface the entry was learned on ("irb.188"), optionally
+        # followed by the physical port in brackets - the only per-IP statement of which VLAN an
+        # address lives on that the scan collects.
+        if ($Line -match "(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)(?:\s+(?<iface>\S+)(?:\s+\[(?<phys>[^\]]+)\])?(?:\s+(?<flags>\S+))?)?") {
             $macLower = $Matches.mac.ToLower()
             $ArpDict[$macLower] = $Matches.ip
-            $NodeData.ArpEntries += [PSCustomObject]@{ MAC = $macLower; IP = $Matches.ip }
+            $NodeData.ArpEntries += [PSCustomObject]@{
+                MAC       = $macLower
+                IP        = $Matches.ip
+                Interface = if ($Matches.iface) { $Matches.iface } else { $null }
+                Port      = if ($Matches.phys) { ConvertTo-JunosPhysicalPort -Port $Matches.phys } else { $null }
+                Flags     = if ($Matches.flags) { $Matches.flags } else { $null }
+            }
         }
     }
 

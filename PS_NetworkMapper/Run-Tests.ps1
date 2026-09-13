@@ -12,6 +12,8 @@
 $ErrorActionPreference = 'Stop'
 $ProjectRoot = $PSScriptRoot
 $LibDir = Join-Path $ProjectRoot 'lib'
+# Pure parsers, safe to dot-source at any point; sections 7 and 12 both exercise them.
+. (Join-Path $LibDir 'JunosParsers.ps1')
 
 $script:Total = 0
 $script:Passed = 0
@@ -435,13 +437,11 @@ if (-not $PoeMatch.Success) {
 # --- multi-VLAN spanning-tree collapse ---
 # "show spanning-tree interface" repeats a port per VLAN, and the loop used to overwrite .STP on
 # every repeat. Repeats are now collapsed by precedence, BLK highest.
-$StpLineMatch = [regex]::Match($JunosNodeDataSrc, '\$Line\s+-match\s+"((?:[^"\\]|\\.)*\(\?<state>FWD(?:[^"\\]|\\.)*)"')
 $StpPrecMatch = [regex]::Match($JunosNodeDataSrc, '\$StpStatePrecedence\s*=\s*(@\{[^}]*\})')
-if (-not ($StpLineMatch.Success -and $StpPrecMatch.Success)) {
-    Write-Host "[FAIL] Could not locate the spanning-tree line regex or precedence table in Get-JunosNodeData.ps1" -ForegroundColor Red
+if (-not $StpPrecMatch.Success) {
+    Write-Host "[FAIL] Could not locate the spanning-tree precedence table in Get-JunosNodeData.ps1" -ForegroundColor Red
     $script:Total++
 } else {
-    $StpPattern = $StpLineMatch.Groups[1].Value
     $StpPrecedence = Invoke-Expression $StpPrecMatch.Groups[1].Value
     # Real layout: the same three ports per STP instance, two blocking only in instance 100.
     $StpText = @"
@@ -465,16 +465,14 @@ ge-0/2/0     128:513    128:513   32768.0019e2b0c380         20000  FWD    DESG
 ae0          128:600    128:600   32768.0019e2b0c380         20000  FWD    DESG
 ge-0/0/5     128:518    128:518   32768.0019e2b0c380         20000  FWD    DESG
 "@
-    # Mirrors the shipped collapse using the shipped pattern and the shipped precedence table.
+    # Mirrors the shipped collapse using the shipped parser and the shipped precedence table.
+    $StpParsed = ConvertFrom-JunosStpInterface -Text $StpText
     $StpCollapsed = @{}
-    foreach ($Line in ($StpText -split "`n")) {
-        $Line = $Line.Trim()
-        if ($Line -match $StpPattern) {
-            $StpPort = $Matches.port -replace "\.\d+$",""
-            $StpNew = $Matches.state
+    foreach ($StpPort in $StpParsed.Keys) {
+        foreach ($StpRecord in $StpParsed[$StpPort]) {
             $StpRank = 0
             if ($StpCollapsed.ContainsKey($StpPort) -and $StpPrecedence.ContainsKey($StpCollapsed[$StpPort])) { $StpRank = $StpPrecedence[$StpCollapsed[$StpPort]] }
-            if ($StpPrecedence[$StpNew] -gt $StpRank) { $StpCollapsed[$StpPort] = $StpNew }
+            if ($StpPrecedence[$StpRecord.State] -gt $StpRank) { $StpCollapsed[$StpPort] = $StpRecord.State }
         }
     }
     Test-Case "STP: a port blocking in one VLAN and forwarding in later ones reports BLK, not the last VLAN's FWD" {
@@ -1222,6 +1220,274 @@ try {
     }
 } finally {
     Remove-Item -LiteralPath $WhatIfDir -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host "`n--- 12. JunosParsers.ps1 (vlans / spanning-tree / extensive / LACP) ---" -ForegroundColor Cyan
+
+# Every sample below is synthetic, shaped after the documented Junos output. Real capture text from a
+# production fleet is never checked in - see .gitignore.
+
+$VlansRiSample = @"
+Routing instance        VLAN name             Tag          Interfaces
+default-switch          DATA_VLAN             110
+                                                           ge-0/0/1.0*
+                                                           ge-0/0/2.0
+                                                           ae0.0*
+                        VOICE_VLAN            120
+                                                           ge-0/0/1.0*
+                        EMPTY_VLAN            130
+                                                           None
+"@
+
+$VlansRi = @(ConvertFrom-JunosVlanTable -Text $VlansRiSample)
+
+# "show vlans brief" on ELS puts the members space-separated on the VLAN row instead.
+$VlansInlineSample = @"
+Routing instance        VLAN name             Tag          Interfaces
+default-switch          default               1
+default-switch          mimi                  2752         ae0.0 ae1.0 ae2.0
+default-switch          v300                  300
+"@
+$VlansInline = @(ConvertFrom-JunosVlanTable -Text $VlansInlineSample)
+Test-Case "show vlans: members listed on the VLAN row itself are picked up" {
+    $VlansInline.Count -eq 3 -and
+        ($VlansInline[1].Interfaces | ForEach-Object { $_.Port }) -join ',' -eq 'ae0,ae1,ae2' -and
+        $VlansInline[2].Interfaces.Count -eq 0
+}
+
+Test-Case "show vlans: every VLAN row is returned" { $VlansRi.Count -eq 3 }
+Test-Case "show vlans: the routing instance carries onto continuation rows" {
+    ($VlansRi | Where-Object { $_.RoutingInstance -eq 'default-switch' }).Count -eq 3
+}
+Test-Case "show vlans: the tag is parsed as a number" { $VlansRi[0].Tag -eq 110 }
+Test-Case "show vlans: indented continuation lines become interface membership" {
+    ($VlansRi[0].Interfaces | ForEach-Object { $_.Port }) -join ',' -eq 'ge-0/0/1,ge-0/0/2,ae0'
+}
+Test-Case "show vlans: the trailing asterisk marks an active member" {
+    $VlansRi[0].Interfaces[0].Active -and -not $VlansRi[0].Interfaces[1].Active
+}
+Test-Case "show vlans: the logical unit is retained alongside the physical port" {
+    $VlansRi[0].Interfaces[0].Unit -eq 'ge-0/0/1.0'
+}
+Test-Case "show vlans: a port in two VLANs appears under both" {
+    $VlansRi[1].Interfaces.Count -eq 1 -and $VlansRi[1].Interfaces[0].Port -eq 'ge-0/0/1'
+}
+# "None" is a literal Junos prints for a VLAN with no members; it is not an interface name.
+Test-Case "show vlans: a VLAN with no members gets an empty interface list" {
+    @($VlansRi[2].Interfaces).Count -eq 0
+}
+
+# Non-ELS EX layout per Juniper's "show vlans (EX Series)" reference: three columns, the tag printed
+# as "None" when unset, and members comma-separated across as many wrapped lines as they need.
+$VlansPlainSample = @"
+Name           Tag     Interfaces
+default        None
+               ge-0/0/34.0, ge-0/0/33.0, ge-0/0/32.0, ge-0/0/31.0,
+               ge-0/0/30.0*, ge-0/0/29.0
+LOBBY          None
+               ge-0/0/8.0*
+LAB            200
+               ge-0/0/6.0
+"@
+$VlansPlain = @(ConvertFrom-JunosVlanTable -Text $VlansPlainSample)
+Test-Case "show vlans: the two-column layout without routing instances still parses" {
+    $VlansPlain.Count -eq 3 -and $VlansPlain[2].Name -eq 'LAB' -and $VlansPlain[2].Tag -eq 200
+}
+Test-Case "show vlans: a tag printed as None becomes a null tag, not zero" {
+    $null -eq $VlansPlain[0].Tag
+}
+Test-Case "show vlans: comma-separated members wrapped over several lines are all kept" {
+    $VlansPlain[0].Interfaces.Count -eq 6 -and $VlansPlain[0].Interfaces[5].Port -eq 'ge-0/0/29'
+}
+Test-Case "show vlans: the active marker survives inside a comma-separated run" {
+    $VlansPlain[0].Interfaces[4].Active -and -not $VlansPlain[0].Interfaces[5].Active
+}
+# Case-insensitively "LOBBY" matches the lo interface prefix, so its row was read as a member list
+# and the VLAN vanished. Same trap for names starting GE, ET, EM, ME, VLAN, IRB.
+Test-Case "show vlans: a VLAN whose name shares an interface prefix is not eaten as a member list" {
+    $VlansPlain[1].Name -eq 'LOBBY' -and $VlansPlain[1].Interfaces[0].Port -eq 'ge-0/0/8'
+}
+
+$StpSample = @"
+Spanning tree interface parameters for VLAN 110
+
+Interface                  Port ID    Designated         Designated         Port    State  Role
+                                      port ID            bridge ID          Cost
+ge-0/0/1                  128:501    128:501            110.aabbcc001122    20000   FWD    DESG
+ae0                       128:601    128:620            110.aabbcc003344    10000   BLK    ALT
+
+Spanning tree interface parameters for VLAN 120
+
+Interface                  Port ID    Designated         Designated         Port    State  Role
+                                      port ID            bridge ID          Cost
+ae0                       128:601    128:601            120.aabbcc003344    10000   FWD    ROOT
+"@
+$StpByPort = ConvertFrom-JunosStpInterface -Text $StpSample
+
+Test-Case "show spanning-tree: a port appearing under two VLANs keeps both records" {
+    @($StpByPort['ae0']).Count -eq 2
+}
+Test-Case "show spanning-tree: the scope string is kept verbatim, not reduced to a VLAN id" {
+    ($StpByPort['ae0'] | ForEach-Object { $_.Scope }) -join '|' -eq 'VLAN 110|VLAN 120'
+}
+Test-Case "show spanning-tree: role, cost and designated bridge survive" {
+    $R = $StpByPort['ae0'][0]
+    $R.Role -eq 'ALT' -and $R.Cost -eq 10000 -and $R.DesignatedBridge -eq '110.aabbcc003344'
+}
+Test-Case "show spanning-tree: the column header line is not read as a port" {
+    -not $StpByPort.ContainsKey('Interface')
+}
+
+# RSTP heads its block "for instance 0" and MSTP "for MSTI N"; keying on a VLAN number would drop both.
+$StpRstpSample = @"
+Spanning tree interface parameters for instance 0
+
+Interface                  Port ID    Designated         Designated         Port    State  Role
+                                      port ID            bridge ID          Cost
+ge-0/0/9                  128:509    128:509            32768.aabbcc005566  20000   FWD    DESG
+"@
+Test-Case "show spanning-tree: an RSTP instance header is accepted as a scope" {
+    (ConvertFrom-JunosStpInterface -Text $StpRstpSample)['ge-0/0/9'][0].Scope -eq 'instance 0'
+}
+
+$AeSample = @"
+Interface               Admin Link Proto    Local                 Remote
+ge-0/0/1.0              up    up   aenet    --> ae0.0
+ge-0/1/1.0              up    up   aenet    --> ae0.0
+ge-0/0/4.0              up    up   eth-switch
+ae0.0                   up    up   eth-switch
+"@
+$AeMap = ConvertFrom-JunosAeMembership -Text $AeSample
+Test-Case "show interfaces terse: both member links map to their bundle" {
+    $AeMap['ge-0/0/1'] -eq 'ae0' -and $AeMap['ge-0/1/1'] -eq 'ae0'
+}
+Test-Case "show interfaces terse: a non-member port is absent from the bundle map" {
+    -not $AeMap.ContainsKey('ge-0/0/4')
+}
+
+$ExtSample = @"
+Physical interface: ge-0/0/1, Enabled, Physical link is Up
+  Interface index: 675, SNMP ifIndex: 513, Generation: 168
+  Description: WORKSTATION_PORT
+  Link-level type: Ethernet, MTU: 1514, LAN-PHY mode, Link-mode: Half-duplex, Speed: Auto, BPDU Error: None, Loopback: Disabled, Source filtering: Disabled, Flow control: Disabled, Auto-negotiation: Enabled, Remote fault: Online, Media type: Copper, Auto-MDIX: Enabled
+  Current address: aa:bb:cc:00:11:22, Hardware address: aa:bb:cc:00:11:22
+  Last flapped   : 2026-01-02 03:04:05 UTC (1w2d 03:04 ago)
+  Traffic statistics:
+   Input  bytes  :             12345678                40352 bps
+   Output bytes  :             87654321                52576 bps
+   IPv6 transit statistics:
+   Input  bytes  :                    0
+   Output bytes  :                    0
+  Input errors:
+    Errors: 1, Drops: 2, Framing errors: 3, Runts: 0, Policed discards: 0, L3 incompletes: 4, L2 channel errors: 0, L2 mismatch timeouts: 0, FIFO errors: 0, Resource errors: 0
+  Output errors:
+    Carrier transitions: 7, Errors: 0, Drops: 14635, Collisions: 5, Aged packets: 0, FIFO errors: 0, HS link CRC errors: 0, MTU errors: 0, Resource errors: 0
+  Egress queues: 12 supported, 8 in use
+  Queue counters:       Queued packets  Transmitted packets      Dropped packets
+    0                         31813303             31798668                14635
+    3                          2141336              2141336                    0
+  Autonegotiation information:
+    Negotiation status: Complete
+    Link partner:
+        Link mode: Full-duplex, Flow control: None, Remote fault: OK, Link partner Speed: 1000 Mbps
+    Local resolution:
+        Flow control: None, Remote fault: Link OK, Local link Speed: 100 Mbps, Link mode: Half-duplex
+  Active alarms  : None
+  Active defects : None
+
+Physical interface: et-0/1/0, Enabled, Physical link is Up
+  Type: 105, Link-level type: Virtual-Chassis-Interface, MTU: 1514, Clocking: Unspecified, Speed: 40000mbps
+  Link type      : Full-Duplex
+  Hardware address: aa:bb:cc:00:33:44
+  Input errors:
+    Errors: 0, Drops: 0, Framing errors: 0, Runts: 0, Giants: 9, Policed discards: 0, Resource errors: 0
+  Output errors:
+    Carrier transitions: 1, Errors: 0, Drops: 0, Aged packets: 0, Resource errors: 0
+  Active alarms  : None
+  Active defects : None
+"@
+$Ext = ConvertFrom-JunosInterfaceExtensive -Text $ExtSample
+
+Test-Case "show interfaces extensive: both blocks are keyed by physical port" {
+    $Ext.Count -eq 2 -and $Ext.ContainsKey('ge-0/0/1') -and $Ext.ContainsKey('et-0/1/0')
+}
+Test-Case "show interfaces extensive: MTU, media type and MAC are retained" {
+    $I = $Ext['ge-0/0/1']
+    $I.Mtu -eq 1514 -and $I.MediaType -eq 'Copper' -and $I.MacAddress -eq 'aa:bb:cc:00:11:22'
+}
+# The whole point of keeping both: a half-duplex local end against a full-duplex partner is the
+# classic one-sided-autoneg fault, and neither field alone shows it.
+Test-Case "show interfaces extensive: configured and negotiated speed are kept apart" {
+    $I = $Ext['ge-0/0/1']
+    $I.SpeedConfigured -eq 'Auto' -and $I.SpeedNegotiated -eq '1000 Mbps'
+}
+Test-Case "show interfaces extensive: local duplex comes from Link-mode, the partner's from its own stanza" {
+    $I = $Ext['ge-0/0/1']
+    $I.Duplex -eq 'Half-duplex' -and $I.DuplexNegotiated -eq 'Full-duplex'
+}
+Test-Case "show interfaces extensive: auto-negotiation state is retained" {
+    $Ext['ge-0/0/1'].AutoNegotiation -eq 'Enabled' -and $Ext['ge-0/0/1'].NegotiationStatus -eq 'Complete'
+}
+# The IPv6 transit block repeats the same four labels with zeroes directly below.
+Test-Case "show interfaces extensive: traffic counters come from the physical block, not IPv6 transit" {
+    $I = $Ext['ge-0/0/1']
+    $I.InputBytes -eq 12345678 -and $I.OutputBytes -eq 87654321 -and $I.InputBps -eq 40352
+}
+Test-Case "show interfaces extensive: error counters are keyed by label" {
+    $I = $Ext['ge-0/0/1']
+    $I.InputErrors['Framing errors'] -eq 3 -and $I.InputErrors['L3 incompletes'] -eq 4 -and $I.OutputErrors['Drops'] -eq 14635
+}
+Test-Case "show interfaces extensive: carrier transitions are promoted out of the output-error block" {
+    $Ext['ge-0/0/1'].CarrierTransitions -eq 7
+}
+# The sections below the error stanza (queue counters, LACP and MACsec tables) are indented at least
+# as deeply, so consuming every indented line invented counters out of their column headings.
+Test-Case "show interfaces extensive: the error stanza stops before the queue-counter table" {
+    $I = $Ext['ge-0/0/1']
+    $I.OutputErrors.Count -eq 9 -and -not $I.OutputErrors.ContainsKey('Egress queues') -and
+        -not $I.OutputErrors.ContainsKey('Queue counters')
+}
+# Blocks whose own field line has no Speed must not borrow "Link partner Speed" from the autoneg stanza.
+Test-Case "show interfaces extensive: the configured speed is never taken from the link partner" {
+    $Ext['ge-0/0/1'].SpeedConfigured -ne '1000 Mbps'
+}
+# A VCP block has Giants where an access port has Collisions: parsing by position would swap them.
+Test-Case "show interfaces extensive: a VCP block's differing error fields land under their own names" {
+    $I = $Ext['et-0/1/0']
+    $I.InputErrors['Giants'] -eq 9 -and -not $I.OutputErrors.ContainsKey('Collisions')
+}
+Test-Case "show interfaces extensive: a VCP block takes duplex from its separate Link type line" {
+    $Ext['et-0/1/0'].Duplex -eq 'Full-Duplex' -and $Ext['et-0/1/0'].SpeedConfigured -eq '40000mbps'
+}
+Test-Case "show interfaces extensive: a block with no autonegotiation stanza leaves those fields null" {
+    $null -eq $Ext['et-0/1/0'].SpeedNegotiated -and $null -eq $Ext['et-0/1/0'].DuplexNegotiated
+}
+Test-Case "show interfaces extensive: admin and link state come off the header line" {
+    $Ext['ge-0/0/1'].AdminStatus -eq 'Enabled' -and $Ext['ge-0/0/1'].LinkStatus -eq 'Up'
+}
+
+Test-Case "the parsers return empty rather than throwing on absent output" {
+    @(ConvertFrom-JunosVlanTable -Text $null).Count -eq 0 -and
+    (ConvertFrom-JunosStpInterface -Text '').Count -eq 0 -and
+    (ConvertFrom-JunosInterfaceExtensive -Text $null).Count -eq 0 -and
+    (ConvertFrom-JunosAeMembership -Text '').Count -eq 0
+}
+
+# The ARP Interface column is the only per-IP statement of which L3 interface an address lives on.
+$ArpRegexMatch = [regex]::Match($JunosNodeDataSrc, '\$Line\s+-match\s+"((?:[^"\\]|\\.)*iface(?:[^"\\]|\\.)*)"')
+if (-not $ArpRegexMatch.Success) {
+    Write-Host "[FAIL] Could not locate the ARP table regex in Get-JunosNodeData.ps1" -ForegroundColor Red
+    $script:Total++
+} else {
+    $ArpPattern = $ArpRegexMatch.Groups[1].Value -replace '`', ''
+    Test-Case "ARP: the L3 interface and bracketed physical port are both captured" {
+        $M = [regex]::Match('aa:bb:cc:00:11:22 10.20.30.40    irb.188 [ge-0/2/0.0]     none', $ArpPattern)
+        $M.Success -and $M.Groups['iface'].Value -eq 'irb.188' -and $M.Groups['phys'].Value -eq 'ge-0/2/0.0'
+    }
+    Test-Case "ARP: an entry with no bracketed port still parses" {
+        $M = [regex]::Match('aa:bb:cc:00:11:33 10.20.30.41    bme0.0                   permanent', $ArpPattern)
+        $M.Success -and $M.Groups['iface'].Value -eq 'bme0.0' -and -not $M.Groups['phys'].Success
+    }
 }
 
 Write-Host "`n============================================" -ForegroundColor Cyan

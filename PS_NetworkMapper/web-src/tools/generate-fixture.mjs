@@ -269,7 +269,7 @@ function blankNode(deviceIp) {
         StackMembers: [], Neighbors: [], Clients: [], ArpEntries: [], Interfaces: [],
         Uptime: 'Unknown', LastConfigured: 'Unknown', LastConfiguredBy: 'Unknown', Alarms: [],
         MasterCpuUtilization: 'Unknown', MasterMemoryUtilization: 'Unknown', MedNeighbors: [],
-        Configuration: 'Unknown', ScanStatus: 'Ok', ScanError: null,
+        Configuration: 'Unknown', ScanStatus: 'Ok', ScanError: null, Vlans: [],
     };
 }
 
