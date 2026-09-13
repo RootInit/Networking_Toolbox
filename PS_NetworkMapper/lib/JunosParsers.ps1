@@ -549,3 +549,137 @@ function ConvertFrom-JunosPoeInterface {
     }
     return $ByPort
 }
+
+# R9. The default route in full, not just its next-hop address.
+#
+# Gateway = "Unknown" currently means two different things: there is no default route, or there is
+# one in a shape the regex missed. Those need different answers from an operator, so an unmatched
+# but non-empty section reports the "Unparsed" sentinel instead.
+function ConvertFrom-JunosDefaultRoute {
+    param([string]$Text)
+
+    $Route = [ordered]@{
+        Table = $null; Destination = $null; Protocol = $null; Preference = $null
+        NextHop = $null; EgressInterface = $null; State = 'NoSection'
+    }
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Route }
+    $Route.State = 'Unparsed'
+
+    if ($Text -match '(?m)^(?<table>\S+\.\d+):\s+\d+\s+destinations') { $Route.Table = $Matches.table }
+    # "0.0.0.0/0          *[Static/5] 1w2d 03:04:05" - the protocol and preference share one bracket.
+    if ($Text -match '(?m)^(?<dest>\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})\s+[*+-]*\[(?<proto>[^/\]]+)(?:/(?<pref>\d+))?\]') {
+        $Route.Destination = $Matches.dest
+        $Route.Protocol = $Matches.proto.Trim()
+        if ($Matches.pref) { $Route.Preference = [int]$Matches.pref }
+    }
+    # The next hop sits on its own continuation line: ">  to 10.0.0.1 via irb.188".
+    if ($Text -match '(?im)to\s+(?<gw>\d{1,3}(?:\.\d{1,3}){3})\s+via\s+(?<iface>\S+)') {
+        $Route.NextHop = $Matches.gw
+        $Route.EgressInterface = $Matches.iface.TrimEnd(',')
+    }
+    if ($Route.NextHop -or $Route.Destination) { $Route.State = 'Parsed' }
+    return $Route
+}
+
+# R11. Virtual-chassis members with the Status column and the Neighbor List continuation rows.
+#
+# Status is what says a member dropped out - "Prsnt" against "NotPrsnt" - and the existing parse
+# discarded it, so a stack missing a member looked identical to a healthy one. The neighbour rows
+# wrap: a member with two VCP links puts the second on its own line carrying only the trailing two
+# columns, which the member-row pattern must not swallow.
+function ConvertFrom-JunosVirtualChassis {
+    param([string]$Text)
+
+    $Members = @()
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Members }
+
+    $Current = $null
+    foreach ($Line in ($Text -split "`r?`n")) {
+        if ($Line -match '^\s*(?<id>\d+)\s+\(FPC\s+(?<fpc>\d+)\)\s+(?<status>\S+)\s+(?<serial>\S+)\s+(?<model>\S+)\s+(?<prio>\d+)\s+(?<role>\S+)(?<tail>.*)$') {
+            $Role = $Matches.role
+            $Current = [PSCustomObject]@{
+                MemberId     = $Matches.id
+                FPC          = $Matches.fpc
+                # "Prsnt" / "NotPrsnt" - the only statement that a configured member is actually there.
+                Status       = $Matches.status
+                Serial       = $Matches.serial
+                Model        = $Matches.model
+                MasterPriority = [int]$Matches.prio
+                # Junos marks the member that answered with a trailing "*".
+                Role         = $Role.TrimEnd('*')
+                IsMaster     = $Role.EndsWith('*')
+                NeighborList = @()
+            }
+            $Tail = $Matches.tail
+            if ($Tail -match '(?<nid>\d+)\s+(?<iface>(?:vcp|ge|xe|et)[\w\-/.:]+)\s*$') {
+                $Current.NeighborList += [PSCustomObject]@{ MemberId = $Matches.nid; Interface = $Matches.iface }
+            }
+            $Members += $Current
+            continue
+        }
+        # A continuation row carries only "<neighbour id>  <vcp interface>". It must be attached to
+        # the member above it, never parsed as a member of its own - after trimming it also starts
+        # with a digit, which is what made it look like one.
+        if ($Current -and $Line -match '^\s+(?<nid>\d+)\s+(?<iface>(?:vcp|ge|xe|et)[\w\-/.:]+)\s*$') {
+            $Current.NeighborList += [PSCustomObject]@{ MemberId = $Matches.nid; Interface = $Matches.iface }
+        }
+    }
+    return $Members
+}
+
+# R8. "show chassis hardware" as FPC -> PIC -> Xcvr.
+#
+# The absence of an Xcvr row under a PIC is the only reliable "nothing is plugged in" signal for a
+# fibre port: a cage with no optic reports link down exactly like a cage with a dead optic.
+#
+# Parsed by the header's own column offsets rather than by splitting on whitespace: Version is
+# "REV 12" (two words) and Description is free text, so field-counting mis-assigns both.
+function ConvertFrom-JunosChassisHardware {
+    param([string]$Text)
+
+    $Items = @()
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Items }
+
+    $Lines = $Text -split "`r?`n"
+    $Offsets = $null
+    foreach ($Line in $Lines) {
+        if ($Line -match '^Item\s+Version\s+Part number\s+Serial number\s+Description') {
+            $Offsets = [ordered]@{}
+            foreach ($Col in 'Item', 'Version', 'Part number', 'Serial number', 'Description') {
+                $Offsets[$Col] = $Line.IndexOf($Col)
+            }
+            break
+        }
+    }
+    if (-not $Offsets) { return $Items }
+
+    function Get-Field {
+        param([string]$Line, [int]$Start, [int]$End)
+        if ($Start -lt 0 -or $Start -ge $Line.Length) { return $null }
+        $Stop = if ($End -lt 0 -or $End -gt $Line.Length) { $Line.Length } else { $End }
+        if ($Stop -le $Start) { return $null }
+        $V = $Line.Substring($Start, $Stop - $Start).Trim()
+        if ([string]::IsNullOrWhiteSpace($V)) { return $null }
+        return $V
+    }
+
+    $Names = @($Offsets.Keys)
+    foreach ($Line in $Lines) {
+        if ($Line -match '^Item\s+Version' -or [string]::IsNullOrWhiteSpace($Line)) { continue }
+        if ($Line -match '^\s*Hardware inventory') { continue }
+        $Item = Get-Field -Line $Line -Start $Offsets['Item'] -End $Offsets['Version']
+        if (-not $Item) { continue }
+        # Indentation is the hierarchy: FPC at column 0, PIC two in, Xcvr four in.
+        $Indent = $Line.Length - $Line.TrimStart().Length
+        $Items += [PSCustomObject]@{
+            Item        = $Item
+            Indent      = $Indent
+            Level       = [int]([math]::Floor($Indent / 2))
+            Version     = Get-Field -Line $Line -Start $Offsets['Version'] -End $Offsets['Part number']
+            PartNumber  = Get-Field -Line $Line -Start $Offsets['Part number'] -End $Offsets['Serial number']
+            Serial      = Get-Field -Line $Line -Start $Offsets['Serial number'] -End $Offsets['Description']
+            Description = Get-Field -Line $Line -Start $Offsets['Description'] -End -1
+        }
+    }
+    return $Items
+}

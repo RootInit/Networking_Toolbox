@@ -125,6 +125,7 @@ function Invoke-FleetCrawl {
             # Both empty by definition: this node exists because the device produced nothing, so no
             # section was captured and there is no capture instant to record.
             MacTable = @(); SectionsCaptured = @(); CaptureTimestamp = $null
+            DefaultRoute = @{}; ChassisInventory = @()
             ScanStatus = $Status
             ScanError  = $ScanErrorText
         }

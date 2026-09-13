@@ -1725,6 +1725,102 @@ Test-Case "R7: the two-line column header is not parsed as a port" {
     -not $Poe.ContainsKey('Interface') -and $Poe.Count -eq 3
 }
 
+Write-Host "`n--- 16. Route, virtual chassis and chassis inventory (R9, R11, R8) ---" -ForegroundColor Cyan
+
+# Documentation addresses only (RFC 5737 / RFC 1918); no fixture in this repo carries a real one.
+$RouteText = @"
+inet.0: 42 destinations, 43 routes (42 active, 0 holddown, 0 hidden)
+Limit/Threshold: 10000/10000 destinations
++ = Active Route, - = Last Active, * = Both
+
+0.0.0.0/0          *[Static/5] 1w2d 03:04:05
+                    >  to 192.0.2.1 via irb.188
+"@
+
+$Route = ConvertFrom-JunosDefaultRoute -Text $RouteText
+Test-Case "R9: the egress interface, protocol, preference and table all survive" {
+    $Route.EgressInterface -eq 'irb.188' -and $Route.Protocol -eq 'Static' -and
+        $Route.Preference -eq 5 -and $Route.Table -eq 'inet.0' -and $Route.Destination -eq '0.0.0.0/0'
+}
+Test-Case "R9: a section that was never captured reads NoSection" {
+    (ConvertFrom-JunosDefaultRoute -Text '').State -eq 'NoSection'
+}
+Test-Case "R9: a captured section in an unrecognized shape reads Unparsed, not NoSection" {
+    # The distinction Gateway = "Unknown" used to swallow: no default route versus a parser miss.
+    (ConvertFrom-JunosDefaultRoute -Text "inet.0: 1 destinations`nsomething we do not understand").State -eq 'Unparsed'
+}
+Test-Case "R9: the worker reports Unparsed rather than leaving Gateway at Unknown" {
+    $JunosNodeDataSrc -match "Gateway = ""Unparsed"""
+}
+
+# The Neighbor List wraps: a member with two VCP links puts the second on its own line carrying only
+# the trailing two columns. After trimming that row also starts with a digit, which is exactly why
+# the previous inline parse could not tell it from a member row.
+$VcText = @"
+Preprovisioned Virtual Chassis
+Virtual Chassis ID: 1b23.4567.8d90
+                                                Mstr           Mixed Route Neighbor List
+Member ID  Status   Serial No    Model          prio  Role      Mode  Mode ID  Interface
+0 (FPC 0)  Prsnt    AA0000000001 ex3400-48p     129   Backup       N  VC   1  vcp-255/1/0
+                                                                           1  vcp-255/1/1
+1 (FPC 1)  NotPrsnt BB0000000002 ex3400-24p     129   Master*      N  VC   0  vcp-255/1/0
+"@
+
+$Vc = @(ConvertFrom-JunosVirtualChassis -Text $VcText)
+Test-Case "R11: a member that dropped out is visible through the Status column" {
+    $Vc.Count -eq 2 -and $Vc[0].Status -eq 'Prsnt' -and $Vc[1].Status -eq 'NotPrsnt'
+}
+Test-Case "R11: a wrapped Neighbor List row attaches to its member, not a new one" {
+    @($Vc[0].NeighborList).Count -eq 2 -and @($Vc[1].NeighborList).Count -eq 1 -and
+        @($Vc[0].NeighborList)[1].Interface -eq 'vcp-255/1/1'
+}
+Test-Case "R11: the master marker is read off the role and stripped from it" {
+    $Vc[1].IsMaster -and $Vc[1].Role -eq 'Master' -and -not $Vc[0].IsMaster -and $Vc[0].Role -eq 'Backup'
+}
+Test-Case "R11: no members parsed from text that has no member table" {
+    @(ConvertFrom-JunosVirtualChassis -Text "Virtual Chassis Mode: Disabled").Count -eq 0
+}
+
+# Fixed-width: Version is "REV 19" (two words) and Description is free text, so the parser reads the
+# header's column offsets rather than splitting on whitespace.
+$HwText = @"
+Hardware inventory:
+Item             Version  Part number  Serial number     Description
+Chassis                                AA0000000001      Virtual Chassis
+Routing Engine 0          BUILTIN      BUILTIN           RE-EX3400-48P
+FPC 0            REV 19   650-059857   BB0000000002      EX3400-48P-TAA
+  CPU                     BUILTIN      BUILTIN           FPC CPU
+  PIC 1          REV 19   650-059857   BB0000000002      2x40G QSFP
+    Xcvr 0       REV 01   740-044512   CC0000000003      QSFP+-40G-CU50CM
+  PIC 2          REV 19   650-059857   BB0000000002      4x10G SFP/SFP+
+"@
+
+$Hw = @(ConvertFrom-JunosChassisHardware -Text $HwText)
+Test-Case "R8: a two-word Version is not mistaken for a Part number" {
+    $Fpc = @($Hw | Where-Object { $_.Item -eq 'FPC 0' })[0]
+    $Fpc.Version -eq 'REV 19' -and $Fpc.PartNumber -eq '650-059857' -and $Fpc.Description -eq 'EX3400-48P-TAA'
+}
+Test-Case "R8: a multi-word Description survives intact" {
+    @($Hw | Where-Object { $_.Item -eq 'PIC 2' })[0].Description -eq '4x10G SFP/SFP+'
+}
+Test-Case "R8: indentation gives the FPC / PIC / Xcvr hierarchy" {
+    @($Hw | Where-Object { $_.Item -eq 'FPC 0' })[0].Level -eq 0 -and
+        @($Hw | Where-Object { $_.Item -eq 'PIC 1' })[0].Level -eq 1 -and
+        @($Hw | Where-Object { $_.Item -eq 'Xcvr 0' })[0].Level -eq 2
+}
+Test-Case "R8: a PIC with no Xcvr beneath it is distinguishable from one with an optic" {
+    # The empty-cage signal: PIC 1 has an Xcvr, PIC 2 has none, and nothing else in the scan says so.
+    $Idx1 = [array]::IndexOf(@($Hw | ForEach-Object { $_.Item }), 'PIC 1')
+    $Idx2 = [array]::IndexOf(@($Hw | ForEach-Object { $_.Item }), 'PIC 2')
+    $Hw[$Idx1 + 1].Item -eq 'Xcvr 0' -and ($Idx2 -eq $Hw.Count - 1)
+}
+Test-Case "R8: an empty column reads null rather than an empty string" {
+    @($Hw | Where-Object { $_.Item -eq 'Chassis' })[0].Version -eq $null
+}
+Test-Case "R8: text with no inventory header yields nothing rather than guessing" {
+    @(ConvertFrom-JunosChassisHardware -Text "some other command output").Count -eq 0
+}
+
 Write-Host "`n--- 13. Get-JunosCapturedSections (R15) ---" -ForegroundColor Cyan
 
 # The truncation signal for section 2.4's integrity gate: a cut-off session reports no error, it just

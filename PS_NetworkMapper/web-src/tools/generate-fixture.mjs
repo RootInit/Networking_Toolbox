@@ -272,6 +272,8 @@ function blankNode(deviceIp) {
         Configuration: 'Unknown', ScanStatus: 'Ok', ScanError: null, Vlans: [],
         // R15/R12/R3. All empty on a node that never answered, as New-PlaceholderNodeLocal has them.
         SectionsCaptured: [], CaptureTimestamp: null, MacTable: [],
+        // R9/R8. A node that never answered has no route and no inventory to report.
+        DefaultRoute: {}, ChassisInventory: [],
     };
 }
 
@@ -330,6 +332,24 @@ function stampCapture(node, scanTime) {
     // ScanTimestamp is too coarse to compare counters or last-seen times across devices.
     node.CaptureTimestamp = new Date(scanTime.getTime() - int(0, 14 * 60000)).toISOString();
     node.MacTable = buildMacTable(node);
+    // R9. Every scanned device reached its gateway, so the route parsed; "Unparsed" is the state a
+    // parser bug produces, not something a healthy fixture should claim.
+    node.DefaultRoute = {
+        Table: 'inet.0', Destination: '0.0.0.0/0', Protocol: 'Static', Preference: 5,
+        NextHop: node.Gateway, EgressInterface: 'irb.100', State: 'Parsed',
+    };
+    // R8. One PIC per stack member, and a cage with no Xcvr beneath it - the empty-cage case is the
+    // whole reason the inventory is worth keeping.
+    node.ChassisInventory = (node.StackMembers || []).flatMap((m, i) => {
+        const rows = [
+            { Item: `FPC ${m.FPC}`, Indent: 0, Level: 0, Version: 'REV 19', PartNumber: '650-059857', Serial: m.Serial, Description: m.Model },
+            { Item: 'PIC 0', Indent: 2, Level: 1, Version: 'REV 19', PartNumber: 'BUILTIN', Serial: 'BUILTIN', Description: '48x10/100/1000 Base-T' },
+            { Item: 'PIC 1', Indent: 2, Level: 1, Version: 'REV 19', PartNumber: '650-059857', Serial: m.Serial, Description: '4x10G SFP/SFP+' },
+        ];
+        // Half the uplink cages are populated; the rest are empty, which is what an absent Xcvr means.
+        if (i === 0) rows.push({ Item: 'Xcvr 0', Indent: 4, Level: 2, Version: 'REV 01', PartNumber: '740-021309', Serial: `AM${1000 + i}WDF1`, Description: 'SFP-SX' });
+        return rows;
+    });
     const dropped = chance(0.07) ? int(1, 3) : 0;
     node.SectionsCaptured = CAPTURE_SECTIONS.slice(0, CAPTURE_SECTIONS.length - dropped);
     for (const name of CAPTURE_SECTIONS.slice(CAPTURE_SECTIONS.length - dropped)) {
@@ -390,6 +410,12 @@ function makeDevice({ deviceIp, bldg, seq, models, role, gateway }) {
         Model: model,
         Serial: nextSerial(),
         Role: models.length === 1 ? 'Standalone' : i === 0 ? 'Master' : i === 1 ? 'Backup' : 'Linecard',
+        // R11. Status is what distinguishes a configured member that is actually there from one that
+        // dropped out; without it a degraded stack looked identical to a healthy one.
+        Status: 'Prsnt',
+        MasterPriority: models.length === 1 ? null : 129,
+        IsMaster: i === 0,
+        NeighborList: models.length === 1 ? [] : [{ MemberId: String((i + 1) % models.length), Interface: `vcp-255/1/${i}` }],
     }));
     node.MasterCpuUtilization = cpuValue();
     node.MasterMemoryUtilization = memValue();

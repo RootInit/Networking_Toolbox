@@ -211,6 +211,12 @@ $NodeData = @{
     # just stops, so the later sections are simply absent, and this list is what tells "no LLDP
     # neighbours here" apart from "never got as far as asking". Read it through asArray(): an empty
     # array serializes as null and a single entry as a bare string, per this project's convention.
+    # R9. The default route in full. Gateway below stays the next-hop address for existing consumers;
+    # this is what tells "no default route" apart from "a default route we failed to read".
+    DefaultRoute = @{}
+    # R8. FPC -> PIC -> Xcvr inventory. A PIC with no Xcvr row underneath is the only reliable way to
+    # say nothing is plugged into a fibre cage.
+    ChassisInventory = @()
     # R3. Every row of the switching table, not the MAC-keyed collapse Clients needs. Duplicate-MAC
     # and sticky-MAC detection and transit sightings all need the rows Clients throws away.
     MacTable = @()
@@ -327,29 +333,21 @@ try {
     # Config backup is stored verbatim; redacted from RawDumps - see Save-RawDump.
     if (-not [string]::IsNullOrWhiteSpace($DataDict["CONFIG"])) { $NodeData.Configuration = $DataDict["CONFIG"].Trim() }
     
+    # R11. The member rows in full, including the Status column that says whether a configured member
+    # is actually present, and the wrapped Neighbor List rows. The previous inline loop matched
+    # "^<digits>" after trimming, which a continuation row also satisfies - it was saved only by the
+    # serial check rejecting them, so a second VCP link was silently unrepresentable.
     $ParsedStack = $false
-    if ($DataDict["VIRTUAL_CHASSIS"] -match "Member ID") {
-        foreach ($Line in ($DataDict["VIRTUAL_CHASSIS"] -split "`n")) {
-            $Line = $Line.Trim()
-            if ($Line -match "^(?<id>\d+)\s+") {
-                # Captured before the -match calls below overwrite $Matches.
-                $fpcId = $Matches.id
-
-                $role = "Unknown"
-                if ($Line -match "(Master|Backup|Linecard)") { $role = $Matches[1] }
-
-                $serial = "Unknown"
-                if ($Line -match "\b([A-Z0-9]{10,})\b") { $serial = $Matches[1] }
-
-                $model = "Unknown"
-                if ($Line -match "(?i)\b(ex\d{4}[^\s]*|qfx\d{4}[^\s]*|srx\d{4}[^\s]*)\b") { $model = $Matches[1] }
-
-                if ($serial -ne "Unknown") {
-                    $NodeData.StackMembers += [PSCustomObject]@{ FPC = $fpcId; Model = $model; Serial = $serial; Role = $role }
-                    $ParsedStack = $true
-                }
+    $VcMembers = @(ConvertFrom-JunosVirtualChassis -Text $DataDict["VIRTUAL_CHASSIS"])
+    if ($VcMembers.Count -gt 0) {
+        $NodeData.StackMembers = $VcMembers | ForEach-Object {
+            [PSCustomObject]@{
+                FPC = $_.FPC; Model = $_.Model; Serial = $_.Serial; Role = $_.Role
+                Status = $_.Status; MasterPriority = $_.MasterPriority; IsMaster = $_.IsMaster
+                NeighborList = @($_.NeighborList)
             }
         }
+        $ParsedStack = $true
     } 
     
     if (-not $ParsedStack) {
@@ -358,11 +356,25 @@ try {
             $ChassisSerial = $Matches.serial
             $ChassisModel = $Matches.model.Trim()
             if ($ChassisModel -match "(?i)^virtual\s+chassis$") { $ChassisModel = "Unknown" }
-            $NodeData.StackMembers += [PSCustomObject]@{ FPC = "0"; Model = $ChassisModel; Serial = $ChassisSerial; Role = "Standalone" }
+            $NodeData.StackMembers += [PSCustomObject]@{
+                FPC = "0"; Model = $ChassisModel; Serial = $ChassisSerial; Role = "Standalone"
+                # Same shape as the VC path: a standalone box is present by definition, is its own
+                # master, and has no VC neighbours.
+                Status = "Prsnt"; MasterPriority = $null; IsMaster = $true; NeighborList = @()
+            }
         }
     }
 
-    if ($DataDict["ROUTE"] -match "to\s+(?<gw>\b(?:\d{1,3}\.){3}\d{1,3}\b)\s+via") { $NodeData.Gateway = $Matches.gw }
+    $NodeData.DefaultRoute = ConvertFrom-JunosDefaultRoute -Text $DataDict["ROUTE"]
+    if ($NodeData.DefaultRoute.NextHop) {
+        $NodeData.Gateway = $NodeData.DefaultRoute.NextHop
+    } elseif ($NodeData.DefaultRoute.State -eq 'Unparsed') {
+        # Distinct from "Unknown": the switch answered and we could not read it, which is a parser
+        # bug to chase rather than a device with no default route.
+        $NodeData.Gateway = "Unparsed"
+    }
+
+    $NodeData.ChassisInventory = @(ConvertFrom-JunosChassisHardware -Text $DataDict["CHASSIS_HARDWARE"])
 
     if ($UptimeScope -match "(?i)System booted:\s*(?<boot>[^\(\r\n]+)") { $NodeData.Uptime = $Matches.boot.Trim() }
     if ($UptimeScope -match "(?i)Last configured:\s*(?<cfg>[^\(\r\n]+?)\s*\([^\)]*\)\s*by\s+(?<user>\S+)") {
