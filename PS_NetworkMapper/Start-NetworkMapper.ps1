@@ -14,6 +14,14 @@ param (
     [int]$WebPort = 8787
 )
 
+# A fleet crawl holds the whole topology as live objects - roughly 1.5 GB of object graph at 350
+# devices - plus the serialized snapshot while it writes. A 32-bit host runs out of address space
+# long before it runs out of RAM, and the failure arrives as an OutOfMemoryException hours in, with
+# the crawl lost. Fail up front instead.
+if (-not [Environment]::Is64BitProcess) {
+    throw "PS_NetworkMapper requires 64-bit PowerShell. This process is 32-bit; relaunch with $env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe (SysWOW64 is the 32-bit one)."
+}
+
 $ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { $PWD }
 $WorkerPath = Join-Path $ScriptDir "lib\Get-JunosNodeData.ps1"
 $ConnectScriptPath = Join-Path $ScriptDir "lib\Connect-Switch.ps1"
@@ -186,7 +194,10 @@ if (-not $NoEncryption -and -not $EncKeyBytes) {
 }
 
 $CrawlProgress = @{}  # unused by the CLI path - passed only because Invoke-FleetCrawl requires it
-$CrawlResult = Invoke-FleetCrawl -StartIP $SwitchIP -AllowedScopes $AllowedScopes -MaxConcurrent $MaxConcurrent `
+# Discarded, not captured: the return value carries the entire topology as live objects, and
+# Start-MapperWebServer below blocks until Ctrl+C. Holding it would keep ~1.5 GB resident for the
+# whole server session to no purpose - the server reads snapshots back from disk.
+$null = Invoke-FleetCrawl -StartIP $SwitchIP -AllowedScopes $AllowedScopes -MaxConcurrent $MaxConcurrent `
     -WorkerPath $WorkerPath -Username $JunosUsername -Password $JunosPassword `
     -SnapshotDir $SnapshotDir -ProgressTable $CrawlProgress `
     -EncKey $EncKeyBytes -MacKey $MacKeyBytes -Salt $SaltBytes -Iterations $PBKDF2_ITERATIONS `

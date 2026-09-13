@@ -872,6 +872,17 @@ Test-Case "Start-NetworkMapper.ps1 declares no -AllowedScopes parameter" {
 Test-Case "Start-NetworkMapper.ps1 refuses to crawl with no scope configured" {
     $StartScriptSrc -match '\$AllowedScopes\.Count -eq 0'
 }
+# A 32-bit host dies of address space, not RAM, hours into a crawl. Verified against the real
+# SysWOW64 shell on the 5.1 VM; here we can only assert the guard exists and precedes the work.
+Test-Case "the launcher refuses a 32-bit host before it starts crawling or serving" {
+    $StartScriptSrc -match 'Is64BitProcess' -and
+        ($StartScriptSrc -split 'Is64BitProcess', 2)[0] -notmatch 'Invoke-FleetCrawl|Start-MapperWebServer'
+}
+# The crawl's return value is the whole topology as live objects; Start-MapperWebServer then blocks
+# until Ctrl+C, so capturing it would pin ~1.5 GB for the entire server session.
+Test-Case "the CLI does not retain the crawl's topology across the web server's lifetime" {
+    $StartScriptSrc -match '(?m)^\$null = Invoke-FleetCrawl'
+}
 # The symptom the operator actually saw.
 $PollResponse = New-MockResponse
 Invoke-ScanNetworkStatusAction -Response $PollResponse
