@@ -1952,7 +1952,7 @@ Media endpoint class: Class III Device
 Organization Info
         OUI      : 00-12-bb (TIA)
         Subtype  : MED Hardware revision (5)
-        Info     : CT4100-A1
+        Info     : STANZA-VALUE
         Index    : 4
 MED Hardware revision : CT4100-A1
 MED Software revision : 6.8.5
@@ -2025,8 +2025,9 @@ Test-Case "R13: a switch neighbour reports no MED inventory at all" {
 # An "Organization Info" stanza can name a MED subtype and carry the value in Info; reading that as the
 # inventory would pick up whichever stanza happened to come first.
 Test-Case "R13: the inventory comes from the MED lines, not from an Organization Info subtype" {
-    $PhoneMed.HardwareRevision -eq 'CT4100-A1' -and
-        $PhoneMed.HardwareRevision -ne 'CT4100-A1 from Organization Info'
+    # The stanza names the same subtype and carries a different value, so reading the stanza instead
+    # of the MED line is visible here rather than hidden by the two agreeing.
+    $PhoneMed.HardwareRevision -eq 'CT4100-A1'
 }
 
 # R5. Gated on a positive Bridge/Router capability, never on the absence of an address.

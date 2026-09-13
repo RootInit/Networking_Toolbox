@@ -615,9 +615,6 @@ try {
         $Neigh = @{
             LocalPort = "Unknown"; RemotePort = "Unknown"; Hostname = "Unknown"
             MacAddress = "Unknown"; ManagementIP = "Unknown"; Description = "Unknown"
-            # R5. $false on a neighbour recorded from its Bridge/Router capability alone, with no
-            # management address to scan. Consumers that resolve a neighbour to a device must skip these.
-            Reachable = $true
             # R2. The 802.3 TLVs, raw: the far end's autonegotiation, MTU and PoE state, readable
             # without scanning the peer - which is the only way to get it for an unreachable one.
             OrgInfo = @(ConvertFrom-JunosLldpOrgInfo -Block $Block)
@@ -643,6 +640,8 @@ try {
         if ($Block -match "(?i)System Description\s*:\s*(?<desc>[^\r\n]+)") { $Neigh.Description = $Matches.desc.Trim() }
 
         $HasManagementIp = $Neigh.ManagementIP -ne "Unknown" -and $Neigh.ManagementIP -ne $TargetIP -and $Neigh.ManagementIP -ne "0.0.0.0"
+        # R5. $false on a neighbour recorded from its Bridge/Router capability alone, with no management
+        # address to scan. Consumers that resolve a neighbour to a device must skip these.
         $Neigh.Reachable = $HasManagementIp
 
         if ($IsMedEndpoint) {
