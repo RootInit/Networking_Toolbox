@@ -30,6 +30,18 @@
 
 .EXAMPLE
     .\Run-AllTests.ps1
+
+.EXAMPLE
+    # On a host without git, naming the commit the files were copied from:
+    .\Run-AllTests.ps1 -Commit 7157bb4
+
+.NOTES
+    The ledger is JSON-per-line so entries from different hosts merge by concatenation - to see one
+    commit's coverage across machines, append the other host's lines to this host's ledger:
+
+        Get-Content \\vm\share\runs.jsonl | Add-Content .\test-results\runs.jsonl
+
+    Nothing reconciles them automatically; the ledger only reports what has been appended to it.
 #>
 [CmdletBinding()]
 param(
@@ -217,6 +229,14 @@ if (Test-Path -LiteralPath $LedgerPath) {
         try { $Prior += ($Line | ConvertFrom-Json) } catch { }
     }
 }
+# ConvertFrom-Json turns an ISO 8601 string into a [datetime], which then renders in the host's
+# culture. Re-format so a ledger read back on any machine prints the timestamp it stored.
+function Format-LedgerTime {
+    param($Value)
+    if ($Value -is [datetime]) { return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+    return [string]$Value
+}
+
 $ForCommit = @()
 if ($Commit -ne 'unknown') {
     $ForCommit = @($Prior | Where-Object { $_.commit -eq $Commit -and -not $_.dirty })
@@ -236,13 +256,13 @@ if ($Dirty) {
     Write-Host ("  Coverage for commit {0}, across all hosts that have reported:" -f $Commit)
     if ($PsOn51.Count -gt 0) {
         $W = $PsOn51[-1]
-        Write-Host ("    [ok] PowerShell verified on 5.1  ({0}, {1}, {2})" -f $W.host, $W.psVersion, $W.timestamp) -ForegroundColor Green
+        Write-Host ("    [ok] PowerShell verified on 5.1  ({0}, {1}, {2})" -f $W.host, $W.psVersion, (Format-LedgerTime $W.timestamp)) -ForegroundColor Green
     } else {
         Write-Host "    [--] PowerShell NOT yet verified on Windows PowerShell 5.1" -ForegroundColor Yellow
     }
     if ($JsAnywhere.Count -gt 0) {
         $W = $JsAnywhere[-1]
-        Write-Host ("    [ok] web-src suite passed        ({0}, {1})" -f $W.host, $W.timestamp) -ForegroundColor Green
+        Write-Host ("    [ok] web-src suite passed        ({0}, {1})" -f $W.host, (Format-LedgerTime $W.timestamp)) -ForegroundColor Green
     } else {
         Write-Host "    [--] web-src suite has not passed for this commit" -ForegroundColor Yellow
     }
