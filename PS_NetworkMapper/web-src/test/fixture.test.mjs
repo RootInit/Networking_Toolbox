@@ -534,16 +534,10 @@ test('a --out that is not a Network_Maps directory writes no Configuration.json'
 //
 // It fails usefully in BOTH directions: a new initializer field nobody accounted for widens the
 // gap, and filling one in narrows it. Either way this list is the thing to edit, deliberately.
-const ACCESS_ROW_GAP = [
-    'ActiveAlarms', 'ActiveDefects', 'AutoNegotiation', 'BpduError', 'Bundle', 'BundleMembers',
-    'CarrierTransitions', 'DeviceFlags', 'Dot1x', 'Duplex', 'DuplexNegotiated',
-    'EthernetSwitchingError', 'FecStatistics', 'InputBps', 'InputBytes', 'InputErrors',
-    'InputPackets', 'InterfaceFlags', 'LinkLevelType', 'LoopDetectPduError', 'MacAddress',
-    'MacRewriteError', 'MacStatistics', 'MediaType', 'Mtu', 'NegotiationStatus', 'OutputBps',
-    'OutputBytes', 'OutputErrors', 'OutputPackets', 'PcsStatistics', 'PoeAdminStatus',
-    'PoeClass', 'PoeMaxPower', 'PoeOperStatus', 'PoePairMode', 'PoePowerConsumption',
-    'PoePriority', 'RemoteFault', 'SpeedConfigured', 'SpeedNegotiated', 'StatisticsLastCleared',
-];
+// Closed 2026-09-13 with work order item 11: the L1 rules read these fields, so every one of them is
+// now emitted. The list stays as the mechanism - a new initializer field nobody accounted for lands
+// here and this test is what says so.
+const ACCESS_ROW_GAP = [];
 
 function interfaceInitializerKeys() {
     const source = fs.readFileSync(path.join(ROOT, 'lib', 'Get-JunosNodeData.ps1'), 'utf8');
@@ -635,6 +629,112 @@ test('VLAN membership is coherent: trunk ends agree, clients sit in VLANs their 
                         `${device.DeviceIP} ${member.Port} is active in VLAN ${vlan.Tag} while ${row.STP}`);
                 }
             }
+        }
+    }
+});
+
+// The same rule VLAN membership follows, for the same reason: autonegotiation state and frame size are
+// properties of the WIRE. Drawn per neighbour entry, a quarter of the clean fleet's links carried an
+// autoneg mismatch and nearly half an MTU mismatch - so the faults the injectors are supposed to be the
+// only source of were the fleet's normal state, and no two-ended rule could be tested against it.
+test('the two ends of a link agree about the wire, and about what each advertises for it', () => {
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+    const tlv = (entry, prefix) => (entry.OrgInfo || []).find(o => String(o.Subtype).startsWith(prefix));
+    const rowFor = (device, port) => device.Interfaces.find(r => r.Port === String(port).replace(/\.\d+$/, ''));
+    let links = 0;
+    const seen = new Set();
+    for (const device of topology) {
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            if (!peer) continue;
+            const back = peer.Neighbors.find(n => String(n.ManagementIP) === String(device.DeviceIP)
+                && String(n.RemotePort) === String(neighbor.LocalPort));
+            if (!back) continue;
+            const key = [`${device.DeviceIP}|${neighbor.LocalPort}`, `${peer.DeviceIP}|${back.LocalPort}`].sort().join('~');
+            if (seen.has(key)) continue;
+            seen.add(key);
+            links++;
+            assert.equal(tlv(neighbor, 'MAC/PHY').Info, tlv(back, 'MAC/PHY').Info,
+                `${device.DeviceIP} ${neighbor.LocalPort} and ${peer.DeviceIP} ${back.LocalPort} advertise different autoneg state`);
+            assert.equal(tlv(neighbor, 'Maximum Frame').Info, tlv(back, 'Maximum Frame').Info,
+                `${device.DeviceIP} ${neighbor.LocalPort} and ${peer.DeviceIP} ${back.LocalPort} advertise different frame sizes`);
+            // And each end's own fields say the same thing it advertises, which is what a rule compares.
+            for (const [dev, entry] of [[device, neighbor], [peer, back]]) {
+                if (!dev.SectionsCaptured.includes('INTERFACES_EXT')) continue;
+                const row = rowFor(dev, entry.LocalPort);
+                if (!row) continue;
+                const advertised = /not supported, disabled/.test(tlv(entry, 'MAC/PHY').Info) ? 'Disabled' : 'Enabled';
+                assert.equal(row.AutoNegotiation, advertised, `${dev.DeviceIP} ${row.Port} contradicts its own TLV`);
+                assert.equal(`MTU Size (${row.Mtu})`, tlv(entry, 'Maximum Frame').Info, `${dev.DeviceIP} ${row.Port} MTU`);
+            }
+        }
+    }
+    assert.ok(links > 50, `only ${links} symmetric links checked`);
+});
+
+// Section 3.4. The two traps are only testable if the fixture reproduces the states that spring them,
+// and section 8.2 requires the states to be coherent with the rest of the row while it does.
+test('the extensive-derived fields reproduce the states section 3.4 warns about', () => {
+    const rows = topology.filter(d => d.ScanStatus === 'Ok'
+        && d.SectionsCaptured.includes('INTERFACES_EXT')).flatMap(d => d.Interfaces);
+    assert.ok(rows.length > 1000, `only ${rows.length} rows with the extensive section`);
+    const up = rows.filter(r => r.Link === 'up');
+    const down = rows.filter(r => r.Link === 'down');
+    assert.ok(up.length > 100 && down.length > 100);
+
+    // Trap two: every DOWN port prints Half-duplex, so an ungated duplex rule fires on all of them.
+    assert.ok(down.every(r => r.Duplex === 'Half-duplex'), 'a down port reports Half-duplex');
+    assert.ok(up.every(r => r.Duplex === 'Full-duplex'), 'an up port reports Full-duplex');
+    // Trap three: LINK is noise on a down port and a real alarm on an up one.
+    assert.ok(down.every(r => r.ActiveAlarms === 'LINK'), 'a down port carries the LINK alarm');
+    assert.ok(up.every(r => r.ActiveAlarms === 'None'), 'no up port carries an alarm in a clean fleet');
+    // Trap one: Drops without Errors, on ports that are otherwise perfectly healthy.
+    const dropping = up.filter(r => r.OutputErrors.Drops > 0);
+    assert.ok(dropping.length > 20, `only ${dropping.length} ports carry output drops`);
+    assert.ok(dropping.every(r => r.OutputErrors.Errors === 0 && r.InputErrors.Errors === 0),
+        'drops are the output queue at work, not an error - a fixture pairing them teaches the wrong rule');
+
+    // Counters and the link state agree: a port that has never carried a frame has no traffic at all.
+    assert.ok(down.every(r => r.InputPackets === 0 && r.OutputPackets === 0 && r.CarrierTransitions === 0));
+    assert.ok(up.every(r => r.InputPackets > 0), 'an up port has carried something');
+    // R4's tables are keyed by the label the switch prints, with the columns the parser reads.
+    for (const row of up.slice(0, 50)) {
+        assert.ok(row.MacStatistics['CRC/Align errors'], 'the R4 table must carry the CRC row');
+        assert.deepEqual(Object.keys(row.MacStatistics['Total packets']), ['Receive', 'Transmit']);
+        // A Receive-only row keeps its missing column missing rather than inventing a zero.
+        assert.deepEqual(Object.keys(row.MacStatistics['Jabber frames']), ['Receive']);
+        assert.equal(row.MacStatistics['Total packets'].Receive, row.InputPackets);
+    }
+    // R6/R7 are derived from the client list and the PoE string, so they cannot contradict them.
+    for (const device of topology.filter(d => d.ScanStatus === 'Ok' && d.SectionsCaptured.includes('DOT1X'))) {
+        for (const row of device.Interfaces) {
+            const onPort = device.Clients.filter(c => String(c.Port).replace(/\.\d+$/, '') === row.Port);
+            for (const entry of row.Dot1x) {
+                if (!entry.MacAddress) { assert.equal(entry.State, 'Initialize'); continue; }
+                const client = onPort.find(c => c.MAC === entry.MacAddress);
+                assert.ok(client, `${row.Port} has a dot1x row for a MAC that is not on the port`);
+                assert.equal(entry.State, client.Dot1x_State);
+            }
+            if (row.PoeOperStatus === 'Delivering') assert.match(row.PoE, /^Delivering/);
+            if (row.PoE === 'Unknown') assert.equal(row.PoeAdminStatus, null);
+        }
+    }
+});
+
+// A truncated capture has to lose what the truncated section supplied, or a guard reading
+// SectionsCaptured reports NOT_EVALUATED beside data that is sitting right there.
+test('a node that lost the extensive section carries none of its fields', () => {
+    const truncated = topology.filter(d => d.ScanStatus === 'Ok' && !d.SectionsCaptured.includes('INTERFACES_EXT'));
+    assert.ok(truncated.length > 0, 'the generator truncates some captures; that is what this is about');
+    for (const device of truncated) {
+        for (const row of device.Interfaces) {
+            assert.equal(row.Duplex, null, `${device.DeviceIP} ${row.Port} kept a duplex the capture never read`);
+            assert.equal(row.ActiveAlarms, null);
+            assert.equal(row.Mtu, null);
+            assert.deepEqual(row.InputErrors, {});
+            assert.deepEqual(row.MacStatistics, {});
+            // What the terse and description sections supplied is still there: only the tail was lost.
+            assert.ok(row.Link === 'up' || row.Link === 'down');
         }
     }
 });
@@ -947,8 +1047,13 @@ test('R2/R2b/R13: every LLDP neighbour row carries the retained LLDP fields', ()
         // Age past the advertised TTL is a neighbour that would already have aged out.
         assert.ok(n.AgeSeconds >= 0 && n.AgeSeconds < n.TimeToLive, `age ${n.AgeSeconds} against TTL ${n.TimeToLive}`);
     }
-    const withAutonegOff = rows.filter(n => n.OrgInfo.some(o => /Autonegotiation disabled/.test(o.Info)));
+    // The Junos wording, not a paraphrase of it: "Autonegotiation [not supported, disabled (0x0)]" is
+    // what the TLV prints, and a rule written against an invented string works only against fixtures.
+    const withAutonegOff = rows.filter(n => n.OrgInfo.some(o => /Autonegotiation \[not supported, disabled/.test(o.Info)));
     assert.ok(withAutonegOff.length > 0, 'no neighbour advertises autoneg disabled - the R2 rule has nothing to fire on');
+    const frameSizes = rows.flatMap(n => n.OrgInfo.filter(o => /Maximum Frame Size/.test(o.Subtype)).map(o => o.Info));
+    assert.ok(frameSizes.length > 0);
+    for (const info of frameSizes) assert.match(info, /^MTU Size \(\d+\)$/, 'the frame-size TLV prints its value as Junos does');
 });
 
 test('R13: only LLDP-MED endpoints report inventory, and a switch neighbour reports none', () => {

@@ -308,9 +308,40 @@ const CAPTURE_SECTIONS = [
 const SECTION_SUPPLIES = {
     CONFIG: (node) => { node.Configuration = 'Unknown'; },
     ROUTING_ENGINE: (node) => { node.MasterCpuUtilization = 'Unknown'; node.MasterMemoryUtilization = 'Unknown'; },
-    // INTERFACES_EXT supplies only fields accessRow does not emit yet (ACCESS_ROW_GAP in
-    // test/fixture.test.mjs). When that gap closes, this must blank them here too.
-    INTERFACES_EXT: () => {},
+    // Now that applyPortDetail fills these, a truncated capture has to lose them: a node carrying
+    // extensive values beside a SectionsCaptured that says the section never arrived is the false clean
+    // the guard framework (section 3.2) exists to prevent, and it would make every guard decorative.
+    INTERFACES_EXT: (node) => {
+        for (const row of node.Interfaces) {
+            Object.assign(row, {
+                Mtu: null, SpeedConfigured: null, SpeedNegotiated: null,
+                Duplex: null, DuplexNegotiated: null, AutoNegotiation: null, NegotiationStatus: null,
+                MediaType: null, MacAddress: null, LinkLevelType: null, CarrierTransitions: null,
+                InputBytes: null, OutputBytes: null, InputBps: null, OutputBps: null,
+                InputErrors: {}, OutputErrors: {}, ActiveAlarms: null, ActiveDefects: null,
+                StatisticsLastCleared: null, InputPackets: null, OutputPackets: null,
+                RemoteFault: null, InterfaceFlags: null, DeviceFlags: null,
+                BpduError: null, LoopDetectPduError: null,
+                EthernetSwitchingError: null, MacRewriteError: null,
+                MacStatistics: {}, PcsStatistics: {}, FecStatistics: {},
+            });
+        }
+    },
+    // The other two sections whose absence has to take their fields with them. Neither is in the tail
+    // a truncated capture loses today, so both are guards against a future batch reordering rather
+    // than states the generator currently produces.
+    POE: (node) => {
+        for (const row of node.Interfaces) {
+            Object.assign(row, {
+                PoE: 'Unknown', PoeAdminStatus: null, PoeOperStatus: null, PoePairMode: null,
+                PoeMaxPower: null, PoePriority: null, PoePowerConsumption: null, PoeClass: null,
+            });
+        }
+    },
+    DOT1X: (node) => {
+        for (const row of node.Interfaces) row.Dot1x = [];
+        for (const client of node.Clients) { client.Dot1x_State = 'Unknown'; client.Dot1x_User = 'Unknown'; }
+    },
 };
 
 // R3. Derived from the clients already on the device rather than invented: an empty MacTable beside a
@@ -431,6 +462,25 @@ function accessRow(port, poe, isCage) {
         LastFlappedState: null,
     };
     setFlap(row, row.LastFlappedSeconds);
+    // Every remaining key of the worker's interface initializer, at its unfilled value. The values
+    // come from applyPortDetail once links and clients exist; what matters here is that no row is ever
+    // missing a key, because an absent key and a $null one are different facts (section 2.5).
+    Object.assign(row, {
+        Mtu: null, SpeedConfigured: null, SpeedNegotiated: null,
+        Duplex: null, DuplexNegotiated: null, AutoNegotiation: null, NegotiationStatus: null,
+        MediaType: null, MacAddress: null, LinkLevelType: null, CarrierTransitions: null,
+        InputBytes: null, OutputBytes: null, InputBps: null, OutputBps: null,
+        InputErrors: {}, OutputErrors: {}, ActiveAlarms: null, ActiveDefects: null,
+        StpDetail: {}, Bundle: null, BundleMembers: [], Vlans: [],
+        StatisticsLastCleared: null, InputPackets: null, OutputPackets: null,
+        RemoteFault: null, InterfaceFlags: null, DeviceFlags: null,
+        BpduError: null, LoopDetectPduError: null,
+        EthernetSwitchingError: null, MacRewriteError: null,
+        MacStatistics: {}, PcsStatistics: {}, FecStatistics: {},
+        Dot1x: [],
+        PoeAdminStatus: null, PoeOperStatus: null, PoePairMode: null,
+        PoeMaxPower: null, PoePriority: null, PoePowerConsumption: null, PoeClass: null,
+    });
     if (live && chance(0.35)) row.Desc = chance(0.5) ? AP_DESC(int(1, 400)) : PHONE_DESC(int(1, 900));
     // R1. A configured switch port has one eth-switch unit; a dark port often has none at all, which
     // is what makes an empty LogicalUnits[] a state the UI has to handle rather than an omission.
@@ -508,15 +558,32 @@ function setFlap(row, seconds) {
     row.LastFlappedState = seconds !== null ? 'Parsed' : (chance(0.7) ? 'Never' : 'Unparsed');
 }
 
+// One draw per ATTACHMENT, not per neighbour entry. Autonegotiation state and frame size are
+// properties of the wire: drawing them on each side independently made a quarter of the clean fleet's
+// links carry an autoneg mismatch and nearly half an MTU mismatch, which is the F11 trap again - the
+// fault the injector is supposed to be the only source of was the fleet's normal state.
+function attachment() {
+    const autoneg = chance(0.25) ? 'disabled' : 'enabled';
+    return { autoneg: autoneg, mtu: chance(0.15) ? 9192 : 1514 };
+}
+
+// The Junos wording, verbatim from a real capture's TLVs rather than paraphrased: R2 keeps `Info` as
+// the switch printed it, so a rule written against an invented string is a rule that works only here.
+const autonegInfo = (state) => (state === 'enabled'
+    ? 'Autonegotiation [supported, enabled (0x3)], PMD Autonegotiation Capability (0xc036), MAU Type (0x0)'
+    : 'Autonegotiation [not supported, disabled (0x0)], PMD Autonegotiation Capability (0x0), MAU Type (0x0)');
+const frameSizeInfo = (mtu) => `MTU Size (${mtu})`;
+
 // R2/R2b/R13/R5. The fields every LLDP neighbour row carries, switch or endpoint. Omitting them here
 // is how the fixture silently stops matching production shape, so both neighbour builders use this.
-function lldpCommon({ reachable = true, med = null } = {}) {
+function lldpCommon({ reachable = true, med = null, link = null } = {}) {
+    const wire = link || attachment();
     return {
         Reachable: reachable,
         // R2. 802.3 TLVs. Autoneg disabled on a live link is the defect this exists to expose.
         OrgInfo: [
-            { OUI: '00-12-0f', Subtype: 'MAC/PHY Configuration/Status (1)', Info: chance(0.25) ? 'Autonegotiation disabled, 1000BaseTFD' : 'Autonegotiation enabled, 1000BaseTFD' },
-            { OUI: '00-12-0f', Subtype: 'Maximum Frame Size (4)', Info: pick(['1518', '9216']) },
+            { OUI: '00-12-0f', Subtype: 'MAC/PHY Configuration/Status (1)', Info: autonegInfo(wire.autoneg) },
+            { OUI: '00-12-0f', Subtype: 'Maximum Frame Size (4)', Info: frameSizeInfo(wire.mtu) },
         ],
         // R2b. Age is bounded by the advertised TTL; a neighbour older than that would have aged out.
         AgeoutCount: chance(0.2) ? int(1, 6) : 0,
@@ -538,16 +605,23 @@ function linkDevices(a, b, descPrefix) {
     const pa = freeUplinks(a).shift();
     const pb = freeUplinks(b).shift();
     if (!pa || !pb) return false;
+    const wire = attachment();
     const stamp = (from, to, localPort, remotePort) => {
         from.Neighbors.push({
             LocalPort: localPort, RemotePort: remotePort, Hostname: to.Hostname,
             MacAddress: to.bridgeMac, ManagementIP: to.DeviceIP,
             Description: `Juniper Networks, Inc. ${to.StackMembers[0].Model.toLowerCase()}`,
-            ...lldpCommon(),
+            ...lldpCommon({ link: wire }),
         });
         const row = byPort(from).get(localPort);
         // STP is not set here: computeSpanningTree decides it once every link exists.
-        if (row) { row.Link = 'up'; row.Admin = 'up'; setFlap(row, int(3600, 90 * 86400)); row.Desc = `${descPrefix} to ${to.Hostname.replace('.local', '')}`; }
+        if (row) {
+            row.Link = 'up'; row.Admin = 'up'; setFlap(row, int(3600, 90 * 86400));
+            row.Desc = `${descPrefix} to ${to.Hostname.replace('.local', '')}`;
+            // The local view of the same wire, so the two ends' own fields agree with what each
+            // advertises: this is what an MTU or autoneg rule compares across the link.
+            row._wire = wire;
+        }
     };
     stamp(a, b, pa, pb);
     stamp(b, a, pb, pa);
@@ -563,12 +637,16 @@ function addClients(node, gatewayNode, vlanTags) {
         const isAp = row.Desc.startsWith('AP-');
         const first = addClient(node, gatewayNode, row, isPhone ? VOICE_TAG : pick(vlanTags));
         if (isPhone || isAp) {
+            // The endpoint's attachment, drawn once and kept on the port as a switch-to-switch link's
+            // is: an endpoint advertises the same wire its switch port sits on.
+            const wire = attachment();
+            row._wire = wire;
             node.MedNeighbors.push({
                 LocalPort: row.Port, Hostname: row.Desc, MacAddress: first.MAC,
                 ManagementIP: first.IP === 'Unknown' ? `10.${node.zone.net}.${int(100, 240)}.${int(2, 250)}` : first.IP,
                 Description: isAp ? 'Wireless Access Point' : 'IP Phone',
                 Class: isAp ? 'Class III' : 'Class II',
-                ...lldpCommon({ med: isAp ? MED_AP : MED_PHONE }),
+                ...lldpCommon({ med: isAp ? MED_AP : MED_PHONE, link: wire }),
             });
         }
         // Confidence depends on LLDP-MED and a VLAN split; all three verdicts need to occur.
@@ -883,7 +961,9 @@ function computeSpanningTree(fleet) {
     // Disabled: a switch reports no role for a link it does not have.
     for (const d of bridges) {
         for (const row of d.Interfaces) {
-            if (row.StpDetail) continue;
+            // Keys, not the container: accessRow now emits StpDetail as an empty object, and an empty
+            // object is truthy - which silently left every endpoint-facing port with no state at all.
+            if (Object.keys(row.StpDetail || {}).length) continue;
             const up = String(row.Link).toLowerCase() === 'up';
             assign(d, row.Port, up ? 'Designated' : 'Disabled', up ? 'FWD' : 'DIS', bridgeId(d),
                 portIdOf.get(String(d.DeviceIP)).get(row.Port) || null);
@@ -1068,6 +1148,135 @@ function applyVlanMembership(fleet) {
     }
 }
 
+// Section 8.1 / work order item 4, finally filled: the extensive-derived fields the L1 rules read. The
+// values and the vocabularies are the ones a real EX prints - "Half-duplex" on every DOWN port,
+// "Present Running Down" device flags, "LINK" alarms, "Never" for a counter baseline - because the two
+// traps section 3.4 names are only testable if the fixture reproduces the states that spring them.
+//
+// Derived, never drawn: a deterministic hash of (device, port, snapshot) stands in for a PRNG, so this
+// pass cannot move the main stream and the counters are stable for one port across a run.
+function detailHash(seed) {
+    let h = 2166136261;
+    for (let i = 0; i < seed.length; i++) { h ^= seed.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h >>> 0;
+}
+const ERROR_LABELS_IN = ['Errors', 'Drops', 'Framing errors', 'Runts', 'Policed discards',
+    'L3 incompletes', 'L2 channel errors', 'L2 mismatch timeouts', 'FIFO errors', 'Resource errors'];
+const ERROR_LABELS_OUT = ['Carrier transitions', 'Errors', 'Drops', 'Collisions', 'Aged packets',
+    'FIFO errors', 'HS link CRC errors', 'MTU errors', 'Resource errors'];
+// R4's table, with the column headers the parser keys on.
+const MAC_STAT_LABELS = ['Total octets', 'Total packets', 'Unicast packets', 'Broadcast packets',
+    'Multicast packets', 'CRC/Align errors', 'FIFO errors', 'MAC control frames', 'MAC pause frames',
+    'Oversized frames', 'Jabber frames', 'Fragment frames', 'VLAN tagged frames', 'Code violations'];
+
+function applyPortDetail(fleet, snapshotIndex) {
+    for (const node of fleet) {
+        const medPorts = new Set(node.MedNeighbors.map(m => String(m.LocalPort).replace(/\.\d+$/, '')));
+        const clientsByPort = new Map();
+        for (const client of node.Clients) {
+            const port = String(client.Port).replace(/\.\d+$/, '');
+            if (!clientsByPort.has(port)) clientsByPort.set(port, []);
+            clientsByPort.get(port).push(client);
+        }
+        for (const row of node.Interfaces) {
+            const h = detailHash(`${node.DeviceIP}|${row.Port}|${snapshotIndex}`);
+            const live = String(row.Link).toLowerCase() === 'up';
+            const wire = row._wire || null;
+            const fibre = /^(?:xe|et)/.test(row.Port);
+
+            row.LinkLevelType = 'Ethernet';
+            row.MediaType = fibre ? 'Fiber' : 'Copper';
+            row.Mtu = wire ? wire.mtu : 1514;
+            row.AutoNegotiation = wire && wire.autoneg === 'disabled' ? 'Disabled' : 'Enabled';
+            // Section 3.4's second trap, reproduced rather than described: every DOWN port prints
+            // Half-duplex, so a duplex rule that does not hard-gate on Link fires across the estate.
+            row.Duplex = live ? 'Full-duplex' : 'Half-duplex';
+            row.DuplexNegotiated = live ? 'Full-duplex' : null;
+            row.NegotiationStatus = live ? 'Complete' : 'Incomplete';
+            row.SpeedConfigured = 'Auto';
+            row.SpeedNegotiated = live ? (fibre ? '10 Gbps' : '1000 Mbps') : null;
+            row.MacAddress = ['02', 'ab', ((h >>> 24) & 0xff), ((h >>> 16) & 0xff), ((h >>> 8) & 0xff), (h & 0xff)]
+                .map(x => (typeof x === 'string' ? x : x.toString(16).padStart(2, '0'))).join(':');
+            row.InterfaceFlags = live ? 'SNMP-Traps Internal: 0x4000' : 'Hardware-Down SNMP-Traps Internal: 0x4000';
+            row.DeviceFlags = live ? 'Present Running' : 'Present Running Down';
+            // The third trap: LINK is a real alarm on a port reporting up, and noise on a down one.
+            row.ActiveAlarms = live ? 'None' : 'LINK';
+            row.ActiveDefects = live ? 'None' : 'LINK';
+            row.StatisticsLastCleared = 'Never';
+            row.RemoteFault = 'Online';
+            row.BpduError = 'None';
+            row.LoopDetectPduError = 'None';
+            row.EthernetSwitchingError = 'None';
+            row.MacRewriteError = 'None';
+            row.CarrierTransitions = live ? 1 + (h % 7) : 0;
+
+            const packets = live ? 100000 + (h % 90000000) : 0;
+            row.InputPackets = packets;
+            row.OutputPackets = live ? Math.floor(packets * 0.8) : 0;
+            row.InputBytes = packets * 700;
+            row.OutputBytes = Math.floor(packets * 0.8) * 700;
+            row.InputBps = live ? (h % 40000000) : 0;
+            row.OutputBps = live ? ((h >>> 3) % 40000000) : 0;
+
+            row.InputErrors = {};
+            row.OutputErrors = {};
+            for (const label of ERROR_LABELS_IN) row.InputErrors[label] = 0;
+            for (const label of ERROR_LABELS_OUT) row.OutputErrors[label] = 0;
+            row.OutputErrors['Carrier transitions'] = row.CarrierTransitions;
+            // Section 3.4's first trap: Drops is the output queue's RED mechanism, not an error. The
+            // healthiest port in the measured capture carries 14,635 of them against zero errors, so a
+            // rule reading Drops as an error flags every busy uplink - and here it would have to.
+            if (live && (h % 3) === 0) row.OutputErrors.Drops = 500 + (h % 30000);
+
+            row.MacStatistics = {};
+            for (const label of MAC_STAT_LABELS) {
+                const stat = { Receive: 0, Transmit: 0 };
+                if (label === 'Total packets') { stat.Receive = packets; stat.Transmit = row.OutputPackets; }
+                if (label === 'Total octets') { stat.Receive = row.InputBytes; stat.Transmit = row.OutputBytes; }
+                if (label === 'Unicast packets') { stat.Receive = Math.floor(packets * 0.95); stat.Transmit = Math.floor(row.OutputPackets * 0.95); }
+                // Receive-only rows, as the parser has them: the absent column stays absent.
+                if (label === 'Oversized frames' || label === 'Jabber frames') delete stat.Transmit;
+                row.MacStatistics[label] = stat;
+            }
+            // Only the optical ports report these tables at all.
+            row.PcsStatistics = fibre ? { 'Bit errors': { Seconds: 0 }, 'Errored blocks': { Seconds: 0 } } : {};
+            row.FecStatistics = fibre ? { 'FEC Corrected Errors': { Errors: 0 }, 'FEC Uncorrected Errors': { Errors: 0 } } : {};
+
+            // R7. The PoE row behind the display string, which has to agree with it.
+            if (row.PoE === 'Unknown') {
+                row.PoeAdminStatus = null; row.PoeOperStatus = null; row.PoePairMode = null;
+                row.PoeMaxPower = null; row.PoePriority = null; row.PoePowerConsumption = null; row.PoeClass = null;
+            } else {
+                const delivering = row.PoE.startsWith('Delivering');
+                row.PoeAdminStatus = 'Enabled';
+                row.PoeOperStatus = delivering ? 'Delivering' : 'OFF';
+                row.PoePairMode = '4-pair';
+                row.PoeMaxPower = '30.0W';
+                row.PoePriority = medPorts.has(row.Port) ? 'High' : 'Low';
+                row.PoePowerConsumption = delivering ? row.PoE.replace(/^\D+\(|\)$/g, '') : '0.0W';
+                row.PoeClass = delivering ? `Class ${1 + (h % 4)}` : 'not-applicable';
+            }
+
+            // R6. One row per authenticated client, and an Initialize row for a configured port with
+            // nothing on it - the state the MAC-keyed parse structurally could not represent. Derived
+            // from Clients so the two cannot disagree about who is authenticated where.
+            row.Dot1x = [];
+            const onPort = clientsByPort.get(row.Port) || [];
+            const supplicants = onPort.filter(c => c.Dot1x_State !== 'Unknown');
+            for (const [i, client] of supplicants.entries()) {
+                row.Dot1x.push({
+                    Interface: `${row.Port}.0`, Role: i === 0 ? 'Authenticator' : null,
+                    State: client.Dot1x_State, MacAddress: client.MAC,
+                    User: client.Dot1x_User === 'Unknown' ? null : client.Dot1x_User,
+                });
+            }
+            if (!supplicants.length && !onPort.length && live && !medPorts.has(row.Port) && (h % 5) === 0) {
+                row.Dot1x.push({ Interface: `${row.Port}.0`, Role: 'Authenticator', State: 'Initialize', MacAddress: null, User: null });
+            }
+        }
+    }
+}
+
 assertNothingOrphaned(topology);
 
 const gatewayFor = (node) => (node.role === 'ACC' ? topology.find(d => d.DeviceIP === node.Gateway) : cores[0]);
@@ -1213,7 +1422,7 @@ function withFailures(fleet, snapshotIndex, scanTime) {
     }
     // Dropped before the clone: bldg.zone.buildings points back at bldg, so a clone would recurse.
     const SCRATCH = ['zone', 'bldg', 'role', 'bridgeMac', 'bridgePriority', '_freeUplinks', '_byPort',
-        '_ownTags', '_extraConfig', 'vlanTags'];
+        '_ownTags', '_extraConfig', 'vlanTags', '_wire'];
     return fleet.map(node => {
         const copy = JSON.parse(JSON.stringify(node, (key, value) => (SCRATCH.includes(key) ? undefined : value)));
         if (failing.has(node.DeviceIP)) {
@@ -1293,7 +1502,11 @@ function injectDuplicateMac(rng, fleet) {
     const donors = scanned(fleet).filter(d => d.Clients.length);
     if (!donors.length) return null;
     const donor = fPick(rng, donors);
-    const client = fPick(rng, donor.Clients);
+    // A supplicant in a failed state carries a finding of its own; copying it would put two findings
+    // under one manifest entry and blunt the oracle.
+    const donorClients = donor.Clients.filter(c => c.Dot1x_State === 'Unknown' || c.Dot1x_State === 'Authenticated');
+    if (!donorClients.length) return null;
+    const client = fPick(rng, donorClients);
     // The second switch has to configure the same VLAN: one MAC cannot appear twice in a VLAN that only
     // one of the two switches carries.
     const hosts = scanned(fleet).filter(d => d !== donor && clientPorts(d).length
@@ -1359,13 +1572,24 @@ function injectOffSubnetClient(rng, fleet) {
 // R6. A supplicant stuck in Held is a wiring or policy fault the port's own state does not show: the
 // link stays up and the client keeps appearing in the MAC table.
 function injectDot1xHeld(rng, fleet) {
-    const hosts = scanned(fleet).filter(d => d.Clients.some(c => c.Dot1x_State !== 'Held'));
+    // Only a supplicant that was authenticated: moving one that had already failed would put two
+    // findings on one manifest entry, and the entry is supposed to be the whole story about that port.
+    const held = (d) => d.Clients.filter(c => c.Dot1x_State === 'Authenticated');
+    const hosts = scanned(fleet).filter(d => held(d).length);
     if (!hosts.length) return null;
     const host = fPick(rng, hosts);
-    const client = fPick(rng, host.Clients.filter(c => c.Dot1x_State !== 'Held'));
+    const client = fPick(rng, held(host));
     const before = client.Dot1x_State;
     client.Dot1x_State = 'Held';
     if (client.Dot1x_User === 'Unknown') client.Dot1x_User = `lab\\user${fInt(rng, 100, 999)}`;
+    // R6's per-port view is derived from the client list, so it moves with it.
+    const heldPort = String(client.Port).replace(/\.\d+$/, '');
+    const heldRow = host.Interfaces.find(r => r.Port === heldPort);
+    if (heldRow) {
+        for (const entry of heldRow.Dot1x || []) {
+            if (entry.MacAddress === client.MAC) { entry.State = 'Held'; entry.User = client.Dot1x_User; }
+        }
+    }
     return {
         // No section 7 row: R6 data, and a rule of its own rather than a path failure.
         kind: 'dot1x-held', failureModes: [], deviceIp: host.DeviceIP,
@@ -1522,6 +1746,7 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     assertForwardingIsSpanningTree(topology);
     // After the tree, because the "*" marking a member as currently forwarding for a VLAN follows it.
     applyVlanMembership(topology);
+    applyPortDetail(topology, i);
     const fleet = withFailures(topology, i, scanTime);
     const manifest = injectFaults(fleet, i, FAULT_COUNT);
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));
