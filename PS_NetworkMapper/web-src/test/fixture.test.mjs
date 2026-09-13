@@ -543,7 +543,7 @@ const ACCESS_ROW_GAP = [
     'OutputBytes', 'OutputErrors', 'OutputPackets', 'PcsStatistics', 'PoeAdminStatus',
     'PoeClass', 'PoeMaxPower', 'PoeOperStatus', 'PoePairMode', 'PoePowerConsumption',
     'PoePriority', 'RemoteFault', 'SpeedConfigured', 'SpeedNegotiated', 'StatisticsLastCleared',
-    'StpDetail', 'Vlans',
+    'Vlans',
 ];
 
 function interfaceInitializerKeys() {
@@ -582,6 +582,181 @@ test('fixture interfaces match Get-JunosNodeData.ps1, except for a known and enu
     assert.deepEqual(missing, ACCESS_ROW_GAP.slice().sort(),
         'the accessRow parity gap changed. Update ACCESS_ROW_GAP in this file to match, ' +
         `removing what generate-fixture.mjs now emits.\n  now missing: ${missing.join(', ')}`);
+});
+
+// Item 7 / section 8.2. The generator builds real cycles - the core ICL, every zone's first frame
+// linked to both cores, 8% access dual-homing, daisy chains - and used to stamp FWD on all of them, so
+// the fixture asserted a converged spanning tree forwarding on a loop. Nothing path-related could be
+// tested against that, which is why this is the prerequisite for items 8 onward.
+//
+// This is the test the whole pass exists for: the forwarding graph must be a tree, which means it has
+// exactly one fewer edge than it has nodes AND is connected. Either alone is satisfiable by a lie.
+test('item 7: the forwarding subgraph is a spanning tree, not a loop stamped FWD', () => {
+    const bridges = topology.filter(d => d.ScanStatus === 'Ok');
+    const byIp = new Map(bridges.map(d => [String(d.DeviceIP), d]));
+    const stpOf = (d, port) => {
+        const row = d.Interfaces.find(r => r.Port === String(port).replace(/\.\d+$/, ''));
+        return row ? row.STP : null;
+    };
+
+    const fwdEdges = new Set();
+    let totalLinks = 0;
+    for (const d of bridges) {
+        for (const n of d.Neighbors) {
+            if (n.Reachable === false) continue;
+            const peer = byIp.get(String(n.ManagementIP));
+            if (!peer) continue;
+            const key = [String(d.DeviceIP), String(peer.DeviceIP)].sort().join('~');
+            totalLinks++;
+            // A link forwards only if BOTH ends do; one FWD end and one BLK end is not a path.
+            if (stpOf(d, n.LocalPort) === 'FWD' && stpOf(peer, n.RemotePort) === 'FWD') fwdEdges.add(key);
+        }
+    }
+    const allEdges = new Set();
+    for (const d of bridges) {
+        for (const n of d.Neighbors) {
+            if (n.Reachable === false || !byIp.has(String(n.ManagementIP))) continue;
+            allEdges.add([String(d.DeviceIP), String(n.ManagementIP)].sort().join('~'));
+        }
+    }
+    assert.ok(allEdges.size > fwdEdges.size,
+        `all ${allEdges.size} links forward - the fixture has no blocked port, so it still claims a tree on a loop`);
+
+    // Connected, over the forwarding edges only.
+    const adj = new Map(bridges.map(d => [String(d.DeviceIP), []]));
+    for (const key of fwdEdges) {
+        const [a, b] = key.split('~');
+        adj.get(a).push(b);
+        adj.get(b).push(a);
+    }
+    const seen = new Set([String(bridges[0].DeviceIP)]);
+    const queue = [String(bridges[0].DeviceIP)];
+    for (let head = 0; head < queue.length; head++) {
+        for (const next of adj.get(queue[head])) {
+            if (seen.has(next)) continue;
+            seen.add(next);
+            queue.push(next);
+        }
+    }
+    assert.equal(seen.size, bridges.length,
+        `the forwarding graph reaches ${seen.size} of ${bridges.length} bridges - blocking partitioned the fleet`);
+    assert.equal(fwdEdges.size, bridges.length - 1,
+        `${fwdEdges.size} forwarding links over ${bridges.length} bridges - a tree has exactly ${bridges.length - 1}`);
+});
+
+test('item 7: exactly one root bridge, it has the best bridge ID, and only non-root bridges have a root port', () => {
+    const bridges = topology.filter(d => d.ScanStatus === 'Ok');
+    const roleOf = (r) => (r.StpDetail && r.StpDetail['instance 0'] ? r.StpDetail['instance 0'].Role : null);
+    const rootPortCount = (d) => d.Interfaces.filter(r => roleOf(r) === 'Root').length;
+
+    const roots = bridges.filter(d => rootPortCount(d) === 0);
+    assert.equal(roots.length, 1, `${roots.length} bridges have no root port - exactly one is the root`);
+    // The root is elected on (priority, MAC), and the config writes 4k only on cores.
+    // role is generator scratch and never reaches a snapshot; the config text is what a reader has.
+    assert.match(roots[0].Configuration, /bridge-priority 4k/,
+        "the root's config must claim the 4k priority it won on - only cores are given it");
+    for (const d of bridges) {
+        if (d === roots[0]) continue;
+        assert.equal(rootPortCount(d), 1, `${d.Hostname} has ${rootPortCount(d)} root ports - RSTP allows exactly one`);
+    }
+});
+
+// An asymmetric link - both ends Designated, or both Alternate - is what a half-converged or
+// misconfigured tree looks like. The pass cannot produce one, so assert it does not.
+test('item 7: every blocked port faces a designated one, and no link has two of either', () => {
+    const bridges = topology.filter(d => d.ScanStatus === 'Ok');
+    const byIp = new Map(bridges.map(d => [String(d.DeviceIP), d]));
+    const detailOf = (d, port) => {
+        const row = d.Interfaces.find(r => r.Port === String(port).replace(/\.\d+$/, ''));
+        return row && row.StpDetail ? row.StpDetail['instance 0'] : null;
+    };
+    let blocked = 0;
+    for (const d of bridges) {
+        for (const n of d.Neighbors) {
+            if (n.Reachable === false) continue;
+            const peer = byIp.get(String(n.ManagementIP));
+            if (!peer) continue;
+            const mine = detailOf(d, n.LocalPort);
+            const theirs = detailOf(peer, n.RemotePort);
+            assert.ok(mine && theirs, `a link between ${d.Hostname} and ${peer.Hostname} has no STP detail`);
+            const pair = [mine.Role, theirs.Role].sort().join('/');
+            assert.ok(['Alternate/Designated', 'Designated/Root'].includes(pair),
+                `${d.Hostname}:${n.LocalPort} and ${peer.Hostname}:${n.RemotePort} are ${pair}`);
+            if (pair === 'Alternate/Designated') {
+                blocked++;
+                // Both ends agree on who won the segment, which is what DesignatedBridge records.
+                assert.equal(mine.DesignatedBridge, theirs.DesignatedBridge, 'the two ends disagree on the designated bridge');
+            }
+        }
+    }
+    assert.ok(blocked > 0, 'no link blocks at all, so the cycles the generator builds are still all forwarding');
+});
+
+// The 8% dual-homing the generator builds. A switch can legitimately forward on two links - one up to
+// the root, one down to a daisy-chained closet - so the assertion is about its UPWARD links: of the
+// ports facing the root, exactly one is the Root port and the rest are Alternate and blocked.
+test('item 7: a dual-homed access switch has one root port and blocks its other path to the root', () => {
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+    const isAccess = (d) => typeof d.Configuration === 'string' && !/bridge-priority (4k|8k)/.test(d.Configuration);
+    const detailOf = (d, port) => {
+        const row = d.Interfaces.find(r => r.Port === String(port).replace(/\.\d+$/, ''));
+        return row && row.StpDetail ? row.StpDetail['instance 0'] : null;
+    };
+
+    let examined = 0;
+    for (const d of topology.filter(x => x.ScanStatus === 'Ok' && isAccess(x))) {
+        const upward = d.Neighbors
+            .filter(n => n.Reachable !== false && byIp.has(String(n.ManagementIP)))
+            .map(n => detailOf(d, n.LocalPort))
+            .filter(x => x && (x.Role === 'Root' || x.Role === 'Alternate'));
+        if (upward.length < 2) continue;
+        examined++;
+        const roots = upward.filter(x => x.Role === 'Root');
+        assert.equal(roots.length, 1, `${d.Hostname} has ${roots.length} root ports among ${upward.length} paths to the root`);
+        for (const alt of upward.filter(x => x.Role === 'Alternate')) {
+            assert.equal(alt.State, 'BLK', `${d.Hostname} has an Alternate port that is not blocked`);
+        }
+    }
+    assert.ok(examined > 0, 'no access switch has a second path to the root - the 8% dual-homing is not being blocked');
+});
+
+// One chassis MAC per device. It was generated per LINK, so the same switch advertised a different
+// chassis ID to every neighbour - and it is the tie-break the root election turns on.
+test('item 7: a device advertises one chassis MAC to every neighbour', () => {
+    const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
+    const seenFor = new Map();
+    for (const d of topology) {
+        for (const n of d.Neighbors) {
+            if (!byIp.has(String(n.ManagementIP))) continue;
+            if (!seenFor.has(String(n.ManagementIP))) seenFor.set(String(n.ManagementIP), new Set());
+            seenFor.get(String(n.ManagementIP)).add(n.MacAddress);
+        }
+    }
+    const multi = [...seenFor.entries()].filter(([, macs]) => macs.size > 1);
+    assert.deepEqual(multi.map(([ip]) => ip), [],
+        'these devices are advertised with more than one chassis MAC across their links');
+    assert.ok([...seenFor.values()].some(macs => macs.size === 1), 'no neighbour MACs were checked at all');
+});
+
+// STP detail is per-scope because a trunk can block in one VLAN and forward in another. The config
+// writes "set protocols rstp", one instance - so the scope is "instance 0" and nothing else. Faking
+// "VLAN N" scopes on an RSTP config would assert a state no such switch can produce.
+test('item 7: STP detail is keyed by the scope the config implies, with the fields the worker records', () => {
+    const rows = topology.filter(d => d.ScanStatus === 'Ok').flatMap(d => d.Interfaces);
+    const FIELDS = ['State', 'Role', 'Cost', 'PortId', 'DesignatedPortId', 'DesignatedBridge'];
+    let checked = 0;
+    for (const r of rows) {
+        assert.ok(r.StpDetail && typeof r.StpDetail === 'object', `${r.Port} has no StpDetail`);
+        assert.deepEqual(Object.keys(r.StpDetail), ['instance 0'], `${r.Port} scopes: ${Object.keys(r.StpDetail)}`);
+        const d = r.StpDetail['instance 0'];
+        for (const f of FIELDS) assert.ok(f in d, `${r.Port} detail is missing ${f}`);
+        // The state string and the collapsed STP field must agree, or the drawer badge contradicts the tab.
+        assert.equal(d.State, r.STP, `${r.Port} says ${r.STP} but its detail says ${d.State}`);
+        assert.ok([2000, 20000].includes(d.Cost), `${r.Port} cost ${d.Cost} is neither a 10G nor a 1G RSTP cost`);
+        assert.equal(d.Cost, /^(xe|et)/.test(r.Port) ? 2000 : 20000, `${r.Port} cost does not match its media`);
+        checked++;
+    }
+    assert.ok(checked > 5000, `only ${checked} rows carried STP detail`);
 });
 
 // C3. @{} serialized as {} and window.asArray turned that into a one-element array holding an empty

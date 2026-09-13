@@ -198,6 +198,9 @@ const VLANS = [
     { tag: 500, name: 'VLAN_CAMERAS' }, { tag: 666, name: 'VLAN_QUARANTINE' },
 ];
 
+// The same values the config text writes as "set protocols rstp bridge-priority 4k|8k|32k".
+const BRIDGE_PRIORITY = { CORE: 4096, DIST: 8192, ACC: 32768 };
+
 const JUNOS_VERSIONS = ['21.4R3-S5.4', '22.2R3-S3.8', '22.4R3.25', '23.2R2-S1.5', '20.4R3-S9.2'];
 // Everything but Ok is a placeholder node - a device with a status and nothing else. C1 split the old
 // catch-all Unreachable into four, and each text here is a shape Get-JunosScanFailureClass classifies
@@ -408,7 +411,9 @@ function accessRow(port, poe, isCage) {
         Admin: live || chance(0.9) ? 'up' : 'down',
         Link: live ? 'up' : 'down',
         Desc: 'Unknown',
-        STP: live ? (chance(0.9) ? 'FWD' : 'BLK') : 'Unknown',
+        // Overwritten by computeSpanningTree; a port it never reaches is on a device that never
+        // answered, and "Unknown" is the honest value there.
+        STP: 'Unknown',
         PoE: poe ? (live && chance(0.5) ? `Delivering (${(rnd() * 25 + 3).toFixed(1)}W)` : 'Enabled') : 'Unknown',
         // The sort needs a spread across the 72h/6-month bands plus a slice with no value at all.
         LastFlappedSeconds: live ? int(60, 72 * 3600)
@@ -463,6 +468,10 @@ function makeDevice({ deviceIp, bldg, seq, models, role, gateway }) {
     node.bldg = bldg;
     node.zone = bldg.zone;
     node.role = role;
+    // One chassis MAC per device, not one per link: a real switch advertises the same chassis ID to
+    // every neighbour, and it is the tie-break in the bridge ID the spanning-tree pass elects on.
+    node.bridgeMac = switchMac();
+    node.bridgePriority = BRIDGE_PRIORITY[role];
     return node;
 }
 
@@ -525,12 +534,13 @@ function linkDevices(a, b, descPrefix) {
     const stamp = (from, to, localPort, remotePort) => {
         from.Neighbors.push({
             LocalPort: localPort, RemotePort: remotePort, Hostname: to.Hostname,
-            MacAddress: switchMac(), ManagementIP: to.DeviceIP,
+            MacAddress: to.bridgeMac, ManagementIP: to.DeviceIP,
             Description: `Juniper Networks, Inc. ${to.StackMembers[0].Model.toLowerCase()}`,
             ...lldpCommon(),
         });
         const row = byPort(from).get(localPort);
-        if (row) { row.Link = 'up'; row.Admin = 'up'; row.STP = 'FWD'; setFlap(row, int(3600, 90 * 86400)); row.Desc = `${descPrefix} to ${to.Hostname.replace('.local', '')}`; }
+        // STP is not set here: computeSpanningTree decides it once every link exists.
+        if (row) { row.Link = 'up'; row.Admin = 'up'; setFlap(row, int(3600, 90 * 86400)); row.Desc = `${descPrefix} to ${to.Hostname.replace('.local', '')}`; }
     };
     stamp(a, b, pa, pb);
     stamp(b, a, pb, pa);
@@ -727,6 +737,158 @@ for (const node of shuffled(access).slice(0, Math.max(2, Math.round(access.lengt
 
 for (const node of [...cores, ...dists, ...access]) topology.push(node);
 
+// Item 7. A real spanning tree over the links the generator builds.
+//
+// The generator creates genuine cycles - the core ICL, every zone's first frame linked to both cores,
+// 8% access dual-homing, and daisy chains - and every port was stamped FWD, so the fixture claimed a
+// converged spanning tree forwarding on a loop. Nothing path-related can be tested against that.
+//
+// One RSTP instance, matching the "set protocols rstp" the config text writes. Per-VLAN divergence
+// (a port FWD in one VLAN and BLK in another) needs VSTP config generation and is not faked here.
+const RSTP_COST = { xe: 2000, et: 2000, ge: 20000, mge: 20000, ae: 20000 };
+const portCost = (port) => RSTP_COST[String(port).match(/^[a-z]+/)[0]] ?? 20000;
+const bridgeId = (node) => `${node.bridgePriority}.${node.bridgeMac}`;
+
+// RSTP compares (priority, MAC) as one number; comparing the printed string would order 4096 after
+// 32768. Returns negative when a sorts before b.
+function compareBridges(a, b) {
+    return a.bridgePriority - b.bridgePriority || (a.bridgeMac < b.bridgeMac ? -1 : a.bridgeMac > b.bridgeMac ? 1 : 0);
+}
+
+function computeSpanningTree(fleet) {
+    // A device that never answered is not a bridge we can hear BPDUs from, and neither is an R5
+    // unmanaged neighbour: ports facing them stay Designated, which is what a real switch shows.
+    const bridges = fleet.filter(d => d.ScanStatus === 'Ok');
+    const byIp = new Map(bridges.map(d => [String(d.DeviceIP), d]));
+
+    // Symmetric adjacency from the LLDP the generator already stamped, so the tree is computed over
+    // exactly the links the snapshot claims exist.
+    const links = new Map();   // deviceIp -> [{ localPort, peer, peerPort }]
+    for (const d of bridges) links.set(String(d.DeviceIP), []);
+    for (const d of bridges) {
+        for (const n of d.Neighbors) {
+            if (n.Reachable === false) continue;
+            const peer = byIp.get(String(n.ManagementIP));
+            if (!peer) continue;
+            links.get(String(d.DeviceIP)).push({ localPort: n.LocalPort.replace(/\.\d+$/, ''), peer, peerPort: String(n.RemotePort).replace(/\.\d+$/, '') });
+        }
+    }
+
+    const root = bridges.reduce((best, d) => (compareBridges(d, best) < 0 ? d : best), bridges[0]);
+
+    // Dijkstra, not BFS by hops: with 1G and 10G uplinks mixed the least-cost tree is not the
+    // fewest-hops tree, and the cost charged is that of the RECEIVING port - the downstream end.
+    const rootCost = new Map([[String(root.DeviceIP), 0]]);
+    const rootPort = new Map();
+    const settled = new Set();
+    while (settled.size < bridges.length) {
+        let cur = null;
+        for (const d of bridges) {
+            const ip = String(d.DeviceIP);
+            if (settled.has(ip) || !rootCost.has(ip)) continue;
+            if (cur === null) { cur = d; continue; }
+            const better = rootCost.get(ip) - rootCost.get(String(cur.DeviceIP)) || compareBridges(d, cur);
+            if (better < 0) cur = d;
+        }
+        if (cur === null) break;   // a partition: assertNothingOrphaned catches a real one
+        const curIp = String(cur.DeviceIP);
+        settled.add(curIp);
+        for (const l of links.get(curIp)) {
+            const peerIp = String(l.peer.DeviceIP);
+            if (settled.has(peerIp)) continue;
+            const cost = rootCost.get(curIp) + portCost(l.peerPort);
+            const known = rootCost.has(peerIp) ? rootCost.get(peerIp) : Infinity;
+            // Tie-break on the sender's bridge ID, as RSTP does, so the tree is deterministic.
+            const incumbent = rootPort.get(peerIp);
+            if (cost < known || (cost === known && incumbent && compareBridges(cur, incumbent.sender) < 0)) {
+                rootCost.set(peerIp, cost);
+                rootPort.set(peerIp, { port: l.peerPort, sender: cur });
+            }
+        }
+    }
+
+    // Port IDs are Junos's "128:N" over the device's own sorted port list.
+    const portIdOf = new Map();
+    for (const d of bridges) {
+        const ids = new Map();
+        d.Interfaces.forEach((r, i) => ids.set(r.Port, `128:${i + 1}`));
+        portIdOf.set(String(d.DeviceIP), ids);
+    }
+
+    const assign = (device, port, role, state, designatedBridge, designatedPortId) => {
+        const row = byPort(device)?.get(port);
+        if (!row) return;
+        row.STP = state;
+        row.StpDetail = {
+            'instance 0': {
+                State: state,
+                Role: role,
+                Cost: portCost(port),
+                PortId: portIdOf.get(String(device.DeviceIP)).get(port) || null,
+                DesignatedPortId: designatedPortId,
+                DesignatedBridge: designatedBridge,
+            },
+        };
+    };
+
+    const claimed = new Set();
+    for (const d of bridges) {
+        const ip = String(d.DeviceIP);
+        const mine = rootPort.get(ip);
+        for (const l of links.get(ip)) {
+            const key = [ip + '|' + l.localPort, String(l.peer.DeviceIP) + '|' + l.peerPort].sort().join('~');
+            if (claimed.has(key)) continue;
+            claimed.add(key);
+
+            const theirs = rootPort.get(String(l.peer.DeviceIP));
+            const iAmDownstream = mine && mine.port === l.localPort && String(mine.sender.DeviceIP) === String(l.peer.DeviceIP);
+            const theyAreDownstream = theirs && theirs.port === l.peerPort && String(theirs.sender.DeviceIP) === ip;
+
+            const myPortId = portIdOf.get(ip).get(l.localPort) || null;
+            const theirPortId = portIdOf.get(String(l.peer.DeviceIP)).get(l.peerPort) || null;
+
+            if (iAmDownstream) {
+                assign(d, l.localPort, 'Root', 'FWD', bridgeId(l.peer), theirPortId);
+                assign(l.peer, l.peerPort, 'Designated', 'FWD', bridgeId(l.peer), theirPortId);
+            } else if (theyAreDownstream) {
+                assign(l.peer, l.peerPort, 'Root', 'FWD', bridgeId(d), myPortId);
+                assign(d, l.localPort, 'Designated', 'FWD', bridgeId(d), myPortId);
+            } else {
+                // Neither end is on its own least-cost path: this link is the redundant one that has to
+                // block, and the better bridge keeps the Designated end.
+                const myCost = rootCost.has(ip) ? rootCost.get(ip) : Infinity;
+                const theirCost = rootCost.has(String(l.peer.DeviceIP)) ? rootCost.get(String(l.peer.DeviceIP)) : Infinity;
+                const iWin = (myCost - theirCost || compareBridges(d, l.peer)) < 0;
+                const winner = iWin ? d : l.peer;
+                const winnerPortId = iWin ? myPortId : theirPortId;
+                assign(winner, iWin ? l.localPort : l.peerPort, 'Designated', 'FWD', bridgeId(winner), winnerPortId);
+                assign(iWin ? l.peer : d, iWin ? l.peerPort : l.localPort, 'Alternate', 'BLK', bridgeId(winner), winnerPortId);
+            }
+        }
+    }
+
+    // Every remaining port faces an endpoint, an unreachable device, or nothing at all. A down port is
+    // Disabled: a switch reports no role for a link it does not have.
+    for (const d of bridges) {
+        for (const row of d.Interfaces) {
+            if (row.StpDetail) continue;
+            const up = String(row.Link).toLowerCase() === 'up';
+            assign(d, row.Port, up ? 'Designated' : 'Disabled', up ? 'FWD' : 'DIS', bridgeId(d),
+                portIdOf.get(String(d.DeviceIP)).get(row.Port) || null);
+        }
+    }
+    const rootLabel = `${root.Hostname} (${bridgeId(root)})`;
+    // withFailures hands this function CLONES, which is what gets serialized, so the identity fields the
+    // election needs cannot be in withFailures' SCRATCH list - they are dropped here instead. byPort's
+    // memo is a Map and would serialize as a stray {} key.
+    for (const d of fleet) {
+        delete d.bridgeMac;
+        delete d.bridgePriority;
+        delete d._byPort;
+    }
+    return { rootLabel: rootLabel, rootCost: rootCost, rootPort: rootPort };
+}
+
 // An unlinked switch is just an orphan node beside the diagram, easy to miss - so it is fatal here.
 function assertNothingOrphaned(fleet) {
     const orphans = fleet.filter(d => d.Neighbors.length === 0);
@@ -898,8 +1060,11 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     // NetworkMap_* so the loaders pick it up, .fixture.json so it can be gitignored separately.
     const mapPath = path.join(OUT_DIR, `NetworkMap_${stamp}.fixture.json`);
     const fleet = withFailures(topology, i, scanTime);
+    // After withFailures, so a device that did not answer in THIS snapshot is not a bridge in its tree,
+    // and before the write, since the pass mutates the interface rows it is about to serialize.
+    const tree = computeSpanningTree(fleet);
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));
-    written.push({ mapPath, fleet });
+    written.push({ mapPath, fleet, tree });
 }
 
 const FIXTURE_CONFIG = {
@@ -919,18 +1084,22 @@ const FIXTURE_CONFIG = {
 const configPath = path.join(OUT_DIR, 'Configuration.fixture.json');
 fs.writeFileSync(configPath, JSON.stringify(FIXTURE_CONFIG, null, 2));
 
-for (const { mapPath, fleet } of written) {
+for (const { mapPath, fleet, tree } of written) {
     const c = fleet.reduce((a, d) => {
         a.interfaces += d.Interfaces.length; a.clients += d.Clients.length;
         a.arp += d.ArpEntries.length; a.neighbors += d.Neighbors.length;
         a.members += d.StackMembers.length; a.med += d.MedNeighbors.length;
         if (d.ScanStatus !== 'Ok') a.failed++;
         if (d.StackMembers.length > 1) a.stacks++;
+        for (const r of d.Interfaces) {
+            if (r.STP === 'FWD') a.fwd++; else if (r.STP === 'BLK') a.blk++;
+        }
         return a;
-    }, { interfaces: 0, clients: 0, arp: 0, neighbors: 0, members: 0, med: 0, failed: 0, stacks: 0 });
+    }, { interfaces: 0, clients: 0, arp: 0, neighbors: 0, members: 0, med: 0, failed: 0, stacks: 0, fwd: 0, blk: 0 });
     process.stderr.write(
         `${mapPath}\n  ${fleet.length} devices (${c.stacks} virtual chassis, ${c.members} members, ${c.failed} failed scans)\n` +
         `  ${c.interfaces} interfaces, ${c.neighbors} LLDP neighbours, ${c.clients} clients, ${c.arp} ARP entries, ${c.med} MED endpoints\n` +
+        `  spanning tree: root ${tree.rootLabel}, ${c.fwd} FWD / ${c.blk} BLK ports\n` +
         `  ${(fs.statSync(mapPath).size / 1048576).toFixed(1)} MiB\n`
     );
 }

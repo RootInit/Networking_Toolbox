@@ -612,6 +612,30 @@ tree forwarding on a loop.
 `bridge-priority` it already writes (`:580`), BFS, `BLK` on non-tree ports — before fault injection
 means anything. This is a larger job than revision 1 budgeted and belongs in the work order.
 
+> **Done 2026-09-13 (work order item 7).** `computeSpanningTree` in `generate-fixture.mjs`, run per
+> snapshot after `withFailures` so a device that did not answer in *that* snapshot is not a bridge in
+> its tree. Root elected on `(bridge-priority, chassis MAC)`; least-cost tree by **Dijkstra, not BFS by
+> hops** — with 1G and 10G uplinks mixed the two differ, and the cost charged is the receiving port's,
+> as RSTP charges it. Per-link roles are Root/Designated on tree links and Designated/Alternate
+> elsewhere, with `BLK` on the Alternate end. `StpDetail` is now emitted, so it left `ACCESS_ROW_GAP`
+> (44 → 43 fields).
+>
+> **One deviation: a single RSTP instance, not per-VLAN.** The config text writes
+> `set protocols rstp`, which is one instance, so the scope key is `"instance 0"` and nothing else.
+> Faking `VLAN N` scopes on an RSTP config would assert a state no such switch can produce; a port that
+> forwards in one VLAN and blocks in another needs VSTP config generation, which belongs with item 8.
+>
+> Two prerequisites fell out of it. Each device now has **one chassis MAC** rather than one per link —
+> a real switch advertises the same chassis ID to every neighbour, and it is the tie-break the root
+> election turns on. And `withFailures` hands the pass *clones*, which are what get serialized, so the
+> identity fields it elects on are dropped after the tree is computed rather than being listed in
+> `SCRATCH`.
+>
+> One test premise here was wrong on the first try and is worth recording: a dual-homed access switch
+> can legitimately forward on two links — one up to the root, one down to a daisy-chained closet. The
+> assertion is about its **upward** links: exactly one Root port, every other path to the root
+> `Alternate` and blocked.
+
 *(Revision 1 also complained that `:376` sets `RemotePort` to a real port name "where reality
 supplies a MAC 38 times out of 43". Per §5.2 the fixture is **correct** — it only creates
 switch-to-switch links, and reality supplies a real port name on 5 of 5 of those.)*
@@ -964,7 +988,8 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    puts entries there that are not addresses.
 6. ~~**Phase 2 correctness C1–C6** (§4.2).~~ **Done 2026-09-13.** Migration notes for C1 and C4 are
    with the table in §4.2.
-7. **Generator spanning-tree pass** (§8.2) — the blocker for everything path-related.
+7. ~~**Generator spanning-tree pass** (§8.2) — the blocker for everything path-related.~~ **Done
+   2026-09-13.** Single RSTP instance, matching the config text; see §8.2 for why not per-VLAN.
 8. **Fault injection + per-snapshot manifests** (§8.3), micro-topologies (§8.4).
 9. **Topology graph + endpoint resolution** (§5, §6.1).
 10. **Path computation** (§6.2) with the F5 and F10 regression tests.
