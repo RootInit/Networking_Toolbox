@@ -251,29 +251,51 @@ identity is the physical port, so unit-level data lives in `LogicalUnits[]`.
 > | `show dot1x interface detail` | `^dot1x interface\b` | the dot1x parse |
 > | `show arp no-resolve expiration-time` | `^arp no-resolve\b` | `ARP_TABLE`, and the added TTE column shifts the optional `Flags` capture at `:663` |
 >
-> Each is placed *after* its short form, so the new one wins. **Any Phase 3 work must first make the
-> section matcher exact rather than prefix-based**, or give each command a distinct key. This is a
-> prerequisite, not a caveat.
+> Each is placed *after* its short form, so the new one wins.
+>
+> **Resolution: replace rather than add.** Three of the four are more-detailed forms of a command
+> already in the batch, so running the detailed form *instead of* the brief one removes the collision
+> entirely — same section key, same batch length, strictly more data. The fourth
+> (`show virtual-chassis vc-port`) is complementary rather than a superset and is cut instead. That
+> leaves the exact-matcher fix worth doing for safety but **no longer a prerequisite**.
 >
 > Revision 1's stated worry — that an unrecognised command could corrupt section parsing — is wrong
 > in both directions: the split is on the echoed prompt, so a CLI syntax error leaves the bad
 > command's section containing an error string and the next section intact.
 
-Ordered by rules unlocked per second of session time, with revision-1 costings corrected:
+**Strategy: upgrade in place, add almost nothing.** Three of the four collisions disappear if the
+*existing* command is replaced by its more detailed form rather than run alongside it — the batch
+length does not grow, the section key stays the same, and the matcher fix becomes a nice-to-have
+rather than a prerequisite. Everything else is cut unless it earns a place.
 
-| Command | Unlocks | Caveat |
-|---|---|---|
-| `show ethernet-switching interface` | Per-VLAN `Tagging` (i.e. native VLAN), `Blocking` state | **Port mode (`Access`/`Trunk`) is a `detail`-level field, not in the default table.** The cheap form gives `Interface \| State \| VLAN members \| Tag \| Tagging \| Blocking`; `detail` on a 48-port switch is a large output against a 120 s cap. Revision 1 costed the cheap form and promised the expensive one's fields |
-| `show spanning-tree bridge` | Root ID, root cost, root port, protocol per scope — and **topology-change count and time since last change**, which for "why is this broken *now*" matters more than the root ID | Confirmed to print per-VLAN Root ID under VSTP |
-| `show lacp interfaces` | Partner system ID/key, `Collecting`/`Distributing` per member | |
-| `show vlans extensive` | Authoritative VLAN ↔ `irb.N` join | **Collides — needs the matcher fix** |
-| `show poe controller` | Chassis PoE budget; explains a fleet of per-port faults at once | |
-| `show interfaces filters`, `show firewall` | Filter bindings, and non-zero discard counters — the strongest passive evidence policy is dropping traffic | |
-| `show route protocol direct`, `… static` | Connected and static routes | Never bare `show route` — the output can blow the batch cap on a core device |
-| `show dot1x interface detail` | Per-port guest / server-fail / assigned VLAN | **Collides** |
-| `show arp no-resolve expiration-time` | ARP entry age | **Collides** |
-| `show virtual-chassis vc-port` | Per-VCP status and errors | **Collides** |
-| `show interfaces diagnostics optics` | Rx/Tx power against the optic's own thresholds | **Demoted from revision 1's third place.** The measured device is 72/75 copper with 2 fibre ports; the command is a no-op where no optic is present. The cost is paid on every device and the yield is near zero on a copper access estate. Worth it on distribution/core, not fleet-wide |
+**Net effect: 18 commands → 19.**
+
+#### Upgrades in place (no net new commands, no collision)
+
+| Replace | With | Gains | Risk |
+|---|---|---|---|
+| `show arp no-resolve` | `show arp no-resolve expiration-time` | ARP entry age, which materially cuts duplicate-IP false positives | **Low — verified.** Same table plus one TTE column; documented option since 8.1. The added column shifts the optional `Flags` capture at `:663`, so the regex needs updating with it |
+| `show vlans` | `show vlans extensive` | Per-interface `ge-0/0/20.0*, tagged, trunk` lines: the active marker, **tagged/untagged (i.e. native VLAN)** and **port mode** — which is most of what `show ethernet-switching interface` was wanted for | **Medium — needs a one-off check on hardware.** Juniper's published sample output for `extensive` shows **no routing instance**, and the parser keys `$VlanDict` on `"<instance>\|<name>"` to disambiguate a VLAN name reused across instances (`:580-586`). Harmless on a single-instance fleet; on a multi-instance fleet the name-only fallback must detect two same-named VLANs with different tags and refuse the join rather than guess. **Confirm the ELS form before committing** |
+| `show dot1x interface` | `show dot1x interface detail` | `Authenticated VLAN` and `Guest VLAN member` per port — i.e. whether a client landed in a fallback VLAN rather than its intended one | **Medium — size unverified.** Per-port stanzas; on a fleet with dot1x on every access port that is ~48 stanzas per switch. **Measure the output against the 120 s cap before committing**; if it is large, keep the brief form and take per-port state from R6 instead |
+
+#### Added (one command)
+
+| Command | Unlocks |
+|---|---|
+| `show spanning-tree bridge` | Root bridge ID, root cost, root port and protocol per scope — and **topology-change count and time since last change**, which for "why is this broken *now*" matters more than the root ID. Small output (one stanza per scope). Today the root is only *inferred* from "a node with no `ROOT`-role port", and `DesignatedBridge` is not the root ID |
+
+#### Cut
+
+| Command | Why it does not earn a place |
+|---|---|
+| `show interfaces diagnostics optics` | The measured fleet is 72/75 copper. The cost is paid on every device and the yield is near zero on a copper access estate. Revisit only if a fibre-dense distribution tier is brought into scope |
+| `show poe controller` | Per-port PoE already arrives free from `show poe interface`, which is already in the batch; R7 widens what is kept from it. The only loss is the chassis power budget, which explains a rare fault |
+| `show virtual-chassis vc-port` | Not a replacement for `show virtual-chassis` — complementary, so it cannot collapse its collision. The important case, a member that dropped out of the stack, is caught by R11's `Status` column at zero cost. The loss is per-VCP error counters |
+| `show lacp interfaces` | Bundle membership is already free from `show interfaces terse`, and "bundle down while every member is up" is diagnosable from data already held. The loss is partner system ID and `Collecting`/`Distributing` per member — narrow, and the measured fleet has one two-member bundle |
+| `show route protocol direct` | Redundant with R1, which recovers connected subnets and prefix lengths from `show interfaces terse` at no session cost |
+| `show route protocol static` | Usually empty on an access switch, and a missing return route is rarely diagnosable from one end anyway |
+| `show ethernet-switching interface` | Its three wanted fields are now covered elsewhere: port mode and per-VLAN tagging by `show vlans extensive` above, and the blocking *reason* partly by R10's `BPDU Error` / `Loop Detect PDU Error` / `Ethernet-Switching Error` fields, which print on every port's link-level line in output already collected. **If the `show vlans extensive` upgrade fails its hardware check, this command comes back** |
+| `show interfaces filters`, `show firewall` | Speculative until filters are known to be in use — and that is checkable for free, by grepping the `Configuration` text already stored at `:311`. Add them only for a fleet that actually binds filters |
 
 ### 4.4 Phase 4 — config parser
 
@@ -625,8 +647,9 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
 9. **Topology graph + endpoint resolution** (§5, §6.1).
 10. **Path computation** (§6.2) with the F5 and F10 regression tests.
 11. **Rule framework** (§3) and the L1 rules — the best-supported layer.
-12. **Section-matcher fix** (§4.3), then Phase 3 commands incrementally, measuring session time each
-    time.
+12. **Phase 3 command changes** (§4.3): verify the two upgrades on real hardware, then land the three
+    in-place replacements and `show spanning-tree bridge`, measuring session time against the 120 s
+    cap each time. The exact-matcher fix is worth doing alongside but no longer gates this.
 13. **L2 and L3 rules** gated on the commands they need.
 14. **UI**: analysis sub-tab, path highlighting, per-hop drawer links.
 15. **Phase 4 config parser** (§4.4), last.
