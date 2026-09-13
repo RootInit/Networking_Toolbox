@@ -368,9 +368,14 @@ Test-Case "an envelope of the wrong format is rejected" {
 } -ExpectThrowMatch 'Not a recognized encrypted file'
 
 # Fixed cross-runtime vector, decrypted here AND by web-src/test/topology-crypto.test.mjs.
-$InteropEnvelope = '{"format":"PSNetworkMapper-EncryptedTopology","version":1,"kdf":"PBKDF2-SHA256","iterations":1000,"cipher":"AES-256-CBC","macAlgorithm":"HMAC-SHA256","salt":"AQIDBAUGBwgJCgsMDQ4PEA==","iv":"b+iBnE7OTNxUHdbMJLgqNA==","mac":"ZPIp4GkNDGJeBU0QZ1VLLci2HQGC482oBvInAG1G5tw=","ciphertext":"k1v8NbYk+p0Qm04nui5MVixuNLLTPAxZyxnlc0vwyvgCnckpR+qhdOu9xhXCE2L2sDIZVf75RyOZ3oE2RdLWeJtbJjgk7Ub+lA/5hzA+HJPzSFNulBOHlKPCTVbyGEknwmUyA+7tu8l4JHNBkwk6cw=="}' | ConvertFrom-Json
+# Built from code points, not written literally: 5.1 decodes a BOM-less .ps1 as ANSI, so a
+# non-ASCII literal would arrive mojibake there and decrypt fine only under pwsh 7.
+# U+00E4 U+00F6 U+00FC, then U+1F600 as its surrogate pair.
+$InteropPassword ="Correct Horse Battery Staple" +
+    [char]0x00E4 + [char]0x00F6 + [char]0x00FC + [char]0xD83D + [char]0xDE00
+$InteropEnvelope ='{"format":"PSNetworkMapper-EncryptedTopology","version":1,"kdf":"PBKDF2-SHA256","iterations":1000,"cipher":"AES-256-CBC","macAlgorithm":"HMAC-SHA256","salt":"AQIDBAUGBwgJCgsMDQ4PEA==","iv":"b+iBnE7OTNxUHdbMJLgqNA==","mac":"ZPIp4GkNDGJeBU0QZ1VLLci2HQGC482oBvInAG1G5tw=","ciphertext":"k1v8NbYk+p0Qm04nui5MVixuNLLTPAxZyxnlc0vwyvgCnckpR+qhdOu9xhXCE2L2sDIZVf75RyOZ3oE2RdLWeJtbJjgk7Ub+lA/5hzA+HJPzSFNulBOHlKPCTVbyGEknwmUyA+7tu8l4JHNBkwk6cw=="}' | ConvertFrom-Json
 Test-Case "decrypts the fixed interop vector shared with the JS implementation" {
-    (Unprotect-TopologyPayload -Envelope $InteropEnvelope -Password "Correct Horse Battery Stapleäöü😀") -eq '{"Topology":[{"DeviceIP":"10.55.1.1","Hostname":"swutch-e"}],"ScanTimestamp":"2026-01-01T00:00:00Z"}'
+    (Unprotect-TopologyPayload -Envelope $InteropEnvelope -Password $InteropPassword) -eq '{"Topology":[{"DeviceIP":"10.55.1.1","Hostname":"swutch-e"}],"ScanTimestamp":"2026-01-01T00:00:00Z"}'
 }
 
 # Both regexes below shipped matching nothing (PoE) or the wrong field (LLDP), and neither failed
@@ -1488,6 +1493,29 @@ if (-not $ArpRegexMatch.Success) {
         $M = [regex]::Match('aa:bb:cc:00:11:33 10.20.30.41    bme0.0                   permanent', $ArpPattern)
         $M.Success -and $M.Groups['iface'].Value -eq 'bme0.0' -and -not $M.Groups['phys'].Success
     }
+}
+
+Write-Host "`n--- 13. Script-file encoding ---" -ForegroundColor Cyan
+
+# 5.1 decodes a BOM-less .ps1 as the system ANSI code page, pwsh 7 as UTF-8, and both parse
+# without complaint - so a non-ASCII literal in a BOM-less file silently means different things
+# on the two runtimes. node_modules is excluded: npm's shims aren't ours to keep clean.
+$OffendingScripts = @()
+foreach ($File in Get-ChildItem -LiteralPath $ProjectRoot -Filter '*.ps1' -Recurse -File |
+                  Where-Object { $_.FullName -notmatch '[\\/]node_modules[\\/]' }) {
+    $Bytes = [System.IO.File]::ReadAllBytes($File.FullName)
+    $HasBom = $Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF
+    if ($HasBom) { continue }
+    $NonAscii = @($Bytes | Where-Object { $_ -gt 0x7F })
+    if ($NonAscii.Count -gt 0) {
+        $OffendingScripts += "$($File.FullName.Substring($ProjectRoot.Length + 1)) ($($NonAscii.Count) bytes)"
+    }
+}
+Test-Case "every .ps1 is pure ASCII or carries a UTF-8 BOM" {
+    if ($OffendingScripts.Count -gt 0) {
+        Write-Host "       offenders: $($OffendingScripts -join '; ')" -ForegroundColor Yellow
+    }
+    $OffendingScripts.Count -eq 0
 }
 
 Write-Host "`n============================================" -ForegroundColor Cyan
