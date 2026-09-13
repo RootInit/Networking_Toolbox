@@ -607,11 +607,87 @@ runtime.
 
 Current fixture: **4.4 MiB for 25,378 interfaces** across 350 devices. At the measured 2.5 KiB/port
 the expanded parse takes that to ~63 MiB — a **14×** growth, not the 4.8× a single-switch
-50 KiB→238 KiB figure implies.
+50 KiB→238 KiB figure implies. *(Superseded by the measurement below, which puts 16,800 interfaces
+at 30.6 MiB compressed / 142.5 MiB pretty; scaled to 25,378 that is ~46 MiB and ~215 MiB. The
+direction was right, the pretty-printer was the missing multiplier.)*
 
-**Requirement: measure a timed `ConvertTo-Json -Depth 100` over a synthetic 350-device topology at
-the new field density, on Windows PowerShell 5.1, before any further retention work.** If it is slow,
-fix the write path first — stream per device, or make periodic writes incremental.
+One in-tree claim did **not** reproduce: `WebServer.ps1:757` states "one `ConvertTo-Json` over a
+~40MB archive takes 5.1 minutes, on this thread." A `ConvertTo-Json -Depth 100` producing 142.5 MiB
+measured **1.4 s** here. The comment's workaround — listing names and sizes only — is still right
+for its own reasons, but the figure behind it is unexplained and should not be cited as a
+constraint until someone reproduces it.
+
+#### Measured — 2026-09-13, and the conclusion changed
+
+Measured on a Server 2019 Core VM, **Windows PowerShell 5.1.17763.1 / .NET 4.7.2**, 4 vCPU
+host-passthrough, 4 GB RAM. Synthetic 350-device × 48-port topology built from the same object
+types production uses (`Hashtable` node, `Object[]` of `PSCustomObject` interfaces, nested
+hashtables for `StpDetail` / `InputErrors` / `OutputErrors` / `Vlans`) and calibrated against a real
+scanned node to within 0.5%: **1390 B/port** compressed, 132.1 KiB/node vs the real 132.7 KiB.
+Three timed runs per case after a discarded warmup, `[GC]::Collect()` between.
+
+The heading is right that the write path is the problem. It is wrong about which part of it.
+
+**1. The encrypted write path did not complete at all — it threw.**
+
+    Array dimensions exceeded supported range
+      at Protect-TopologyPayload, lib/TopologyCrypto.ps1:61
+
+`Protect-` and `Unprotect-TopologyPayload` hashed over `($IvBytes + $CipherBytes)`. PowerShell's
+`+` on a `byte[]` does not concatenate buffers — it builds an `Object[]` and boxes every byte,
+roughly 32 bytes of allocation per ciphertext byte. At fleet size that exceeds the 2 GB
+single-object limit and the crawl cannot write an encrypted snapshot at any speed. Fixed by
+feeding the HMAC two blocks; the bytes hashed are unchanged, so `topology-crypto.js` stays in
+lockstep. **This was shipped, and no existing test reached a payload large enough to see it.**
+
+**2. Once it completes, time is not the problem — memory and file size are.**
+
+Per-stage, config excluded, three runs:
+
+| stage | pretty (shipped) | `-Compress` |
+|---|---|---|
+| `ConvertTo-Json -Depth 100` | 1350–1435 ms | 1228–1312 ms |
+| `Protect-TopologyPayload` | 1212–1215 ms | ~420 ms |
+| envelope `ConvertTo-Json -Depth 5` | 1596–1996 ms | ~520 ms |
+| `Out-File` + `Move-FileAtomic` | 231–1190 ms | ~200 ms |
+| **total, encrypted branch** | **4701–5526 ms** | **2347 ms** |
+| **total, plaintext branch** | **1634–2161 ms** | **1632 ms** |
+| snapshot JSON | 142.5 MiB | 30.6 MiB |
+| encrypted envelope on disk | 190.0 MiB | 40.8 MiB |
+| **process peak working set** | **3.27–3.58 GB** | **1.80–1.93 GB** |
+
+At ~5.5 s the write is **~4% of a device's 145 s abandon budget** — the starvation risk in the
+paragraph above is real but small, and the `elapsed × 10` backoff never reaches its 120 s ceiling.
+*Time was never the binding constraint.* **Peak working set is**, and 3.3–3.6 GB on a 4 GB box is
+not survivable with the crawl's runspaces and SSH state on top. Treat the pretty figure as a floor:
+the harness holds one string production would not (it measures both serializers), but production
+adds everything else the process is doing. The `-Compress` figure is *over*-stated for the opposite
+reason — that run still built and held the 156 MiB pretty string it was measuring against, so a
+production crawl writing only compressed output sits meaningfully below 1.8 GB.
+
+**`-Depth 100` pretty-printing costs 4.66× on 5.1** — far worse than the 1.79× the same topology
+shows under pwsh 7, so this could not have been inferred off-target. Switching the crawl to
+`-Compress` (`lib/FleetCrawl.ps1`) halves peak memory, more than halves the encrypted write, and
+cuts the retained snapshots the browser eager-loads (§9.2) by 4.66× — **20 × 190 MiB ≈ 3.8 GB on
+disk becomes ≈ 860 MB**. Nothing reads a snapshot by lines (the server sends the file verbatim as
+bytes, `WebServer.ps1:795`) and `Configuration` is a JSON string with escaped newlines either way,
+so indentation never aided manual review.
+
+**Storing the configuration is affordable.** At 40 KiB/device it adds 13.7 MiB to the compressed
+payload (30.6 → 44.3 MiB); at 120 KiB/device, 43 MiB. It is the largest single lever after
+`-Compress` but it does not dominate, and §4.4's decision — collect and store, never parse — costs
+nothing the crawl cannot afford.
+
+**The read path is not a problem.** Nothing in the crawl or the server parses a snapshot: the
+server streams bytes, and the only PowerShell `ConvertFrom-Json` over a snapshot is
+`lib/Protect-MapperFile.ps1:90`, a user-invoked tool that parses the whole file solely to read
+`.format` for its double-encryption guard. Measured on 5.1: **6.6 s at 156 MiB, 5.9 s at 44 MiB**.
+Worth narrowing to a prefix check eventually; not a crawl blocker, so not filed as work.
+
+**Still unmeasured:** `Update-ClientIpCorrelationLocal` runs inside the same blocking write and was
+not isolated (it is a nested local function). **Open question for the operator: how much RAM does
+the production host have?** That single number decides whether `-Compress` is sufficient or the
+write must also stream per device.
 
 ### 9.2 The browser load path is the other half, and it is also already shipped
 
@@ -659,8 +735,12 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
 
 ## 10. Work order
 
-1. **Measure the crawl write path** (§9.1) on 5.1. Fix it if slow. *Nothing else matters if a crawl
-   cannot complete.*
+1. ~~**Measure the crawl write path** (§9.1) on 5.1. Fix it if slow.~~ **Done 2026-09-13.** It did
+   not merely run slowly — the encrypted branch threw. Fixed the byte-array boxing in
+   `TopologyCrypto.ps1` and switched the crawl to `ConvertTo-Json -Compress`; peak working set
+   3.3–3.6 GB → 1.8–1.9 GB, encrypted write 4.7–9.5 s → 2.3 s, snapshots 190 MiB → 41 MiB.
+   Remaining: confirm the production host's RAM, and decide from that whether per-device streaming
+   is still needed.
 2. **Bound the browser autoload** (§9.2).
 3. **Test runner with host recording** (§8.6).
 4. **Parity-test mechanism** (§8.1) — ship the mechanism first; it will start failing usefully. Fill
