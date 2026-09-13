@@ -182,21 +182,38 @@ foreach ($Kib in $ConfigKiB) {
 
     $BuildSw = [System.Diagnostics.Stopwatch]::StartNew()
     $Topology = New-Object System.Collections.Generic.List[object]
-    for ($d = 0; $d -lt $Devices; $d++) { $Topology.Add((New-SyntheticNode -Index $d -Ports $PortsPerDevice -Config $Config)) }
+    for ($d = 0; $d -lt $Devices; $d++) {
+        # A distinct instance per device: production stores each switch's own config text, and one
+        # shared string would understate the graph by $Devices copies.
+        $DeviceConfig = if ($Kib -gt 0) { "set system host-name sw-$d`n$Config" } else { $Config }
+        $Topology.Add((New-SyntheticNode -Index $d -Ports $PortsPerDevice -Config $DeviceConfig))
+    }
     $BuildSw.Stop()
 
+    # The number that decides whether a host is big enough. Peak working set is elastic - .NET
+    # defers gen2 collections when there is headroom, so the same workload peaks higher on a bigger
+    # box - but the live set after a forced full collect is what must actually fit.
+    [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); [System.GC]::Collect()
+    $LiveSet = [System.GC]::GetTotalMemory($true)
     Emit ("=== config {0} KiB/device ===  (topology built in {1:n1}s)" -f $Kib, $BuildSw.Elapsed.TotalSeconds)
+    Emit ("    live set, topology graph only       {0:n0} MiB" -f ($LiveSet/1mb))
 
     $Wrap = @{ Topology = $Topology; ScanTimestamp = '2026-09-13T00:00:00Z' }
-    $null = $Wrap | ConvertTo-Json -Depth 100   # warmup, discarded
+    # Warmup, discarded - same serializer as the timed runs, so JIT and GC state match.
+    if ($CompressJson) { $null = $Wrap | ConvertTo-Json -Depth 100 -Compress } else { $null = $Wrap | ConvertTo-Json -Depth 100 }
 
     for ($run = 1; $run -le $Runs; $run++) {
         [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); [System.GC]::Collect()
         $Before = [System.GC]::GetTotalMemory($false)
 
-        $Pretty   = Measure-Stage 'ConvertTo-Json -Depth 100'          { $Wrap | ConvertTo-Json -Depth 100 }
-        $Compress = Measure-Stage 'ConvertTo-Json -Depth 100 -Compress'{ $Wrap | ConvertTo-Json -Depth 100 -Compress }
-        $Json = if ($CompressJson) { $Compress.Result } else { $Pretty.Result }
+        # Only the serializer under test runs. Measuring both would leave the unused string live
+        # across the whole write, inflating peak working set by its full size.
+        $Serialize = if ($CompressJson) {
+            Measure-Stage 'ConvertTo-Json -Depth 100 -Compress' { $Wrap | ConvertTo-Json -Depth 100 -Compress }
+        } else {
+            Measure-Stage 'ConvertTo-Json -Depth 100' { $Wrap | ConvertTo-Json -Depth 100 }
+        }
+        $Json = $Serialize.Result
 
         $Prot = Measure-Stage 'Protect-TopologyPayload' {
             Protect-TopologyPayload -PlainJson $Json -EncKey $EncKey -MacKey $MacKey -Salt $Salt -Iterations 200000
@@ -214,24 +231,24 @@ foreach ($Kib in $ConfigKiB) {
         $Peak = [System.Diagnostics.Process]::GetCurrentProcess().PeakWorkingSet64
         $Managed = [System.GC]::GetTotalMemory($false)
 
-        $SerMs = if ($CompressJson) { $Compress.Ms } else { $Pretty.Ms }
-        $PlainTotal = $SerMs + $WritePlain.Ms
-        $EncTotal   = $SerMs + $Prot.Ms + $Env5.Ms + $WriteEnc.Ms + $Move.Ms
+        $PlainTotal = $Serialize.Ms + $WritePlain.Ms
+        $EncTotal   = $Serialize.Ms + $Prot.Ms + $Env5.Ms + $WriteEnc.Ms + $Move.Ms
 
         Emit ("  run {0}:" -f $run)
-        foreach ($S in $Pretty, $Compress, $Prot, $Env5, $WritePlain, $WriteEnc, $Move) {
+        foreach ($S in $Serialize, $Prot, $Env5, $WritePlain, $WriteEnc, $Move) {
             Emit ("    {0,-34} {1,7} ms" -f $S.Stage, $S.Ms)
         }
-        Emit ("    pretty JSON chars                  {0,7}  ({1:n1} MiB)" -f $Json.Length, ($Json.Length / 1mb))
-        Emit ("    compressed JSON chars              {0,7}  (pretty is {1:n2}x)" -f $Compress.Result.Length, ($Json.Length / $Compress.Result.Length))
+        Emit ("    JSON chars                         {0,7}  ({1:n1} MiB)" -f $Json.Length, ($Json.Length / 1mb))
         Emit ("    plaintext file bytes               {0,7}  ({1:n1} MiB)" -f $WritePlain.Result, ($WritePlain.Result / 1mb))
         Emit ("    envelope file bytes                {0,7}  ({1:n1} MiB)" -f $WriteEnc.Result, ($WriteEnc.Result / 1mb))
-        Emit ("    managed heap after                 {0:n1} MiB    process peak working set {1:n1} MiB" -f ($Managed/1mb), ($Peak/1mb))
+        [System.GC]::Collect(); [System.GC]::WaitForPendingFinalizers(); [System.GC]::Collect()
+        $LiveAfter = [System.GC]::GetTotalMemory($true)
+        Emit ("    managed heap after                 {0:n0} MiB   live set after full collect {1:n0} MiB   process peak WS {2:n0} MiB" -f ($Managed/1mb), ($LiveAfter/1mb), ($Peak/1mb))
         Emit ("    TOTAL plaintext branch             {0,7} ms" -f $PlainTotal)
         Emit ("    TOTAL encrypted branch             {0,7} ms" -f $EncTotal)
         Emit ""
 
-        $Json = $null; $Pretty = $null; $Compress = $null; $Prot = $null; $Env5 = $null
+        $Json = $null; $Serialize = $null; $Prot = $null; $Env5 = $null
     }
 
     $Topology = $null; $Wrap = $null

@@ -658,12 +658,62 @@ Per-stage, config excluded, three runs:
 
 At ~5.5 s the write is **~4% of a device's 145 s abandon budget** — the starvation risk in the
 paragraph above is real but small, and the `elapsed × 10` backoff never reaches its 120 s ceiling.
-*Time was never the binding constraint.* **Peak working set is**, and 3.3–3.6 GB on a 4 GB box is
-not survivable with the crawl's runspaces and SSH state on top. Treat the pretty figure as a floor:
-the harness holds one string production would not (it measures both serializers), but production
-adds everything else the process is doing. The `-Compress` figure is *over*-stated for the opposite
-reason — that run still built and held the 156 MiB pretty string it was measuring against, so a
-production crawl writing only compressed output sits meaningfully below 1.8 GB.
+*Time was never the binding constraint.*
+
+#### Peak working set is elastic; the live set is the requirement
+
+The peak figures above are **not** a memory requirement, and reading them as one was the second
+mistake in this section. .NET's workstation GC defers gen2 collections while there is headroom, so
+the same workload peaks higher on a bigger machine. Re-running on an 8 GB guest:
+
+| | 4 GB guest | 8 GB guest |
+|---|---|---|
+| pretty, peak WS | 3.27–3.58 GB | **3.48–4.35 GB** |
+| `-Compress`, peak WS | 1.80–1.93 GB | 0.85–1.88 GB |
+
+The 4 GB numbers were being *pressured down*, not measured. What must actually fit is the live set
+after a forced full collect — measured in a **fresh process per case**, reproducible to the MiB
+(216 / 244 / 216 MiB across three runs):
+
+| 350 devices × 48 ports, `-Compress` | config 0 | config 40 KiB/device |
+|---|---|---|
+| topology object graph, live | **216 MiB** | **244 MiB** |
+| live set after a write (graph + retained envelope) | 506 MiB | 634 MiB |
+| process peak WS, same run | 849–850 MiB | 1055 MiB |
+
+The +28 MiB for configuration is exactly 350 × 40 KiB × 2 bytes of UTF-16 — the model accounts for
+itself. *(An earlier pass reported a 442 MiB graph. That was measurement-order contamination: cases
+sharing one process, and one config string shared across all 350 nodes. Both are fixed in
+`tools/Measure-WritePath.ps1` — it now gives each device its own config text, and each case must be
+run in its own process.)*
+
+#### Budget against the production host — 16 GB
+
+| component | | basis |
+|---|---|---|
+| topology object graph (resident for the crawl) | 244 MiB | measured |
+| write transients (UTF-16 string, UTF-8 bytes, ciphertext, base64, envelope) | ~390 MiB | measured as the 634 − 244 MiB delta |
+| 25 concurrent runspaces × raw capture + redacted copy | ~50 MiB | **estimated**, not benchmarked |
+| PowerShell + web server baseline | ~200 MiB | measured |
+| **total live** | **≈ 0.9 GB** | **≈ 6% of 16 GB** |
+
+**Per-device streaming is not needed and is off the work order.** `-Compress` is sufficient with an
+order of magnitude to spare. Peak WS will float well above the live set on a 16 GB box — that is
+the GC using memory it has, not a shortage — and it is bounded by the `[GC]::Collect()` already at
+`FleetCrawl.ps1:507` after each periodic write.
+
+**The precondition is being 64-bit.** A 32-bit PowerShell host caps the process at 2–4 GB of
+address space no matter how much RAM the machine has, which a ~250 MiB resident graph plus write
+transients plus an elastic GC will eventually exhaust — as an `OutOfMemoryException` hours into a
+crawl, with the crawl lost. `Start-NetworkMapper.ps1` now refuses to start under a 32-bit host
+(verified against the real `SysWOW64` shell on the 5.1 VM), and the CLI path no longer captures
+the crawl's return value, which had pinned the whole graph for the blocking web server's lifetime.
+
+**Candidate, not shipped:** `GCSettings.LargeObjectHeapCompactionMode = 'CompactOnce'` before that
+`[GC]::Collect()`. Every string in the write path is a large-object allocation and .NET 4.7.2 does
+not compact the LOH by default, so fragmentation could creep over a long crawl of repeated writes.
+Unmeasured, and at 16 GB probably irrelevant — it needs a "20 periodic writes in a loop, working
+set after each" mode in the benchmark before it earns a line of code.
 
 **`-Depth 100` pretty-printing costs 4.66× on 5.1** — far worse than the 1.79× the same topology
 shows under pwsh 7, so this could not have been inferred off-target. Switching the crawl to
@@ -684,10 +734,14 @@ server streams bytes, and the only PowerShell `ConvertFrom-Json` over a snapshot
 `.format` for its double-encryption guard. Measured on 5.1: **6.6 s at 156 MiB, 5.9 s at 44 MiB**.
 Worth narrowing to a prefix check eventually; not a crawl blocker, so not filed as work.
 
+**16 GB host RAM does nothing for §9.2.** A browser tab's JS heap is capped independently of
+machine memory (~4 GB on 64-bit Chrome), so eager-loading 20 snapshots stays the next blocker even
+though `-Compress` cut them from 190 MiB to 41 MiB each.
+
 **Still unmeasured:** `Update-ClientIpCorrelationLocal` runs inside the same blocking write and was
-not isolated (it is a nested local function). **Open question for the operator: how much RAM does
-the production host have?** That single number decides whether `-Compress` is sufficient or the
-write must also stream per device.
+not isolated (it is a nested local function). The 25-runspace figure in the budget is an estimate
+from raw-capture size, not a benchmark — faking SSH state was judged not worth the fidelity it
+would buy.
 
 ### 9.2 The browser load path is the other half, and it is also already shipped
 
@@ -737,10 +791,10 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
 
 1. ~~**Measure the crawl write path** (§9.1) on 5.1. Fix it if slow.~~ **Done 2026-09-13.** It did
    not merely run slowly — the encrypted branch threw. Fixed the byte-array boxing in
-   `TopologyCrypto.ps1` and switched the crawl to `ConvertTo-Json -Compress`; peak working set
-   3.3–3.6 GB → 1.8–1.9 GB, encrypted write 4.7–9.5 s → 2.3 s, snapshots 190 MiB → 41 MiB.
-   Remaining: confirm the production host's RAM, and decide from that whether per-device streaming
-   is still needed.
+   `TopologyCrypto.ps1`, switched the crawl to `ConvertTo-Json -Compress`, added a 64-bit host guard,
+   and stopped the CLI pinning the topology behind the blocking web server. Against the production
+   host's **16 GB**: live set ≈ 0.9 GB, ~6%. Encrypted write 4.7–9.5 s → 2.2–2.7 s; snapshots
+   190 MiB → 41 MiB. **Per-device streaming is not needed — dropped.**
 2. **Bound the browser autoload** (§9.2).
 3. **Test runner with host recording** (§8.6).
 4. **Parity-test mechanism** (§8.1) — ship the mechanism first; it will start failing usefully. Fill
