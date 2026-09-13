@@ -683,3 +683,152 @@ function ConvertFrom-JunosChassisHardware {
     }
     return $Items
 }
+
+# R2. The "Organization Info" stanzas of an LLDP neighbour block.
+#
+# These carry the 802.3 TLVs - MAC/PHY Configuration/Status, Maximum Frame Size, MDI Power, Link
+# Aggregation - which state the FAR end's autonegotiation, MTU and PoE negotiation. That is a
+# duplex/speed mismatch and an MTU mismatch diagnosable from one end, without scanning the peer,
+# which matters most for the peers a crawl cannot reach.
+#
+# One block carries several stanzas and each repeats the same three labels, so they are split on the
+# "Organization Info" heading rather than matched across the whole block.
+function ConvertFrom-JunosLldpOrgInfo {
+    param([string]$Block)
+
+    $Stanzas = @()
+    if ([string]::IsNullOrWhiteSpace($Block)) { return $Stanzas }
+
+    foreach ($Chunk in ($Block -split '(?im)^\s*Organization Info\s*$')) {
+        if ($Chunk -notmatch '(?im)^\s*OUI\s*:') { continue }
+        $Entry = [PSCustomObject]@{ OUI = $null; Subtype = $null; Info = $null }
+        if ($Chunk -match '(?im)^\s*OUI\s*:\s*(?<v>.+?)\s*$')     { $Entry.OUI = $Matches.v }
+        if ($Chunk -match '(?im)^\s*Subtype\s*:\s*(?<v>.+?)\s*$') { $Entry.Subtype = $Matches.v }
+        # Info is the payload and is the only free-form one; it runs to end of line.
+        if ($Chunk -match '(?im)^\s*Info\s*:\s*(?<v>.+?)\s*$')    { $Entry.Info = $Matches.v }
+        $Stanzas += $Entry
+    }
+    return $Stanzas
+}
+
+# R2b. LLDP timing: Ageout Count from the block header, and Time to live / Time mark / Age from the
+# "Local Information" line. Age is seconds since this neighbour was last heard from, which is the
+# closest thing to a per-port last-seen the scan collects - see port-last-used-spec.md section 1.3.
+function ConvertFrom-JunosLldpTiming {
+    param([string]$Block)
+
+    $Timing = [ordered]@{ AgeoutCount = $null; TimeToLive = $null; TimeMark = $null; AgeSeconds = $null }
+    if ([string]::IsNullOrWhiteSpace($Block)) { return $Timing }
+
+    if ($Block -match '(?im)^\s*Ageout Count\s*:\s*(?<v>\d+)') { $Timing.AgeoutCount = [int]$Matches.v }
+    if ($Block -match '(?i)Time to live\s*:\s*(?<v>\d+)')      { $Timing.TimeToLive = [int]$Matches.v }
+    # "Time mark: Tue Sep  9 12:34:56 2026 Age: 15 secs" - the mark is free-form and runs up to "Age:".
+    if ($Block -match '(?i)Time mark\s*:\s*(?<v>.+?)\s+Age\s*:') { $Timing.TimeMark = $Matches.v.Trim() }
+    if ($Block -match '(?i)\bAge\s*:\s*(?<v>\d+)\s*secs')        { $Timing.AgeSeconds = [int]$Matches.v }
+    return $Timing
+}
+
+# R13. LLDP-MED inventory. Every field carries a "MED " prefix in the output, which is why a pattern
+# anchored on "Model name" finds nothing. Present on 25 of the capture's 43 blocks, and it is the only
+# statement of what a phone or access point actually IS - model and manufacturer are otherwise
+# unknowable from the switch.
+function ConvertFrom-JunosLldpMedInventory {
+    param([string]$Block)
+
+    $Med = [ordered]@{
+        Manufacturer = $null; ModelName = $null; SerialNumber = $null
+        HardwareRevision = $null; SoftwareRevision = $null; FirmwareRevision = $null
+    }
+    if ([string]::IsNullOrWhiteSpace($Block)) { return $Med }
+
+    $Map = [ordered]@{
+        'Manufacturer name' = 'Manufacturer'; 'Model name' = 'ModelName'; 'Serial number' = 'SerialNumber'
+        'Hardware revision' = 'HardwareRevision'; 'Software revision' = 'SoftwareRevision'
+        'Firmware revision' = 'FirmwareRevision'
+    }
+    foreach ($Label in $Map.Keys) {
+        if ($Block -match ('(?im)^\s*MED\s+' + [regex]::Escape($Label) + '\s*:\s*(?<v>.+?)\s*$')) {
+            $Med[$Map[$Label]] = $Matches.v
+        }
+    }
+    return $Med
+}
+
+# R1. Logical units from "show interfaces terse", one row per (parent, unit, family, address).
+#
+# The physical-port rows in $NodeData.Interfaces deliberately strip the ".unit" suffix - their identity
+# is the physical port and window.normalizePort joins depend on it - so unit-level facts have nowhere
+# to live there. Emitted flat with a Parent field: the L3 addresses a gateway-candidate rule needs sit
+# on irb.N / vme.0 / me.0 / lo0.N, whose parents are not physical ports and get no Interfaces row.
+#
+# Parsed by the header's column offsets rather than by whitespace runs, because the Local column is
+# optional independently of Proto (vcp units have neither) and a unit may continue onto further lines:
+# a lone token at the Proto offset is another family on the same unit, one at the Local offset is
+# another address on the same family.
+function ConvertFrom-JunosInterfacesTerse {
+    param([string]$Text)
+
+    $Rows = @()
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Rows }
+
+    $ProtoCol = -1
+    $Parent = $null
+    $Unit = $null
+    $Admin = $null
+    $Link = $null
+    $Proto = $null
+
+    foreach ($Line in ($Text -split "`r?`n")) {
+        if ($ProtoCol -lt 0) {
+            if ($Line -match 'Admin' -and $Line -match 'Link' -and $Line -match 'Proto') {
+                $ProtoCol = $Line.IndexOf('Proto')
+            }
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($Line)) { continue }
+
+        if ($Line[0] -match '\S') {
+            if ($Line -notmatch '^(?<if>\S+)\s+(?<admin>up|down)\s+(?<link>up|down)') { continue }
+            $IfName = $Matches.if
+            $Admin = $Matches.admin
+            $Link = $Matches.link
+            $Parent = $null
+            $Unit = $null
+            $Proto = $null
+            # Unit-less parents carry no address and are not emitted.
+            if ($IfName -match '^(?<p>.+)\.(?<u>\d+)$') { $Parent = $Matches.p; $Unit = [int]$Matches.u }
+            if ($null -eq $Parent) { continue }
+        } elseif ($null -eq $Parent) {
+            continue
+        }
+
+        # Everything from the Proto offset rightwards, split on tokens rather than on the header's Local
+        # and Remote offsets: "eth-switch" is one character wider than the Proto column, so a fixed-width
+        # read truncates it. A line blank at the Proto offset is a continuation carrying only an address.
+        $Tail = ""
+        if ($Line.Length -gt $ProtoCol) { $Tail = $Line.Substring($ProtoCol) }
+        if ($Tail -match '^(?<proto>\S+)(?<rest>.*)$') {
+            $Proto = $Matches.proto
+            $Tail = $Matches.rest
+        }
+        # A bundle member prints its aggregate as "--> ae0.0"; the arrow is not part of the address.
+        $Tail = $Tail.Trim() -replace '^-->\s*',''
+        $Local = $null
+        $Remote = $null
+        if ($Tail -match '^(?<local>\S+)(?:\s+(?<remote>.+?))?\s*$') {
+            $Local = $Matches.local
+            if ($Matches.remote) { $Remote = $Matches.remote.Trim() }
+        }
+
+        $Rows += [PSCustomObject]@{
+            Parent = $Parent
+            Unit = $Unit
+            Family = $Proto
+            LocalAddress = $Local
+            Remote = $Remote
+            Admin = $Admin
+            Link = $Link
+        }
+    }
+    return $Rows
+}

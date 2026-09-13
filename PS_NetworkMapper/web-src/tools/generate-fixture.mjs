@@ -273,7 +273,7 @@ function blankNode(deviceIp) {
         // R15/R12/R3. All empty on a node that never answered, as New-PlaceholderNodeLocal has them.
         SectionsCaptured: [], CaptureTimestamp: null, MacTable: [],
         // R9/R8. A node that never answered has no route and no inventory to report.
-        DefaultRoute: {}, ChassisInventory: [],
+        DefaultRoute: {}, ChassisInventory: [], LogicalUnits: [],
     };
 }
 
@@ -350,12 +350,25 @@ function stampCapture(node, scanTime) {
         if (i === 0) rows.push({ Item: 'Xcvr 0', Indent: 4, Level: 2, Version: 'REV 01', PartNumber: '740-021309', Serial: `AM${1000 + i}WDF1`, Description: 'SFP-SX' });
         return rows;
     });
+    // R1. Every unit on the device, flat with its parent - including the management unit, whose parent
+    // has no Interfaces row. The L3 irb units the section 6.4 gateway rule will need are not emitted
+    // yet: the fixture's client addressing is not subnet-coherent, so an irb address here would assert
+    // a prefix no client actually sits inside. That lands with the rule, in Phase 2.
+    node.LogicalUnits = [
+        { Parent: 'vme', Unit: 0, Family: 'inet', LocalAddress: `${node.DeviceIP}/24`, Remote: null, Admin: 'up', Link: 'up' },
+        ...node.Interfaces.flatMap(r => r.LogicalUnits || []),
+    ];
+
     const dropped = chance(0.07) ? int(1, 3) : 0;
     node.SectionsCaptured = CAPTURE_SECTIONS.slice(0, CAPTURE_SECTIONS.length - dropped);
     for (const name of CAPTURE_SECTIONS.slice(CAPTURE_SECTIONS.length - dropped)) {
         if (SECTION_SUPPLIES[name]) SECTION_SUPPLIES[name](node);
     }
 }
+
+// R13. Fictional vendors: a real model string from a captured network has no business in the repo.
+const MED_PHONE = { Manufacturer: 'Contoso Telecom', ModelName: 'CT-4100', SerialNumber: 'CTX000000001', HardwareRevision: 'CT4100-A1', SoftwareRevision: '6.8.5' };
+const MED_AP = { Manufacturer: 'Fabrikam Wireless', ModelName: 'FW-AP305', SerialNumber: 'FWX000000001', HardwareRevision: 'AP305-B2', SoftwareRevision: '8.11.2' };
 
 const AP_DESC = n => `AP-${1000 + n}`;
 const PHONE_DESC = n => `PHONE-${2000 + n}`;
@@ -396,6 +409,11 @@ function accessRow(port, poe, isCage) {
                 : chance(0.5) ? int(72 * 3600, 182 * 86400) : int(182 * 86400, 900 * 86400),
     };
     if (live && chance(0.35)) row.Desc = chance(0.5) ? AP_DESC(int(1, 400)) : PHONE_DESC(int(1, 900));
+    // R1. A configured switch port has one eth-switch unit; a dark port often has none at all, which
+    // is what makes an empty LogicalUnits[] a state the UI has to handle rather than an omission.
+    row.LogicalUnits = live || chance(0.8)
+        ? [{ Parent: port, Unit: 0, Family: 'eth-switch', LocalAddress: null, Remote: null, Admin: row.Admin, Link: row.Link }]
+        : [];
     return row;
 }
 
@@ -456,6 +474,31 @@ function freeUplinks(node) {
 
 const byPort = (node) => (node._byPort ||= new Map(node.Interfaces.map(r => [r.Port, r])));
 
+// R2/R2b/R13/R5. The fields every LLDP neighbour row carries, switch or endpoint. Omitting them here
+// is how the fixture silently stops matching production shape, so both neighbour builders use this.
+function lldpCommon({ reachable = true, med = null } = {}) {
+    return {
+        Reachable: reachable,
+        // R2. 802.3 TLVs. Autoneg disabled on a live link is the defect this exists to expose.
+        OrgInfo: [
+            { OUI: '00-12-0f', Subtype: 'MAC/PHY Configuration/Status (1)', Info: chance(0.25) ? 'Autonegotiation disabled, 1000BaseTFD' : 'Autonegotiation enabled, 1000BaseTFD' },
+            { OUI: '00-12-0f', Subtype: 'Maximum Frame Size (4)', Info: pick(['1518', '9216']) },
+        ],
+        // R2b. Age is bounded by the advertised TTL; a neighbour older than that would have aged out.
+        AgeoutCount: chance(0.2) ? int(1, 6) : 0,
+        TimeToLive: 120,
+        TimeMark: null,
+        AgeSeconds: int(0, 119),
+        // R13. Only LLDP-MED endpoints report inventory; a switch neighbour leaves all six null.
+        Manufacturer: med ? med.Manufacturer : null,
+        ModelName: med ? med.ModelName : null,
+        SerialNumber: med ? med.SerialNumber : null,
+        HardwareRevision: med ? med.HardwareRevision : null,
+        SoftwareRevision: med ? med.SoftwareRevision : null,
+        FirmwareRevision: null,
+    };
+}
+
 // LLDP is symmetric; an asymmetric fixture hides every edge-dedup and primary-tree bug.
 function linkDevices(a, b, descPrefix) {
     const pa = freeUplinks(a).shift();
@@ -466,6 +509,7 @@ function linkDevices(a, b, descPrefix) {
             LocalPort: localPort, RemotePort: remotePort, Hostname: to.Hostname,
             MacAddress: switchMac(), ManagementIP: to.DeviceIP,
             Description: `Juniper Networks, Inc. ${to.StackMembers[0].Model.toLowerCase()}`,
+            ...lldpCommon(),
         });
         const row = byPort(from).get(localPort);
         if (row) { row.Link = 'up'; row.Admin = 'up'; row.STP = 'FWD'; row.LastFlappedSeconds = int(3600, 90 * 86400); row.Desc = `${descPrefix} to ${to.Hostname.replace('.local', '')}`; }
@@ -489,6 +533,7 @@ function addClients(node, gatewayNode, vlanTags) {
                 ManagementIP: first.IP === 'Unknown' ? `10.${node.zone.net}.${int(100, 240)}.${int(2, 250)}` : first.IP,
                 Description: isAp ? 'Wireless Access Point' : 'IP Phone',
                 Class: isAp ? 'Class III' : 'Class II',
+                ...lldpCommon({ med: isAp ? MED_AP : MED_PHONE }),
             });
         }
         // Confidence depends on LLDP-MED and a VLAN split; all three verdicts need to occur.
@@ -645,6 +690,21 @@ for (const [, switches] of inBuilding) {
         const leaf = pick(switches);
         if (leaf !== a && !leaf.Neighbors.some(n => n.ManagementIP === a.DeviceIP)) linkDevices(a, leaf, 'DAISY');
     }
+}
+
+// R5. An unmanaged desk switch: it advertises Bridge capability over LLDP but no management address,
+// so there is nothing to scan and no node behind it. Reachable = false, and every edge, node-meta and
+// diff consumer must skip it on ManagementIP alone - which is what having a few of these here checks.
+for (const node of shuffled(access).slice(0, Math.max(2, Math.round(access.length * 0.04)))) {
+    const row = node.Interfaces.find(r => r.Link === 'up' && r.Desc === 'Unknown');
+    if (!row) continue;
+    row.Desc = 'UNMANAGED desk switch';
+    node.Neighbors.push({
+        LocalPort: `${row.Port}.0`, RemotePort: '1', Hostname: 'Unknown',
+        MacAddress: switchMac(), ManagementIP: 'Unknown',
+        Description: 'Unmanaged 8-port switch',
+        ...lldpCommon({ reachable: false }),
+    });
 }
 
 for (const node of [...cores, ...dists, ...access]) topology.push(node);

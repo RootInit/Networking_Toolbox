@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Chassis from '../chassis.js';
-import { computeNeighborEdges } from '../topology-graph.js';
+import { computeNeighborEdges, buildSwitchMapNodeMeta } from '../topology-graph.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..', '..');
@@ -582,6 +582,84 @@ test('fixture interfaces match Get-JunosNodeData.ps1, except for a known and enu
     assert.deepEqual(missing, ACCESS_ROW_GAP.slice().sort(),
         'the accessRow parity gap changed. Update ACCESS_ROW_GAP in this file to match, ' +
         `removing what generate-fixture.mjs now emits.\n  now missing: ${missing.join(', ')}`);
+});
+
+// R1. Interfaces[] is keyed by physical port, so a unit whose parent is irb/vme/me0 has nowhere to live
+// on a row - the node-level array is the one a gateway-candidate rule can read. The per-row array must
+// be a filtered view of it, not a second parse that can drift.
+test('R1: logical units are node-level, mirrored onto their parent row, and cover the unit-less parents', () => {
+    const scanned = topology.filter(d => d.ScanStatus === 'Ok');
+    assert.ok(scanned.length > 100, 'expected a populated fixture');
+    for (const d of scanned) {
+        assert.ok(Array.isArray(d.LogicalUnits) && d.LogicalUnits.length > 0, `${d.DeviceIP} has no logical units`);
+        for (const u of d.LogicalUnits) {
+            assert.ok(u.Parent && typeof u.Parent === 'string', 'a unit needs a parent');
+            assert.equal(typeof u.Unit, 'number', 'a unit number is a number');
+        }
+        // The management unit's parent is not a physical port and gets no Interfaces row.
+        const mgmt = d.LogicalUnits.filter(u => u.Parent === 'vme');
+        assert.equal(mgmt.length, 1, `${d.DeviceIP} should carry exactly one management unit`);
+        assert.match(mgmt[0].LocalAddress, /^\d+\.\d+\.\d+\.\d+\/\d+$/);
+        assert.equal(d.Interfaces.some(r => r.Port === 'vme'), false, 'vme must not become a physical port row');
+
+        // Every row-level unit appears node-level, and names its own row as its parent.
+        const nodeKeys = new Set(d.LogicalUnits.map(u => `${u.Parent}.${u.Unit}`));
+        for (const row of d.Interfaces) {
+            for (const u of (row.LogicalUnits || [])) {
+                assert.equal(u.Parent, row.Port, `unit on ${row.Port} claims parent ${u.Parent}`);
+                assert.ok(nodeKeys.has(`${u.Parent}.${u.Unit}`), `${u.Parent}.${u.Unit} is missing node-level`);
+            }
+        }
+    }
+    const dark = scanned.flatMap(d => d.Interfaces).filter(r => !(r.LogicalUnits || []).length);
+    assert.ok(dark.length > 0, 'no port has an empty LogicalUnits[] - the UI never sees that state');
+});
+
+// R2/R2b/R13/R5. The neighbour row grew ten fields; a fixture missing any of them lets a consumer that
+// reads an undefined pass here and break on real data.
+test('R2/R2b/R13: every LLDP neighbour row carries the retained LLDP fields', () => {
+    const LLDP_FIELDS = ['Reachable', 'OrgInfo', 'AgeoutCount', 'TimeToLive', 'TimeMark', 'AgeSeconds',
+        'Manufacturer', 'ModelName', 'SerialNumber', 'HardwareRevision', 'SoftwareRevision', 'FirmwareRevision'];
+    const rows = topology.flatMap(d => [...(d.Neighbors || []), ...(d.MedNeighbors || [])]);
+    assert.ok(rows.length > 500, `only ${rows.length} neighbour rows`);
+    for (const n of rows) {
+        for (const f of LLDP_FIELDS) assert.ok(f in n, `a neighbour row is missing ${f}`);
+        assert.ok(Array.isArray(n.OrgInfo) && n.OrgInfo.length > 0, 'OrgInfo must carry the 802.3 TLVs');
+        for (const o of n.OrgInfo) assert.ok(o.OUI && o.Subtype && o.Info, 'a stanza needs all three fields');
+        // Age past the advertised TTL is a neighbour that would already have aged out.
+        assert.ok(n.AgeSeconds >= 0 && n.AgeSeconds < n.TimeToLive, `age ${n.AgeSeconds} against TTL ${n.TimeToLive}`);
+    }
+    const withAutonegOff = rows.filter(n => n.OrgInfo.some(o => /Autonegotiation disabled/.test(o.Info)));
+    assert.ok(withAutonegOff.length > 0, 'no neighbour advertises autoneg disabled - the R2 rule has nothing to fire on');
+});
+
+test('R13: only LLDP-MED endpoints report inventory, and a switch neighbour reports none', () => {
+    const med = topology.flatMap(d => d.MedNeighbors || []);
+    assert.ok(med.length > 100, `only ${med.length} MED endpoints`);
+    assert.ok(med.every(n => n.ModelName && n.Manufacturer && n.SerialNumber), 'every MED endpoint needs its inventory');
+    assert.ok(new Set(med.map(n => n.ModelName)).size > 1, 'a single model would let a rule hard-code it');
+    for (const n of topology.flatMap(d => d.Neighbors || [])) {
+        assert.equal(n.ModelName, null, 'a switch neighbour must not carry MED inventory');
+    }
+});
+
+// R5. These carry ManagementIP 'Unknown', which every edge and node-meta consumer already skips. If one
+// stopped skipping it, an unmanaged desk switch would appear as a phantom node in the diagram.
+test('R5: unreachable neighbours exist, are Bridge-capable, and reach no edge or node', () => {
+    const unreachable = topology.flatMap(d => (d.Neighbors || []).map(n => [d, n])).filter(([, n]) => n.Reachable === false);
+    assert.ok(unreachable.length >= 2, `expected some unreachable neighbours, got ${unreachable.length}`);
+    for (const [, n] of unreachable) {
+        assert.equal(n.ManagementIP, 'Unknown', 'an unreachable neighbour has no address to scan');
+        assert.ok(n.LocalPort, 'it is still known which port it is on');
+    }
+    const reachable = topology.flatMap(d => (d.Neighbors || []).filter(n => n.Reachable !== false));
+    assert.ok(reachable.every(n => n.ManagementIP && n.ManagementIP !== 'Unknown'),
+        'a reachable neighbour must carry a real management address');
+
+    const meta = buildSwitchMapNodeMeta(topology);
+    assert.equal(meta.has('Unknown'), false, 'an unreachable neighbour became a graph node');
+    const edges = computeNeighborEdges(topology);
+    assert.equal(edges.some(e => e.to === 'Unknown' || e.from === 'Unknown'), false, 'an unreachable neighbour became an edge');
 });
 
 // R12: one ScanTimestamp covers a crawl spanning many minutes, so per-device capture times are what

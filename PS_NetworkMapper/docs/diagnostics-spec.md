@@ -205,28 +205,36 @@ the device rebooted recently.
 Data already in the collected payload and discarded by the parser. The largest category of blocked
 rules and the cheapest to fix.
 
-> **Progress (2026-09-13): R4, R10, R12, R14, R15 landed.** Remaining: R1, R2, R2b, R3, R5, R6, R7,
-> R8, R9, R11, R13. Each landed item moved all three mirrors of the node shape together (worker
-> initializer, `New-PlaceholderNodeLocal`, `blankNode`) plus its tests, as §8.1 requires; the
-> interface-level ones grew `ACCESS_ROW_GAP` from 23 to 36 rather than closing it, since filling the
-> fixture's values waits on the initializer settling.
+> **Progress (2026-09-13): all of Phase 1 has landed.** Each item moved all three mirrors of the node
+> shape together (worker initializer, `New-PlaceholderNodeLocal`, `blankNode`) plus its tests, as §8.1
+> requires. The interface-level ones grew `ACCESS_ROW_GAP` from 23 to 44 rather than closing it, since
+> filling the fixture's values waits on the initializer settling; `LogicalUnits[]` is the exception,
+> emitted by the fixture because R1's own tests need units to assert against.
+>
+> Two predictions in this section were checked against the real capture and held: R5 admits **zero**
+> neighbours there (all 11 address-less blocks are endpoints), and 25 of 43 LLDP blocks carry MED
+> inventory. R2b's `Age` is present on 42 of 43.
 
 | # | Change | Site | Unlocks |
 |---|---|---|---|
-| R1 | Parse logical units — `irb\|vlan\|lo0\|me\|vme\|fxp\|em\|vcp` — with their address and family, into a **new `LogicalUnits[]` array on each physical interface row** | `lib/Get-JunosNodeData.ps1:378-407` | ~10 L3 rules, VC interconnect health. **Corrected from revision 1**, which proposed re-keying `Interfaces` by unit: that redefines the array's member identity, which `window.normalizePort` joins depend on at `utils.js:199,273` and `drawer.js:667`, and violates §9.5 |
-| R2 | Parse LLDP `Organization Info` stanzas: 802.3 `MAC/PHY Configuration/Status`, `Maximum Frame Size`, `MDI Power`, `Link Aggregation` | `lib/Get-JunosNodeData.ps1:517-552` | Far-end autoneg, MTU and PoE negotiation **without scanning the peer**. 27 of 43 blocks advertise autoneg disabled |
-| R2b | Parse LLDP `Age`, `Time mark`, `Ageout Count` per local interface | same | Per-port last-seen — see `port-last-used-spec.md` §1.3 |
-| R3 | Retain every MAC-table row in `Node.MacTable` (MAC, port, VLAN, **raw flag char**, age) alongside the de-duplicated `Clients` | `lib/Get-JunosNodeData.ps1:616-649` | Duplicate-MAC and sticky-MAC detection, **transit sightings (G1)**. `$RawMacs` is keyed by MAC last-wins and `:645` collapses the flag to `"Static/Other"` |
+| R1 **[done]** | Parse logical units — `irb\|vlan\|lo0\|me\|vme\|fxp\|em\|vcp` — with their address and family, into a **new `LogicalUnits[]` array on each physical interface row** | `lib/Get-JunosNodeData.ps1:378-407` | ~10 L3 rules, VC interconnect health. **Corrected from revision 1**, which proposed re-keying `Interfaces` by unit: that redefines the array's member identity, which `window.normalizePort` joins depend on at `utils.js:199,273` and `drawer.js:667`, and violates §9.5. **Deviation, deliberate:** the units this
+unlocks sit on `irb`/`vme`/`me0`/`lo0`, whose parents get no `Interfaces` row at all, so the array is
+**node-level** (`$NodeData.LogicalUnits`) and each physical row carries the subset belonging to it as a
+filtered view of the same parse. Creating rows for those parents would have been revision 1 in a
+different hat: every "N ports, M down" the UI derives from `Interfaces` would change value |
+| R2 **[done]** | Parse LLDP `Organization Info` stanzas: 802.3 `MAC/PHY Configuration/Status`, `Maximum Frame Size`, `MDI Power`, `Link Aggregation` | `lib/Get-JunosNodeData.ps1:517-552` | Far-end autoneg, MTU and PoE negotiation **without scanning the peer**. 27 of 43 blocks advertise autoneg disabled |
+| R2b **[done]** | Parse LLDP `Age`, `Time mark`, `Ageout Count` per local interface | same | Per-port last-seen — see `port-last-used-spec.md` §1.3 |
+| R3 **[done]** | Retain every MAC-table row in `Node.MacTable` (MAC, port, VLAN, **raw flag char**, age) alongside the de-duplicated `Clients` | `lib/Get-JunosNodeData.ps1:616-649` | Duplicate-MAC and sticky-MAC detection, **transit sightings (G1)**. `$RawMacs` is keyed by MAC last-wins and `:645` collapses the flag to `"Static/Other"` |
 | R4 **[done]** | `ConvertFrom-JunosMacStatistics` for the fixed-width `MAC statistics:` table; likewise `PCS statistics` and `Ethernet FEC statistics` | `lib/JunosParsers.ps1` | `CRC/Align errors`, `Jabber`, `Fragment frames`, `Code violations`. One port in the capture carries **51 CRC/Align errors — the only non-zero CRC value present — and the snapshot cannot see it**, because `ConvertFrom-JunosErrorCounters` correctly terminates at the first non-counter line, which is `Egress queues:` |
-| R5 | Record LLDP neighbours that advertise **`Bridge` or `Router` capability** but no management address, with `Reachable = $false` | `lib/Get-JunosNodeData.ps1:541-548` | **Corrected from revision 1**, which gated on the *absence of an address*. All 11 address-less blocks in the capture are endpoints — 10 workstations (`Class I Device`, chassis ID a hostname string under `Locally assigned`) and 1 telephone. Zero are bridges. Gating on absence would inject ~11 phantom "unreachable switch" nodes per access switch |
-| R6 | Per-port dot1x state keyed by **interface** | `lib/Get-JunosNodeData.ps1:509-513` | The captured interface is discarded and `Initialize` rows carry no MAC, so 25 rows are dropped. **No per-port dot1x state exists in the snapshot today** |
-| R7 | PoE: keep `Admin status`, `Max power`, `Priority`, `Pair/Mode` | `lib/Get-JunosNodeData.ps1:502-504` | `Admin status` is captured into `$Matches.status` and dropped, so "PoE admin-disabled" and "no PD connected" both read `OFF` |
-| R8 | Parse `show chassis hardware` into `FPC → PIC → Xcvr` | `lib/Get-JunosNodeData.ps1:340-345` | Absence of an `Xcvr` row is the only reliable "nothing plugged in" discriminator for a fibre port |
-| R9 | Route regex: capture egress interface, protocol tag, table name; distinct `"Unparsed"` sentinel | `lib/Get-JunosNodeData.ps1:348` | `Gateway = "Unknown"` currently conflates *no default route* with *a shape the regex misses* |
+| R5 **[done]** | Record LLDP neighbours that advertise **`Bridge` or `Router` capability** but no management address, with `Reachable = $false` | `lib/Get-JunosNodeData.ps1:541-548` | **Corrected from revision 1**, which gated on the *absence of an address*. All 11 address-less blocks in the capture are endpoints — 10 workstations (`Class I Device`, chassis ID a hostname string under `Locally assigned`) and 1 telephone. Zero are bridges. Gating on absence would inject ~11 phantom "unreachable switch" nodes per access switch |
+| R6 **[done]** | Per-port dot1x state keyed by **interface** | `lib/Get-JunosNodeData.ps1:509-513` | The captured interface is discarded and `Initialize` rows carry no MAC, so 25 rows are dropped. **No per-port dot1x state exists in the snapshot today** |
+| R7 **[done]** | PoE: keep `Admin status`, `Max power`, `Priority`, `Pair/Mode` | `lib/Get-JunosNodeData.ps1:502-504` | `Admin status` is captured into `$Matches.status` and dropped, so "PoE admin-disabled" and "no PD connected" both read `OFF` |
+| R8 **[done]** | Parse `show chassis hardware` into `FPC → PIC → Xcvr` | `lib/Get-JunosNodeData.ps1:340-345` | Absence of an `Xcvr` row is the only reliable "nothing plugged in" discriminator for a fibre port |
+| R9 **[done]** | Route regex: capture egress interface, protocol tag, table name; distinct `"Unparsed"` sentinel | `lib/Get-JunosNodeData.ps1:348` | `Gateway = "Unknown"` currently conflates *no default route* with *a shape the regex misses* |
 | R10 **[done]** | From extensive: `Statistics last cleared`, `Input/Output packets`, `Remote fault` (field-line scoped), `Interface flags`, `Device flags`, **and `BPDU Error` / `Loop Detect PDU Error` / `Ethernet-Switching Error` / `MAC-REWRITE Error`** | `lib/JunosParsers.ps1:262-299` | Exact counter baselines; error ratios; one-way-link detection. The four error fields print on **every** port's Link-level line and none is parsed — they partly supply the "blocking reason" §4.3 was going to spend a command on |
-| R11 | VC member `Status` column and `Neighbor List` continuation rows | `lib/Get-JunosNodeData.ps1:314-335` | A stack member that dropped out is invisible |
+| R11 **[done]** | VC member `Status` column and `Neighbor List` continuation rows | `lib/Get-JunosNodeData.ps1:314-335` | A stack member that dropped out is invisible |
 | R12 **[done]** | Per-device capture timestamp | `:194-210`, `lib/FleetCrawl.ps1:111-122` | One `ScanTimestamp` covers a crawl spanning many minutes |
-| R13 | LLDP-MED `Model name`, `Manufacturer`, `Serial number`, revisions | `:517-552` | Present on 25 of 43 blocks; phone/AP model is currently unknowable |
+| R13 **[done]** | LLDP-MED `Model name`, `Manufacturer`, `Serial number`, revisions | `:517-552` | Present on 25 of 43 blocks; phone/AP model is currently unknowable |
 | R15 **[done]** | **`SectionsCaptured[]` from `$DataDict`** | `lib/Get-JunosNodeData.ps1:264-292` | §2.4. The only truncation signal that survives §4.3 |
 
 **R14 (comments, not behaviour). [done]** Document at the field that `Vlans[].RoutingInstance`
@@ -919,7 +927,13 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    2026-09-13.** Mechanism shipped with the 23-field gap enumerated in `ACCESS_ROW_GAP`; it fails on
    drift in either direction. `accessRow`'s values stay unfilled, as directed — Phase 1 (item 5)
    narrows the list one field at a time.
-5. **Phase 1 retention R1–R15** (§4.1), each landing with its fixture counterpart.
+5. ~~**Phase 1 retention R1–R15** (§4.1), each landing with its fixture counterpart.~~ **Done
+   2026-09-13.** All fifteen landed. Three shapes came out differently from revision 1's proposal and
+   are noted at their rows: R1 is node-level with a per-row view, R5 gates on a positive Bridge/Router
+   capability rather than on a missing address, and R3 keeps the raw flag character rather than the
+   collapsed `"Static/Other"`. The crawl enqueue loop gained a skip for both an `"Unknown"` management
+   address and `Reachable = $false`, since it walks `Neighbors[]` to decide what to scan next and R5
+   puts entries there that are not addresses.
 6. **Phase 2 correctness C1–C6** (§4.2).
 7. **Generator spanning-tree pass** (§8.2) — the blocker for everything path-related.
 8. **Fault injection + per-snapshot manifests** (§8.3), micro-topologies (§8.4).

@@ -220,6 +220,11 @@ $NodeData = @{
     # R3. Every row of the switching table, not the MAC-keyed collapse Clients needs. Duplicate-MAC
     # and sticky-MAC detection and transit sightings all need the rows Clients throws away.
     MacTable = @()
+    # R1. Every logical unit on the device, flat, with its parent. Interfaces[] is keyed by physical
+    # port (R14), and the L3 addresses a gateway-candidate rule needs sit on irb/vme/me/lo0 units whose
+    # parents get no Interfaces row at all - so this is node-level, and each physical row carries the
+    # subset belonging to it as a filtered view of the same parse.
+    LogicalUnits = @()
     SectionsCaptured = @()
     # R12. When THIS device was read. One ScanTimestamp covers a crawl that can span many minutes,
     # which is too coarse to compare counters or last-seen times between devices. $null on a device
@@ -451,6 +456,10 @@ try {
                     # AdminStatus, "administratively disabled" and "nothing drawing power" both read OFF.
                     PoeAdminStatus = $null; PoeOperStatus = $null; PoePairMode = $null
                     PoeMaxPower = $null; PoePriority = $null; PoePowerConsumption = $null; PoeClass = $null
+                    # R1. This port's own logical units - family "aenet" names the bundle a member link
+                    # belongs to independently of the LACP parse above. Node-level LogicalUnits holds
+                    # every unit on the device, including those whose parent has no row here.
+                    LogicalUnits = @()
                 }
             }
         }
@@ -461,6 +470,13 @@ try {
         if ($Line -match "^(?<port>(?:ge|xe|et|ae|mge)[^\s]+)\s+(?:up|down)\s+(?:up|down)\s+(?<desc>.+)$") {
             $p = $Matches.port -replace "\.\d+$",""
             if ($NodeData.Interfaces.ContainsKey($p)) { $NodeData.Interfaces[$p].Desc = $Matches.desc.Trim() }
+        }
+    }
+
+    $NodeData.LogicalUnits = @(ConvertFrom-JunosInterfacesTerse -Text $DataDict["INTERFACES_TERSE"])
+    foreach ($LogicalUnit in $NodeData.LogicalUnits) {
+        if ($NodeData.Interfaces.ContainsKey($LogicalUnit.Parent)) {
+            $NodeData.Interfaces[$LogicalUnit.Parent].LogicalUnits += $LogicalUnit
         }
     }
 
@@ -594,7 +610,26 @@ try {
         # The capability list is on separate "Supported:"/"Enabled :" lines, so match "Enabled  :".
         $IsSwitchOrRouter = ($Block -match "(?i)Enabled\s*:\s*[^\r\n]*(?:Bridge|Router)")
 
-        $Neigh = @{ LocalPort = "Unknown"; RemotePort = "Unknown"; Hostname = "Unknown"; MacAddress = "Unknown"; ManagementIP = "Unknown"; Description = "Unknown" }
+        $Timing = ConvertFrom-JunosLldpTiming -Block $Block
+        $Med = ConvertFrom-JunosLldpMedInventory -Block $Block
+        $Neigh = @{
+            LocalPort = "Unknown"; RemotePort = "Unknown"; Hostname = "Unknown"
+            MacAddress = "Unknown"; ManagementIP = "Unknown"; Description = "Unknown"
+            # R5. $false on a neighbour recorded from its Bridge/Router capability alone, with no
+            # management address to scan. Consumers that resolve a neighbour to a device must skip these.
+            Reachable = $true
+            # R2. The 802.3 TLVs, raw: the far end's autonegotiation, MTU and PoE state, readable
+            # without scanning the peer - which is the only way to get it for an unreachable one.
+            OrgInfo = @(ConvertFrom-JunosLldpOrgInfo -Block $Block)
+            # R2b. Age is seconds since this neighbour was last heard from, the nearest thing to a
+            # per-port last-seen in the scan.
+            AgeoutCount = $Timing.AgeoutCount; TimeToLive = $Timing.TimeToLive
+            TimeMark = $Timing.TimeMark; AgeSeconds = $Timing.AgeSeconds
+            # R13. LLDP-MED inventory. The only statement of what a phone or access point actually is.
+            Manufacturer = $Med.Manufacturer; ModelName = $Med.ModelName; SerialNumber = $Med.SerialNumber
+            HardwareRevision = $Med.HardwareRevision; SoftwareRevision = $Med.SoftwareRevision
+            FirmwareRevision = $Med.FirmwareRevision
+        }
         if ($Block -match "(?i)Local Interface\s*:\s*(?<port>[^\r\n]+)") { $Neigh.LocalPort = $Matches.port.Trim() }
         # Anchored: the block opens with "Local Port ID : <ifIndex>", which an unanchored match takes.
         if ($Block -match "(?im)^Port ID\s*:\s*(?<rport>[^\r\n]+)") { $Neigh.RemotePort = $Matches.rport.Trim() }
@@ -607,19 +642,24 @@ try {
         if ($Block -match "(?i)(?:Management Address|Address)\s*:\s*(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)") { $Neigh.ManagementIP = $Matches.ip.Trim() }
         if ($Block -match "(?i)System Description\s*:\s*(?<desc>[^\r\n]+)") { $Neigh.Description = $Matches.desc.Trim() }
 
+        $HasManagementIp = $Neigh.ManagementIP -ne "Unknown" -and $Neigh.ManagementIP -ne $TargetIP -and $Neigh.ManagementIP -ne "0.0.0.0"
+        $Neigh.Reachable = $HasManagementIp
+
         if ($IsMedEndpoint) {
             # Phones/APs rarely advertise a management address, so gate only on LocalPort.
             if ($Neigh.LocalPort -ne "Unknown") {
                 $NodeData.MedNeighbors += [PSCustomObject]$Neigh
             }
         } else {
-            $HasManagementIp = $Neigh.ManagementIP -ne "Unknown" -and $Neigh.ManagementIP -ne $TargetIP -and $Neigh.ManagementIP -ne "0.0.0.0"
             if ($Neigh.LocalPort -ne "Unknown" -and ($IsSwitchOrRouter -or $HasManagementIp)) {
                 $LocalPhysPort = $Neigh.LocalPort -replace "\.\d+$",""
                 [void]$LldpSwitchPorts.Add($LocalPhysPort)
                 if ($AeMemberOf.ContainsKey($LocalPhysPort)) { [void]$LldpSwitchPorts.Add($AeMemberOf[$LocalPhysPort]) }
             }
-            if ($HasManagementIp) {
+            # R5. Gated on a positive Bridge/Router capability, never on the absence of an address: the
+            # address-less blocks in a real capture are workstations and phones, and admitting those
+            # would invent a phantom unreachable switch on every access port.
+            if ($HasManagementIp -or ($IsSwitchOrRouter -and $Neigh.LocalPort -ne "Unknown")) {
                 $NodeData.Neighbors += [PSCustomObject]$Neigh
             }
         }

@@ -534,7 +534,7 @@ window.renderNeighbors = function() {
         neighborRows.forEach(n => {
             html += `<tr>
                 <td><b>${esc(n.LocalPort) || "?"}</b></td>
-                <td>${esc(n.Hostname) || "Unknown"}<br><span style="font-family:monospace; color:var(--text-muted); font-size:0.75rem;">${esc(n.ManagementIP) || "Unknown"}</span></td>
+                <td>${esc(n.Hostname) || "Unknown"}<br><span style="font-family:monospace; color:var(--text-muted); font-size:0.75rem;">${n.Reachable === false ? "no management address" : (esc(n.ManagementIP) || "Unknown")}</span></td>
                 <td>${esc(n.RemotePort) || "?"}</td>
                 <td style="font-style:italic; color:var(--text-muted);">${esc(n.Description)}</td>
             </tr>`;

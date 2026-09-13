@@ -125,7 +125,7 @@ function Invoke-FleetCrawl {
             # Both empty by definition: this node exists because the device produced nothing, so no
             # section was captured and there is no capture instant to record.
             MacTable = @(); SectionsCaptured = @(); CaptureTimestamp = $null
-            DefaultRoute = @{}; ChassisInventory = @()
+            DefaultRoute = @{}; ChassisInventory = @(); LogicalUnits = @()
             ScanStatus = $Status
             ScanError  = $ScanErrorText
         }
@@ -392,7 +392,11 @@ function Invoke-FleetCrawl {
                             try {
                                 foreach ($Neigh in $Node.Neighbors) {
                                     $NIP = $Neigh.ManagementIP
-                                    if ([string]::IsNullOrEmpty($NIP)) { continue }
+                                    # "Unknown" is the initializer default, and R5 records neighbours
+                                    # that advertise Bridge/Router capability but no management address
+                                    # with Reachable = $false. Neither is an address to connect to.
+                                    if ([string]::IsNullOrEmpty($NIP) -or $NIP -eq "Unknown") { continue }
+                                    if ($Neigh.Reachable -eq $false) { continue }
                                     $InScope = Test-IpInAllowedScopes -IP $NIP -AllowedScopes $AllowedScopes
 
                                     if ($InScope -and !$Visited.Contains($NIP) -and !$Enqueued.Contains($NIP)) {

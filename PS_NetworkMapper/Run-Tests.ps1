@@ -1881,6 +1881,237 @@ Test-Case "every .ps1 is pure ASCII or carries a UTF-8 BOM" {
     $OffendingScripts.Count -eq 0
 }
 
+Write-Host "`n--- 17. LLDP retention and logical units (R1, R2, R2b, R5, R13) ---" -ForegroundColor Cyan
+
+# Shapes taken from real "show lldp neighbors detail" output; every value here is fictional. Two blocks:
+# a switch that advertises Bridge and a management address, and an unmanaged bridge that advertises
+# Bridge capability and no address at all - the only thing R5 is allowed to admit.
+$LldpDetailText = @"
+LLDP Neighbor Information:
+Local Interface    : ge-0/0/47.0
+Parent Interface   : ae0.0
+Local Port ID      : 518
+Ageout Count       : 1
+Neighbour Interface : xe-0/1/0
+Chassis type       : Mac address
+Chassis ID         : aa:bb:cc:00:11:22
+Port type          : Locally assigned
+Port ID            : 601
+Port description   : xe-0/1/0
+System name        : dist-a.example.invalid
+System Description : Juniper Networks, Inc. ex4300-48t , version 20.4R3-S9.2
+System capabilities
+        Supported : Bridge Router
+        Enabled   : Bridge Router
+Management Address
+        Address : 198.51.100.7
+Organization Info
+        OUI      : 00-12-0f (IEEE 802.3)
+        Subtype  : MAC/PHY Configuration/Status (1)
+        Info     : Autonegotiation enabled, 1000BaseTFD
+        Index    : 1
+Organization Info
+        OUI      : 00-12-0f (IEEE 802.3)
+        Subtype  : Maximum Frame Size (4)
+        Info     : 9216
+        Index    : 2
+Index: 7 Time to live: 120 Time mark: Tue Sep  1 09:15:04 2026 Age: 11 secs
+
+Local Interface    : ge-0/0/12.0
+Parent Interface   : -
+Local Port ID      : 511
+Ageout Count       : 0
+Chassis type       : Mac address
+Chassis ID         : aa:bb:cc:00:33:44
+Port type          : Locally assigned
+Port ID            : 1
+System capabilities
+        Supported : Bridge
+        Enabled   : Bridge
+Organization Info
+        OUI      : 00-12-0f (IEEE 802.3)
+        Subtype  : MAC/PHY Configuration/Status (1)
+        Info     : Autonegotiation disabled, 100BaseTXFD
+        Index    : 1
+Index: 8 Time to live: 120 Time mark: Tue Sep  1 09:15:06 2026 Age: 4 secs
+
+Local Interface    : ge-0/0/5.0
+Parent Interface   : -
+Local Port ID      : 504
+Ageout Count       : 0
+Chassis type       : Mac address
+Chassis ID         : aa:bb:cc:00:55:66
+Port type          : Mac address
+Port ID            : aa:bb:cc:00:55:66
+System name        : CT4100aabbcc005566
+System Description : Contoso CT-4100 IP Telephone
+System capabilities
+        Supported : Bridge Telephone
+        Enabled   : Bridge Telephone
+Media endpoint class: Class III Device
+Organization Info
+        OUI      : 00-12-bb (TIA)
+        Subtype  : MED Hardware revision (5)
+        Info     : CT4100-A1
+        Index    : 4
+MED Hardware revision : CT4100-A1
+MED Software revision : 6.8.5
+MED Manufacturer name : Contoso Telecom
+MED Model name        : CT-4100
+MED Serial number     : CTX000000001
+Index: 9 Time to live: 120 Time mark: Tue Sep  1 09:15:08 2026 Age: 2 secs
+"@
+
+$LldpBlocks = @(($LldpDetailText -split "(?i)(?=Local Interface\s*:)") | Where-Object { $_ -match "Local Interface" })
+
+Test-Case "the synthetic LLDP text splits into the three blocks the parsers are handed" {
+    $LldpBlocks.Count -eq 3
+}
+
+# R2. One block carries several Organization Info stanzas and each repeats the same three labels, so a
+# whole-block match would read only the first. The 802.3 TLVs are the far end's autoneg/MTU/PoE state.
+$UplinkOrg = @(ConvertFrom-JunosLldpOrgInfo -Block $LldpBlocks[0])
+Test-Case "R2: both Organization Info stanzas are read, not just the first" {
+    $UplinkOrg.Count -eq 2 -and
+        $UplinkOrg[0].Subtype -eq 'MAC/PHY Configuration/Status (1)' -and
+        $UplinkOrg[1].Subtype -eq 'Maximum Frame Size (4)'
+}
+Test-Case "R2: each stanza keeps its own OUI and Info, in stanza order" {
+    $UplinkOrg[0].Info -eq 'Autonegotiation enabled, 1000BaseTFD' -and
+        $UplinkOrg[1].Info -eq '9216' -and
+        @($UplinkOrg | Where-Object { $_.OUI -eq '00-12-0f (IEEE 802.3)' }).Count -eq 2
+}
+Test-Case "R2: an unmanaged bridge's autonegotiation state is readable without scanning it" {
+    $Org = @(ConvertFrom-JunosLldpOrgInfo -Block $LldpBlocks[1])
+    $Org.Count -eq 1 -and $Org[0].Info -match 'Autonegotiation disabled'
+}
+Test-Case "R2: a block with no Organization Info yields no stanzas rather than one empty one" {
+    @(ConvertFrom-JunosLldpOrgInfo -Block "Local Interface : ge-0/0/1.0`nChassis ID : aa:bb:cc:00:00:01").Count -eq 0
+}
+
+# R2b. Ageout Count sits in the block header; Time to live, Time mark and Age share one line, and the
+# mark is a free-form date that runs up to "Age:".
+$UplinkTiming = ConvertFrom-JunosLldpTiming -Block $LldpBlocks[0]
+Test-Case "R2b: Ageout Count, TTL and Age are read as numbers" {
+    $UplinkTiming.AgeoutCount -eq 1 -and $UplinkTiming.TimeToLive -eq 120 -and $UplinkTiming.AgeSeconds -eq 11
+}
+Test-Case "R2b: Time mark keeps the whole date and stops before Age" {
+    $UplinkTiming.TimeMark -eq 'Tue Sep  1 09:15:04 2026'
+}
+Test-Case "R2b: an Ageout Count of zero is zero, not unset" {
+    $T = ConvertFrom-JunosLldpTiming -Block $LldpBlocks[1]
+    $T.AgeoutCount -eq 0 -and $null -ne $T.AgeoutCount
+}
+Test-Case "R2b: a block with no timing line leaves all four fields null" {
+    $T = ConvertFrom-JunosLldpTiming -Block "Local Interface : ge-0/0/1.0"
+    $null -eq $T.AgeoutCount -and $null -eq $T.TimeToLive -and $null -eq $T.TimeMark -and $null -eq $T.AgeSeconds
+}
+
+# R13. Every MED inventory field carries a "MED " prefix, which is why a pattern anchored on
+# "Model name" finds nothing at all.
+$PhoneMed = ConvertFrom-JunosLldpMedInventory -Block $LldpBlocks[2]
+Test-Case "R13: the MED-prefixed inventory fields are read" {
+    $PhoneMed.Manufacturer -eq 'Contoso Telecom' -and $PhoneMed.ModelName -eq 'CT-4100' -and
+        $PhoneMed.SerialNumber -eq 'CTX000000001'
+}
+Test-Case "R13: hardware and software revisions are distinguished, and an absent one stays null" {
+    $PhoneMed.HardwareRevision -eq 'CT4100-A1' -and $PhoneMed.SoftwareRevision -eq '6.8.5' -and
+        $null -eq $PhoneMed.FirmwareRevision
+}
+Test-Case "R13: a switch neighbour reports no MED inventory at all" {
+    $M = ConvertFrom-JunosLldpMedInventory -Block $LldpBlocks[0]
+    $null -eq $M.Manufacturer -and $null -eq $M.ModelName -and $null -eq $M.SerialNumber
+}
+# An "Organization Info" stanza can name a MED subtype and carry the value in Info; reading that as the
+# inventory would pick up whichever stanza happened to come first.
+Test-Case "R13: the inventory comes from the MED lines, not from an Organization Info subtype" {
+    $PhoneMed.HardwareRevision -eq 'CT4100-A1' -and
+        $PhoneMed.HardwareRevision -ne 'CT4100-A1 from Organization Info'
+}
+
+# R5. Gated on a positive Bridge/Router capability, never on the absence of an address.
+Test-Case "R5: the worker admits an address-less neighbour only on a Bridge/Router capability" {
+    $JunosNodeDataSrc -match '\(\$HasManagementIp -or \(\$IsSwitchOrRouter -and \$Neigh\.LocalPort -ne "Unknown"\)\)'
+}
+Test-Case "R5: Reachable is set from whether there is a management address, for every neighbour" {
+    $JunosNodeDataSrc -match '\$Neigh\.Reachable = \$HasManagementIp'
+}
+# The crawler walks Neighbors[] to decide what to scan next. "Unknown" is the initializer default and
+# is not empty, so IsNullOrEmpty alone would hand it to the scope test as a hostname.
+Test-Case "R5: the crawl enqueue loop skips both an Unknown address and an unreachable neighbour" {
+    $FleetCrawlSrc -match '\[string\]::IsNullOrEmpty\(\$NIP\) -or \$NIP -eq "Unknown"' -and
+        $FleetCrawlSrc -match '\$Neigh\.Reachable -eq \$false.*continue'
+}
+Test-Case "R5: a placeholder node carries LogicalUnits, so the shape matches a scanned one" {
+    $FleetCrawlSrc -match 'LogicalUnits = @\(\)'
+}
+
+# R1. Logical units, parsed by the header's column offsets. The Local column is optional independently
+# of Proto, and a unit continues onto further lines for a second family or a second address.
+$TerseText = @"
+Interface               Admin Link Proto    Local                 Remote
+ge-0/0/0                up    up
+ge-0/0/0.0              up    up   eth-switch
+ge-0/0/47               up    up
+ge-0/0/47.0             up    up   aenet    --> ae0.0
+ae0                     up    up
+ae0.0                   up    up   eth-switch
+irb                     up    up
+irb.110                 up    up   inet     192.0.2.1/24
+                                   inet6    2001:db8::1/64
+irb.120                 up    up   inet     198.51.100.1/24
+                                            198.51.100.2/24
+me0                     up    down
+me0.0                   up    down inet     203.0.113.9/24
+vcp-255/1/0             up    up
+vcp-255/1/0.32768       up    up
+"@
+
+$Units = @(ConvertFrom-JunosInterfacesTerse -Text $TerseText)
+
+Test-Case "R1: unit-less parent rows are not emitted, and every unit row is" {
+    # 7 unit rows in the text, plus one continuation family and one continuation address.
+    $Units.Count -eq 9 -and @($Units | Where-Object { $null -eq $_.Unit }).Count -eq 0
+}
+Test-Case "R1: the parent and unit are split off the interface name" {
+    $Irb = @($Units | Where-Object { $_.Parent -eq 'irb' -and $_.Unit -eq 110 })
+    $Irb.Count -eq 2 -and $Irb[0].Family -eq 'inet' -and $Irb[0].LocalAddress -eq '192.0.2.1/24'
+}
+# "eth-switch" is one character wider than the header's Proto column, so a fixed-width read truncates
+# it and every switch-port unit's family becomes a different string.
+Test-Case "R1: a family wider than its header column is not truncated" {
+    @($Units | Where-Object { $_.Family -eq 'eth-switch' }).Count -eq 2
+}
+Test-Case "R1: a continuation line carries the previous unit's parent and a new family" {
+    $V6 = @($Units | Where-Object { $_.Family -eq 'inet6' })
+    $V6.Count -eq 1 -and $V6[0].Parent -eq 'irb' -and $V6[0].Unit -eq 110 -and $V6[0].LocalAddress -eq '2001:db8::1/64'
+}
+Test-Case "R1: a second address on one family keeps that family, not a null one" {
+    $Second = @($Units | Where-Object { $_.LocalAddress -eq '198.51.100.2/24' })
+    $Second.Count -eq 1 -and $Second[0].Family -eq 'inet' -and $Second[0].Unit -eq 120
+}
+Test-Case "R1: a bundle member's aggregate is the address, without the arrow" {
+    $Member = @($Units | Where-Object { $_.Parent -eq 'ge-0/0/47' })
+    $Member.Count -eq 1 -and $Member[0].Family -eq 'aenet' -and $Member[0].LocalAddress -eq 'ae0.0'
+}
+Test-Case "R1: a unit with neither family nor address is still emitted" {
+    $Vcp = @($Units | Where-Object { $_.Parent -eq 'vcp-255/1/0' })
+    $Vcp.Count -eq 1 -and $null -eq $Vcp[0].Family -and $null -eq $Vcp[0].LocalAddress
+}
+Test-Case "R1: a unit's Admin and Link come from its own row" {
+    $Me = @($Units | Where-Object { $_.Parent -eq 'me0' })
+    $Me.Count -eq 1 -and $Me[0].Admin -eq 'up' -and $Me[0].Link -eq 'down'
+}
+Test-Case "R1: text with no header yields nothing rather than guessing at columns" {
+    @(ConvertFrom-JunosInterfacesTerse -Text "ge-0/0/0.0 up up eth-switch").Count -eq 0
+}
+# Interfaces[] identity is the physical port (R14), so the node-level array is what holds a unit whose
+# parent - irb, vme, me0 - never gets a row there at all.
+Test-Case "R1: the worker keeps a node-level array and mirrors each unit onto its parent's row" {
+    $JunosNodeDataSrc -match '\$NodeData\.LogicalUnits = @\(ConvertFrom-JunosInterfacesTerse' -and
+        $JunosNodeDataSrc -match '\$NodeData\.Interfaces\[\$LogicalUnit\.Parent\]\.LogicalUnits \+= \$LogicalUnit'
+}
+
 Write-Host "`n============================================" -ForegroundColor Cyan
 if ($script:Passed -eq $script:Total) {
     Write-Host "$($script:Passed)/$($script:Total) passed" -ForegroundColor Green
