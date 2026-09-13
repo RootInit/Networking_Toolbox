@@ -667,6 +667,31 @@ switch-to-switch links, and reality supplies a real port name on 5 of 5 of those
 - **The oracle is the manifest, not golden files** — golden output is invalidated by any generator
   edit.
 
+**Done 2026-09-13 (work order item 8, injection half).** `--faults N` in `generate-fixture.mjs`, one
+`FaultManifest_<stamp>.fixture.json` per snapshot, seven kinds: `duplicate-mac` (F1),
+`duplicate-ip`/`off-subnet-client`/`dot1x-held`/`autoneg-asymmetric` (F4), `stp-unconverged` (F9),
+`unmanaged-bridge-shared-segment` (F14). Default is 0 — a fault nobody has a manifest for is worth
+less than a clean fleet. Deviations from the plan above:
+
+- **One injection site, not two.** Injection runs on the fleet `withFailures` has already cloned, where
+  `Interfaces`, `Neighbors`, `Clients`, `ArpEntries` and `MacTable` all exist together, so both fault
+  families are reachable from one place — which is what the two-site requirement was for. It also
+  settles the other two problems directly: a placeholder is skipped by reading the `ScanStatus` already
+  on the clone, and since the clone is discarded after the write, nothing leaks into the next snapshot.
+- **The cost is that an injector owns the whole shape of its fault.** `stampCapture` has already
+  derived `MacTable` and `LogicalUnits` by then, so an injected client carries its own MAC-table row.
+  That is §8.2 applied to injection.
+- **The sub-PRNG rule is a test, not a review note.** Untouched devices must be byte-identical between
+  `--faults 0` and `--faults 9`; an injector that reached `rnd()` shifts the main stream and fails it.
+  Verified by making one injector call `int()` and watching the test fail.
+- **The manifest is not named `NetworkMap_*`.** Both loaders match `/^NetworkMap_.*\.json$/`, so a
+  manifest named after its map would be offered to the operator as a snapshot to open.
+- **F11 (a VLAN missing from a trunk) has no injector.** `Vlans[]` is empty on every fixture device, so
+  there is no membership to remove. It lands with the VLAN retention work.
+- `stp-unconverged` only ever relabels an already-blocked port, so the forwarding subgraph the
+  generator asserted is untouched; the test states that as an equality against the clean run rather
+  than as `devices - 1`, because a placeholder device's links are unobservable in the written snapshot.
+
 ### 8.4 Hand-built micro-topologies
 
 A triangle with one leg blocked in VLAN 10 and forwarding in VLAN 20 (the F5 regression); a VLAN with

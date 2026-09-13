@@ -27,15 +27,22 @@ const SNAPSHOT_COUNT = Math.max(1, parseInt(flag('snapshots', '3'), 10));
 const DEFAULT_OUT_DIR = path.resolve(path.join(HERE, '..', '..', 'Network_Maps'));
 const OUT_DIR = path.resolve(flag('out', DEFAULT_OUT_DIR));
 
+// How many deliberate faults to inject per snapshot. Zero by default: a fault has to be described by a
+// manifest to be worth anything, and a consumer that does not read one is better off with a clean fleet.
+const FAULT_COUNT = Math.max(0, parseInt(flag('faults', '0'), 10));
+
 // mulberry32: a fixture must be reproducible from --seed alone, so never reach for Math.random().
-let seedState = SEED >>> 0;
-function rnd() {
-    seedState = (seedState + 0x6D2B79F5) >>> 0;
-    let t = seedState;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+function makeRng(seed) {
+    let state = seed >>> 0;
+    return () => {
+        state = (state + 0x6D2B79F5) >>> 0;
+        let t = state;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
 }
+const rnd = makeRng(SEED);
 const int = (lo, hi) => lo + Math.floor(rnd() * (hi - lo + 1));
 const pick = (arr) => arr[Math.floor(rnd() * arr.length)];
 const chance = (p) => rnd() < p;
@@ -1086,6 +1093,228 @@ function withFailures(fleet, snapshotIndex, scanTime) {
     });
 }
 
+// Section 8.3. Deliberate faults, described by a manifest.
+//
+// Injection runs on the cloned fleet withFailures has already produced, which is one site rather than
+// the two section 8.3 asked for, and is what makes both fault families reachable: the clone carries
+// Interfaces, Neighbors, Clients, ArpEntries and MacTable together, so a client fault and a structural
+// one are injectable in the same pass. It also settles two problems the spec raised. A device that
+// never answered is skipped by reading the ScanStatus already on the clone, so no fault can be claimed
+// on a placeholder; and because the clone is discarded after the write, nothing leaks into the next
+// snapshot, which is what would otherwise make snapshot N's manifest a lie about snapshot N+1.
+//
+// The price is that an injector owns the whole shape of its fault - a client row implies a MAC-table
+// row - because stampCapture has already run and will not derive it. That is the section 8.2 rule
+// applied to injection: a fault that contradicts itself teaches a rule to fire on an impossible state.
+//
+// None of these helpers may reach rnd(): the main stream's position decides every other byte of the
+// fixture, and the manifest is only an oracle if --faults 0 and --faults N describe the same fleet.
+const fInt = (rng, lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
+const fPick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
+const fHexByte = (rng) => fInt(rng, 0, 255).toString(16).padStart(2, '0');
+const faultClientMac = (rng) => ['aa', 'bb', fHexByte(rng), fHexByte(rng), fHexByte(rng), fHexByte(rng)].join(':');
+const faultSwitchMac = (rng) => ['02', 'ab', fHexByte(rng), fHexByte(rng), fHexByte(rng), fHexByte(rng)].join(':').toUpperCase();
+
+// lldpCommon's shape without lldpCommon's reach into the main stream.
+function faultLldpCommon(rng, { reachable = true, autoneg = 'enabled' } = {}) {
+    return {
+        Reachable: reachable,
+        OrgInfo: [
+            { OUI: '00-12-0f', Subtype: 'MAC/PHY Configuration/Status (1)', Info: `Autonegotiation ${autoneg}, 1000BaseTFD` },
+            { OUI: '00-12-0f', Subtype: 'Maximum Frame Size (4)', Info: '1518' },
+        ],
+        AgeoutCount: 0, TimeToLive: 120, TimeMark: null, AgeSeconds: fInt(rng, 0, 119),
+        Manufacturer: null, ModelName: null, SerialNumber: null,
+        HardwareRevision: null, SoftwareRevision: null, FirmwareRevision: null,
+    };
+}
+
+const scanned = (fleet) => fleet.filter(d => d.ScanStatus === 'Ok');
+// A live port with no LLDP neighbour on it: where a client hangs, and never where a trunk does.
+const clientPorts = (node) => node.Interfaces.filter(r =>
+    String(r.Link).toLowerCase() === 'up' &&
+    !node.Neighbors.some(n => String(n.LocalPort).replace(/\.\d+$/, '') === r.Port));
+const macRow = (client, port) => ({
+    RoutingInstance: 'default-switch', VlanName: client.VLAN_Name, MacAddress: client.MAC,
+    Flags: 'D', Age: null, Interface: client.Port, PhysicalPort: port,
+});
+
+// F1/F4. One MAC learned on two access ports of two different switches: either a loop or a spoof, and
+// indistinguishable from a host that genuinely moved between crawls without the MAC table's age.
+function injectDuplicateMac(rng, fleet) {
+    const donors = scanned(fleet).filter(d => d.Clients.length);
+    if (!donors.length) return null;
+    const donor = fPick(rng, donors);
+    const client = fPick(rng, donor.Clients);
+    const hosts = scanned(fleet).filter(d => d !== donor && clientPorts(d).length);
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const row = fPick(rng, clientPorts(host));
+    const copy = { ...client, Port: `${row.Port}.0`, PortDesc: row.Desc };
+    host.Clients.push(copy);
+    host.MacTable.push(macRow(copy, row.Port));
+    return {
+        kind: 'duplicate-mac', failureMode: 'F1', deviceIp: host.DeviceIP, port: row.Port, mac: copy.MAC,
+        params: { alsoOn: donor.DeviceIP, alsoOnPort: String(client.Port).replace(/\.\d+$/, '') },
+        expected: { finding: 'duplicate-mac-across-devices', deviceIp: host.DeviceIP, port: row.Port },
+    };
+}
+
+// Two MACs claiming one address. The ARP-to-MAC correlation has to report the ambiguity rather than
+// pick a winner, which is the defect C2 fixed in the crawler and has no fixture coverage without this.
+function injectDuplicateIp(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => d.ArpEntries.length);
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const entry = fPick(rng, host.ArpEntries);
+    const mac = faultClientMac(rng);
+    host.ArpEntries.push({ MAC: mac, IP: entry.IP });
+    return {
+        kind: 'duplicate-ip', failureMode: 'F4', deviceIp: host.DeviceIP, port: null, mac: mac,
+        params: { ip: entry.IP, alsoClaimedBy: entry.MAC },
+        expected: { finding: 'duplicate-ip-two-macs', deviceIp: host.DeviceIP, port: null },
+    };
+}
+
+// A resolved client address outside every allowedScopes prefix. 192.0.2.0/24 is documentation space and
+// is not one of the fleet's 10.<zone>. nets, so it cannot collide with a legitimate client.
+function injectOffSubnetClient(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => clientPorts(d).length);
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const row = fPick(rng, clientPorts(host));
+    const vlan = fPick(rng, VLANS);
+    const client = {
+        IP: `192.0.2.${fInt(rng, 2, 250)}`, MAC: faultClientMac(rng), Port: `${row.Port}.0`,
+        PortDesc: row.Desc, VLAN_Name: vlan.name, VLAN_Tag: vlan.tag, Type: 'Dynamic',
+        Dot1x_User: 'Unknown', Dot1x_State: 'Unknown',
+    };
+    host.Clients.push(client);
+    host.MacTable.push(macRow(client, row.Port));
+    host.ArpEntries.push({ MAC: client.MAC, IP: client.IP });
+    return {
+        kind: 'off-subnet-client', failureMode: 'F4', deviceIp: host.DeviceIP, port: row.Port, mac: client.MAC,
+        params: { ip: client.IP, vlanTag: vlan.tag },
+        expected: { finding: 'client-outside-scope', deviceIp: host.DeviceIP, port: row.Port },
+    };
+}
+
+// R6. A supplicant stuck in Held is a wiring or policy fault the port's own state does not show: the
+// link stays up and the client keeps appearing in the MAC table.
+function injectDot1xHeld(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => d.Clients.some(c => c.Dot1x_State !== 'Held'));
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const client = fPick(rng, host.Clients.filter(c => c.Dot1x_State !== 'Held'));
+    const before = client.Dot1x_State;
+    client.Dot1x_State = 'Held';
+    if (client.Dot1x_User === 'Unknown') client.Dot1x_User = `lab\\user${fInt(rng, 100, 999)}`;
+    return {
+        kind: 'dot1x-held', failureMode: 'F4', deviceIp: host.DeviceIP,
+        port: String(client.Port).replace(/\.\d+$/, ''), mac: client.MAC,
+        params: { previousState: before, user: client.Dot1x_User },
+        expected: { finding: 'dot1x-held', deviceIp: host.DeviceIP, port: String(client.Port).replace(/\.\d+$/, '') },
+    };
+}
+
+// F9. A port still learning is neither forwarding nor blocking. It is left on a port the tree already
+// blocked, so the forwarding subgraph is untouched and stays the spanning tree the assertion checked -
+// the fault is that a path computer reading only FWD/BLK has a third state to account for.
+function injectStpUnconverged(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => d.Interfaces.some(r => r.STP === 'BLK'));
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const row = fPick(rng, host.Interfaces.filter(r => r.STP === 'BLK'));
+    row.STP = 'LRN';
+    for (const scope of Object.keys(row.StpDetail || {})) row.StpDetail[scope].State = 'LRN';
+    return {
+        kind: 'stp-unconverged', failureMode: 'F9', deviceIp: host.DeviceIP, port: row.Port, mac: null,
+        params: { previousState: 'BLK' },
+        expected: { finding: 'stp-port-not-converged', deviceIp: host.DeviceIP, port: row.Port },
+    };
+}
+
+// R2. The two ends of one link advertising different autonegotiation state. Neither port alone looks
+// wrong, so nothing short of comparing the pair across two devices finds it.
+function injectAutonegAsymmetric(rng, fleet) {
+    const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
+    const candidates = [];
+    for (const d of scanned(fleet)) {
+        for (const n of d.Neighbors) {
+            const peer = byIp.get(String(n.ManagementIP));
+            if (peer && peer.ScanStatus === 'Ok' && peer.Neighbors.some(x => String(x.ManagementIP) === String(d.DeviceIP))) {
+                candidates.push([d, n, peer]);
+            }
+        }
+    }
+    if (!candidates.length) return null;
+    const [device, neighbor, peer] = fPick(rng, candidates);
+    const back = peer.Neighbors.find(x => String(x.ManagementIP) === String(device.DeviceIP));
+    const phy = (entry) => (entry.OrgInfo || []).find(o => String(o.Subtype).startsWith('MAC/PHY'));
+    const near = phy(neighbor);
+    const far = phy(back);
+    if (!near || !far) return null;
+    near.Info = 'Autonegotiation disabled, 1000BaseTFD';
+    far.Info = 'Autonegotiation enabled, 1000BaseTFD';
+    return {
+        kind: 'autoneg-asymmetric', failureMode: 'F4', deviceIp: device.DeviceIP,
+        port: String(neighbor.LocalPort).replace(/\.\d+$/, ''), mac: null,
+        params: { peerIp: peer.DeviceIP, peerPort: String(back.LocalPort).replace(/\.\d+$/, '') },
+        expected: { finding: 'autoneg-mismatch', deviceIp: device.DeviceIP, port: String(neighbor.LocalPort).replace(/\.\d+$/, '') },
+    };
+}
+
+// F14. One unmanaged bridge between two switches. No node exists for it, both ports read DESG FWD, and
+// chaining them into a path would invent a link that is not there.
+function injectSharedSegment(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => clientPorts(d).length);
+    if (hosts.length < 2) return null;
+    const first = fPick(rng, hosts);
+    const others = hosts.filter(d => d !== first);
+    if (!others.length) return null;
+    const second = fPick(rng, others);
+    const mac = faultSwitchMac(rng);
+    const ends = [];
+    for (const node of [first, second]) {
+        const row = fPick(rng, clientPorts(node));
+        row.Desc = 'UNMANAGED shared segment';
+        node.Neighbors.push({
+            LocalPort: `${row.Port}.0`, RemotePort: ends.length === 0 ? '1' : '2', Hostname: 'Unknown',
+            MacAddress: mac, ManagementIP: 'Unknown', Description: 'Unmanaged 8-port switch',
+            ...faultLldpCommon(rng, { reachable: false }),
+        });
+        ends.push({ deviceIp: node.DeviceIP, port: row.Port });
+    }
+    return {
+        kind: 'unmanaged-bridge-shared-segment', failureMode: 'F14',
+        deviceIp: ends[0].deviceIp, port: ends[0].port, mac: mac,
+        params: { otherIp: ends[1].deviceIp, otherPort: ends[1].port },
+        expected: { finding: 'shared-segment-not-a-link', deviceIp: ends[0].deviceIp, port: ends[0].port },
+    };
+}
+
+const INJECTORS = [
+    injectDuplicateMac, injectDuplicateIp, injectOffSubnetClient, injectDot1xHeld,
+    injectStpUnconverged, injectAutonegAsymmetric, injectSharedSegment,
+];
+
+// F11 (a VLAN missing from a trunk) has no injector: the fixture's Vlans[] is empty on every device, so
+// there is no membership to remove. It lands with the VLAN retention work, not here.
+function injectFaults(fleet, snapshotIndex, count) {
+    // Derived from the seed rather than taken from it, so two snapshots of one run do not inject the
+    // same faults in the same places.
+    const rng = makeRng((Math.imul(SEED, 0x9E3779B9) + snapshotIndex * 0x85EBCA6B) >>> 0);
+    const manifest = [];
+    for (let n = 0; n < count; n++) {
+        const injector = INJECTORS[n % INJECTORS.length];
+        const entry = injector(rng, fleet);
+        // A fleet too small to hold the fault, not an error: a 4-device run has no second host for a
+        // duplicate MAC, and a manifest that claims one would be the lie this whole file avoids.
+        if (entry) manifest.push({ id: `${snapshotIndex}-${manifest.length + 1}-${entry.kind}`, ...entry });
+    }
+    return manifest;
+}
+
 fs.mkdirSync(OUT_DIR, { recursive: true });
 const written = [];
 for (let i = 0; i < SNAPSHOT_COUNT; i++) {
@@ -1101,8 +1330,21 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     const tree = computeSpanningTree(topology);
     assertForwardingIsSpanningTree(topology);
     const fleet = withFailures(topology, i, scanTime);
+    const manifest = injectFaults(fleet, i, FAULT_COUNT);
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));
-    written.push({ mapPath, fleet, tree });
+    // Not NetworkMap_*: both loaders match /^NetworkMap_.*\.json$/, so a manifest named after its map
+    // would be offered as a snapshot to open.
+    const manifestPath = path.join(OUT_DIR, `FaultManifest_${stamp}.fixture.json`);
+    if (FAULT_COUNT) {
+        fs.writeFileSync(manifestPath, JSON.stringify({
+            Map: path.basename(mapPath), ScanTimestamp: scanTime.toISOString(),
+            Seed: SEED, Requested: FAULT_COUNT, Faults: manifest,
+        }, null, 2));
+    } else if (fs.existsSync(manifestPath)) {
+        // A stale manifest from an earlier --faults run describes faults this one did not inject.
+        fs.unlinkSync(manifestPath);
+    }
+    written.push({ mapPath, fleet, tree, manifest });
 }
 
 const FIXTURE_CONFIG = {
@@ -1122,7 +1364,7 @@ const FIXTURE_CONFIG = {
 const configPath = path.join(OUT_DIR, 'Configuration.fixture.json');
 fs.writeFileSync(configPath, JSON.stringify(FIXTURE_CONFIG, null, 2));
 
-for (const { mapPath, fleet, tree } of written) {
+for (const { mapPath, fleet, tree, manifest } of written) {
     const c = fleet.reduce((a, d) => {
         a.interfaces += d.Interfaces.length; a.clients += d.Clients.length;
         a.arp += d.ArpEntries.length; a.neighbors += d.Neighbors.length;
@@ -1138,6 +1380,7 @@ for (const { mapPath, fleet, tree } of written) {
         `${mapPath}\n  ${fleet.length} devices (${c.stacks} virtual chassis, ${c.members} members, ${c.failed} failed scans)\n` +
         `  ${c.interfaces} interfaces, ${c.neighbors} LLDP neighbours, ${c.clients} clients, ${c.arp} ARP entries, ${c.med} MED endpoints\n` +
         `  spanning tree: root ${tree.rootLabel}, ${c.fwd} FWD / ${c.blk} BLK ports\n` +
+        (FAULT_COUNT ? `  injected faults: ${manifest.length} of ${FAULT_COUNT} requested (${manifest.map(f => f.kind).join(', ') || 'none placeable'})\n` : '') +
         `  ${(fs.statSync(mapPath).size / 1048576).toFixed(1)} MiB\n`
     );
 }
