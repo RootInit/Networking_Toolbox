@@ -589,6 +589,33 @@ record which host ran the PowerShell suite and mark a pwsh-only run as unverifie
 `Run-Tests.ps1` targets Windows PowerShell 5.1 and a green run under pwsh 7 on Linux is not evidence
 for it.
 
+#### Built — 2026-09-13: `Run-AllTests.ps1`
+
+Runs both suites, reports host / PowerShell version / edition, and marks anything that is not
+Windows PowerShell 5.1 as **SECONDARY**.
+
+The requirement understated the problem: **no single host can run everything.** The Windows test VM
+has no Node, and Linux cannot be 5.1. A single per-run verdict would therefore always have been
+partial, so each run appends one JSON line to `test-results/runs.jsonl` (gitignored) and the summary
+reports coverage for the current commit across every host that has reported, as two independent
+facts with the host and timestamp that produced each:
+
+    Coverage for commit 33e805b, across all hosts that have reported:
+      [ok] PowerShell verified on 5.1  (PNM-TEST, 5.1.17763.1, 2026-09-13T15:46:30Z)
+      [ok] web-src suite passed        (alexander-laptop, 2026-09-13T15:46:01Z)
+
+A dirty tree, or a commit that cannot be determined, is attributed to nothing. Hosts without git
+take `-Commit`, recorded as *supplied* rather than verified. The ledger is JSON-per-line so entries
+from different machines merge by concatenation; nothing reconciles them automatically.
+
+The runner also **fails on a stale `lib/Network_Visualizer.html`** (the §9.3 hazard, which bit for
+real while measuring §9.2 — a `dashboard.js` edit was invisible until a rebuild, so the JS suite had
+been testing source that does not ship). `-AllowStaleBuild` overrides it.
+
+One trap worth recording: capturing `Run-Tests.ps1` requires `*>&1`, not `2>&1`. It reports through
+`Write-Host`, so an error-stream redirect captures nothing and a 184/184 run parses as zero tests.
+The first version of the runner reported a failure on a passing suite for exactly that reason.
+
 ---
 
 ## 9. Constraints and risks
@@ -814,6 +841,8 @@ base64 decode, which is a separate piece of work and is not required by any meas
 `lib/Network_Visualizer.html` (2.35 MB, committed) win outright — `web-src/` is never served.
 Editing `web-src/*.js` has **no runtime effect** until `build-inline.mjs` re-runs, with no error.
 Add a check that fails when any `web-src/*.js` is newer than the artifact; ten lines.
+**Done 2026-09-13** — it lives in `Run-AllTests.ps1` (§8.6), which aborts on a stale artifact unless
+`-AllowStaleBuild` is passed. It caught a real instance during the §9.2 work.
 
 ### 9.4 Server-side and FIPS
 
@@ -851,7 +880,10 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    autoload now streams lazily instead of triple-buffering every body (peak RSS 3,499 -> 1,948 MiB
    plaintext), decrypts the first snapshot once instead of twice, and derives the PBKDF2 key once per
    archive instead of once per snapshot. The enveloped path still peaks near 3 GB - see §9.2.
-3. **Test runner with host recording** (§8.6).
+3. ~~**Test runner with host recording** (§8.6).~~ **Done 2026-09-13** — `Run-AllTests.ps1`. Records
+   host and edition, marks non-5.1 runs SECONDARY, and because no single host runs both suites,
+   keeps a per-commit ledger that reports 5.1 verification and web-src separately. Also fails on a
+   stale build artifact (§9.3).
 4. **Parity-test mechanism** (§8.1) — ship the mechanism first; it will start failing usefully. Fill
    in `accessRow`'s values **after** Phase 1 settles the initializer, not before.
 5. **Phase 1 retention R1–R15** (§4.1), each landing with its fixture counterpart.
