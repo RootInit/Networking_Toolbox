@@ -699,6 +699,26 @@ no STP instance (F13); two paths surviving pruning (F10 — the test BFS would f
 with and without a down member; a VC spanning FPCs; an unscanned waypoint; an address-less bridge; an
 out-of-scope neighbour; a `Partial` node asserting `NOT_EVALUATED`, not clean.
 
+**Done 2026-09-13 (work order item 8, micro-topology half).** All ten in
+`web-src/tools/micro-topologies.mjs`, four devices or fewer each, no PRNG anywhere in the file — a
+regression test needs a fixed input, and a test asserts two imports are byte-identical. Each is
+asserted on its structural property, not on a rule verdict: the rule engine is item 11, and when it
+arrives these are its inputs.
+
+- **The VSTP cases are where the per-VLAN requirement lives**, as §8.2 decided. `setStp` writes the
+  per-scope detail and the collapsed field together, and a test requires every instance of every VSTP
+  topology to be a spanning tree in its own right — hand-authored per-VLAN state is easy to get subtly
+  wrong, and the wrongness would surface later as a rule that looks broken.
+- **The diamond gives three different wrong answers from one input**: two paths ignoring STP, one path
+  per VLAN, and *none at all* pruning on the collapsed field, because both of the access switch's
+  uplinks read `BLK` once collapsed. That is F5 and F10 in one topology.
+- **Shape parity is checked against the worker's own initializers**, read out of
+  `Get-JunosNodeData.ps1` at test time rather than restated in the test: every node and interface key a
+  micro-topology uses must appear in `$NodeData = @{` or `$NodeData.Interfaces[$p] = @{`. Verified by
+  adding a misspelled key and watching it fail.
+- **`node web-src/tools/micro-topologies.mjs --out <dir>`** writes each one as a loadable
+  `NetworkMap_micro_*.fixture.json`, so a case can be opened in the visualizer by hand.
+
 ### 8.5 PowerShell tests
 
 `Run-Tests.ps1` §12 style: synthetic text in, objects out. **No byte of the production capture enters
@@ -1024,7 +1044,11 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    with the table in §4.2.
 7. ~~**Generator spanning-tree pass** (§8.2) — the blocker for everything path-related.~~ **Done
    2026-09-13.** Single RSTP instance, matching the config text; see §8.2 for why not per-VLAN.
-8. **Fault injection + per-snapshot manifests** (§8.3), micro-topologies (§8.4).
+8. ~~**Fault injection + per-snapshot manifests** (§8.3), micro-topologies (§8.4).~~ **Done
+   2026-09-13.** Seven fault kinds behind `--faults N` with a manifest per snapshot, and ten
+   hand-built micro-topologies. Both halves came out differently from revision 2's proposal and are
+   noted at §8.3 and §8.4: injection runs on the cloned fleet (one site, not two), and the F11
+   injector is deferred until `Vlans[]` carries trunk membership.
 9. **Topology graph + endpoint resolution** (§5, §6.1).
 10. **Path computation** (§6.2) with the F5 and F10 regression tests.
 11. **Rule framework** (§3) and the L1 rules — the best-supported layer.
