@@ -261,6 +261,24 @@ function ConvertFrom-JunosInterfaceExtensive {
             OutputErrors       = @{}
             ActiveAlarms       = $null
             ActiveDefects      = $null
+            # R10. Counter baselines and the one-way-link / L2-error signals. The four *Error fields
+            # print on EVERY port's Link-level line and none was parsed; between them they supply
+            # most of the "why is this port blocking" answer section 4.3 was going to spend a whole
+            # extra command on.
+            StatisticsLastCleared  = $null
+            InputPackets           = $null
+            OutputPackets          = $null
+            RemoteFault            = $null
+            InterfaceFlags         = $null
+            DeviceFlags            = $null
+            BpduError              = $null
+            LoopDetectPduError     = $null
+            EthernetSwitchingError = $null
+            MacRewriteError        = $null
+            # R4. The fixed-width statistics tables, which the error-counter parser cannot reach.
+            MacStatistics          = [ordered]@{}
+            PcsStatistics          = [ordered]@{}
+            FecStatistics          = [ordered]@{}
         }
 
         if ($Block -match '(?im)^\s*Description:\s*(?<v>.+?)\s*$')          { $Detail.Description = $Matches.v }
@@ -290,7 +308,36 @@ function ConvertFrom-JunosInterfaceExtensive {
             $Traffic = $Matches.t
             if ($Traffic -match '(?i)Input\s+bytes\s*:\s*(?<b>\d+)(?:\s+(?<r>\d+)\s*bps)?')  { $Detail.InputBytes = [int64]$Matches.b; if ($Matches.r) { $Detail.InputBps = [int64]$Matches.r } }
             if ($Traffic -match '(?i)Output\s+bytes\s*:\s*(?<b>\d+)(?:\s+(?<r>\d+)\s*bps)?') { $Detail.OutputBytes = [int64]$Matches.b; if ($Matches.r) { $Detail.OutputBps = [int64]$Matches.r } }
+            # R10. Packet counts, in the same bounded stanza - "IPv6 transit statistics" repeats these
+            # labels with a subset of the traffic, which is why the bound exists.
+            if ($Traffic -match '(?i)Input\s+packets\s*:\s*(?<p>\d+)')  { $Detail.InputPackets = [int64]$Matches.p }
+            if ($Traffic -match '(?i)Output\s+packets\s*:\s*(?<p>\d+)') { $Detail.OutputPackets = [int64]$Matches.p }
         }
+
+        # R10. Scoped to the Link-level type LINE, not the block: "Remote fault" also appears in the
+        # Link partner stanza ("OK") and in Local resolution ("Link OK"), with different meanings, so
+        # an unscoped match returns whichever Junos happened to print first. Same trap the configured
+        # Speed field already had to dodge.
+        $LinkLevelLine = $null
+        if ($Block -match '(?im)^[ \t]*Link-level type:.*$') { $LinkLevelLine = $Matches[0] }
+        if ($LinkLevelLine) {
+            if ($LinkLevelLine -match '(?i)\bRemote fault:\s*(?<v>[^,\r\n]+)')               { $Detail.RemoteFault = $Matches.v.Trim() }
+            if ($LinkLevelLine -match '(?i)\bBPDU Error:\s*(?<v>[^,\r\n]+)')                 { $Detail.BpduError = $Matches.v.Trim() }
+            if ($LinkLevelLine -match '(?i)\bLoop Detect PDU Error:\s*(?<v>[^,\r\n]+)')      { $Detail.LoopDetectPduError = $Matches.v.Trim() }
+            if ($LinkLevelLine -match '(?i)\bEthernet-Switching Error:\s*(?<v>[^,\r\n]+)')   { $Detail.EthernetSwitchingError = $Matches.v.Trim() }
+            if ($LinkLevelLine -match '(?i)\bMAC-REWRITE Error:\s*(?<v>[^,\r\n]+)')          { $Detail.MacRewriteError = $Matches.v.Trim() }
+        }
+        # "Never" is a real value and the common one; it is kept verbatim rather than mapped to $null,
+        # which would be indistinguishable from "this platform did not print the line".
+        if ($Block -match '(?im)^[ \t]*Statistics last cleared:\s*(?<v>.+?)\s*$') { $Detail.StatisticsLastCleared = $Matches.v }
+        # These two carry their own colons in the value ("Internal: 0x4000"), so the value runs to
+        # end of line rather than stopping at the next colon.
+        if ($Block -match '(?im)^[ \t]*Device flags\s*:\s*(?<v>.+?)\s*$')    { $Detail.DeviceFlags = $Matches.v }
+        if ($Block -match '(?im)^[ \t]*Interface flags\s*:\s*(?<v>.+?)\s*$') { $Detail.InterfaceFlags = $Matches.v }
+
+        $Detail.MacStatistics = ConvertFrom-JunosStatisticsTable -Block $Block -Label 'MAC statistics'
+        $Detail.PcsStatistics = ConvertFrom-JunosStatisticsTable -Block $Block -Label 'PCS statistics'
+        $Detail.FecStatistics = ConvertFrom-JunosStatisticsTable -Block $Block -Label 'Ethernet FEC statistics'
 
         $Detail.InputErrors = ConvertFrom-JunosErrorCounters -Block $Block -Direction 'Input'
         $Detail.OutputErrors = ConvertFrom-JunosErrorCounters -Block $Block -Direction 'Output'
@@ -331,4 +378,53 @@ function Get-JunosCapturedSections {
     }
     if ($Captured.Count -eq 0) { return ,@() }
     return ,@($Captured | Sort-Object)
+}
+
+# R4. The fixed-width statistics tables inside a "show interfaces extensive" block: "MAC statistics:"
+# (Receive/Transmit), "PCS statistics" (Seconds) and "Ethernet FEC statistics" (Errors).
+#
+# None of these is reachable through ConvertFrom-JunosErrorCounters, which correctly stops at the
+# first line that is not a counter - and on this platform that line is "Egress queues:", well before
+# the MAC table. The cost is concrete: CRC/Align errors, Jabber frames, Fragment frames and Code
+# violations are all in the collected payload and none of them reaches the snapshot.
+#
+# The header names its own columns and they differ per table, so they are read rather than assumed:
+# the column name is what makes a bare integer mean something to a rule.
+function ConvertFrom-JunosStatisticsTable {
+    param([string]$Block, [string]$Label)
+
+    $Result = [ordered]@{}
+    if ([string]::IsNullOrWhiteSpace($Block) -or [string]::IsNullOrWhiteSpace($Label)) { return $Result }
+
+    # "MAC statistics:" carries a colon; "PCS statistics" and "Ethernet FEC statistics" do not.
+    $HeaderMatch = [regex]::Match($Block, '(?im)^[ \t]*' + [regex]::Escape($Label) + ':?[ \t]+(?<cols>\S.*?)[ \t]*$')
+    if (-not $HeaderMatch.Success) { return $Result }
+    $Columns = @([regex]::Split($HeaderMatch.Groups['cols'].Value, '\s{2,}') | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+    if ($Columns.Count -eq 0) { return $Result }
+
+    # Terminate on line SHAPE and require the rows to be contiguous. These three tables sit directly
+    # against one another, so anything looser runs the first table into the next table's header, and
+    # a fixed row-count guess breaks on any platform that prints a row more or fewer.
+    $Rest = $Block.Substring($HeaderMatch.Index + $HeaderMatch.Length)
+    $RowPattern = '^[ \t]{3,}(?<label>\S.*?)[ \t]{2,}(?<v1>\d+)(?:[ \t]+(?<v2>\d+))?[ \t]*$'
+    $Started = $false
+    foreach ($Line in ($Rest -split "`r?`n")) {
+        $RowMatch = [regex]::Match($Line, $RowPattern)
+        if (-not $RowMatch.Success) {
+            # The split's first element is the empty remainder of the header line itself, so a blank
+            # line before the first row is skipped rather than treated as the end of the table.
+            if (-not $Started -and [string]::IsNullOrWhiteSpace($Line)) { continue }
+            break
+        }
+        $Started = $true
+        $Row = [ordered]@{}
+        $Row[$Columns[0]] = [int64]$RowMatch.Groups['v1'].Value
+        # A row with one value in a two-column table is Receive-only ("Oversized frames", "Jabber
+        # frames"); the absent column stays absent rather than being invented as zero.
+        if ($RowMatch.Groups['v2'].Success -and $Columns.Count -gt 1) {
+            $Row[$Columns[1]] = [int64]$RowMatch.Groups['v2'].Value
+        }
+        $Result[$RowMatch.Groups['label'].Value.Trim()] = $Row
+    }
+    return $Result
 }

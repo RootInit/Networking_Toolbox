@@ -418,6 +418,16 @@ try {
                     Bundle = $null; BundleMembers = @()
                     # VLANs this port is a member of, from "show vlans".
                     Vlans = @()
+                    # R10, all from "show interfaces extensive". The four *Error fields print on every
+                    # port's Link-level line; RemoteFault is read from that line specifically, since
+                    # the autonegotiation stanzas below it repeat the label with other meanings.
+                    StatisticsLastCleared = $null; InputPackets = $null; OutputPackets = $null
+                    RemoteFault = $null; InterfaceFlags = $null; DeviceFlags = $null
+                    BpduError = $null; LoopDetectPduError = $null
+                    EthernetSwitchingError = $null; MacRewriteError = $null
+                    # R4. Fixed-width statistics tables the error-counter parser cannot reach; this is
+                    # where CRC/Align errors, Jabber, Fragment frames and Code violations live.
+                    MacStatistics = @{}; PcsStatistics = @{}; FecStatistics = @{}
                 }
             }
         }
@@ -466,11 +476,17 @@ try {
         if (-not $NodeData.Interfaces.ContainsKey($ExtPort)) { continue }
         $Iface = $NodeData.Interfaces[$ExtPort]
         $Detail = $ExtDetail[$ExtPort]
+        # Every name here must exist in the interface initializer above, or the merge silently
+        # invents a key that no placeholder and no fixture carries. Run-Tests.ps1 asserts that.
         foreach ($Field in @('Mtu','SpeedConfigured','SpeedNegotiated','Duplex','DuplexNegotiated',
                              'AutoNegotiation','NegotiationStatus','MediaType','MacAddress',
                              'LinkLevelType','CarrierTransitions','InputBytes','OutputBytes',
                              'InputBps','OutputBps','InputErrors','OutputErrors',
-                             'ActiveAlarms','ActiveDefects')) {
+                             'ActiveAlarms','ActiveDefects',
+                             'StatisticsLastCleared','InputPackets','OutputPackets','RemoteFault',
+                             'InterfaceFlags','DeviceFlags','BpduError','LoopDetectPduError',
+                             'EthernetSwitchingError','MacRewriteError',
+                             'MacStatistics','PcsStatistics','FecStatistics')) {
             $Iface[$Field] = $Detail[$Field]
         }
         # "show interfaces descriptions" omits a port whose link is down on some releases; extensive

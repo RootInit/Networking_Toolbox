@@ -1523,6 +1523,98 @@ if (-not $ArpRegexMatch.Success) {
     }
 }
 
+Write-Host "`n--- 14. Statistics tables and Link-level fields (R4, R10) ---" -ForegroundColor Cyan
+
+# Synthetic, matching the real column layout: "MAC statistics:" carries a colon and two columns,
+# "PCS statistics" and "Ethernet FEC statistics" carry neither. The three tables sit directly
+# against one another, which is what the row-shape termination has to survive.
+$StatsBlock = @"
+Physical interface: ge-0/0/9, Enabled, Physical link is Up
+  Link-level type: Ethernet, MTU: 1514, Link-mode: Full-duplex, Speed: Auto, BPDU Error: Detected, Loop Detect PDU Error: None, Ethernet-Switching Error: None, MAC-REWRITE Error: None, Auto-negotiation: Enabled, Remote fault: Online, Media type: Copper
+  Device flags   : Present Running
+  Interface flags: SNMP-Traps Internal: 0x4000
+  Statistics last cleared: 2026-01-02 03:04:05 UTC (1w2d 03:04 ago)
+  Traffic statistics:
+   Input  bytes  :             12345678                 1000 bps
+   Output bytes  :             87654321                 2000 bps
+   Input  packets:                 4321                    5 pps
+   Output packets:                 8765                    9 pps
+  PCS statistics                      Seconds
+    Bit errors                             7
+    Errored blocks                         9
+  Ethernet FEC statistics              Errors
+    FEC Corrected Errors                   11
+    FEC Uncorrected Errors                 13
+  MAC statistics:                      Receive         Transmit
+    Total octets                   99999999999      88888888888
+    CRC/Align errors                        51                0
+    Oversized frames                         3
+    Code violations                          4
+  PRBS Mode : Disabled
+  Autonegotiation information:
+    Negotiation status: Complete
+    Link partner:
+        Link mode: Full-duplex, Remote fault: OK, Link partner Speed: 1000 Mbps
+    Local resolution:
+        Flow control: None, Remote fault: Link OK, Local link Speed: 1000 Mbps
+"@
+
+$Stats = ConvertFrom-JunosInterfaceExtensive -Text $StatsBlock
+$StatsPort = $Stats['ge-0/0/9']
+
+Test-Case "R4: MAC statistics parses both columns, keyed by the header's own names" {
+    $StatsPort.MacStatistics['CRC/Align errors']['Receive'] -eq 51 -and
+        $StatsPort.MacStatistics['CRC/Align errors']['Transmit'] -eq 0
+}
+Test-Case "R4: a receive-only row has no Transmit key rather than an invented zero" {
+    $Row = $StatsPort.MacStatistics['Oversized frames']
+    $Row['Receive'] -eq 3 -and -not $Row.Contains('Transmit')
+}
+Test-Case "R4: the MAC table stops at the first non-counter line and does not absorb what follows" {
+    # "PRBS Mode : Disabled" follows the table; absorbing it would invent a counter from a setting.
+    $StatsPort.MacStatistics.Count -eq 4 -and -not $StatsPort.MacStatistics.Contains('PRBS Mode')
+}
+Test-Case "R4: adjacent tables do not bleed into each other" {
+    # PCS is immediately followed by the FEC header, which must terminate it rather than be read
+    # as a row - these three tables are printed back to back with no blank line between them.
+    $StatsPort.PcsStatistics.Count -eq 2 -and $StatsPort.PcsStatistics['Bit errors']['Seconds'] -eq 7 -and
+        $StatsPort.FecStatistics.Count -eq 2 -and $StatsPort.FecStatistics['FEC Corrected Errors']['Errors'] -eq 11
+}
+Test-Case "R4: a block with no statistics tables yields empty tables, not null" {
+    $Bare = ConvertFrom-JunosInterfaceExtensive -Text "Physical interface: ge-0/0/1, Enabled, Physical link is Up`n  Link-level type: Ethernet, MTU: 1514"
+    $B = $Bare['ge-0/0/1']
+    $null -ne $B.MacStatistics -and $B.MacStatistics.Count -eq 0 -and $B.FecStatistics.Count -eq 0
+}
+Test-Case "R10: Remote fault comes from the Link-level line, not the autonegotiation stanzas" {
+    # The same label appears three times per block with three meanings: "Online" on the field line,
+    # "OK" under Link partner, "Link OK" under Local resolution. Only the first is this port's.
+    $StatsPort.RemoteFault -eq 'Online'
+}
+Test-Case "R10: the four Link-level error fields are captured separately" {
+    $StatsPort.BpduError -eq 'Detected' -and $StatsPort.LoopDetectPduError -eq 'None' -and
+        $StatsPort.EthernetSwitchingError -eq 'None' -and $StatsPort.MacRewriteError -eq 'None'
+}
+Test-Case "R10: flag lines keep a value that itself contains a colon" {
+    $StatsPort.InterfaceFlags -eq 'SNMP-Traps Internal: 0x4000' -and $StatsPort.DeviceFlags -eq 'Present Running'
+}
+Test-Case "R10: statistics-last-cleared is kept verbatim, including the common 'Never'" {
+    $Never = (ConvertFrom-JunosInterfaceExtensive -Text ($StatsBlock -replace 'Statistics last cleared: [^\r\n]+', 'Statistics last cleared: Never'))['ge-0/0/9']
+    $StatsPort.StatisticsLastCleared -eq '2026-01-02 03:04:05 UTC (1w2d 03:04 ago)' -and $Never.StatisticsLastCleared -eq 'Never'
+}
+Test-Case "R10: packet counters are read from the physical stanza" {
+    $StatsPort.InputPackets -eq 4321 -and $StatsPort.OutputPackets -eq 8765
+}
+# The merge list and the initializer are maintained by hand in two places; a name in one and not the
+# other silently creates a key no placeholder and no fixture carries.
+Test-Case "every field the extensive merge copies exists in the interface initializer" {
+    $InitMatch = [regex]::Match($JunosNodeDataSrc, '(?s)\$NodeData\.Interfaces\[\$p\] = @\{(.*?)\n\s{16}\}')
+    $MergeMatch = [regex]::Match($JunosNodeDataSrc, "(?s)foreach \(\`$Field in @\((.*?)\)\) \{")
+    if (-not $InitMatch.Success -or -not $MergeMatch.Success) { return $false }
+    $InitKeys = @([regex]::Matches($InitMatch.Groups[1].Value, '(?m)(?:^|;)\s*([A-Za-z][A-Za-z0-9]*)\s*=') | ForEach-Object { $_.Groups[1].Value })
+    $MergeKeys = @([regex]::Matches($MergeMatch.Groups[1].Value, "'([A-Za-z][A-Za-z0-9]*)'") | ForEach-Object { $_.Groups[1].Value })
+    $MergeKeys.Count -gt 15 -and @($MergeKeys | Where-Object { $InitKeys -notcontains $_ }).Count -eq 0
+}
+
 Write-Host "`n--- 13. Get-JunosCapturedSections (R15) ---" -ForegroundColor Cyan
 
 # The truncation signal for section 2.4's integrity gate: a cut-off session reports no error, it just

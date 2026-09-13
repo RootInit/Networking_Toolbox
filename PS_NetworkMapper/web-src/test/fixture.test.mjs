@@ -535,10 +535,13 @@ test('a --out that is not a Network_Maps directory writes no Configuration.json'
 // It fails usefully in BOTH directions: a new initializer field nobody accounted for widens the
 // gap, and filling one in narrows it. Either way this list is the thing to edit, deliberately.
 const ACCESS_ROW_GAP = [
-    'ActiveAlarms', 'ActiveDefects', 'AutoNegotiation', 'Bundle', 'BundleMembers',
-    'CarrierTransitions', 'Duplex', 'DuplexNegotiated', 'InputBps', 'InputBytes', 'InputErrors',
-    'LinkLevelType', 'MacAddress', 'MediaType', 'Mtu', 'NegotiationStatus', 'OutputBps',
-    'OutputBytes', 'OutputErrors', 'SpeedConfigured', 'SpeedNegotiated', 'StpDetail', 'Vlans',
+    'ActiveAlarms', 'ActiveDefects', 'AutoNegotiation', 'BpduError', 'Bundle', 'BundleMembers',
+    'CarrierTransitions', 'DeviceFlags', 'Duplex', 'DuplexNegotiated', 'EthernetSwitchingError',
+    'FecStatistics', 'InputBps', 'InputBytes', 'InputErrors', 'InputPackets', 'InterfaceFlags',
+    'LinkLevelType', 'LoopDetectPduError', 'MacAddress', 'MacRewriteError', 'MacStatistics',
+    'MediaType', 'Mtu', 'NegotiationStatus', 'OutputBps', 'OutputBytes', 'OutputErrors',
+    'OutputPackets', 'PcsStatistics', 'RemoteFault', 'SpeedConfigured', 'SpeedNegotiated',
+    'StatisticsLastCleared', 'StpDetail', 'Vlans',
 ];
 
 function interfaceInitializerKeys() {
