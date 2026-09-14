@@ -306,7 +306,7 @@ test('an address-less bridge is two DESG FWD ports and no node between them', ()
         assert.equal(neighbor.ManagementIP, 'Unknown');
         assert.equal(neighbor.Reachable, false, 'R5: an address-less neighbour is not enqueued for a crawl');
         const row = rowOf(device, neighbor.LocalPort);
-        assert.equal(row.StpDetail['instance 0'].Role, 'Designated');
+        assert.equal(row.StpDetail['instance 0'].Role, 'DESG');
         assert.equal(row.STP, 'FWD');
         ends.push(`${device.DeviceIP}|${row.Port}`);
     }

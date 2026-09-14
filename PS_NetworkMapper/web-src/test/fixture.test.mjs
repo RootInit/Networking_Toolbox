@@ -818,10 +818,33 @@ test('item 7: the forwarding subgraph is a spanning tree, not a loop stamped FWD
         `${fwdEdges.size} forwarding links over ${bridges.length} bridges - a tree has exactly ${bridges.length - 1}`);
 });
 
+// The columns print the Junos abbreviations, and a down port is the trap: it prints State BLK with
+// Role DIS - blocking a port it has no link on - never a DIS state. Getting this wrong made section
+// 6.3's both-ends-designated check dead code on hardware for as long as it has existed.
+test('spanning-tree state and role use the vocabulary the switch prints', () => {
+    const STATES = ['FWD', 'BLK', 'LRN'];        // LRN only from the F9 injector; LST is unobserved
+    const ROLES = ['DESG', 'ROOT', 'ALT', 'DIS'];
+    let down = 0;
+    for (const device of topology.filter(d => d.ScanStatus === 'Ok')) {
+        for (const row of device.Interfaces) {
+            const detail = (row.StpDetail || {})['instance 0'];
+            if (!detail) continue;
+            assert.ok(STATES.includes(detail.State), `${row.Port} state ${detail.State}`);
+            assert.ok(ROLES.includes(detail.Role), `${row.Port} role ${detail.Role}`);
+            assert.equal(row.STP, detail.State, `${row.Port} collapses to a state it does not hold`);
+            if (String(row.Link).toLowerCase() !== 'up') {
+                down++;
+                assert.deepEqual([detail.State, detail.Role], ['BLK', 'DIS'], `${row.Port} is down`);
+            }
+        }
+    }
+    assert.ok(down > 20, `only ${down} down ports carry an STP row`);
+});
+
 test('item 7: exactly one root bridge, it has the best bridge ID, and only non-root bridges have a root port', () => {
     const bridges = topology.filter(d => d.ScanStatus === 'Ok');
     const roleOf = (r) => (r.StpDetail && r.StpDetail['instance 0'] ? r.StpDetail['instance 0'].Role : null);
-    const rootPortCount = (d) => d.Interfaces.filter(r => roleOf(r) === 'Root').length;
+    const rootPortCount = (d) => d.Interfaces.filter(r => roleOf(r) === 'ROOT').length;
 
     // A scan-failed device has no rows to read, so at most one OBSERVABLE bridge lacks a root port: the
     // elected root, and then only if our ssh happened to reach it.
@@ -839,7 +862,7 @@ test('item 7: exactly one root bridge, it has the best bridge ID, and only non-r
     }
 });
 
-// An asymmetric link - both ends Designated, or both Alternate - is what a half-converged or
+// An asymmetric link - both ends DESG, or both ALT - is what a half-converged or
 // misconfigured tree looks like. The pass cannot produce one, so assert it does not.
 test('item 7: every blocked port faces a designated one, and no link has two of either', () => {
     const bridges = topology.filter(d => d.ScanStatus === 'Ok');
@@ -861,9 +884,9 @@ test('item 7: every blocked port faces a designated one, and no link has two of 
             const theirs = detailOf(peer, n.RemotePort);
             assert.ok(mine && theirs, `a link between ${d.Hostname} and ${peer.Hostname} has no STP detail`);
             const pair = [mine.Role, theirs.Role].sort().join('/');
-            assert.ok(['Alternate/Designated', 'Designated/Root'].includes(pair),
+            assert.ok(['ALT/DESG', 'DESG/ROOT'].includes(pair),
                 `${d.Hostname}:${n.LocalPort} and ${peer.Hostname}:${n.RemotePort} are ${pair}`);
-            if (pair === 'Alternate/Designated') {
+            if (pair === 'ALT/DESG') {
                 blocked++;
                 // Both ends agree on who won the segment, which is what DesignatedBridge records.
                 assert.equal(mine.DesignatedBridge, theirs.DesignatedBridge, 'the two ends disagree on the designated bridge');
@@ -875,7 +898,7 @@ test('item 7: every blocked port faces a designated one, and no link has two of 
 
 // The 8% dual-homing the generator builds. A switch can legitimately forward on two links - one up to
 // the root, one down to a daisy-chained closet - so the assertion is about its UPWARD links: of the
-// ports facing the root, exactly one is the Root port and the rest are Alternate and blocked.
+// ports facing the root, exactly one is the ROOT port and the rest are ALT and blocked.
 test('item 7: a dual-homed access switch has one root port and blocks its other path to the root', () => {
     const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
     const isAccess = (d) => typeof d.Configuration === 'string' && !/bridge-priority (4k|8k)/.test(d.Configuration);
@@ -889,13 +912,13 @@ test('item 7: a dual-homed access switch has one root port and blocks its other 
         const upward = d.Neighbors
             .filter(n => n.Reachable !== false && byIp.has(String(n.ManagementIP)))
             .map(n => detailOf(d, n.LocalPort))
-            .filter(x => x && (x.Role === 'Root' || x.Role === 'Alternate'));
+            .filter(x => x && (x.Role === 'ROOT' || x.Role === 'ALT'));
         if (upward.length < 2) continue;
         examined++;
-        const roots = upward.filter(x => x.Role === 'Root');
+        const roots = upward.filter(x => x.Role === 'ROOT');
         assert.equal(roots.length, 1, `${d.Hostname} has ${roots.length} root ports among ${upward.length} paths to the root`);
-        for (const alt of upward.filter(x => x.Role === 'Alternate')) {
-            assert.equal(alt.State, 'BLK', `${d.Hostname} has an Alternate port that is not blocked`);
+        for (const alt of upward.filter(x => x.Role === 'ALT')) {
+            assert.equal(alt.State, 'BLK', `${d.Hostname} has an ALT port that is not blocked`);
         }
     }
     assert.ok(examined > 0, 'no access switch has a second path to the root - the 8% dual-homing is not being blocked');

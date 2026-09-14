@@ -943,9 +943,11 @@ function computeSpanningTree(fleet) {
         portIdOf.set(String(d.DeviceIP), ids);
     }
 
+    const assigned = new Set();
     const assign = (device, port, role, state, designatedBridge, designatedPortId) => {
         const row = byPort(device)?.get(port);
         if (!row) return;
+        assigned.add(`${device.DeviceIP}|${port}`);
         row.STP = state;
         row.StpDetail = {
             'instance 0': {
@@ -976,34 +978,37 @@ function computeSpanningTree(fleet) {
             const theirPortId = portIdOf.get(String(l.peer.DeviceIP)).get(l.peerPort) || null;
 
             if (iAmDownstream) {
-                assign(d, l.localPort, 'Root', 'FWD', bridgeId(l.peer), theirPortId);
-                assign(l.peer, l.peerPort, 'Designated', 'FWD', bridgeId(l.peer), theirPortId);
+                assign(d, l.localPort, 'ROOT', 'FWD', bridgeId(l.peer), theirPortId);
+                assign(l.peer, l.peerPort, 'DESG', 'FWD', bridgeId(l.peer), theirPortId);
             } else if (theyAreDownstream) {
-                assign(l.peer, l.peerPort, 'Root', 'FWD', bridgeId(d), myPortId);
-                assign(d, l.localPort, 'Designated', 'FWD', bridgeId(d), myPortId);
+                assign(l.peer, l.peerPort, 'ROOT', 'FWD', bridgeId(d), myPortId);
+                assign(d, l.localPort, 'DESG', 'FWD', bridgeId(d), myPortId);
             } else {
                 // Neither end is on its own least-cost path: this link is the redundant one that has to
-                // block, and the better bridge keeps the Designated end.
+                // block, and the better bridge keeps the designated end.
                 const myCost = rootCost.has(ip) ? rootCost.get(ip) : Infinity;
                 const theirCost = rootCost.has(String(l.peer.DeviceIP)) ? rootCost.get(String(l.peer.DeviceIP)) : Infinity;
                 const iWin = (myCost - theirCost || compareBridges(d, l.peer)) < 0;
                 const winner = iWin ? d : l.peer;
                 const winnerPortId = iWin ? myPortId : theirPortId;
-                assign(winner, iWin ? l.localPort : l.peerPort, 'Designated', 'FWD', bridgeId(winner), winnerPortId);
-                assign(iWin ? l.peer : d, iWin ? l.peerPort : l.localPort, 'Alternate', 'BLK', bridgeId(winner), winnerPortId);
+                assign(winner, iWin ? l.localPort : l.peerPort, 'DESG', 'FWD', bridgeId(winner), winnerPortId);
+                assign(iWin ? l.peer : d, iWin ? l.peerPort : l.localPort, 'ALT', 'BLK', bridgeId(winner), winnerPortId);
             }
         }
     }
 
-    // Every remaining port faces an endpoint, an unreachable device, or nothing at all. A down port is
-    // Disabled: a switch reports no role for a link it does not have.
+    // Every remaining port faces an endpoint, an unreachable device, or nothing at all. A down port
+    // prints State BLK with Role DIS - the disabled ROLE, not a DIS state: the switch is blocking a port
+    // it has no link on, and the state column never carries DIS on hardware.
     for (const d of bridges) {
         for (const row of d.Interfaces) {
-            // Keys, not the container: accessRow now emits StpDetail as an empty object, and an empty
-            // object is truthy - which silently left every endpoint-facing port with no state at all.
-            if (Object.keys(row.StpDetail || {}).length) continue;
+            // What this pass assigned, not what the row already carries: a row keeps the previous
+            // snapshot's detail, and ageFleet takes ports up and down between snapshots. Skipping on
+            // "has any detail" left a port that went down still reporting the FWD DESG it held while
+            // it was up - a state no switch prints.
+            if (assigned.has(`${d.DeviceIP}|${row.Port}`)) continue;
             const up = String(row.Link).toLowerCase() === 'up';
-            assign(d, row.Port, up ? 'Designated' : 'Disabled', up ? 'FWD' : 'DIS', bridgeId(d),
+            assign(d, row.Port, up ? 'DESG' : 'DIS', up ? 'FWD' : 'BLK', bridgeId(d),
                 portIdOf.get(String(d.DeviceIP)).get(row.Port) || null);
         }
     }
@@ -1666,10 +1671,15 @@ const injectDot1xHeld = injectDot1xState({ state: 'Held', kind: 'dot1x-held', fi
 // blocked, so the forwarding subgraph is untouched and stays the spanning tree the assertion checked -
 // the fault is that a path computer reading only FWD/BLK has a third state to account for.
 function injectStpUnconverged(rng, fleet) {
-    const hosts = scanned(fleet).filter(d => d.Interfaces.some(r => r.STP === 'BLK'));
+    // BLK alone is not the port wanted: a down port blocks too, with the disabled ROLE and no link
+    // behind it. The fault has to land on the redundant link the tree chose to block, which is the
+    // alternate port - anywhere else there is no edge for a path computer to cross.
+    const blockedOnLink = (row) => (row.StpDetail || {})['instance 0']
+        && row.StpDetail['instance 0'].Role === 'ALT';
+    const hosts = scanned(fleet).filter(d => d.Interfaces.some(blockedOnLink));
     if (!hosts.length) return null;
     const host = fPick(rng, hosts);
-    const row = fPick(rng, host.Interfaces.filter(r => r.STP === 'BLK'));
+    const row = fPick(rng, host.Interfaces.filter(blockedOnLink));
     row.STP = 'LRN';
     for (const scope of Object.keys(row.StpDetail || {})) row.StpDetail[scope].State = 'LRN';
     return {

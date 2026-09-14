@@ -918,6 +918,24 @@ that would have passed here and misbehaved on hardware, which is what §8.2 exis
   `Class 3` were shapes no switch emits. The test now asserts the display string against the two fields
   it is built from rather than matching a prefix.
 
+**A fifth, found the same way — 2026-09-14 (item 13).** The spanning-tree **Role** column prints Junos
+abbreviations, not words: `DESG`, `ROOT`, `ALT`, `DIS` (113/12/3/25 in the capture). The fixture had been
+emitting `Designated`/`Root`/`Alternate`/`Disabled`, so §6.3's both-ends-designated check
+(`l2-path.js`) compared against strings the parser has never produced — **dead code on hardware since it
+was written**, and a rule repeating the comparison would have been dead too. Two more facts came with it:
+
+- **A down port prints `State BLK` with `Role DIS`** — the disabled *role*, blocking a port with no link
+  behind it. The state column never carries `DIS`. The fixture had it the other way round, which also
+  meant the F9 injector, drawing from "any port whose state is BLK", could land its learning port on a
+  dark endpoint port that is no edge at all. It now draws from the alternate ports — the redundant links
+  the tree actually blocked.
+- **A port that goes down between snapshots has to lose its old role.** `computeSpanningTree` skipped any
+  row that already carried detail, so a port taken down by `ageFleet` kept the `FWD DESG` it held while it
+  was up. It now tracks what *this* pass assigned. 31 of 120 devices' rows were in that impossible state.
+
+`BKUP` and `MSTR` roles, and the `LRN`/`LST` states in `NOT_FORWARDING`, are **unobserved** — the capture
+holds a converged tree. They stay as written; see §3.5's provisional list.
+
 ### 8.3 Fault injection
 
 - **Two injection sites, not one.** `assertNothingOrphaned` is at `:572` but `addClients` runs at

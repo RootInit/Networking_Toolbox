@@ -80,6 +80,17 @@ function endLabel(end) {
 
 // One hop's worth of judgement about one edge, computed once and reused by the filter, the enumeration
 // and the report - so a hop cannot be pruned for one reason and then reported with another.
+// Section 6.3. Both ends Designated, or both Root, in one scope is not a hop to trust: within a
+// converged instance exactly one end is designated. The role column prints the Junos abbreviations
+// (DESG, ROOT, ALT, DIS), not the words - see section 8.2's fifth vocabulary correction.
+var SEGMENT_ROLES = ['DESG', 'ROOT'];
+
+function bothEndsClaimSegment(scopeA, scopeB) {
+    var role = scopeA.role ? String(scopeA.role).toUpperCase() : null;
+    if (!role || SEGMENT_ROLES.indexOf(role) === -1) return false;
+    return scopeB.role && role === String(scopeB.role).toUpperCase();
+}
+
 function assessEdge(edge, tag) {
     var vlanA = carriesVlan(edge.a, tag);
     var vlanB = carriesVlan(edge.b, tag);
@@ -150,8 +161,8 @@ function assessEdge(edge, tag) {
     }
     // Section 6.3. Both ends Designated, or both Root, in one scope is not a hop to trust: within a
     // converged instance exactly one end is Designated.
-    if (scopeA.role && scopeA.role === scopeB.role && (scopeA.role === 'Designated' || scopeA.role === 'Root')) {
-        notes.push('both-ends-' + scopeA.role.toLowerCase());
+    if (bothEndsClaimSegment(scopeA, scopeB)) {
+        notes.push('both-ends-' + String(scopeA.role).toLowerCase());
         confidence = worst(confidence, 'UNVERIFIED');
     }
 
@@ -462,6 +473,7 @@ function computePath(input, options) {
 
 var L2Path = {
     computePath: computePath,
+    bothEndsClaimSegment: bothEndsClaimSegment,
     assessEdge: assessEdge,
     scopeFor: scopeFor,
     carriesVlan: carriesVlan,

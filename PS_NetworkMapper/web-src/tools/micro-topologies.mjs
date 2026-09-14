@@ -187,14 +187,14 @@ function triangleVstp() {
 
     const D = (State, Role) => ({ State, Role, Cost: 2000 });
     // A is root in VLAN 10, B in VLAN 20, so the leg each instance blocks is a different one.
-    setStp(a, 'xe-0/0/0', { 'VLAN 10': D('FWD', 'Designated'), 'VLAN 20': D('FWD', 'Root') });
-    setStp(a, 'xe-0/0/1', { 'VLAN 10': D('FWD', 'Designated'), 'VLAN 20': D('FWD', 'Designated') });
-    setStp(b, 'xe-0/0/0', { 'VLAN 10': D('FWD', 'Root'), 'VLAN 20': D('FWD', 'Designated') });
+    setStp(a, 'xe-0/0/0', { 'VLAN 10': D('FWD', 'DESG'), 'VLAN 20': D('FWD', 'ROOT') });
+    setStp(a, 'xe-0/0/1', { 'VLAN 10': D('FWD', 'DESG'), 'VLAN 20': D('FWD', 'DESG') });
+    setStp(b, 'xe-0/0/0', { 'VLAN 10': D('FWD', 'ROOT'), 'VLAN 20': D('FWD', 'DESG') });
     // Each instance blocks a different one of C's two ports, so both read BLK once collapsed while each
     // forwards in one VLAN. The A-C leg is the one VLAN 20 blocks; the B-C leg is VLAN 10's.
-    setStp(c, 'xe-0/0/0', { 'VLAN 10': D('FWD', 'Root'), 'VLAN 20': D('BLK', 'Alternate') });
-    setStp(b, 'xe-0/0/1', { 'VLAN 10': D('FWD', 'Designated'), 'VLAN 20': D('FWD', 'Designated') });
-    setStp(c, 'xe-0/0/1', { 'VLAN 10': D('BLK', 'Alternate'), 'VLAN 20': D('FWD', 'Root') });
+    setStp(c, 'xe-0/0/0', { 'VLAN 10': D('FWD', 'ROOT'), 'VLAN 20': D('BLK', 'ALT') });
+    setStp(b, 'xe-0/0/1', { 'VLAN 10': D('FWD', 'DESG'), 'VLAN 20': D('FWD', 'DESG') });
+    setStp(c, 'xe-0/0/1', { 'VLAN 10': D('BLK', 'ALT'), 'VLAN 20': D('FWD', 'ROOT') });
 
     return {
         name: 'triangle-vstp-leg-blocked-in-one-vlan',
@@ -222,8 +222,8 @@ function vlanWithoutStpInstance() {
         applyVlanMembership(node);
     }
     link(a, 'xe-0/0/0', b, 'xe-0/0/0', 'TRUNK');
-    setStp(a, 'xe-0/0/0', { 'VLAN 10': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
-    setStp(b, 'xe-0/0/0', { 'VLAN 10': { State: 'FWD', Role: 'Root', Cost: 2000 } });
+    setStp(a, 'xe-0/0/0', { 'VLAN 10': { State: 'FWD', Role: 'DESG', Cost: 2000 } });
+    setStp(b, 'xe-0/0/0', { 'VLAN 10': { State: 'FWD', Role: 'ROOT', Cost: 2000 } });
     addClient(b, 'ge-0/0/1', { mac: 'aa:bb:00:00:00:30', ip: '10.30.200.30', tag: 30, vlanName: 'LEGACY' });
     a.ArpEntries.push({ MAC: 'aa:bb:00:00:00:30', IP: '10.30.200.30' });
 
@@ -274,18 +274,18 @@ function diamondTwoPaths() {
 
     const D = (State, Role) => ({ State, Role, Cost: 2000 });
     for (const [node, port, roles] of [
-        [root, 'xe-0/0/0', ['Designated', 'Designated']],
-        [root, 'xe-0/0/1', ['Designated', 'Designated']],
-        [d1, 'xe-0/0/0', ['Root', 'Root']],
-        [d2, 'xe-0/0/0', ['Root', 'Root']],
-        [d1, 'xe-0/0/1', ['Designated', 'Designated']],
-        [d2, 'xe-0/0/1', ['Designated', 'Designated']],
+        [root, 'xe-0/0/0', ['DESG', 'DESG']],
+        [root, 'xe-0/0/1', ['DESG', 'DESG']],
+        [d1, 'xe-0/0/0', ['ROOT', 'ROOT']],
+        [d2, 'xe-0/0/0', ['ROOT', 'ROOT']],
+        [d1, 'xe-0/0/1', ['DESG', 'DESG']],
+        [d2, 'xe-0/0/1', ['DESG', 'DESG']],
     ]) {
         setStp(node, port, { 'VLAN 10': D('FWD', roles[0]), 'VLAN 20': D('FWD', roles[1]) });
     }
     // The block is one-ended, as RSTP has it: the upstream port stays Designated and forwarding.
-    setStp(acc, 'xe-0/0/0', { 'VLAN 10': D('FWD', 'Root'), 'VLAN 20': D('BLK', 'Alternate') });
-    setStp(acc, 'xe-0/0/1', { 'VLAN 10': D('BLK', 'Alternate'), 'VLAN 20': D('FWD', 'Root') });
+    setStp(acc, 'xe-0/0/0', { 'VLAN 10': D('FWD', 'ROOT'), 'VLAN 20': D('BLK', 'ALT') });
+    setStp(acc, 'xe-0/0/1', { 'VLAN 10': D('BLK', 'ALT'), 'VLAN 20': D('FWD', 'ROOT') });
     addClient(acc, 'ge-0/0/2', { mac: 'aa:bb:00:00:02:01', ip: '10.30.202.5', tag: 10, vlanName: 'DATA' });
     root.ArpEntries.push({ MAC: 'aa:bb:00:00:02:01', IP: '10.30.202.5' });
 
@@ -318,7 +318,7 @@ function lag(memberDown) {
     link(a, 'ge-0/0/0', b, 'ge-0/0/0', 'LAG');
     link(a, 'ge-0/0/1', b, 'ge-0/0/1', 'LAG');
     for (const node of [a, b]) {
-        setStp(node, 'ae0', { 'instance 0': { State: 'FWD', Role: node === a ? 'Designated' : 'Root', Cost: 20000 } });
+        setStp(node, 'ae0', { 'instance 0': { State: 'FWD', Role: node === a ? 'DESG' : 'ROOT', Cost: 20000 } });
         // On the bundle, as "show vlans" reports it: an aggregate's members are not members of the VLAN.
         setVlans(node, [vlan('DATA', 10, ['ae0.0'])]);
     }
@@ -354,8 +354,8 @@ function virtualChassis() {
     });
     const upstream = microNode('10.30.4.11', 'micro-vc-up.example.net', { ports: ['xe-0/0/0'], model: 'EX4600-40F' });
     link(vc, 'xe-0/2/0', upstream, 'xe-0/0/0');
-    setStp(vc, 'xe-0/2/0', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
-    setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
+    setStp(vc, 'xe-0/2/0', { 'instance 0': { State: 'FWD', Role: 'ROOT', Cost: 2000 } });
+    setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'DESG', Cost: 2000 } });
     addClient(vc, 'ge-0/0/0', { mac: 'aa:bb:00:00:04:00', tag: 10, vlanName: 'DATA' });
     addClient(vc, 'ge-1/0/0', { mac: 'aa:bb:00:00:04:01', tag: 10, vlanName: 'DATA' });
     setVlans(vc, [vlan('DATA', 10, ['xe-0/2/0.0', 'ge-0/0/0.0', 'ge-1/0/0.0'])]);
@@ -378,8 +378,8 @@ function unscannedWaypoint() {
     const b = microNode('10.30.5.11', 'micro-wp-b.example.net', { ports: ['xe-0/0/0', 'xe-0/0/1'] });
     link(a, 'xe-0/0/0', b, 'xe-0/0/0');
     link(c, 'xe-0/0/0', b, 'xe-0/0/1');
-    setStp(a, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
-    setStp(c, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
+    setStp(a, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'ROOT', Cost: 2000 } });
+    setStp(c, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'ROOT', Cost: 2000 } });
     // Both real ends carry the VLAN. The hop in the middle carries no membership because it carries no
     // data at all, which is the point: unknown is not absent.
     for (const node of [a, c]) setVlans(node, [vlan('DATA', 10, ['xe-0/0/0.0'])]);
@@ -412,7 +412,7 @@ function addresslessBridge() {
     const bridgeMac = '02:AB:DE:AD:BE:EF';
     for (const [node, remotePort] of [[a, '1'], [b, '2']]) {
         rowOf(node, 'ge-0/0/0').Desc = 'UNMANAGED shared segment';
-        setStp(node, 'ge-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 20000 } });
+        setStp(node, 'ge-0/0/0', { 'instance 0': { State: 'FWD', Role: 'DESG', Cost: 20000 } });
         node.Neighbors.push({
             LocalPort: 'ge-0/0/0.0', RemotePort: remotePort, Hostname: 'Unknown',
             MacAddress: bridgeMac, ManagementIP: 'Unknown', Description: 'Unmanaged 8-port switch',
@@ -434,7 +434,7 @@ function addresslessBridge() {
 // as a node nor treated as a missing scan.
 function outOfScopeNeighbor() {
     const a = microNode('10.30.7.10', 'micro-scope-a.example.net', { ports: ['xe-0/0/0'] });
-    setStp(a, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
+    setStp(a, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'ROOT', Cost: 2000 } });
     a.Neighbors.push({
         LocalPort: 'xe-0/0/0', RemotePort: 'xe-1/1/1', Hostname: 'partner-core.example.org',
         MacAddress: '02:AB:11:22:33:44', ManagementIP: '172.31.9.1',
@@ -461,8 +461,8 @@ function transitSighting() {
     const access = microNode('10.30.9.10', 'micro-transit-access.example.net', { ports: ['ge-0/0/0', 'xe-0/0/1'] });
     const upstream = microNode('10.30.9.11', 'micro-transit-up.example.net', { ports: ['xe-0/0/0', 'ge-0/0/1'], model: 'EX4600-40F' });
     link(access, 'xe-0/0/1', upstream, 'xe-0/0/0');
-    setStp(access, 'xe-0/0/1', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
-    setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
+    setStp(access, 'xe-0/0/1', { 'instance 0': { State: 'FWD', Role: 'ROOT', Cost: 2000 } });
+    setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'DESG', Cost: 2000 } });
     setVlans(access, [vlan('DATA', 10, ['ge-0/0/0.0', 'xe-0/0/1.0'])]);
     setVlans(upstream, [vlan('DATA', 10, ['xe-0/0/0.0', 'ge-0/0/1.0'])]);
     const mac = 'aa:bb:00:00:09:01';
@@ -492,9 +492,9 @@ function inferredSegment() {
     const a = microNode('10.30.10.10', 'micro-inferred-a.example.net', { ports: ['ge-0/0/0', 'xe-0/0/1'] });
     const upstream = microNode('10.30.10.11', 'micro-inferred-up.example.net', { ports: ['xe-0/0/0'], model: 'EX4600-40F' });
     link(a, 'xe-0/0/1', upstream, 'xe-0/0/0');
-    setStp(a, 'xe-0/0/1', { 'instance 0': { State: 'FWD', Role: 'Root', Cost: 2000 } });
-    setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
-    setStp(a, 'ge-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 20000 } });
+    setStp(a, 'xe-0/0/1', { 'instance 0': { State: 'FWD', Role: 'ROOT', Cost: 2000 } });
+    setStp(upstream, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'DESG', Cost: 2000 } });
+    setStp(a, 'ge-0/0/0', { 'instance 0': { State: 'FWD', Role: 'DESG', Cost: 20000 } });
     setVlans(a, [vlan('DATA', 10, ['ge-0/0/0.0', 'xe-0/0/1.0'])]);
     setVlans(upstream, [vlan('DATA', 10, ['xe-0/0/0.0'])]);
     for (const suffix of ['01', '02', '03', '04']) {
@@ -517,7 +517,7 @@ function partialNode() {
     const a = microNode('10.30.8.10', 'micro-partial-a.example.net', { ports: ['xe-0/0/0'] });
     const b = microNode('10.30.8.11', 'micro-partial-b.example.net', { ports: ['xe-0/0/0', 'ge-0/0/1'] });
     link(a, 'xe-0/0/0', b, 'xe-0/0/0');
-    setStp(a, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'Designated', Cost: 2000 } });
+    setStp(a, 'xe-0/0/0', { 'instance 0': { State: 'FWD', Role: 'DESG', Cost: 2000 } });
     setVlans(a, [vlan('DATA', 10, ['xe-0/0/0.0'])]);
     b.ScanStatus = 'Partial';
     // Truncated at STP, so everything from there on is absent - the tail order is the worker's.
