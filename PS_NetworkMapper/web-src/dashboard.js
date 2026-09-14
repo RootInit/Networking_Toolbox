@@ -12,6 +12,10 @@ window.refreshAnalysisDashboard = function() {
     window.renderTopologyDiff();
     window.renderIpSpaceUtilization();
     window.renderReliabilityHeatmap();
+    // Gated on being the visible tab, unlike the renders above it: evaluating every rule over the fleet
+    // builds the port graph and every fleet-level join, which is the most expensive thing in the app.
+    var diagnostics = document.getElementById('analysis-tab-diagnostics');
+    if (diagnostics && diagnostics.classList.contains('active')) window.renderDiagnostics();
 };
 
 window.switchAnalysisTab = function(tabId) {
@@ -26,6 +30,7 @@ window.switchAnalysisTab = function(tabId) {
     if (tabId === 'analysis-tab-topodiff') window.renderTopologyDiff();
     if (tabId === 'analysis-tab-ipspace') window.renderIpSpaceUtilization();
     if (tabId === 'analysis-tab-reliability') window.renderReliabilityHeatmap();
+    if (tabId === 'analysis-tab-diagnostics') window.renderDiagnostics();
 };
 
 // One severity vocabulary ('ok' | 'warn' | 'crit') for every bar, band and badge here.

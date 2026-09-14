@@ -768,10 +768,25 @@ l2Path(a, b, T):
 - **A path is per VLAN, and no VLAN is not a VLAN.** A missing tag would otherwise be `NaN`, match no
   member anywhere, and prune every hop with a fabricated `VLAN NaN is not on …` — a wrong answer in the
   shape of a real diagnosis. It is refused with `no-vlan-given` instead.
-- **Still device-to-device, which item 14 has to close.** §6.2's `a` and `b` are resolver outputs —
+- ~~**Still device-to-device, which item 14 has to close.** §6.2's `a` and `b` are resolver outputs —
   `(device, port)` pairs — and an access port's own membership and spanning-tree state are therefore
   never assessed: a path to a host whose port is not in the VLAN, or whose supplicant is `Held`, reads as
-  clean up to the last switch. That belongs where the resolver result is wired into the path call.
+  clean up to the last switch. That belongs where the resolver result is wired into the path call.~~
+  **Closed 2026-09-14 (item 14).** `computePath` takes optional `fromPort`/`toPort` and assesses each end
+  with the same two filters a hop gets: `endpoint-vlan-absent` (F11) or
+  `endpoint-stp-blocking` / `endpoint-stp-not-converged` (F9) is a `NO_PATH` whose reason names the port,
+  and no hops are enumerated — the frontier is not the diagnosis when the path stops at one of its own
+  ends. A port that carries the VLAN still caps the answer: an endpoint in RSTP's single instance makes
+  the path `VLAN_ONLY` and one in no instance `NO_STP_INSTANCE`, which is how the demotion is attributed
+  to the endpoint rather than to a hop. A named port the device does not have is reported as
+  `unknown-port:<ip> <port>` and never used as a filter. The dot1x half of the note above is not
+  included: a `Held` supplicant is a rule (`dot1x-held`, §3.5), and the path computer's job is the
+  forwarding question. **`ScanStatus` is not read here** — an endpoint's own scan state is already a note
+  from the check above it.
+- **The port end is built by `l2-graph.js`, not by the path computer.** `portEndFor(device, port)` returns
+  the same shape and the same absent-versus-empty rules as an edge half, so an endpoint and a hop cannot
+  come to different conclusions about one row. `ipToLong` / `cidrContains` / `vridOf` moved there for the
+  same reason: §6.4 and the L3 rules now test one implementation of containment.
 
 ### 6.3 Symmetry
 
@@ -803,11 +818,65 @@ Two L2 segments joined by an explicit L3 hop, marked *not verified*.
 prefix** contain the endpoint's IP. More than one candidate is `AMBIGUOUS`, not a pick. Report VRRP
 presence (G3) alongside.
 
+**Done 2026-09-14 (work order item 14).** `L2Path.gatewayCandidates(snapshot|graph, ip, {vlanTag})` →
+`{status, candidates, vrrp, notes}`, rendered under the path answer rather than inside it — the path is
+an L2 question and the gateway an L3 one. Three things it does not do, each deliberate:
+
+- **No ARP anywhere in it**, per the correction above. Only `LogicalUnits[].LocalAddress` with a prefix.
+- **`NOT_FOUND` is the usual answer on an access-only crawl and is not dressed up.** The generated
+  fleet's only `inet` unit is each device's own `vme.0` management address, so a client address is inside
+  no crawled device's prefix and the report says exactly that. A fabricated `irb` to make the fixture
+  produce candidates would have been a lie in the test data; the micro test carries the `irb.20` case.
+- **VRRP is reported beside the candidates, never folded into them.** A VIP MAC proves a virtual router
+  exists and gives its VRID; it gives nothing about which candidate is master, and G3's whole value is
+  that "one of N routers" beats a single pick. Filtered by the path's VLAN when one is known, since a VIP
+  in another VLAN is not evidence about this one.
+
 ### 6.5 Report, do not adjudicate
 
 Firewall filter term evaluation — implicit-discard semantics, term ordering, `then accept` vs
 `then count` — is the most error-prone item in the catalogue. A binding is a lead; a non-zero
 discard counter is evidence.
+
+---
+
+### 6.6 Built — 2026-09-14: the Diagnostics sub-tab
+
+`web-src/diagnostics.js`, an eighth tab in `#analysisview`. Three panels: the path tracer at the top,
+the findings grouped by severity then rule, and the `missing` histogram under them. Decisions worth
+keeping, each of which is easy to undo by accident:
+
+- **The histogram is on the screen, not behind a toggle.** §2.4's whole point is that "nothing fired" and
+  "nothing was read" look identical on a findings-only screen. Every rule with an unevaluated subject is
+  listed with the datum that was missing and how many times — a truncated capture reads as a table of
+  `section:MAC_TABLE`, not as a clean fleet. Measured on a 40-device faulted fixture with `10.20.` as the
+  allowed scope: **131 findings, 3,185 unevaluated subjects across 21 of the 39 rules**, and the
+  histogram's largest row by far is `section:INTERFACES_EXT` at 2,496 — the §4.3 section this fleet's
+  devices do not all capture, which is a statement about the data and not about the network. (Run with no
+  scopes configured the same snapshot reports 47 findings and 3,445 unevaluated, the difference being
+  `client-outside-scope`'s 260 subjects going from evaluated to `option:allowedScopes` — which is why the
+  summary line says so rather than showing a smaller number as an improvement.)
+- **`severity: 'info'` is mapped explicitly.** The dashboard's vocabulary is `ok`/`warn`/`crit` and the
+  stat cards' is `critical`/`warn`; `info` arrived with `neighbour-never-scanned` in item 13 and belongs
+  to neither by default. A test asserts every severity in the catalogue has a tier and a band, so a new
+  one cannot be added without the screen gaining a place to put it.
+- **The evaluation is memoised per snapshot AND per allowed-scope list**, and the tab is the only
+  dashboard render gated on being visible: a fleet-scale `evaluate` builds the port graph and every
+  fleet-level join. Editing the scopes in Settings changes which neighbours are in the fleet at all, so a
+  cached result from before the edit answers a different question and is discarded.
+- **No allowed scopes is stated, not silently absorbed.** Without them `client-outside-scope` reports
+  `option:allowedScopes` for every subject, and the summary says so rather than showing a zero.
+- **The diagram is drawn on only for an unambiguous path**, and the hop TABLE is the report. The
+  highlight is the red edges; the nodes are merely selected, which already means "this device's drawer is
+  open". A hop whose devices are inside a collapsed cluster has no edge to colour, so the panel says how
+  many of the hops were drawn rather than implying the picture is complete.
+- **A path query refuses rather than guesses.** An `AMBIGUOUS` endpoint is an answer (§6.1) and is shown
+  as one; a VLAN is taken from the resolved client's own sighting only when exactly one non-transit
+  sighting agrees, and a typed tag always wins over an inferred one.
+
+Per-hop and per-finding links go through `window.goToSearchResult(ip, 'tab-interfaces', snapshot, {port})`
+— the same navigation the search results and the Fleet Health drill-downs use, so the drawer opens on the
+right snapshot, the interfaces tab, and the right jack.
 
 ---
 
@@ -1473,7 +1542,12 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
     layers. See §3.6 for the catalogue and for what stayed out: every command-dependent rule (G4
     included) waits on item 12, and G3 turned out not to be a rule at all. G2 is closed. Appendix A's L2
     and L3 rows are superseded the way item 11 superseded the L1 row.
-14. **UI**: analysis sub-tab, path highlighting, per-hop drawer links.
+14. ~~**UI**: analysis sub-tab, path highlighting, per-hop drawer links.~~ **Done 2026-09-14.**
+    `web-src/diagnostics.js` plus the `Diagnostics` analysis sub-tab: the findings grouped by severity and
+    rule, the §2.4 `missing` histogram beside them, and a path tracer that resolves both ends (§6.1) and
+    passes the resolved PORTS into `computePath` — which is the functional half, recorded at §6.2. §6.4's
+    gateway report lands with it, which closes G3's placed half. See §6.6 for what the screen does and the
+    three decisions that are easy to undo by accident.
 *(There is no config-parsing step. See §4.4 — the configuration is collected and stored for backup
 and manual review, and stays out of the rule engine.)*
 
@@ -1516,6 +1590,6 @@ by today's data.
 |---|---|
 | **G1** | **MAC learning as per-hop path verification.** The spec computes a path and never *checks* it. At each hop, the destination's MAC should be learned on the port facing the next hop — direct forwarding-plane evidence, far stronger than "both ends report FWD". The data exists (1030 entries in the capture) and `:674` discards exactly the transit sightings needed. R3 retains them; nothing in §6 uses them. **The largest missed opportunity in the document.** |
 | ~~G2~~ | ~~**Per-VLAN STP scope drift between neighbours.** A link where one end runs an instance for VLAN *T* and the other does not. Detectable today by comparing each end's `StpDetail` scope set against its `Vlans` membership. §6.3 only compares states within a scope both ends have. With 4 of 17 VLANs instance-less on one device, not hypothetical~~ **Closed 2026-09-14 (item 13):** `stp-scope-drift` (§3.6) is the comparison, with an injector that plants it on an already-blocked link so the forwarding tree is untouched |
-| G3 *(placed)* | **VRRP is partly detectable** and §6.3 says it is not. The `00:00:5e:00:01:xx` virtual-MAC prefix appears in the capture's MAC table and identifies both VRRP presence and the VRID. It gives no master/backup, but "this VLAN's gateway is a VIP, so the L3 hop is one of N routers" beats §6.4's single pick. **Placed 2026-09-14 (item 13):** not a rule — a VIP on a trunk is how VRRP is meant to look — so the detection ships as `vridOf` for §6.4 to report with its gateway pick, and `duplicate-mac-across-devices` skips those MACs. The §6.4 half lands with item 14 |
+| ~~G3~~ | ~~**VRRP is partly detectable** and §6.3 says it is not. The `00:00:5e:00:01:xx` virtual-MAC prefix appears in the capture's MAC table and identifies both VRRP presence and the VRID. It gives no master/backup, but "this VLAN's gateway is a VIP, so the L3 hop is one of N routers" beats §6.4's single pick. **Placed 2026-09-14 (item 13):** not a rule — a VIP on a trunk is how VRRP is meant to look — so the detection ships as `vridOf` for §6.4 to report with its gateway pick, and `duplicate-mac-across-devices` skips those MACs.~~ **Closed 2026-09-14 (item 14):** `gatewayCandidates` reports every VIP and its VRID beside its candidates, filtered by the path's VLAN — see §6.4 |
 | G4 *(blocked)* | **Topology-change churn, not root ID.** `show spanning-tree bridge` also carries topology-change count and time since last change per scope. For "why is this broken *now*", a VLAN that reconverged 40 seconds ago explains more than which bridge is root. Needs the §4.3 command, so it queues behind item 12 — see §3.6 |
 | ~~G5~~ | ~~**MTU and native-VLAN mismatch rules are injected as test faults (§8.3) but described nowhere.** R2 retains the LLDP `Maximum Frame Size` TLV without saying what compares it to the local MTU~~ **Closed 2026-09-13 (item 11)** for the MTU half: `mtu-mismatch` (§3.5) is the comparison, with an injector of its own. The native-VLAN half stays open and is blocked on retention rather than undescribed — the snapshot carries no native-VLAN field at all |

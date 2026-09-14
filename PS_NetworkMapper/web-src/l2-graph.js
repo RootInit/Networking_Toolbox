@@ -118,6 +118,54 @@ function endFor(device, index, port, memberPorts) {
     };
 }
 
+// One end for a port that is not on an edge - an access port an endpoint resolved to. Same shape and
+// same absent-versus-empty rules as the halves above, so section 6.2 can filter on it with the
+// predicates it already uses rather than a second, subtly different reading of the same row.
+function portEndFor(device, port) {
+    if (!device) return null;
+    var bare = stripUnit(port);
+    var index = portIndexFor(device);
+    if (!index.rows.has(bare)) return null;
+    return endFor(device, index, bare, []);
+}
+
+function ipToLong(text) {
+    var parts = String(text === null || text === undefined ? '' : text).split('.');
+    if (parts.length !== 4) return null;
+    var value = 0;
+    for (var i = 0; i < 4; i++) {
+        var octet = Number(parts[i]);
+        if (!isFinite(octet) || octet < 0 || octet > 255 || parts[i] === '') return null;
+        value = (value * 256) + octet;
+    }
+    return value;
+}
+
+// Shared by the L3 rules and by section 6.4's gateway candidates, so the two cannot disagree about
+// which addresses a configured prefix contains.
+function cidrContains(cidr, ip) {
+    var parts = String(cidr === null || cidr === undefined ? '' : cidr).split('/');
+    var network = ipToLong(parts[0]);
+    var address = ipToLong(ip);
+    // NaN, not null: isFinite(null) is true, so a bare address with no prefix would otherwise be read as
+    // a /0 and swallow every address in the fleet.
+    var bits = parts.length === 2 && parts[1] !== '' ? Number(parts[1]) : NaN;
+    if (network === null || address === null || !isFinite(bits) || bits < 0 || bits > 32) return null;
+    if (bits === 0) return true;
+    // ToInt32 on both sides of the & is consistent, so a /8 network above 127.x compares correctly.
+    var mask = (0xFFFFFFFF << (32 - bits)) >>> 0;
+    return ((network & mask) >>> 0) === ((address & mask) >>> 0);
+}
+
+// The VRRP virtual-MAC prefix: 00:00:5e:00:01:<VRID> (G3). No rule fires on one - a VIP on a trunk is
+// how VRRP is supposed to look - so the only consumer is section 6.4's gateway report.
+var VRRP_MAC_PREFIX = '00:00:5E:00:01:';
+
+function vridOf(mac) {
+    var text = String(mac === null || mac === undefined ? '' : mac).toUpperCase();
+    return text.indexOf(VRRP_MAC_PREFIX) === 0 ? parseInt(text.slice(VRRP_MAC_PREFIX.length), 16) : null;
+}
+
 function inScope(ip, allowedScopes) {
     if (!allowedScopes || !allowedScopes.length) return null;   // undecidable without them
     for (var i = 0; i < allowedScopes.length; i++) {
@@ -365,8 +413,13 @@ var L2Graph = {
     buildPortGraph: buildPortGraph,
     groupSharedSegments: groupSharedSegments,
     edgesFor: edgesFor,
+    portEndFor: portEndFor,
     stripUnit: stripUnit,
     isInterconnect: isInterconnect,
+    ipToLong: ipToLong,
+    cidrContains: cidrContains,
+    vridOf: vridOf,
+    VRRP_MAC_PREFIX: VRRP_MAC_PREFIX,
 };
 
 // Dual-mode export: node:test (CJS/ESM interop) vs. browser <script> (no `module`).

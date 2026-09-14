@@ -245,42 +245,12 @@ function deviceFacts(device, referenceMs) {
 // snapshot - a MAC seen twice, an address claimed twice, a neighbour nobody scanned - so the join is
 // built once per evaluation rather than per subject.
 
-function ipToLong(text) {
-    var parts = String(text === null || text === undefined ? '' : text).split('.');
-    if (parts.length !== 4) return null;
-    var value = 0;
-    for (var i = 0; i < 4; i++) {
-        var octet = Number(parts[i]);
-        if (!isFinite(octet) || octet < 0 || octet > 255 || parts[i] === '') return null;
-        value = (value * 256) + octet;
-    }
-    return value;
-}
-
-// Section 6.4 needs the same containment test for its gateway candidates, so it lives here rather than
-// inside the one rule that reads it today.
-function cidrContains(cidr, ip) {
-    var parts = String(cidr === null || cidr === undefined ? '' : cidr).split('/');
-    var network = ipToLong(parts[0]);
-    var address = ipToLong(ip);
-    // NaN, not null: isFinite(null) is true, so a bare address with no prefix would otherwise be read as
-    // a /0 and swallow every address in the fleet.
-    var bits = parts.length === 2 && parts[1] !== '' ? Number(parts[1]) : NaN;
-    if (network === null || address === null || !isFinite(bits) || bits < 0 || bits > 32) return null;
-    if (bits === 0) return true;
-    // ToInt32 on both sides of the & is consistent, so a /8 network above 127.x compares correctly.
-    var mask = (0xFFFFFFFF << (32 - bits)) >>> 0;
-    return ((network & mask) >>> 0) === ((address & mask) >>> 0);
-}
-
-// The VRRP virtual-MAC prefix: 00:00:5e:00:01:<VRID>. Section 6.4 reports the VIP alongside its gateway
-// pick (G3); no rule fires on one, because a VIP on a trunk is how VRRP is supposed to look.
-var VRRP_MAC_PREFIX = '00:00:5E:00:01:';
-
-function vridOf(mac) {
-    var text = String(mac === null || mac === undefined ? '' : mac).toUpperCase();
-    return text.indexOf(VRRP_MAC_PREFIX) === 0 ? parseInt(text.slice(VRRP_MAC_PREFIX.length), 16) : null;
-}
+// Address containment and the VRRP virtual-MAC prefix live in l2-graph.js: section 6.4's gateway report
+// tests the same prefixes against the same addresses, and one copy is the only way the rule and the
+// report cannot drift apart.
+var cidrContains = L2.cidrContains;
+var vridOf = L2.vridOf;
+var VRRP_MAC_PREFIX = L2.VRRP_MAC_PREFIX;
 
 function fleetFacts(devices, factsByIp, graph, allowedScopes) {
     // MAC -> the places it was learned that are LOCATIONS rather than sightings in passing. A MAC on an

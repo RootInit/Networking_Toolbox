@@ -38,6 +38,12 @@ var DEFAULT_PATH_LIMIT = 8;
 // with no STP data can hold enormous numbers of simple paths. This bounds the walk itself.
 var DEFAULT_STEP_BUDGET = 200000;
 
+function asList(value) {
+    if (Array.isArray(value)) return value.filter(function (item) { return item !== null && item !== undefined; });
+    if (value === null || value === undefined) return [];
+    return [value];
+}
+
 function worst(a, b) {
     return CONFIDENCE_ORDER.indexOf(a) >= CONFIDENCE_ORDER.indexOf(b) ? a : b;
 }
@@ -169,6 +175,58 @@ function assessEdge(edge, tag) {
     return {
         edge: edge, vlan: { a: vlanA, b: vlanB }, scope: { a: scopeA, b: scopeB },
         confidence: confidence, notes: notes, pruned: pruned,
+    };
+}
+
+// Section 6.2's endpoints, which until item 14 were device addresses only. A resolver answer is a
+// (device, port) pair, and the port at each end of a path is subject to the same two filters as every
+// hop: it either carries the VLAN or the path stops there (F11), and it either forwards in that VLAN's
+// scope or it does not (F9). Assessed separately from assessEdge because an endpoint has one end, not
+// two - there is no far side to disagree with.
+function assessEndpoint(end, tag, role) {
+    var member = carriesVlan(end, tag);
+    var scope = scopeFor(end, tag);
+    var notes = [];
+    var confidence = 'VERIFIED';
+    var pruned = null;
+
+    if (member === 'NO') {
+        pruned = {
+            reason: 'endpoint-vlan-absent', failureMode: 'F11',
+            detail: 'VLAN ' + tag + ' is not on the ' + role + ' port ' + endLabel(end),
+            ends: [{ ip: end.ip, port: end.port }],
+        };
+    } else if (scope.state && NOT_FORWARDING.indexOf(scope.state) !== -1) {
+        var transitioning = scope.state === 'LRN' || scope.state === 'LST';
+        pruned = {
+            reason: transitioning ? 'endpoint-stp-not-converged' : 'endpoint-stp-blocking',
+            failureMode: transitioning ? 'F9' : null,
+            detail: scope.state + ' on the ' + role + ' port ' + endLabel(end) + ' in ' + scope.key,
+            ends: [{ ip: end.ip, port: end.port, state: scope.state }],
+        };
+    }
+
+    if (member === 'UNKNOWN') {
+        confidence = 'PHYSICAL_ONLY';
+        notes.push('endpoint-vlan-membership-not-captured:' + endLabel(end));
+    }
+    if (scope.kind === 'NOT_CAPTURED') {
+        confidence = worst(confidence, 'PHYSICAL_ONLY');
+        notes.push('endpoint-stp-section-not-captured:' + endLabel(end));
+    } else if (scope.kind === 'NO_INSTANCE') {
+        confidence = worst(confidence, 'NO_STP_INSTANCE');
+        notes.push('endpoint-no-stp-instance-for-vlan:' + endLabel(end));
+    } else if (scope.kind === 'RSTP' || scope.kind === 'MSTI') {
+        confidence = worst(confidence, 'VLAN_ONLY');
+        notes.push('endpoint-stp-scope-not-per-vlan:' + endLabel(end));
+    } else if (confidence === 'VERIFIED' && scope.state !== 'FWD' && !pruned) {
+        confidence = 'UNVERIFIED';
+        notes.push('endpoint-stp-state-unreadable:' + endLabel(end));
+    }
+
+    return {
+        role: role, ip: end.ip, port: end.port, desc: end.desc, link: end.link,
+        vlan: member, scope: scope, confidence: confidence, notes: notes, pruned: pruned,
     };
 }
 
@@ -369,7 +427,7 @@ function computePath(input, options) {
     var result = {
         from: fromIp, to: toIp, vlanTag: tag,
         status: 'NO_PATH', paths: [], truncated: false, reasons: [], lastReachedHop: null,
-        notes: [],
+        endpoints: [], notes: [],
     };
     // Without this, a missing tag is NaN, no port matches it, and every hop is pruned with a plausible
     // "VLAN NaN is not on ..." - a wrong answer that reads like a real diagnosis.
@@ -392,6 +450,37 @@ function computePath(input, options) {
         result.notes.push((device.ScanStatus === 'Partial' ? 'endpoint-scan-partial:' : 'endpoint-scan-failed:') + ip);
     });
 
+    // The resolver's own (device, port) pairs, when the caller passes them (section 6.1 -> 6.2). Absent,
+    // the answer is device-to-device and says so by leaving `endpoints` empty rather than by inventing a
+    // port; present, an endpoint's own membership and spanning-tree state gate the path like any hop.
+    [{ ip: fromIp, port: opts.fromPort, role: 'source' }, { ip: toIp, port: opts.toPort, role: 'target' }]
+        .forEach(function (request) {
+            if (request.port === null || request.port === undefined || request.port === '') return;
+            var end = L2.portEndFor(graph.deviceByIp.get(request.ip), request.port);
+            if (!end) {
+                result.notes.push('unknown-port:' + request.ip + ' ' + request.port);
+                return;
+            }
+            result.endpoints.push(assessEndpoint(end, tag, request.role));
+        });
+    var endpointConfidence = result.endpoints.reduce(function (carried, endpoint) {
+        endpoint.notes.forEach(function (note) { if (result.notes.indexOf(note) === -1) result.notes.push(note); });
+        return worst(carried, endpoint.confidence);
+    }, 'VERIFIED');
+    var blockedEndpoints = result.endpoints.filter(function (endpoint) { return endpoint.pruned; });
+    if (blockedEndpoints.length) {
+        // Not a NO_PATH to diagnose at the frontier: the path stops at an end of it, and the endpoint
+        // itself is the whole reason. Enumerating hops from a port the VLAN is not on would report a
+        // clean path up to the last switch, which is exactly what item 14 had to close.
+        result.reasons = blockedEndpoints.map(function (endpoint) {
+            return {
+                kind: endpoint.pruned.reason, failureMode: endpoint.pruned.failureMode,
+                detail: endpoint.pruned.detail, ends: endpoint.pruned.ends,
+            };
+        });
+        return result;
+    }
+
     var assessments = graph.edges.map(function (edge) { return assessEdge(edge, tag); });
     var surviving = assessments.filter(function (assessment) { return !assessment.pruned; });
     var pruned = assessments.filter(function (assessment) { return assessment.pruned; });
@@ -399,7 +488,10 @@ function computePath(input, options) {
 
     if (fromIp === toIp) {
         result.status = 'PATH';
-        result.paths.push({ hops: [], confidence: 'VERIFIED', notes: ['same-device'], captureSpreadSeconds: 0, macCoherent: true });
+        result.paths.push({
+            hops: [], confidence: endpointConfidence, notes: ['same-device'],
+            captureSpreadSeconds: 0, macCoherent: true,
+        });
         return result;
     }
 
@@ -412,7 +504,9 @@ function computePath(input, options) {
     result.paths = found.paths.slice(0, limit).map(function (trail) {
         var hops = [];
         var cursor = fromIp;
-        var confidence = 'VERIFIED';
+        // A path is as good as its worst hop AND as good as its worst end: an endpoint port whose scope
+        // is RSTP's single instance is no more per-VLAN than a hop's would be.
+        var confidence = endpointConfidence;
         var notes = [];
         var instants = [captureInstant(graph.deviceByIp.get(fromIp))];
         trail.forEach(function (entry) {
@@ -471,8 +565,79 @@ function computePath(input, options) {
     return result;
 }
 
+// Section 6.4, as corrected: a candidate gateway is a device holding a logical unit whose CONFIGURED
+// address and prefix contain the endpoint's address. Not an ARP entry - a device ARPs anything it
+// originates traffic to, and revision 1's rule declared a switch the gateway for its own gateway.
+// More than one candidate is AMBIGUOUS, never a pick.
+//
+// The VRRP half of G3 is reported beside the candidates rather than folded into them: a VIP MAC in the
+// MAC table proves a virtual router exists and gives its VRID, and gives nothing at all about which
+// candidate is master. "The gateway is one of N routers" is the honest answer and it beats a pick.
+function gatewayCandidates(input, ip, options) {
+    var opts = options || {};
+    var devices = opts.devices || (input && input.deviceByIp ? Array.from(input.deviceByIp.values()) : asList(input));
+    var address = String(ip === null || ip === undefined ? '' : ip).trim();
+    var result = { ip: address, status: 'NOT_FOUND', candidates: [], vrrp: [], notes: [] };
+    if (L2.ipToLong(address) === null) {
+        result.notes.push('not-an-ipv4-address');
+        return result;
+    }
+    var tag = opts.vlanTag === undefined || opts.vlanTag === null ? null : Number(opts.vlanTag);
+
+    devices.forEach(function (device) {
+        asList(device.LogicalUnits).forEach(function (unit) {
+            if (String(unit.Family) !== 'inet') return;
+            if (L2.cidrContains(unit.LocalAddress, address) !== true) return;
+            result.candidates.push({
+                deviceIp: String(device.DeviceIP), hostname: device.Hostname,
+                unit: (unit.Parent === null || unit.Parent === undefined ? '?' : unit.Parent) + '.' + unit.Unit,
+                address: unit.LocalAddress, admin: unit.Admin, link: unit.Link,
+                scanStatus: device.ScanStatus,
+            });
+        });
+        // Every VIP in the snapshot, whoever learned it: a backup router's VIP is learned on the master's
+        // side of the fleet, so restricting the search to the candidates would usually find nothing.
+        asList(device.MacTable).forEach(function (row) {
+            var vrid = L2.vridOf(row.MacAddress);
+            if (vrid === null) return;
+            if (tag !== null && row.VlanTag !== undefined && row.VlanTag !== null && Number(row.VlanTag) !== tag) return;
+            var mac = String(row.MacAddress).toUpperCase();
+            var seen = result.vrrp.find(function (entry) { return entry.mac === mac; });
+            if (!seen) {
+                seen = { mac: mac, vrid: vrid, vlanName: row.VlanName === undefined ? null : row.VlanName, seenOn: [] };
+                result.vrrp.push(seen);
+            }
+            var port = row.PhysicalPort ? String(row.PhysicalPort) : L2.stripUnit(row.Interface);
+            if (!seen.seenOn.some(function (place) { return place.ip === String(device.DeviceIP) && place.port === port; })) {
+                seen.seenOn.push({ ip: String(device.DeviceIP), port: port });
+            }
+        });
+    });
+
+    result.candidates.sort(function (x, y) {
+        return x.deviceIp < y.deviceIp ? -1 : x.deviceIp > y.deviceIp ? 1 : (x.unit < y.unit ? -1 : 1);
+    });
+    result.vrrp.sort(function (x, y) { return x.mac < y.mac ? -1 : 1; });
+
+    var devicesNamed = new Set(result.candidates.map(function (candidate) { return candidate.deviceIp; }));
+    if (!result.candidates.length) {
+        // The common case on an access-only crawl, and not a failure: no crawled device holds an L3
+        // interface in the endpoint's subnet, so the gateway is simply not in the snapshot.
+        result.notes.push('no-crawled-device-holds-a-prefix-containing-this-address');
+    } else if (devicesNamed.size > 1) {
+        result.status = 'AMBIGUOUS';
+        result.notes.push('prefix-held-by-' + devicesNamed.size + '-devices');
+    } else {
+        result.status = 'FOUND';
+    }
+    if (result.vrrp.length) result.notes.push('vrrp-virtual-mac-present:' + result.vrrp.map(function (e) { return e.vrid; }).join(','));
+    return result;
+}
+
 var L2Path = {
     computePath: computePath,
+    gatewayCandidates: gatewayCandidates,
+    assessEndpoint: assessEndpoint,
     bothEndsClaimSegment: bothEndsClaimSegment,
     assessEdge: assessEdge,
     scopeFor: scopeFor,

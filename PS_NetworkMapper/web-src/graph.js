@@ -356,6 +356,49 @@ window.refreshNodeVisual = function(ip) {
     }
 };
 
+// Section 6.2's answer drawn on the diagram: the consecutive device pairs of one path. Styling only -
+// no dataset rebuild, so the user's pan, zoom and expansion survive it. A hop whose devices are inside
+// a collapsed cluster has no edge to colour and is silently not drawn, which is why the hop TABLE, not
+// the diagram, is the authoritative report.
+var PATH_EDGE_COLOR = '#d9534f';
+var highlightedPathEdgeIds = [];
+
+function edgePairKey(from, to) {
+    return from < to ? from + '|' + to : to + '|' + from;
+}
+
+window.clearPathHighlight = function() {
+    if (!edgesDataset || !highlightedPathEdgeIds.length) { highlightedPathEdgeIds = []; return; }
+    var updates = [];
+    highlightedPathEdgeIds.forEach(function (id) {
+        var edge = edgesDataset.get(id);
+        if (!edge) return;
+        var isPrimary = String(id).indexOf('primary-') === 0;
+        updates.push({ id: id, color: isPrimary ? '#848484' : '#c0c0c0', width: isPrimary ? 2 : 1, shadow: false });
+    });
+    highlightedPathEdgeIds = [];
+    edgesDataset.update(updates);
+    // A VLAN filter's own edge styling is what was overwritten, so hand the diagram back to it.
+    if (document.getElementById('vlanFilter') && document.getElementById('vlanFilter').value !== 'ALL') window.applyVlanFilter();
+};
+
+window.highlightPathOnDiagram = function(deviceIps) {
+    window.clearPathHighlight();
+    if (!edgesDataset || !nodesDataset || !deviceIps || deviceIps.length < 2) return 0;
+    var wanted = new Set();
+    for (var i = 1; i < deviceIps.length; i++) wanted.add(edgePairKey(String(deviceIps[i - 1]), String(deviceIps[i])));
+    var updates = [];
+    edgesDataset.get().forEach(function (edge) {
+        if (!wanted.has(edgePairKey(String(edge.from), String(edge.to)))) return;
+        highlightedPathEdgeIds.push(edge.id);
+        updates.push({ id: edge.id, color: PATH_EDGE_COLOR, width: 4, shadow: false });
+    });
+    edgesDataset.update(updates);
+    var present = deviceIps.filter(function (ip) { return nodesDataset.get(String(ip)); }).map(String);
+    if (network && present.length) network.selectNodes(present, false);
+    return updates.length;
+};
+
 window.setClusterThreshold = function(value) {
     var n = parseInt(value, 10);
     if (!Number.isFinite(n) || n < 2) return;

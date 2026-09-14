@@ -349,8 +349,10 @@ window.mergeRescannedDevice = function(freshDevice, targetSnapshot) {
         topology[index] = freshDevice;
     }
 
-    // dashboard.js memoises fleet totals per snapshot, so invalidate where the topology changes.
+    // dashboard.js memoises fleet totals per snapshot and diagnostics.js the whole rule evaluation, so
+    // invalidate both where the topology changes.
     if (window.invalidateFleetTotalsCache) window.invalidateFleetTotalsCache(targetSnapshot);
+    if (window.invalidateDiagnosticsCache) window.invalidateDiagnosticsCache(targetSnapshot);
 
     correlateClientIps(topology);
 

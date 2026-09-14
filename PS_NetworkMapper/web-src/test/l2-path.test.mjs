@@ -422,3 +422,116 @@ test('on the generated fleet, a pruned VLAN leaves exactly one path between scan
         }
     }
 });
+
+// Item 14. Until now section 6.2's `a` and `b` were device addresses, so an access port's own VLAN
+// membership and spanning-tree state were never assessed - a path to a host whose port is not in the
+// VLAN read clean all the way to the last switch. These are the two halves of closing that.
+test('an endpoint port that does not carry the VLAN stops the path at the port, not at the last switch', () => {
+    const topology = byName('diamond-two-paths-per-vlan');
+    const [root, , , acc] = topology.snapshot.Topology.map(d => String(d.DeviceIP));
+
+    // ge-0/0/2 is the access port, carried in DATA (10) and not in VOICE (20). Device-to-device, the
+    // fleet answers VLAN 20 with a clean path through dist2 - which is the wrong answer for a host on
+    // that port, and the one this closes.
+    const deviceToDevice = pathIn(topology.name, { from: acc, to: root, vlanTag: 20 });
+    assert.equal(deviceToDevice.status, 'PATH');
+
+    const fromPort = pathIn(topology.name, { from: acc, to: root, vlanTag: 20, fromPort: 'ge-0/0/2' });
+    assert.equal(fromPort.status, 'NO_PATH');
+    assert.deepEqual(fromPort.paths, []);
+    const reason = fromPort.reasons.find(r => r.kind === 'endpoint-vlan-absent');
+    assert.ok(reason, `no endpoint reason: ${JSON.stringify(fromPort.reasons)}`);
+    assert.equal(reason.failureMode, 'F11');
+    assert.deepEqual(reason.ends, [{ ip: acc, port: 'ge-0/0/2' }]);
+    assert.equal(fromPort.endpoints.length, 1);
+    assert.equal(fromPort.endpoints[0].role, 'source');
+    assert.equal(fromPort.endpoints[0].vlan, 'NO');
+
+    // The VLAN the port does carry is unaffected, and the endpoint is reported rather than assumed: this
+    // access port is in no spanning-tree instance, which caps the answer below the trunk-only VERIFIED.
+    const carried = pathIn(topology.name, { from: acc, to: root, vlanTag: 10, fromPort: 'ge-0/0/2' });
+    assert.equal(carried.status, 'PATH');
+    assert.equal(carried.endpoints[0].vlan, 'YES');
+    assert.equal(carried.endpoints[0].scope.kind, 'NO_INSTANCE');
+    assert.equal(carried.paths[0].confidence, 'NO_STP_INSTANCE');
+    assert.ok(carried.notes.some(n => n.startsWith('endpoint-no-stp-instance-for-vlan:')));
+    // Without the port the same query is VERIFIED, so the demotion is the endpoint's and nothing else's.
+    assert.equal(pathIn(topology.name, { from: acc, to: root, vlanTag: 10 }).paths[0].confidence, 'VERIFIED');
+
+    // A port the device does not have is said, not silently ignored - and never turned into a filter.
+    const unknown = pathIn(topology.name, { from: acc, to: root, vlanTag: 10, fromPort: 'ge-9/9/9' });
+    assert.equal(unknown.status, 'PATH');
+    assert.deepEqual(unknown.endpoints, []);
+    assert.ok(unknown.notes.includes(`unknown-port:${acc} ge-9/9/9`));
+});
+
+test('an endpoint port blocked in the VLAN stops the path with F9s own reason', () => {
+    const topology = byName('diamond-two-paths-per-vlan');
+    const [root, , , acc] = topology.snapshot.Topology.map(d => String(d.DeviceIP));
+
+    // acc xe-0/0/1 is the uplink VLAN 10 blocks. Asked as an endpoint rather than as a hop, the block is
+    // still the answer, and it names the port.
+    const blocked = pathIn(topology.name, { from: acc, to: root, vlanTag: 10, fromPort: 'xe-0/0/1' });
+    assert.equal(blocked.status, 'NO_PATH');
+    const reason = blocked.reasons.find(r => r.kind === 'endpoint-stp-blocking');
+    assert.ok(reason, `no endpoint reason: ${JSON.stringify(blocked.reasons)}`);
+    assert.deepEqual(reason.ends, [{ ip: acc, port: 'xe-0/0/1', state: 'BLK' }]);
+    // Its partner port forwards in the same VLAN, so the topology, not the check, is what differs.
+    assert.equal(pathIn(topology.name, { from: acc, to: root, vlanTag: 10, fromPort: 'xe-0/0/0' }).status, 'PATH');
+});
+
+// Section 6.4, as corrected: candidates come from a configured prefix containing the address, and more
+// than one is an ambiguity rather than a pick. G3's VIP detection is reported beside them.
+test('gateway candidates come from configured prefixes, and two candidates are not a pick', () => {
+    const { gatewayCandidates } = L2Path;
+    const unit = (parent, unitNumber, address) => ({
+        Parent: parent, Unit: unitNumber, Family: 'inet', LocalAddress: address,
+        Remote: null, Admin: 'up', Link: 'up',
+    });
+    const device = (ip, units, macTable = []) => ({
+        DeviceIP: ip, Hostname: `gw-${ip}`, ScanStatus: 'Ok', LogicalUnits: units, MacTable: macTable,
+    });
+
+    const one = device('10.30.9.1', [unit('irb', 20, '192.0.2.1/24'), unit('vme', 0, '10.30.9.1/24')]);
+    const other = device('10.30.9.2', [unit('vme', 0, '10.30.9.2/24')]);
+    const found = gatewayCandidates([one, other], '192.0.2.50');
+    assert.equal(found.status, 'FOUND');
+    assert.equal(found.candidates.length, 1);
+    assert.equal(found.candidates[0].deviceIp, '10.30.9.1');
+    assert.equal(found.candidates[0].unit, 'irb.20');
+
+    // The switches' own management prefix holds both of them, which is exactly the shape revision 1's
+    // ARP rule turned into "this switch is the gateway for its own gateway".
+    const ambiguous = gatewayCandidates([one, other], '10.30.9.77');
+    assert.equal(ambiguous.status, 'AMBIGUOUS');
+    assert.equal(ambiguous.candidates.length, 2);
+    assert.ok(ambiguous.notes.includes('prefix-held-by-2-devices'));
+
+    // No crawled device holds the prefix: a stated absence, not a guess.
+    const absent = gatewayCandidates([one, other], '203.0.113.5');
+    assert.equal(absent.status, 'NOT_FOUND');
+    assert.deepEqual(absent.candidates, []);
+    assert.ok(absent.notes.includes('no-crawled-device-holds-a-prefix-containing-this-address'));
+    assert.equal(gatewayCandidates([one, other], 'not-an-address').notes[0], 'not-an-ipv4-address');
+});
+
+test('G3: a VRRP virtual MAC is reported beside the candidates, with its VRID', () => {
+    const { gatewayCandidates } = L2Path;
+    const vip = {
+        MacAddress: '00:00:5e:00:01:0a', Interface: 'xe-0/0/0.0', PhysicalPort: 'xe-0/0/0',
+        VlanName: 'DATA', VlanTag: 10,
+    };
+    const device = {
+        DeviceIP: '10.30.9.1', Hostname: 'gw', ScanStatus: 'Ok',
+        LogicalUnits: [{ Parent: 'irb', Unit: 10, Family: 'inet', LocalAddress: '192.0.2.1/24', Admin: 'up', Link: 'up' }],
+        MacTable: [vip, { ...vip, MacAddress: 'aa:bb:00:00:00:01' }],
+    };
+    const report = gatewayCandidates([device], '192.0.2.50', { vlanTag: 10 });
+    assert.equal(report.status, 'FOUND');
+    assert.equal(report.vrrp.length, 1, 'only the virtual MAC is a VIP');
+    assert.equal(report.vrrp[0].vrid, 10);
+    assert.deepEqual(report.vrrp[0].seenOn, [{ ip: '10.30.9.1', port: 'xe-0/0/0' }]);
+    assert.ok(report.notes.includes('vrrp-virtual-mac-present:10'));
+    // Asked about another VLAN, the VIP in VLAN 10 is not evidence about it.
+    assert.deepEqual(gatewayCandidates([device], '192.0.2.50', { vlanTag: 20 }).vrrp, []);
+});

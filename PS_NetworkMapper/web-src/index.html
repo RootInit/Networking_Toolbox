@@ -164,6 +164,30 @@
         .tier-ok { --tier: #27ae60; } .tier-warn { --tier: #d68910; } .tier-crit { --tier: #e74c3c; } .tier-neutral { --tier: var(--accent); }
         .fleet-hint { font-size: 0.78rem; color: var(--text-dim); margin: -10px 0 18px; }
 
+        /* Diagnostics sub-tab (diagnostics.js): rule findings, the missing-datum histogram, path trace */
+        .diag-note { font-size: 0.78rem; color: var(--text-dim); margin: 0 0 12px; }
+        .diag-empty { font-size: 0.83rem; color: var(--text-dim); font-style: italic; margin: 6px 0 14px; }
+        .diag-band { margin-bottom: 18px; }
+        .diag-band-title { font-size: 0.8rem; margin: 0 0 8px; color: var(--tier); text-transform: uppercase; letter-spacing: 0.03em; }
+        .diag-subhead { font-size: 0.8rem; margin: 16px 0 6px; color: var(--heading); }
+        .diag-rule { border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; background: var(--subtle-bg); }
+        .diag-rule > summary { cursor: pointer; padding: 7px 10px; font-size: 0.82rem; }
+        .diag-rule code { font-size: 0.78rem; }
+        .diag-badge { display: inline-block; min-width: 22px; text-align: center; font-weight: bold; font-size: 0.75rem; color: var(--tier); }
+        .diag-layer { font-size: 0.7rem; color: var(--text-dim); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; }
+        .diag-table { width: 100%; font-size: 0.78rem; }
+        .diag-table td, .diag-table th { vertical-align: top; }
+        .diag-evidence { color: var(--text-dim); word-break: break-word; }
+        .diag-dim { color: var(--text-dim); }
+        .diag-link { color: var(--accent); text-decoration: none; cursor: pointer; }
+        .diag-link:hover { text-decoration: underline; }
+        .diag-resolution { font-size: 0.82rem; margin-bottom: 6px; }
+        .diag-status { font-weight: bold; }
+        .diag-notes { font-size: 0.72rem; color: var(--text-dim); }
+        .diag-path-status { font-size: 0.85rem; font-weight: bold; color: var(--tier); margin: 12px 0 8px; }
+        .diag-reasons { font-size: 0.8rem; margin: 0 0 10px; padding-left: 18px; }
+        .diag-reasons li { margin-bottom: 3px; }
+
         .inline-bar { display: inline-flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; }
         .inline-bar-track { flex: 1 1 auto; height: 8px; background: var(--hover-neutral-bg); border-radius: 4px; overflow: hidden; }
         .inline-bar-fill { display: block; height: 100%; background: var(--tier); border-radius: 4px; }
@@ -837,6 +861,7 @@
                 <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-topodiff')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-topodiff'))" id="btn-analysis-tab-topodiff">Topology Diff</div>
                 <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-ipspace')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-ipspace'))" id="btn-analysis-tab-ipspace">IP Space</div>
                 <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-reliability')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-reliability'))" id="btn-analysis-tab-reliability">Reliability</div>
+                <div class="analysis-tab" tabindex="0" role="tab" aria-selected="false" onclick="window.switchAnalysisTab('analysis-tab-diagnostics')" onkeydown="window.activateOnKey(event, () => window.switchAnalysisTab('analysis-tab-diagnostics'))" id="btn-analysis-tab-diagnostics">Diagnostics</div>
             </div>
             <div id="analysis-tab-fleethealth" class="analysis-tab-content active">
                 <div id="fleet-health-content"></div>
@@ -905,6 +930,25 @@
                 </div>
                 <div id="reliability-heatmap"></div>
             </div>
+
+            <!-- Sections 3 and 6 on screen; rendered by diagnostics.js. The missing-datum table is
+                 beside the findings on purpose: no findings and no data look identical otherwise. -->
+            <div id="analysis-tab-diagnostics" class="analysis-tab-content">
+                <div class="analysis-trend-controls">
+                    <label>From: <input type="text" id="diagPathFrom" spellcheck="false" placeholder="IP, MAC, hostname, user, or &quot;switch port&quot;" style="width: 240px; margin: 0;"></label>
+                    <label>To: <input type="text" id="diagPathTo" spellcheck="false" placeholder="IP, MAC, hostname, user, or &quot;switch port&quot;" style="width: 240px; margin: 0;"></label>
+                    <label>VLAN: <input type="text" id="diagPathVlan" spellcheck="false" placeholder="tag" style="width: 70px; margin: 0;"></label>
+                    <button onclick="window.runPathQuery()" style="width: auto; margin: 0;">Trace</button>
+                </div>
+                <p class="diag-note">A path is per VLAN and per port. Both ends are resolved first (section 6.1) and the resolved ports are what the path is computed between - an endpoint whose own access port is not in the VLAN stops the path there, not at the last switch. Two surviving paths are reported as ambiguous rather than resolved into one.</p>
+                <div id="diag-path-result"></div>
+                <hr style="border: none; border-top: 1px solid var(--border); margin: 18px 0;">
+                <div id="diagnostics-summary"></div>
+                <div id="diagnostics-findings"></div>
+                <h4 class="diag-subhead">Why a rule stayed silent</h4>
+                <p class="diag-note">Per rule, the subjects it could not evaluate and the datum missing each time. A truncated capture shows up here rather than as a clean fleet.</p>
+                <div id="diagnostics-gaps"></div>
+            </div>
         </div>
         <!-- Deliberately not theme-var'd: this floats over map tiles, which stay light in both themes. -->
         <div id="mapUnplacedPanel" style="display:none; position:absolute; top:50px; left:10px; z-index:1001; background:white; color:#333; border:1px solid #e0e0e0; border-radius:6px; box-shadow:0 2px 8px rgba(0,0,0,0.15); max-width:320px; max-height:60vh; overflow-y:auto;">
@@ -964,6 +1008,7 @@
     <script src="config-resolve.js"></script>
     <script src="graph.js"></script>
     <script src="dashboard.js"></script>
+    <script src="diagnostics.js"></script>
     <script src="search.js"></script>
     <script src="chassis.js"></script>
     <script src="drawer.js"></script>
