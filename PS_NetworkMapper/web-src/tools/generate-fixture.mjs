@@ -1866,7 +1866,7 @@ const L1_PORT_DEFECTS = [
         needs: 'Duplex',
         apply: (row) => { row.Duplex = 'Half-duplex'; row.DuplexNegotiated = 'Half-duplex'; },
     },
-    { finding: 'negotiation-incomplete', needs: 'NegotiationStatus', apply: (row) => { row.NegotiationStatus = 'Incomplete'; } },
+    { finding: 'negotiation-incomplete', needs: 'NegotiationStatus', where: (row) => row.AutoNegotiation === 'Enabled', apply: (row) => { row.NegotiationStatus = 'Incomplete'; } },
     {
         finding: 'autoneg-disabled',
         // Only a port that was negotiating, so the fault is a change rather than a restatement.

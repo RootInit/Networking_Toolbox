@@ -246,6 +246,14 @@ G-BASELINE's reset detection. No rule reads the configuration (§4.4).
   'Half-duplex'` and `Link = 'up'` on that node while leaving `SectionsCaptured` truncated — exactly the
   state a `needs: ['Interfaces[].Duplex']` list passes — and asserts the rule *still* reports
   `section:INTERFACES_EXT`.
+- **A subject filter may not read a field its own section supplies.** The two are one decision made twice:
+  `only` runs before the guard, so a filter that reads a blanked field turns a truncated capture into
+  "not a subject" — silence with no datum named, which is the §3.2 failure the guard exists to prevent.
+  Every such filter goes through `reports(ctx, field)`: while the section is missing the port stays a
+  subject and the guard speaks; once the section has arrived, a field the port does not report is hardware
+  absence (an optical port has no duplex, a non-PoE port no PoE row) and not a subject. A fleet-scale
+  test asserts that every rule reading an `INTERFACES_EXT` field carries `section:INTERFACES_EXT` in its
+  `missing` histogram, with the PoE, dot1x and LAG rules listed as the rules that must *not*.
 - **Suppression has three states, not two.** A suppressor can itself be unevaluable: whether a port faces
   an MED endpoint is unknown when the LLDP section never arrived, and whether the device rebooted
   recently is unknown when `Uptime` (fifth-from-last in the batch) is missing. A finding records

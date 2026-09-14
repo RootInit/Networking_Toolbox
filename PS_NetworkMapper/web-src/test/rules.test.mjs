@@ -429,6 +429,25 @@ test('a truncated node in the fleet explains its silence by section, not by fiel
     assert.equal(result.stats['duplex-half-on-up-link'].missing['section:INTERFACES_EXT'] > 0, true);
 });
 
+// A subject filter that reads an extensive field would skip a truncated port instead of letting the
+// guard speak, turning "the capture stopped early" into "not a subject" - silence with no datum named.
+// Every rule reading INTERFACES_EXT must therefore show that section among its missing data.
+const NO_EXT_DEPENDENCE = ['poe-admin-disabled-with-endpoint', 'poe-denied', 'lag-member-down',
+    'dot1x-held', 'dot1x-auth-failed', 'dot1x-unauthenticated-traffic'];
+
+test('no rule lets a truncated extensive section pass as "not a subject"', () => {
+    const result = evaluate(clean.snapshots[0]);
+    const reads = RULES.filter(rule => !NO_EXT_DEPENDENCE.includes(rule.id)).map(rule => rule.id);
+    for (const id of reads) {
+        assert.ok((result.stats[id].missing['section:INTERFACES_EXT'] || 0) > 0,
+            `${id} never reports section:INTERFACES_EXT - a subject filter is reading a blanked field`);
+    }
+    for (const id of NO_EXT_DEPENDENCE) {
+        assert.equal(result.stats[id].missing['section:INTERFACES_EXT'] || 0, 0,
+            `${id} now depends on INTERFACES_EXT; move it out of the exception list`);
+    }
+});
+
 test('the reboot suppressor is evaluable on a real fixture device', () => {
     // Uptime is a boot timestamp string, so this is really an assertion that the format parses at all:
     // an unparseable one would silently turn every reboot suppressor into "cannot tell".

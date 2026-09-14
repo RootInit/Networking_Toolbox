@@ -110,6 +110,19 @@ function needPortKey(ctx, field, key) {
     return null;
 }
 
+function hasSection(ctx, name) { return ctx.facts.sections.indexOf(name) !== -1; }
+
+// Whether this port is a SUBJECT of a rule reading `field`. A field the section delivered and the port
+// does not report is hardware absence - an optical port has no duplex, a non-PoE port no PoE row - and
+// that is not a subject. While the section is missing the port stays a subject, so the guard reports the
+// truncation rather than a subject filter hiding it: the difference is the section 3.2 guarantee.
+function reports(ctx, field) {
+    var section = FIELD_SECTION[field];
+    if (section && !hasSection(ctx, section)) return true;
+    var value = ctx.row ? ctx.row[field] : undefined;
+    return value !== null && value !== undefined;
+}
+
 function firstGap() {
     for (var i = 0; i < arguments.length; i++) { if (arguments[i]) return arguments[i]; }
     return null;
@@ -271,10 +284,10 @@ var live = function (ctx) { return lower(ctx.row.Link) === 'up'; };
 // A port with no PoE hardware reports null for every PoE field once the POE section HAS arrived, and
 // that is not a subject of a PoE rule. While the section is missing it stays a subject, so the guard -
 // not this predicate - is what reports the truncation.
-var poeCapable = function (ctx) {
-    if (ctx.facts.sections.indexOf('POE') === -1) return true;
-    return ctx.row.PoeOperStatus !== null && ctx.row.PoeOperStatus !== undefined;
-};
+var poeCapable = function (ctx) { return reports(ctx, 'PoeOperStatus'); };
+// The same shape for the dot1x rules: no supplicant row means nothing to judge, but only once the section
+// has arrived. An empty Dot1x[] on a node that lost DOT1X is truncation.
+var dot1xConfigured = function (ctx) { return !hasSection(ctx, 'DOT1X') || asList(ctx.row.Dot1x).length > 0; };
 var neighborsHere = function (ctx) { return asList(ctx.facts.neighborsByPort.get(ctx.port)); };
 var switchNeighbor = function (ctx) {
     var found = null;
@@ -302,7 +315,12 @@ var RULES = [
         // link is down. Without the second gate this would restate every autoneg-disabled finding.
         id: 'negotiation-incomplete', layer: 'L1', severity: 'warning', scope: 'port',
         title: 'Port is up but autonegotiation never completed',
-        only: function (ctx) { return live(ctx) && lower(ctx.row.AutoNegotiation) === 'enabled'; },
+        only: function (ctx) {
+            if (!live(ctx)) return false;
+            // Not `=== 'enabled'` alone: on a truncated node the field is blank, and skipping there would
+            // report silence as "no subject" instead of as the missing section it is.
+            return !hasSection(ctx, 'INTERFACES_EXT') || lower(ctx.row.AutoNegotiation) === 'enabled';
+        },
         guard: function (ctx) { return firstGap(needPort(ctx, 'AutoNegotiation'), needPort(ctx, 'NegotiationStatus')); },
         field: 'NegotiationStatus', cmp: 'eqi', value: 'Incomplete',
         suppressors: ['faces-med-endpoint'],
@@ -562,7 +580,7 @@ var RULES = [
         // R6 exists because the MAC-keyed parse could not represent a port with nothing authenticated.
         id: 'dot1x-held', layer: 'L1', severity: 'error', scope: 'port',
         title: 'A supplicant on this port is in the Held state',
-        only: function (ctx) { return asList(ctx.row.Dot1x).length > 0; },
+        only: dot1xConfigured,
         guard: function (ctx) { return needPort(ctx, 'Dot1x'); },
         when: function (ctx) {
             return asList(ctx.row.Dot1x).some(function (entry) { return lower(entry.State) === 'held'; });
@@ -573,7 +591,7 @@ var RULES = [
     {
         id: 'dot1x-auth-failed', layer: 'L1', severity: 'error', scope: 'port',
         title: 'A supplicant on this port failed authentication',
-        only: function (ctx) { return asList(ctx.row.Dot1x).length > 0; },
+        only: dot1xConfigured,
         guard: function (ctx) { return needPort(ctx, 'Dot1x'); },
         when: function (ctx) {
             return asList(ctx.row.Dot1x).some(function (entry) {
@@ -588,7 +606,7 @@ var RULES = [
         // Initialize row with no MAC-table entry behind it is a quiet port, not this.
         id: 'dot1x-unauthenticated-traffic', layer: 'L1', severity: 'warning', scope: 'port',
         title: 'MACs are learned on a dot1x port with nothing authenticated',
-        only: function (ctx) { return live(ctx) && asList(ctx.row.Dot1x).length > 0; },
+        only: function (ctx) { return live(ctx) && dot1xConfigured(ctx); },
         guard: function (ctx) { return firstGap(needPort(ctx, 'Dot1x'), needDevice(ctx, 'MacTable')); },
         when: function (ctx) {
             var authenticated = asList(ctx.row.Dot1x).some(function (entry) { return lower(entry.State) === 'authenticated'; });
