@@ -357,6 +357,12 @@ const SECTION_SUPPLIES = {
     // the field's section is declared in one place. What separates the two states is SectionsCaptured,
     // which is why every guard reads that first.
     ALARMS: (node) => { node.Alarms = []; },
+    // The three the L2 and L3 rules read. None is in the tail a truncated capture loses today, so like
+    // ALARMS they declare where a field comes from rather than describing a state the generator
+    // currently produces.
+    ROUTE: (node) => { node.DefaultRoute = {}; node.Gateway = 'Unknown'; },
+    MAC_TABLE: (node) => { node.MacTable = []; node.Clients = []; },
+    ARP_TABLE: (node) => { node.ArpEntries = []; },
 };
 
 // R3. Derived from the clients already on the device rather than invented: an empty MacTable beside a
@@ -376,19 +382,32 @@ function buildMacTable(node) {
             Interface: c.Port, PhysicalPort: String(c.Port).replace(/\.\d+$/, ''),
         });
     }
-    // One MAC aged-in on a second port is what duplicate-MAC detection looks for, and a fixture
-    // without one lets a rule that never fires pass its own test.
+    // One MAC aged-in on a second port is what endpoint resolution has to report as ambiguous, and a
+    // fixture without one lets a resolver that never sees the case pass its own test. It has to land in
+    // a DIFFERENT VLAN: the table is keyed by (VLAN, MAC), so one MAC twice in one VLAN is a row no
+    // switch prints, and a MAC learned in a VLAN the port does not carry is one it cannot learn.
+    const carriedBy = new Map((node.Interfaces || []).map(r => [r.Port, (r.Vlans || []).map(v => v.Name)]));
     if (rows.length > 2 && chance(0.2)) {
         const moved = rows[int(0, rows.length - 1)];
-        const elsewhere = rows.find(r => r.PhysicalPort !== moved.PhysicalPort);
+        const elsewhere = rows.find(r => r.PhysicalPort !== moved.PhysicalPort
+            && (carriedBy.get(r.PhysicalPort) || []).some(name => name !== moved.VlanName));
         if (elsewhere) {
-            rows.push({ ...moved, Interface: `${elsewhere.PhysicalPort}.0`, PhysicalPort: elsewhere.PhysicalPort });
+            const vlan = (carriedBy.get(elsewhere.PhysicalPort) || []).find(name => name !== moved.VlanName);
+            rows.push({
+                ...moved, VlanName: vlan,
+                Interface: `${elsewhere.PhysicalPort}.0`, PhysicalPort: elsewhere.PhysicalPort,
+            });
         }
     }
     return rows;
 }
 
 // R12 + R15, applied per snapshot because both depend on when that snapshot was taken.
+// The .1 of the device's own management /24.
+function managementGateway(deviceIp) {
+    return `${String(deviceIp).split('.').slice(0, 3).join('.')}.1`;
+}
+
 function stampCapture(node, scanTime) {
     // A fleet crawl spans minutes and scanTime is when the snapshot was written, so each device was
     // read somewhere in the window before it. That spread is the whole point of R12: one
@@ -397,9 +416,13 @@ function stampCapture(node, scanTime) {
     node.MacTable = buildMacTable(node);
     // R9. Every scanned device reached its gateway, so the route parsed; "Unparsed" is the state a
     // parser bug produces, not something a healthy fixture should claim.
+    // The next hop sits on the subnet the device holds its own address on, which is what lets it ARP
+    // for the gateway at all - a route to an address on no local subnet is the L3 rule's finding, not
+    // the shape of a healthy device.
+    node.Gateway = managementGateway(node.DeviceIP);
     node.DefaultRoute = {
         Table: 'inet.0', Destination: '0.0.0.0/0', Protocol: 'Static', Preference: 5,
-        NextHop: node.Gateway, EgressInterface: 'irb.100', State: 'Parsed',
+        NextHop: node.Gateway, EgressInterface: 'vme.0', State: 'Parsed',
     };
     // R8. One PIC per stack member, and a cage with no Xcvr beneath it - the empty-cage case is the
     // whole reason the inventory is worth keeping.
@@ -514,6 +537,9 @@ function makeDevice({ deviceIp, bldg, seq, models, role, gateway }) {
     // Building abbreviation first: the hostname alone tells you which closet to walk to.
     node.Hostname = `uw-${bldg.abbr.toLowerCase()}-${role.toLowerCase()}${String(seq).padStart(2, '0')}.washington.edu`;
     node.JunosVersion = pick(JUNOS_VERSIONS);
+    // The device upstream of this one, which is not the same fact as the default route's next hop:
+    // stampCapture sets Gateway to the address the device actually routes through.
+    node._uplinkIp = gateway;
     node.Gateway = gateway;
     node.StackMembers = models.map((model, i) => ({
         FPC: String(i),
@@ -726,7 +752,11 @@ function addClient(node, gatewayNode, row, tag, macOverride) {
         Dot1x_State: dot1x ? (chance(0.12) ? pick(DOT1X_FAILURES) : 'Authenticated') : 'Unknown',
     };
     node.Clients.push(client);
-    if (gatewayNode) gatewayNode.ArpEntries.push({ MAC: mac, IP: clientIp });
+    // Keyed by address on a real device, so a second draw landing on an address already in the table
+    // would be a duplicate-IP fault the generator never meant to inject.
+    if (gatewayNode && !gatewayNode.ArpEntries.some(e => e.IP === clientIp)) {
+        gatewayNode.ArpEntries.push({ MAC: mac, IP: clientIp });
+    }
     return client;
 }
 
@@ -1333,7 +1363,7 @@ function applyPortDetail(fleet, snapshotIndex) {
 
 assertNothingOrphaned(topology);
 
-const gatewayFor = (node) => (node.role === 'ACC' ? topology.find(d => d.DeviceIP === node.Gateway) : cores[0]);
+const gatewayFor = (node) => (node.role === 'ACC' ? topology.find(d => d.DeviceIP === node._uplinkIp) : cores[0]);
 
 for (const node of topology) {
     node._ownTags = accessTags(shuffled(VLANS.map(v => v.tag)).slice(0, int(2, 5)));
@@ -1476,7 +1506,7 @@ function withFailures(fleet, snapshotIndex, scanTime) {
     }
     // Dropped before the clone: bldg.zone.buildings points back at bldg, so a clone would recurse.
     const SCRATCH = ['zone', 'bldg', 'role', 'bridgeMac', 'bridgePriority', '_freeUplinks', '_byPort',
-        '_ownTags', '_extraConfig', 'vlanTags', '_wire'];
+        '_ownTags', '_extraConfig', 'vlanTags', '_wire', '_uplinkIp'];
     return fleet.map(node => {
         const copy = JSON.parse(JSON.stringify(node, (key, value) => (SCRATCH.includes(key) ? undefined : value)));
         if (failing.has(node.DeviceIP)) {
@@ -1974,6 +2004,211 @@ function injectPortDefect(defect) {
     return injector;
 }
 
+// ---------------------------------------------------------------------------------------------------
+// The L2 and L3 faults (spec section 3.6). Same contract as above: one kind per rule the fixture can
+// reach, each naming the finding it has to produce, so the delta oracle can hold both sides to it.
+
+// An edge is one finding whichever end the engine reaches first, so both the rule and the manifest
+// anchor it on the lower of the two ends.
+const lowerEnd = (link) => [`${link.device.DeviceIP}|${link.nearPort}`, `${link.peer.DeviceIP}|${link.farPort}`]
+    .sort()[0].split('|');
+
+// A MAC learned in a VLAN the port does not carry. The switch answers both questions and they disagree.
+function injectMacInWrongVlan(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => d.Vlans.length > 1 && clientPorts(d).length);
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const rows = clientPorts(host).filter(r => (r.Vlans || []).length);
+    if (!rows.length) return null;
+    const row = fPick(rng, rows);
+    const carried = new Set((row.Vlans || []).map(v => v.Name));
+    const stray = host.Vlans.filter(v => !carried.has(v.Name));
+    if (!stray.length) return null;
+    const vlan = fPick(rng, stray);
+    const mac = faultClientMac(rng);
+    host.MacTable.push({
+        RoutingInstance: 'default-switch', VlanName: vlan.Name, MacAddress: mac,
+        Flags: 'D', Age: null, Interface: `${row.Port}.0`, PhysicalPort: row.Port,
+    });
+    return {
+        kind: 'mac-in-unconfigured-vlan', failureModes: [], deviceIp: host.DeviceIP, port: row.Port, mac: mac,
+        params: { vlanName: vlan.Name, vlanTag: vlan.Tag, portCarries: [...carried] },
+        expected: { finding: 'mac-in-vlan-not-on-port', deviceIp: host.DeviceIP, port: row.Port },
+    };
+}
+
+// Section 6.3. Both ends of one wire holding the same role: a tree that has not converged, or two trees.
+function injectStpRoleConflict(rng, fleet) {
+    const roleOf = (row) => ((row.StpDetail || {})['instance 0'] || {}).Role || null;
+    const link = pickReciprocalLink(rng, fleet, (l) => roleOf(l.nearRow) === 'DESG' && roleOf(l.farRow) === 'ROOT');
+    if (!link) return null;
+    link.farRow.StpDetail['instance 0'].Role = 'DESG';
+    // The rule cannot know which end was changed - both now claim the segment - so it anchors on the
+    // lower end of the wire and the manifest has to name the same one.
+    const [anchorIp, anchorPort] = lowerEnd(link);
+    return {
+        kind: 'stp-role-conflict', failureModes: [], deviceIp: link.peer.DeviceIP, port: link.farPort, mac: null,
+        params: { scope: 'instance 0', role: 'DESG', peerIp: link.device.DeviceIP, peerPort: link.nearPort },
+        expected: { finding: 'stp-both-ends-claim-segment', deviceIp: anchorIp, port: anchorPort },
+    };
+}
+
+// G2. One end runs an instance for a scope the other does not, so the pruning that decides whether a
+// frame may cross happens on one side of the wire only.
+function injectStpScopeDrift(rng, fleet) {
+    // On a link the tree already blocks, so the forwarding set is untouched and the fault is exactly the
+    // drift: a port with no instance beside a peer that has one.
+    const link = pickReciprocalLink(rng, fleet,
+        (l) => ((l.nearRow.StpDetail || {})['instance 0'] || {}).Role === 'ALT'
+            && Object.keys(l.farRow.StpDetail || {}).length);
+    if (!link) return null;
+    const scopes = Object.keys(link.nearRow.StpDetail);
+    link.nearRow.StpDetail = {};
+    link.nearRow.STP = 'Unknown';
+    return {
+        kind: 'stp-scope-drift', failureModes: [], deviceIp: link.device.DeviceIP, port: link.nearPort, mac: null,
+        params: { lostScopes: scopes, peerIp: link.peer.DeviceIP, peerPort: link.farPort },
+        expected: { finding: 'stp-scope-drift', deviceIp: link.device.DeviceIP, port: link.nearPort },
+    };
+}
+
+// Both devices answered and only one of them sees the other: LLDP off at one end, a one-way fibre pair,
+// or a neighbour entry that has not aged out.
+function injectLldpOneSided(rng, fleet) {
+    const link = pickReciprocalLink(rng, fleet);
+    if (!link) return null;
+    link.peer.Neighbors = link.peer.Neighbors.filter(n => n !== link.back);
+    const [anchorIp, anchorPort] = lowerEnd(link);
+    return {
+        kind: 'lldp-one-sided', failureModes: [], deviceIp: anchorIp, port: anchorPort, mac: null,
+        params: { silentIp: String(link.peer.DeviceIP), silentPort: link.farPort,
+                  peerIp: String(link.device.DeviceIP), peerPort: link.nearPort },
+        expected: { finding: 'lldp-one-sided', deviceIp: anchorIp, port: anchorPort },
+    };
+}
+
+// R9's sentinel: the switch answered the route query and nothing came out of the parser.
+function injectRouteUnparsed(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => d.SectionsCaptured.includes('ROUTE') && d.DefaultRoute.NextHop);
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const previous = host.DefaultRoute.NextHop;
+    host.DefaultRoute = {
+        Table: 'inet.0', Destination: null, Protocol: null, Preference: null,
+        NextHop: null, EgressInterface: null, State: 'Unparsed',
+    };
+    host.Gateway = 'Unparsed';
+    return {
+        kind: 'route-unparsed', failureModes: [], deviceIp: host.DeviceIP, port: null, mac: null,
+        params: { previousNextHop: previous },
+        expected: { finding: 'default-route-unreadable', deviceIp: host.DeviceIP, port: null },
+    };
+}
+
+// A next hop on no subnet this device holds an address on: it cannot ARP for its own gateway. 192.0.2.0/24
+// is documentation space and collides with nothing the fleet addresses out of.
+function injectGatewayOffSubnet(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => d.DefaultRoute.NextHop && d.LogicalUnits.some(u => u.Family === 'inet'));
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const previous = host.DefaultRoute.NextHop;
+    host.DefaultRoute.NextHop = `192.0.2.${fInt(rng, 2, 250)}`;
+    host.Gateway = host.DefaultRoute.NextHop;
+    return {
+        kind: 'gateway-off-subnet', failureModes: [], deviceIp: host.DeviceIP, port: null, mac: null,
+        params: { previousNextHop: previous, nextHop: host.DefaultRoute.NextHop },
+        expected: { finding: 'gateway-not-on-a-local-subnet', deviceIp: host.DeviceIP, port: null },
+    };
+}
+
+// The device's own L3 presence in a VLAN, enabled and down. No physical port's state says this.
+function injectRoutedUnitDown(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => d.LogicalUnits.some(u => u.Family === 'inet' && u.Link === 'up'));
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const unit = fPick(rng, host.LogicalUnits.filter(u => u.Family === 'inet' && u.Link === 'up'));
+    unit.Link = 'down';
+    return {
+        kind: 'routed-unit-down', failureModes: [], deviceIp: host.DeviceIP, port: null, mac: null,
+        params: { parent: unit.Parent, unit: unit.Unit, address: unit.LocalAddress },
+        expected: { finding: 'routed-unit-down', deviceIp: host.DeviceIP, port: null },
+    };
+}
+
+// A neighbour naming a management address no device in the snapshot carries: a coverage gap, and the
+// reason a path stops (F8) rather than crossing.
+function injectUnscannedNeighbour(rng, fleet) {
+    const known = new Set(fleet.map(d => String(d.DeviceIP)));
+    const hosts = scanned(fleet).filter(d => clientPorts(d).length);
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const row = fPick(rng, clientPorts(host));
+    let address = null;
+    for (let i = 240; i > 200 && address === null; i--) {
+        const candidate = `${String(host.DeviceIP).split('.').slice(0, 3).join('.')}.${i}`;
+        if (!known.has(candidate)) address = candidate;
+    }
+    if (address === null) return null;
+    host.Neighbors.push({
+        LocalPort: `${row.Port}.0`, RemotePort: 'ge-0/0/0', Hostname: 'uw-unscanned-sw01.washington.edu',
+        MacAddress: faultSwitchMac(rng), ManagementIP: address,
+        Description: 'Juniper Networks, Inc. ex2300-24p',
+        ...faultLldpCommon(rng, {}),
+    });
+    return {
+        kind: 'neighbour-never-scanned', failureModes: ['F8'], deviceIp: host.DeviceIP, port: row.Port, mac: null,
+        params: { farIp: address },
+        expected: { finding: 'neighbour-never-scanned', deviceIp: host.DeviceIP, port: row.Port },
+    };
+}
+
+// R5/F6. One bridge advertising Bridge capability and no management address - a switch nothing can
+// scan. One end only: two ends of the same bridge are the shared segment above.
+function injectAddresslessBridge(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => clientPorts(d).length);
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const row = fPick(rng, clientPorts(host));
+    const mac = faultSwitchMac(rng);
+    host.Neighbors.push({
+        LocalPort: `${row.Port}.0`, RemotePort: '5', Hostname: 'Unknown',
+        MacAddress: mac, ManagementIP: 'Unknown', Description: 'Unmanaged 5-port switch',
+        ...faultLldpCommon(rng, { reachable: false }),
+    });
+    return {
+        kind: 'bridge-without-address', failureModes: ['F6'], deviceIp: host.DeviceIP, port: row.Port, mac: mac,
+        params: {},
+        expected: { finding: 'bridge-without-management-address', deviceIp: host.DeviceIP, port: row.Port },
+    };
+}
+
+// Section 5.3's fourth fleet edge: several MACs behind a port with no neighbour of any kind.
+function injectInferredSegment(rng, fleet) {
+    const med = (node) => new Set(node.MedNeighbors.map(m => physical(m.LocalPort)));
+    const hosts = scanned(fleet).filter(d => d.Vlans.length && clientPorts(d).some(r => !med(d).has(r.Port)));
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const medPorts = med(host);
+    const row = fPick(rng, clientPorts(host).filter(r => !medPorts.has(r.Port)));
+    const vlan = (row.Vlans || [])[0] || host.Vlans[0];
+    const macs = [];
+    for (let i = 0; i < 4; i++) {
+        const mac = faultClientMac(rng);
+        macs.push(mac);
+        host.MacTable.push({
+            RoutingInstance: 'default-switch', VlanName: vlan.Name, MacAddress: mac,
+            Flags: 'D', Age: null, Interface: `${row.Port}.0`, PhysicalPort: row.Port,
+        });
+    }
+    claimMembership(host, row, vlan.Tag);
+    return {
+        kind: 'unrecorded-switch-behind-port', failureModes: ['F14'],
+        deviceIp: host.DeviceIP, port: row.Port, mac: macs[0],
+        params: { macCount: macs.length, vlanTag: vlan.Tag },
+        expected: { finding: 'unmanaged-segment-inferred', deviceIp: host.DeviceIP, port: row.Port },
+    };
+}
+
 const INJECTORS = [
     injectDuplicateMac, injectDuplicateIp, injectOffSubnetClient, injectDot1xHeld,
     injectStpUnconverged, injectAutonegAsymmetric, injectSharedSegment, injectVlanMissingFromTrunk,
@@ -1983,6 +2218,10 @@ const INJECTORS = [
     injectDot1xState({ state: 'Failed', kind: 'dot1x-auth-failed', finding: 'dot1x-auth-failed' }),
     injectDot1xState({ state: 'Connecting', kind: 'dot1x-connecting', finding: 'dot1x-unauthenticated-traffic', sole: true }),
     ...L1_PORT_DEFECTS.map(injectPortDefect),
+    // The L2 and L3 family, appended for the same reason.
+    injectMacInWrongVlan, injectStpRoleConflict, injectStpScopeDrift, injectLldpOneSided,
+    injectRouteUnparsed, injectGatewayOffSubnet, injectRoutedUnitDown,
+    injectUnscannedNeighbour, injectAddresslessBridge, injectInferredSegment,
 ];
 
 function injectFaults(fleet, snapshotIndex, count) {

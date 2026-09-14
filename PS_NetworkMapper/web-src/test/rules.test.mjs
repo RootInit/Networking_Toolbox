@@ -18,7 +18,7 @@ import Rules from '../rules.js';
 import L2Graph from '../l2-graph.js';
 import { byName, microNode, microRow, link, CAPTURE_SECTIONS, SCAN_TIMESTAMP } from '../tools/micro-topologies.mjs';
 
-const { evaluate, RULES, OUTCOME, FIELD_SECTION, COMPARATORS } = Rules;
+const { evaluate, RULES, OUTCOME, FIELD_SECTION, COMPARATORS, cidrContains, vridOf } = Rules;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..', '..');
 const GENERATOR = path.join(ROOT, 'web-src', 'tools', 'generate-fixture.mjs');
@@ -368,13 +368,17 @@ function generate(args) {
 }
 
 const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
+// The fleet addresses out of 10.0.0.0/8, and the scopes are the caller's: without them
+// client-outside-scope has no question to answer and says so rather than guessing.
+const FLEET = { allowedScopes: ['10.'] };
 const clean = generate(ARGS);
-// One fault per injector plus a wrap, so every L1 injector places at least once in every snapshot.
-const faulted = generate([...ARGS, '--faults', '30']);
+// One fault per injector plus a wrap, so every injector places at least once in every snapshot.
+const faulted = generate([...ARGS, '--faults', '40']);
 
 test('the clean fleet holds no disagreement between two ends of one wire', () => {
     for (const snap of clean.snapshots) {
-        const result = evaluate(snap, { rules: ['duplex-mismatch', 'autoneg-mismatch', 'mtu-mismatch'] });
+        const result = evaluate(snap, { rules: ['duplex-mismatch', 'autoneg-mismatch', 'mtu-mismatch',
+            'vlan-absent-on-one-trunk-end', 'stp-both-ends-claim-segment', 'stp-scope-drift', 'lldp-one-sided'] });
         assert.deepEqual(result.findings.map(f => `${f.ruleId} ${f.deviceIp} ${f.port}`), [],
             'a wire property drawn per end rather than per wire shows up here as the fault the '
             + 'injector is supposed to be the only source of');
@@ -385,18 +389,26 @@ test('the clean fleet holds no disagreement between two ends of one wire', () =>
         for (const id of ['autoneg-mismatch', 'duplex-mismatch']) {
             assert.ok(result.stats[id].evaluated > 10, `${id} evaluated ${result.stats[id].evaluated}`);
         }
+        // The L2 pair comparisons have a subject on every edge, both ends: a VLAN set, a spanning-tree
+        // instance and an LLDP reciprocity are all properties of the wire rather than of the transceiver.
+        for (const id of ['vlan-absent-on-one-trunk-end', 'stp-both-ends-claim-segment', 'stp-scope-drift',
+            'lldp-one-sided']) {
+            assert.ok(result.stats[id].evaluated > 100, `${id} evaluated ${result.stats[id].evaluated}`);
+        }
     }
 });
 
 test('every rule reaches the fleet, and the counts add up per subject', () => {
-    const result = evaluate(clean.snapshots[0]);
+    const result = evaluate(clean.snapshots[0], FLEET);
     const idle = RULES.filter(rule => {
         const stats = result.stats[rule.id];
         return stats.evaluated === 0 && stats.notEvaluated === 0;
     }).map(rule => rule.id);
-    // The fixture holds no aggregate at all (noted in spec 8.2), so this rule is exercised only by the
-    // micro topology above. Any other rule appearing here means a subject shape that does not exist.
-    assert.deepEqual(idle, ['lag-member-down']);
+    // Three subject shapes a healthy fleet does not contain: no aggregate exists at all (spec 8.2), and
+    // an unmanaged bridge between two switches or a neighbour nobody scanned is a defect rather than a
+    // shape - each is injected, and each is covered by the delta oracle below. Any OTHER rule appearing
+    // here means a subject shape that does not exist anywhere.
+    assert.deepEqual(idle, ['lag-member-down', 'shared-segment-not-a-link', 'neighbour-never-scanned']);
 
     for (const rule of RULES) {
         const stats = result.stats[rule.id];
@@ -410,7 +422,8 @@ test('every rule reaches the fleet, and the counts add up per subject', () => {
         assert.equal(stats.evaluated, byOutcome(OUTCOME.PASSED) + byOutcome(OUTCOME.SUPPRESSED) + byOutcome(OUTCOME.FIRED));
         for (const datum of Object.keys(stats.missing)) {
             assert.ok(datum.startsWith('section:') || datum.startsWith('scan:') || datum.startsWith('far.')
-                || datum.startsWith('Interfaces[') || datum.startsWith('Device.') || datum.startsWith('Neighbors['),
+                || datum.startsWith('Interfaces[') || datum.startsWith('Device.') || datum.startsWith('Neighbors[')
+                || datum.startsWith('option:'),
                 `${rule.id} reports an unrecognisable missing datum: ${datum}`);
         }
     }
@@ -429,16 +442,18 @@ test('a truncated node in the fleet explains its silence by section, not by fiel
     assert.equal(result.stats['duplex-half-on-up-link'].missing['section:INTERFACES_EXT'] > 0, true);
 });
 
-// A subject filter that reads an extensive field would skip a truncated port instead of letting the
-// guard speak, turning "the capture stopped early" into "not a subject" - silence with no datum named.
-// Every rule reading INTERFACES_EXT must therefore show that section among its missing data.
-const NO_EXT_DEPENDENCE = ['poe-admin-disabled-with-endpoint', 'poe-denied', 'lag-member-down',
-    'dot1x-held', 'dot1x-auth-failed', 'dot1x-unauthenticated-traffic'];
+// A subject filter that reads a field its own section supplies would skip a truncated port instead of
+// letting the guard speak, turning "the capture stopped early" into "not a subject" - silence with no
+// datum named. Stated for INTERFACES_EXT, the one section the fixture's truncation actually drops: every
+// rule that reads a field from it must show that section among its missing data.
+const EXT_DEPENDENT = RULES.filter(rule => rule.layer === 'L1').map(rule => rule.id)
+    .filter(id => ['poe-admin-disabled-with-endpoint', 'poe-denied', 'lag-member-down',
+        'dot1x-held', 'dot1x-auth-failed', 'dot1x-unauthenticated-traffic'].indexOf(id) === -1);
+const NO_EXT_DEPENDENCE = RULES.map(rule => rule.id).filter(id => EXT_DEPENDENT.indexOf(id) === -1);
 
 test('no rule lets a truncated extensive section pass as "not a subject"', () => {
-    const result = evaluate(clean.snapshots[0]);
-    const reads = RULES.filter(rule => !NO_EXT_DEPENDENCE.includes(rule.id)).map(rule => rule.id);
-    for (const id of reads) {
+    const result = evaluate(clean.snapshots[0], FLEET);
+    for (const id of EXT_DEPENDENT) {
         assert.ok((result.stats[id].missing['section:INTERFACES_EXT'] || 0) > 0,
             `${id} never reports section:INTERFACES_EXT - a subject filter is reading a blanked field`);
     }
@@ -465,6 +480,103 @@ test('a lost DOT1X section is NOT_EVALUATED, not a port without supplicants', ()
     assert.deepEqual(evaluate(oneSwitch(rows), { rules }).records, []);
 });
 
+// The same shape for every mid-batch section an L2 or L3 rule reads. Truncation only ever loses the tail,
+// so none of these states exists at fixture scale: a rule that quietly skipped when its section was gone
+// would look identical to one that has nothing to say, and only this catches the difference.
+const SECTION_SUBJECTS = [
+    ['STP', ['stp-port-not-converged']],
+    ['MAC_TABLE', ['duplicate-mac-across-devices', 'mac-in-vlan-not-on-port']],
+    ['ARP_TABLE', ['duplicate-ip-two-macs']],
+    ['ROUTE', ['default-route-unreadable', 'gateway-not-on-a-local-subnet']],
+    ['INTERFACES_TERSE', ['routed-unit-down']],
+];
+
+test('a lost section is NOT_EVALUATED for every rule that reads it', () => {
+    for (const [section, rules] of SECTION_SUBJECTS) {
+        const row = detailRow('ge-0/0/4', {
+            Vlans: [{ Name: 'VLAN_STAFF', Tag: 20, Unit: 'ge-0/0/4.0', Active: true }],
+            StpDetail: { 'instance 0': { State: 'FWD', Role: 'DESG', Cost: 20000 } },
+        });
+        const node = oneSwitch([row], {
+            SectionsCaptured: CAPTURE_SECTIONS.filter(s => s !== section),
+            MacTable: [{ RoutingInstance: 'default-switch', VlanName: 'VLAN_STAFF', MacAddress: 'AA:BB:00:00:00:01',
+                Flags: 'D', Age: null, Interface: 'ge-0/0/4.0', PhysicalPort: 'ge-0/0/4' }],
+            ArpEntries: [{ MAC: 'AA:BB:00:00:00:01', IP: '10.30.9.50' }],
+        });
+        const result = evaluate(node, { rules, allowedScopes: ['10.'] });
+        assert.ok(result.records.length >= rules.length, `${section}: ${result.records.length} records`);
+        for (const record of result.records) {
+            assert.equal(record.outcome, OUTCOME.NOT_EVALUATED, `${section} ${record.ruleId}`);
+            assert.equal(record.missing, `section:${section}`, `${section} ${record.ruleId}`);
+        }
+    }
+});
+
+test('the scopes are the caller\'s, and without them the scope rule says so rather than guessing', () => {
+    const rows = [detailRow('ge-0/0/4')];
+    const node = oneSwitch(rows, {
+        Clients: [{ IP: '192.0.2.7', MAC: 'AA:BB:00:00:00:09', Port: 'ge-0/0/4.0', PortDesc: 'Unknown',
+            VLAN_Name: 'VLAN_STAFF', VLAN_Tag: 20, Type: 'Dynamic', Dot1x_User: 'Unknown', Dot1x_State: 'Unknown' }],
+    });
+    const blind = evaluate(node, { rules: ['client-outside-scope'] });
+    assert.equal(blind.records[0].outcome, OUTCOME.NOT_EVALUATED);
+    assert.equal(blind.records[0].missing, 'option:allowedScopes');
+    const told = evaluate(node, { rules: ['client-outside-scope'], allowedScopes: ['10.'] });
+    assert.equal(told.records[0].outcome, OUTCOME.FIRED);
+    assert.equal(told.findings[0].evidence.clients[0].ip, '192.0.2.7');
+});
+
+test('one-sided LLDP is a finding between two live switches and a missing section on a truncated one', () => {
+    // The rule has no subject filter on ScanStatus, deliberately: the guards and G-NOSCAN are what
+    // answer for an end that could not speak, and a filter would turn those answers back into silence.
+    const a = microNode('10.30.7.10', 'micro-one-sided-a.example.net', { ports: ['xe-0/0/0'] });
+    const b = microNode('10.30.7.11', 'micro-one-sided-b.example.net', { ports: ['xe-0/0/0'] });
+    link(a, 'xe-0/0/0', b, 'xe-0/0/0');
+    b.Neighbors = [];   // B never reports A: LLDP off at that end, or a one-way pair
+    const live = evaluate(snapshot([a, b]), { rules: ['lldp-one-sided'] });
+    assert.equal(live.findings.length, 1, JSON.stringify(live.records));
+    assert.equal(live.findings[0].deviceIp, '10.30.7.10');
+
+    // The same silence from a node whose capture stopped before LLDP is not evidence of anything, and
+    // the record says which section rather than reporting the link as fine or skipping it outright.
+    const micro = byName('partial-node-missing-stp-section');
+    const truncated = evaluate(micro.snapshot, { rules: ['lldp-one-sided'] });
+    assert.deepEqual(truncated.findings, []);
+    assert.ok(truncated.records.length);
+    for (const record of truncated.records) {
+        assert.equal(record.outcome, OUTCOME.NOT_EVALUATED);
+        assert.ok(['section:LLDP', 'far.section:LLDP'].includes(record.missing), record.missing);
+    }
+});
+
+test('a VRRP virtual MAC is not a duplicated host', () => {
+    // 00:00:5e:00:01:<VRID>, which every router in the group answers for by design. Section 6.4 reports
+    // the VIP beside its gateway pick; a rule reading it as one host on two switches would fire on every
+    // redundant gateway in the estate.
+    assert.equal(vridOf('00:00:5e:00:01:0a'), 0x0a);
+    assert.equal(vridOf('aa:bb:00:00:00:01'), null);
+    const vip = (ip, port) => oneSwitch([detailRow(port)], {
+        DeviceIP: ip, Hostname: `micro-${ip}.example.net`,
+        MacTable: [{ RoutingInstance: 'default-switch', VlanName: 'VLAN_STAFF', MacAddress: '00:00:5e:00:01:0a',
+            Flags: 'D', Age: null, Interface: `${port}.0`, PhysicalPort: port }],
+    }).Topology[0];
+    const both = { Topology: [vip('10.30.9.10', 'ge-0/0/4'), vip('10.30.9.11', 'ge-0/0/5')], ScanTimestamp: SCAN_TIMESTAMP };
+    assert.deepEqual(evaluate(both, { rules: ['duplicate-mac-across-devices'] }).findings, []);
+});
+
+test('a prefix contains the addresses inside it and nothing else', () => {
+    assert.equal(cidrContains('10.30.9.10/24', '10.30.9.1'), true);
+    assert.equal(cidrContains('10.30.9.10/24', '10.30.10.1'), false);
+    // Above 127: the operands go through ToInt32 on both sides of the mask, which is only correct
+    // because both sides do.
+    assert.equal(cidrContains('192.0.2.10/24', '192.0.2.254'), true);
+    assert.equal(cidrContains('172.16.0.5/12', '172.31.255.254'), true);
+    assert.equal(cidrContains('172.16.0.5/12', '172.32.0.1'), false);
+    // Unreadable input is unmeasured, never containment: the rule treats null as "cannot tell".
+    assert.equal(cidrContains('10.30.9.10', '10.30.9.1'), null);
+    assert.equal(cidrContains('10.30.9.10/24', 'Unknown'), null);
+});
+
 test('the reboot suppressor is evaluable on a real fixture device', () => {
     // Uptime is a boot timestamp string, so this is really an assertion that the format parses at all:
     // an unparseable one would silently turn every reboot suppressor into "cannot tell".
@@ -482,21 +594,23 @@ test('the reboot suppressor is evaluable on a real fixture device', () => {
 // a fault the manifest names. The second is what catches a rule that fires on collateral - a defect
 // planted on one port that the engine reports on an unrelated one.
 
-const L1_RULE_IDS = RULES.map(r => r.id);
+const RULE_IDS = RULES.map(r => r.id);
 const located = (finding) => `${finding.ruleId} ${finding.deviceIp} ${finding.port}`;
 
-test('one injector per L1 rule, and the manifest says which rule each fault is for', () => {
+// The one rule with no fixture injector: the fixture holds no aggregate at all, and inventing one inside
+// injectFaults would put ordinary topology behind a fault manifest. The micro-topology covers it.
+const NO_INJECTOR = ['lag-member-down'];
+
+test('one injector per rule, and the manifest says which rule each fault is for', () => {
     const promised = new Set(faulted.faults.flatMap(m => m.Faults)
-        .map(f => f.expected && f.expected.finding).filter(id => L1_RULE_IDS.includes(id)));
-    // lag-member-down is the documented exception: the fixture holds no aggregate, so its injector would
-    // have to invent ordinary topology behind a fault manifest. The micro-topology covers it.
-    assert.deepEqual([...promised].sort(), L1_RULE_IDS.filter(id => id !== 'lag-member-down').sort());
+        .map(f => f.expected && f.expected.finding).filter(id => RULE_IDS.includes(id)));
+    assert.deepEqual([...promised].sort(), RULE_IDS.filter(id => NO_INJECTOR.indexOf(id) === -1).sort());
 });
 
 test('the findings a faulted fleet grows are exactly the faults the manifest names', () => {
     for (const [index, snap] of faulted.snapshots.entries()) {
-        const before = new Set(evaluate(clean.snapshots[index], { records: false }).findings.map(located));
-        const after = evaluate(snap, { records: false }).findings;
+        const before = new Set(evaluate(clean.snapshots[index], { records: false, ...FLEET }).findings.map(located));
+        const after = evaluate(snap, { records: false, ...FLEET }).findings;
         const delta = after.filter(f => !before.has(located(f)));
         const afterKeys = new Set(after.map(located));
         const vanished = [...before].filter(key => !afterKeys.has(key));
@@ -508,12 +622,20 @@ test('the findings a faulted fleet grows are exactly the faults the manifest nam
         // is a property of a wire and both ends can see it.
         const touched = new Set();
         for (const fault of manifest) {
-            if (fault.port) touched.add(`${fault.deviceIp} ${fault.port}`);
+            // Device-scope faults carry a null port, and so do the findings they produce: "10.0.0.1 null"
+            // matches a device-wide finding on that device and nothing else.
+            touched.add(`${fault.deviceIp} ${fault.port === undefined ? null : fault.port}`);
             const params = fault.params || {};
             if (params.peerIp && params.peerPort) touched.add(`${params.peerIp} ${params.peerPort}`);
+            // A MAC planted on one switch is a duplicate at BOTH places it is now learned, and the
+            // manifest names the other one - the fault is the pair, not the copy.
+            if (params.alsoOn && params.alsoOnPort) touched.add(`${params.alsoOn} ${params.alsoOnPort}`);
+            if (params.silentIp && params.silentPort) touched.add(`${params.silentIp} ${params.silentPort}`);
+            // A shared segment is two ports facing one bridge: both of them are the fault.
+            if (params.otherIp && params.otherPort) touched.add(`${params.otherIp} ${params.otherPort}`);
         }
         for (const fault of manifest) {
-            if (!fault.expected || !L1_RULE_IDS.includes(fault.expected.finding)) continue;
+            if (!fault.expected || !RULE_IDS.includes(fault.expected.finding)) continue;
             const wanted = `${fault.expected.finding} ${fault.expected.deviceIp} ${fault.expected.port}`;
             assert.ok(delta.some(f => located(f) === wanted),
                 `the manifest promised ${wanted} in snapshot ${index} and the engine did not report it`);

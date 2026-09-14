@@ -28,7 +28,7 @@ function generate(args) {
 const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
 // Thirty against 28 kinds, so every injector places once and the cycle wraps: a second instance of a
 // kind has to place as well.
-const faulted = generate([...ARGS, '--faults', '30']);
+const faulted = generate([...ARGS, '--faults', '40']);
 const clean = generate(ARGS);
 
 const byIp = (snapshot) => new Map(snapshot.Topology.map(d => [String(d.DeviceIP), d]));
@@ -64,7 +64,7 @@ test('a manifest is written per snapshot and names the map it describes', () => 
     assert.equal(faulted.manifests.length, faulted.names.length);
     for (const [i, m] of faulted.faults.entries()) {
         assert.equal(m.Map, faulted.names[i], 'the manifest and the map must pair by timestamp');
-        assert.equal(m.Requested, 30);
+        assert.equal(m.Requested, 40);
         assert.ok(m.Faults.length > 0, 'a 60-device fleet is large enough to place every kind');
     }
 });
@@ -100,7 +100,11 @@ test('every fault kind places, and each entry carries an oracle a rule can be ch
         'l1-poe-admin-disabled-with-endpoint', 'l1-poe-denied', 'l1-port-flapped-recently',
         'l1-remote-fault', 'mtu-mismatch', 'off-subnet-client', 'stp-unconverged',
         'unmanaged-bridge-shared-segment', 'vlan-missing-from-trunk',
-    ]);
+        // The L2 and L3 family (item 13), appended for the same reason.
+        'bridge-without-address', 'gateway-off-subnet', 'lldp-one-sided', 'mac-in-unconfigured-vlan',
+        'neighbour-never-scanned', 'route-unparsed', 'routed-unit-down', 'stp-role-conflict',
+        'stp-scope-drift', 'unrecorded-switch-behind-port',
+    ].sort());
     const ids = entries.map(f => f.id);
     assert.equal(new Set(ids).size, ids.length, 'ids must be unique across snapshots');
     for (const f of entries) {
@@ -110,7 +114,12 @@ test('every fault kind places, and each entry carries an oracle a rule can be ch
         assert.ok(Array.isArray(f.failureModes), `${f.id} has no failureModes list`);
         assert.ok(f.failureModes.every(m => /^F\d+$/.test(m)), `${f.id}: ${f.failureModes} is not a section 7 label`);
         assert.ok(f.expected && f.expected.finding, `${f.id} has no expected finding`);
-        assert.equal(f.expected.deviceIp, f.deviceIp);
+        // Usually the device the fault was planted on. A two-ended fault is one finding anchored on the
+        // lower end of the wire, which may be the peer - so the expectation has to name an end of the
+        // fault, not a third device.
+        const ends = [String(f.deviceIp), String((f.params || {}).peerIp)];
+        assert.ok(ends.includes(String(f.expected.deviceIp)),
+            `${f.id} expects a finding on ${f.expected.deviceIp}, which is neither end of the fault`);
     }
     // And the labels that do appear must be ones section 7 actually lists.
     const catalogued = new Set([...fs.readFileSync(path.join(ROOT, 'docs', 'diagnostics-spec.md'), 'utf8')
@@ -306,13 +315,13 @@ test('injection does not perturb the main PRNG: untouched devices are byte-ident
         for (const [ip, device] of a) {
             if (namedIps.has(ip)) continue;
             assert.equal(JSON.stringify(b.get(ip)), JSON.stringify(device),
-                `${ip} differs between --faults 0 and --faults 30, so an injector reached the main PRNG`);
+                `${ip} differs between --faults 0 and --faults 40, so an injector reached the main PRNG`);
             compared++;
         }
     }
     // Every device a manifest entry names anywhere is excluded, and 30 faults across two snapshots name
     // half a 60-device fleet - so the bar is "much of the fleet", not a fixed count.
-    assert.ok(compared > 30, `only ${compared} devices compared; the guard is not covering the fleet`);
+    assert.ok(compared > 20, `only ${compared} devices compared; the guard is not covering the fleet`);
 });
 
 test('a fleet too small to hold a fault reports fewer faults rather than claiming one', () => {

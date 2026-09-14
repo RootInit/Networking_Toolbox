@@ -26,6 +26,12 @@ var L2 = (typeof module !== 'undefined' && module.exports)
     ? require('./l2-graph.js')
     : (typeof window !== 'undefined' ? window.L2Graph : null);
 
+// The L2 rules must agree with the path computer about what a converged link looks like, so the
+// definition is imported rather than restated (section 6.3).
+var L2Path = (typeof module !== 'undefined' && module.exports)
+    ? require('./l2-path.js')
+    : (typeof window !== 'undefined' ? window.L2Path : null);
+
 var OUTCOME = { FIRED: 'FIRED', PASSED: 'PASSED', SUPPRESSED: 'SUPPRESSED', NOT_EVALUATED: 'NOT_EVALUATED' };
 
 // G-NOSCAN (section 2.4). The device contributed nothing, so no rule may read its blank fields as
@@ -70,6 +76,10 @@ var FIELD_SECTION = {
     // Device-level.
     Neighbors: 'LLDP', MedNeighbors: 'LLDP', MacTable: 'MAC_TABLE', ArpEntries: 'ARP_TABLE',
     Uptime: 'UPTIME', Alarms: 'ALARMS', Configuration: 'CONFIG',
+    // Clients is the de-duplicated view of the MAC table, joined to ARP and dot1x: no table, no clients.
+    Clients: 'MAC_TABLE', DefaultRoute: 'ROUTE', Gateway: 'ROUTE',
+    // R1's units are parsed out of the terse listing, not the extensive block.
+    LogicalUnits: 'INTERFACES_TERSE',
 };
 
 function asList(value) {
@@ -89,9 +99,9 @@ function lower(value) {
 // ---------------------------------------------------------------------------------------------------
 // Guard primitives (section 3.2)
 
-function missingOn(sections, holder, prefix, field) {
+function missingOn(sections, holder, prefix, field, sectionPrefix) {
     var section = FIELD_SECTION[field];
-    if (section && sections.indexOf(section) === -1) return 'section:' + section;
+    if (section && sections.indexOf(section) === -1) return (sectionPrefix || '') + 'section:' + section;
     var value = holder ? holder[field] : undefined;
     if (value === null || value === undefined) return prefix + field;
     return null;
@@ -99,6 +109,14 @@ function missingOn(sections, holder, prefix, field) {
 
 function needPort(ctx, field) { return missingOn(ctx.facts.sections, ctx.row, 'Interfaces[].', field); }
 function needDevice(ctx, field) { return missingOn(ctx.facts.sections, ctx.device, 'Device.', field); }
+// The far end of an edge, named as the far end: "far.section:VLANS" and "section:VLANS" send an operator
+// to two different switches.
+function needFarPort(ctx, field) {
+    return missingOn(ctx.farFacts.sections, ctx.farRow, 'far.Interfaces[].', field, 'far.');
+}
+function needFarDevice(ctx, field) {
+    return missingOn(ctx.farFacts.sections, ctx.farDevice, 'far.Device.', field, 'far.');
+}
 
 // A container that exists and is empty is the case a path string cannot express: `InputErrors` is `{}`
 // both when the port reports no counters and when the section never arrived, and `StpDetail` is keyed by
@@ -221,6 +239,128 @@ function deviceFacts(device, referenceMs) {
 }
 
 // ---------------------------------------------------------------------------------------------------
+// Fleet-level derived facts (section 3, the L2 and L3 rules)
+//
+// An L1 rule reads one port. Every rule below compares one device's datum against the rest of the
+// snapshot - a MAC seen twice, an address claimed twice, a neighbour nobody scanned - so the join is
+// built once per evaluation rather than per subject.
+
+function ipToLong(text) {
+    var parts = String(text === null || text === undefined ? '' : text).split('.');
+    if (parts.length !== 4) return null;
+    var value = 0;
+    for (var i = 0; i < 4; i++) {
+        var octet = Number(parts[i]);
+        if (!isFinite(octet) || octet < 0 || octet > 255 || parts[i] === '') return null;
+        value = (value * 256) + octet;
+    }
+    return value;
+}
+
+// Section 6.4 needs the same containment test for its gateway candidates, so it lives here rather than
+// inside the one rule that reads it today.
+function cidrContains(cidr, ip) {
+    var parts = String(cidr === null || cidr === undefined ? '' : cidr).split('/');
+    var network = ipToLong(parts[0]);
+    var address = ipToLong(ip);
+    // NaN, not null: isFinite(null) is true, so a bare address with no prefix would otherwise be read as
+    // a /0 and swallow every address in the fleet.
+    var bits = parts.length === 2 && parts[1] !== '' ? Number(parts[1]) : NaN;
+    if (network === null || address === null || !isFinite(bits) || bits < 0 || bits > 32) return null;
+    if (bits === 0) return true;
+    // ToInt32 on both sides of the & is consistent, so a /8 network above 127.x compares correctly.
+    var mask = (0xFFFFFFFF << (32 - bits)) >>> 0;
+    return ((network & mask) >>> 0) === ((address & mask) >>> 0);
+}
+
+// The VRRP virtual-MAC prefix: 00:00:5e:00:01:<VRID>. Section 6.4 reports the VIP alongside its gateway
+// pick (G3); no rule fires on one, because a VIP on a trunk is how VRRP is supposed to look.
+var VRRP_MAC_PREFIX = '00:00:5E:00:01:';
+
+function vridOf(mac) {
+    var text = String(mac === null || mac === undefined ? '' : mac).toUpperCase();
+    return text.indexOf(VRRP_MAC_PREFIX) === 0 ? parseInt(text.slice(VRRP_MAC_PREFIX.length), 16) : null;
+}
+
+function fleetFacts(devices, factsByIp, graph, allowedScopes) {
+    // MAC -> the places it was learned that are LOCATIONS rather than sightings in passing. A MAC on an
+    // uplink is the same frame seen a second time (R3, F4), so counting those would report every client
+    // in the fleet as duplicated.
+    var macLocations = new Map();
+    var macsByLocation = new Map();
+    // IP -> the MACs claiming it, across every ARP table in the snapshot (C2's order-independence made
+    // visible: two claims are an ambiguity to report, never a winner to pick).
+    var ipClaims = new Map();
+    devices.forEach(function (device) {
+        var ip = String(device.DeviceIP);
+        var facts = factsByIp.get(ip);
+        if (!facts.contributes) return;
+        var transit = graph && graph.transitPorts ? (graph.transitPorts.get(ip) || new Set()) : new Set();
+        asList(device.MacTable).forEach(function (row) {
+            var port = row.PhysicalPort ? String(row.PhysicalPort) : stripUnit(row.Interface);
+            if (!port || (L2 && L2.isInterconnect(port)) || transit.has(port)) return;
+            var mac = String(row.MacAddress).toUpperCase();
+            if (vridOf(mac) !== null) return;   // a VIP is learned wherever the master is, by design
+            if (!macLocations.has(mac)) macLocations.set(mac, []);
+            macLocations.get(mac).push({ ip: ip, port: port, vlan: row.VlanName, tag: row.VlanTag });
+            // The same join read the other way round. Without it every port subject would walk the whole
+            // fleet's MAC map, which the measured switch alone fills with a thousand entries.
+            var key = ip + '|' + port;
+            if (!macsByLocation.has(key)) macsByLocation.set(key, []);
+            macsByLocation.get(key).push(mac);
+        });
+        asList(device.ArpEntries).forEach(function (entry) {
+            var address = String(entry.IP);
+            if (!address || address === 'Unknown') return;
+            if (!ipClaims.has(address)) ipClaims.set(address, []);
+            ipClaims.get(address).push({ ip: ip, mac: String(entry.MAC).toUpperCase() });
+        });
+    });
+    // Terminals and shared segments, keyed the way a port-scope rule asks for them.
+    var terminalsByPort = new Map();
+    var segmentEnds = new Set();
+    if (graph) {
+        asList(graph.terminals).forEach(function (terminal) {
+            var key = terminal.ip + '|' + terminal.port;
+            if (!terminalsByPort.has(key)) terminalsByPort.set(key, []);
+            terminalsByPort.get(key).push(terminal);
+        });
+        (L2 ? L2.groupSharedSegments(graph) : []).forEach(function (segment) {
+            segment.ends.forEach(function (end) { segmentEnds.add(end.ip + '|' + end.port); });
+        });
+    }
+    return {
+        macLocations: macLocations, macsByLocation: macsByLocation, ipClaims: ipClaims,
+        terminalsByPort: terminalsByPort, segmentEnds: segmentEnds,
+        allowedScopes: asList(allowedScopes).map(String),
+    };
+}
+
+function terminalsAt(ctx, kind) {
+    var list = ctx.fleet.terminalsByPort.get(ctx.ip + '|' + ctx.port) || [];
+    return list.filter(function (terminal) { return terminal.kind === kind; });
+}
+
+// Every scope key both ends of this edge report, so a comparison never reads one end's instance against
+// nothing (section 6.3: an end with no instance is NO_STP_INSTANCE, not disagreement).
+function sharedScopes(ctx) {
+    var mine = (ctx.near.stp && ctx.near.stp.scopes) || {};
+    var theirs = (ctx.far.stp && ctx.far.stp.scopes) || {};
+    return Object.keys(mine).filter(function (key) {
+        return Object.prototype.hasOwnProperty.call(theirs, key);
+    }).sort();
+}
+
+function vlanTagsOf(end) {
+    var tags = [];
+    asList(end && end.vlans && end.vlans.members).forEach(function (member) {
+        if (member.Tag === null || member.Tag === undefined) return;
+        if (tags.indexOf(Number(member.Tag)) === -1) tags.push(Number(member.Tag));
+    });
+    return tags.sort(function (x, y) { return x - y; });
+}
+
+// ---------------------------------------------------------------------------------------------------
 // Suppressors (section 3.3)
 //
 // A suppressor can itself be unevaluable, and a finding records that rather than silently standing or
@@ -299,6 +439,146 @@ var switchNeighbor = function (ctx) {
     });
     return found;
 };
+
+// ---------------------------------------------------------------------------------------------------
+// Readers for the L2 and L3 rules. Each one answers a question the rule states, so the rule table stays
+// a table (section 3.1) and the joins stay in one place.
+
+var NOT_CONVERGED_STATES = ['LRN', 'LST'];
+
+function stpScopes(row) { return (row && row.StpDetail) || {}; }
+
+function hasStpRow(ctx) {
+    return !hasSection(ctx, 'STP') || Object.keys(stpScopes(ctx.row)).length > 0;
+}
+
+function unconvergedScopes(ctx) {
+    var scopes = stpScopes(ctx.row);
+    return Object.keys(scopes).filter(function (key) {
+        return NOT_CONVERGED_STATES.indexOf(String(scopes[key].State).toUpperCase()) !== -1;
+    }).map(function (key) { return { scope: key, state: scopes[key].State }; });
+}
+
+function learnedHere(ctx) {
+    return ctx.fleet.macsByLocation.get(ctx.ip + '|' + ctx.port) || [];
+}
+
+function duplicatedMacs(ctx) {
+    return learnedHere(ctx).map(function (mac) {
+        var elsewhere = ctx.fleet.macLocations.get(mac).filter(function (place) { return place.ip !== ctx.ip; });
+        return { mac: mac, elsewhere: elsewhere };
+    }).filter(function (entry) { return entry.elsewhere.length > 0; });
+}
+
+function portVlanNames(ctx) {
+    return asList(ctx.row && ctx.row.Vlans).map(function (entry) {
+        return entry && typeof entry === 'object' ? String(entry.Name) : String(entry);
+    });
+}
+
+function strayVlans(ctx) {
+    var carried = portVlanNames(ctx);
+    var stray = [];
+    asList(ctx.device.MacTable).forEach(function (row) {
+        var port = row.PhysicalPort ? String(row.PhysicalPort) : stripUnit(row.Interface);
+        if (port !== ctx.port) return;
+        var name = String(row.VlanName);
+        if (!name || name === 'undefined' || carried.indexOf(name) !== -1) return;
+        if (stray.indexOf(name) === -1) stray.push(name);
+    });
+    return stray;
+}
+
+// The mirror of stpComparable, and for the same reason: an end carrying NO tag while its peer carries
+// several is the worst shape F11 takes, not a reason to stop looking.
+function vlansComparable(ctx) {
+    if (!(ctx.near.vlans && ctx.near.vlans.captured) || !(ctx.far.vlans && ctx.far.vlans.captured)) return true;
+    return vlanTagsOf(ctx.far).length > 0;
+}
+
+function vlansOnlyFar(ctx) {
+    var here = vlanTagsOf(ctx.near);
+    return vlanTagsOf(ctx.far).filter(function (tag) { return here.indexOf(tag) === -1; });
+}
+
+// A subject whenever the FAR end runs an instance: an end with none is the drift, not a reason to stop
+// looking. Sections missing at either end leave it a subject too, so the guard is what answers.
+function stpComparable(ctx) {
+    if (!(ctx.near.stp && ctx.near.stp.captured) || !(ctx.far.stp && ctx.far.stp.captured)) return true;
+    return Object.keys((ctx.far.stp || {}).scopes || {}).length > 0;
+}
+
+function scopesOnlyFar(ctx) {
+    var here = Object.keys((ctx.near.stp || {}).scopes || {});
+    return Object.keys((ctx.far.stp || {}).scopes || {}).filter(function (key) { return here.indexOf(key) === -1; });
+}
+
+function conflictingScopes(ctx) {
+    var mine = (ctx.near.stp || {}).scopes || {};
+    var theirs = (ctx.far.stp || {}).scopes || {};
+    return sharedScopes(ctx).filter(function (key) {
+        return L2Path && L2Path.bothEndsClaimSegment(
+            { role: mine[key].Role }, { role: theirs[key].Role });
+    }).map(function (key) { return { scope: key, role: mine[key].Role }; });
+}
+
+// One finding per edge, and the same one whichever end the engine reached first.
+function lowestEnd(ctx) {
+    var here = ctx.near.ip + '|' + ctx.near.port;
+    var there = ctx.far.ip + '|' + ctx.far.port;
+    return here <= there ? { ip: ctx.near.ip, port: ctx.near.port } : { ip: ctx.far.ip, port: ctx.far.port };
+}
+
+function contestedAddresses(ctx) {
+    var contested = [];
+    asList(ctx.device.ArpEntries).forEach(function (entry) {
+        var address = String(entry.IP);
+        var claims = ctx.fleet.ipClaims.get(address) || [];
+        var macs = [];
+        claims.forEach(function (claim) { if (macs.indexOf(claim.mac) === -1) macs.push(claim.mac); });
+        if (macs.length < 2) return;
+        if (contested.some(function (row) { return row.ip === address; })) return;
+        contested.push({ ip: address, macs: macs.sort(), claimedBy: claims.map(function (c) { return c.ip; }).sort() });
+    });
+    return contested;
+}
+
+function nextHopOf(ctx) {
+    var hop = (ctx.device.DefaultRoute || {}).NextHop;
+    return hop === null || hop === undefined || hop === 'Unknown' ? null : String(hop);
+}
+
+function inetUnits(ctx) {
+    return asList(ctx.device.LogicalUnits).filter(function (unit) {
+        return unit && lower(unit.Family) === 'inet' && unit.LocalAddress;
+    });
+}
+
+function inetPrefixes(ctx) {
+    return inetUnits(ctx).map(function (unit) { return String(unit.LocalAddress); });
+}
+
+function downUnits(ctx) {
+    return inetUnits(ctx).filter(function (unit) {
+        return lower(unit.Admin) === 'up' && lower(unit.Link) === 'down';
+    }).map(function (unit) {
+        return { parent: unit.Parent, unit: unit.Unit, address: unit.LocalAddress };
+    });
+}
+
+function clientsHere(ctx) {
+    return asList(ctx.device.Clients).filter(function (client) {
+        return stripUnit(client.Port) === ctx.port;
+    });
+}
+
+function offScopeClients(ctx) {
+    return clientsHere(ctx).filter(function (client) {
+        var address = String(client.IP);
+        if (!address || address === 'Unknown') return false;
+        return !ctx.fleet.allowedScopes.some(function (scope) { return address.indexOf(scope) === 0; });
+    }).map(function (client) { return { ip: client.IP, mac: client.MAC, vlanTag: client.VLAN_Tag }; });
+}
 
 var RULES = [
     // --- Negotiation and duplex -------------------------------------------------------------------
@@ -621,6 +901,234 @@ var RULES = [
             };
         },
     },
+
+    // -----------------------------------------------------------------------------------------------
+    // L2 switching (section 3, item 13). Every rule here reads data the crawler already collects; the
+    // ones that need a section 4.3 command are listed in section 3.6 and not declared.
+    {
+        // F9. A port mid-transition is neither forwarding nor blocking, and a path computer reading only
+        // FWD and BLK has no answer for it. Reported per port, naming the scope it is unconverged in.
+        id: 'stp-port-not-converged', layer: 'L2', severity: 'warning', scope: 'port',
+        title: 'A spanning-tree port is still learning or listening',
+        only: function (ctx) { return hasStpRow(ctx); },
+        guard: function (ctx) { return needPort(ctx, 'StpDetail'); },
+        when: function (ctx) { return unconvergedScopes(ctx).length > 0; },
+        datum: 'Interfaces[].StpDetail[].State',
+        evidence: function (ctx) { return { scopes: unconvergedScopes(ctx) }; },
+    },
+    {
+        // F1/F4. One MAC learned as a LOCATION on two devices: a loop, a spoof, or a host that moved
+        // between two captures. Sightings on transit ports are excluded upstream - every client in the
+        // fleet is visible on its uplink, and counting those would report the whole estate as duplicated.
+        id: 'duplicate-mac-across-devices', layer: 'L2', severity: 'error', scope: 'port',
+        title: 'A MAC is learned on access ports of two different switches',
+        only: function (ctx) { return learnedHere(ctx).length > 0; },
+        guard: function (ctx) { return needDevice(ctx, 'MacTable'); },
+        when: function (ctx) { return duplicatedMacs(ctx).length > 0; },
+        datum: 'Device.MacTable[].MacAddress',
+        evidence: function (ctx) {
+            return {
+                macs: duplicatedMacs(ctx).map(function (entry) {
+                    return { mac: entry.mac, alsoOn: entry.elsewhere };
+                }),
+            };
+        },
+    },
+    {
+        // A MAC learned in a VLAN the port is not a member of. The switch answers both questions and
+        // they disagree, which is a membership change that did not reach the forwarding table.
+        id: 'mac-in-vlan-not-on-port', layer: 'L2', severity: 'warning', scope: 'port',
+        title: 'A MAC is learned in a VLAN this port does not carry',
+        only: function (ctx) { return learnedHere(ctx).length > 0; },
+        guard: function (ctx) { return firstGap(needDevice(ctx, 'MacTable'), needPort(ctx, 'Vlans')); },
+        when: function (ctx) { return strayVlans(ctx).length > 0; },
+        datum: 'Device.MacTable[].VlanName',
+        evidence: function (ctx) {
+            return { learnedIn: strayVlans(ctx), portCarries: portVlanNames(ctx) };
+        },
+    },
+    {
+        // F14. Two ports facing one address-less bridge are a shared segment, and chaining them would
+        // invent a link across a device that is not in the snapshot. Reported, never traversed.
+        id: 'shared-segment-not-a-link', layer: 'L2', severity: 'warning', scope: 'port', usesGraph: true,
+        title: 'This port shares a segment with another through an unmanaged bridge',
+        only: function (ctx) { return ctx.fleet.segmentEnds.has(ctx.ip + '|' + ctx.port); },
+        guard: function (ctx) { return needDevice(ctx, 'Neighbors'); },
+        when: function () { return true; },
+        datum: 'Neighbors[].ManagementIP',
+        evidence: function (ctx) {
+            var here = terminalsAt(ctx, 'addressless-bridge')[0] || null;
+            return { bridgeMac: here ? here.mac : null, description: here ? here.description : null };
+        },
+    },
+    {
+        // R5/F6. A bridge that advertises Bridge or Router capability and no management address is a
+        // switch nothing can scan. One end only - two ends of the same bridge are the segment above.
+        id: 'bridge-without-management-address', layer: 'L2', severity: 'warning', scope: 'port', usesGraph: true,
+        title: 'The neighbour here is a bridge with no management address',
+        only: function (ctx) {
+            return terminalsAt(ctx, 'addressless-bridge').length > 0
+                && !ctx.fleet.segmentEnds.has(ctx.ip + '|' + ctx.port);
+        },
+        guard: function (ctx) { return needDevice(ctx, 'Neighbors'); },
+        when: function () { return true; },
+        datum: 'Neighbors[].ManagementIP',
+        evidence: function (ctx) {
+            var here = terminalsAt(ctx, 'addressless-bridge')[0];
+            return { bridgeMac: here.mac, remotePort: here.remotePort, description: here.description };
+        },
+    },
+    {
+        // Section 5.3's fourth fleet edge: several client MACs behind a port with no LLDP neighbour and
+        // no MED endpoint. Something is bridging there that nobody has recorded.
+        id: 'unmanaged-segment-inferred', layer: 'L2', severity: 'warning', scope: 'port', usesGraph: true,
+        title: 'Several MACs sit behind a port with no neighbour of any kind',
+        only: function (ctx) { return terminalsAt(ctx, 'inferred-segment').length > 0; },
+        guard: function (ctx) { return firstGap(needDevice(ctx, 'MacTable'), needDevice(ctx, 'Neighbors')); },
+        when: function () { return true; },
+        datum: 'Device.MacTable[].MacAddress',
+        evidence: function (ctx) {
+            var here = terminalsAt(ctx, 'inferred-segment')[0];
+            return { macCount: here.macCount, macs: here.macs };
+        },
+    },
+    {
+        // A neighbour that named a management address no device in the snapshot carries. Not a device
+        // fault - a coverage gap, and the reason a path stops at F8 rather than crossing.
+        id: 'neighbour-never-scanned', layer: 'L2', severity: 'info', scope: 'port', usesGraph: true,
+        title: 'The neighbour on this port is not in the snapshot',
+        only: function (ctx) { return terminalsAt(ctx, 'unscanned').length > 0; },
+        guard: function (ctx) { return needDevice(ctx, 'Neighbors'); },
+        when: function () { return true; },
+        datum: 'Neighbors[].ManagementIP',
+        evidence: function (ctx) {
+            var here = terminalsAt(ctx, 'unscanned')[0];
+            return { farIp: here.farIp, farHostname: here.farHostname, scopesKnown: here.scopesKnown };
+        },
+    },
+    {
+        // F11. One VLAN on one end of a trunk. Both ends forward, nothing about either port looks wrong,
+        // and frames in that VLAN cannot cross. Anchored on the end that is MISSING the VLAN.
+        id: 'vlan-absent-on-one-trunk-end', layer: 'L2', severity: 'error', scope: 'edge',
+        title: 'A VLAN is configured on one end of this link only',
+        only: vlansComparable,
+        guard: function (ctx) { return firstGap(needPort(ctx, 'Vlans'), needFarPort(ctx, 'Vlans')); },
+        when: function (ctx) { return vlansOnlyFar(ctx).length > 0; },
+        anchor: function (ctx) { return { ip: ctx.near.ip, port: ctx.near.port }; },
+        datum: 'Interfaces[].Vlans',
+        evidence: function (ctx) {
+            return { missingHere: vlansOnlyFar(ctx), here: vlanTagsOf(ctx.near), far: vlanTagsOf(ctx.far) };
+        },
+    },
+    {
+        // Section 6.3. Within a converged instance exactly one end of a link is designated; two ends
+        // claiming the same role over one wire is a tree that has not converged or is not one tree.
+        id: 'stp-both-ends-claim-segment', layer: 'L2', severity: 'error', scope: 'edge',
+        title: 'Both ends of this link hold the same spanning-tree role',
+        only: function (ctx) { return sharedScopes(ctx).length > 0; },
+        guard: function (ctx) { return firstGap(needPort(ctx, 'StpDetail'), needFarPort(ctx, 'StpDetail')); },
+        when: function (ctx) { return conflictingScopes(ctx).length > 0; },
+        anchor: function (ctx) { return lowestEnd(ctx); },
+        datum: 'Interfaces[].StpDetail[].Role',
+        evidence: function (ctx) { return { scopes: conflictingScopes(ctx) }; },
+    },
+    {
+        // G2. One end runs an instance for a scope the other does not, so the pruning that decides
+        // whether a frame may cross is happening on one side of the wire only.
+        id: 'stp-scope-drift', layer: 'L2', severity: 'warning', scope: 'edge',
+        title: 'The two ends of this link run different spanning-tree instances',
+        only: stpComparable,
+        guard: function (ctx) { return firstGap(needPort(ctx, 'StpDetail'), needFarPort(ctx, 'StpDetail')); },
+        when: function (ctx) { return scopesOnlyFar(ctx).length > 0; },
+        anchor: function (ctx) { return { ip: ctx.near.ip, port: ctx.near.port }; },
+        datum: 'Interfaces[].StpDetail',
+        evidence: function (ctx) {
+            return { missingHere: scopesOnlyFar(ctx), here: Object.keys((ctx.near.stp || {}).scopes || {}).sort() };
+        },
+    },
+    {
+        // Both devices answered and only one of them sees the other. LLDP off on one end, a one-way
+        // fibre pair, or a neighbour entry that has not aged out - all of them worth a look, and all of
+        // them a reason section 6.2 will not call the hop VERIFIED.
+        id: 'lldp-one-sided', layer: 'L2', severity: 'warning', scope: 'edge',
+        title: 'Only one end of this link reports the other',
+        // No subject filter: a Partial node still ran LLDP (tenth in the batch, well ahead of the tail),
+        // so a truncated switch whose peer stopped seeing it is a real one-sided link. G-NOSCAN answers
+        // for an end that contributed nothing and the guards answer for a missing section; a filter on
+        // ScanStatus would only turn those answers back into silence.
+        guard: function (ctx) { return firstGap(needDevice(ctx, 'Neighbors'), needFarDevice(ctx, 'Neighbors')); },
+        when: function (ctx) { return ctx.edge.reciprocal === false; },
+        anchor: function (ctx) { return lowestEnd(ctx); },
+        datum: 'Neighbors[].ManagementIP',
+        evidence: function (ctx) { return { confirmation: ctx.edge.confirmation }; },
+    },
+
+    // -----------------------------------------------------------------------------------------------
+    // L3 and policy. Section 4.4 stands: none of these reads the configuration.
+    {
+        // C2. Two MACs claiming one address, anywhere in the fleet. The crawler's ARP map picks one to
+        // resolve a client with; the ambiguity is the finding, and picking is what it must not do.
+        id: 'duplicate-ip-two-macs', layer: 'L3', severity: 'error', scope: 'device',
+        title: 'One address is claimed by two MACs',
+        only: function (ctx) { return asList(ctx.device.ArpEntries).length > 0; },
+        guard: function (ctx) { return needDevice(ctx, 'ArpEntries'); },
+        when: function (ctx) { return contestedAddresses(ctx).length > 0; },
+        datum: 'Device.ArpEntries[].MAC',
+        evidence: function (ctx) { return { addresses: contestedAddresses(ctx) }; },
+    },
+    {
+        // R9's sentinel, surfaced. The switch answered the route query and the parser read nothing out
+        // of it: either this device has no default route, or the output has a shape the regex misses.
+        // Both are worth a human; conflating them with "Unknown" is what R9 fixed.
+        id: 'default-route-unreadable', layer: 'L3', severity: 'warning', scope: 'device',
+        title: 'The route table gave no default route this parser could read',
+        only: function (ctx) { return ctx.device.DefaultRoute !== null && ctx.device.DefaultRoute !== undefined; },
+        guard: function (ctx) { return needDevice(ctx, 'DefaultRoute'); },
+        when: function (ctx) { return String((ctx.device.DefaultRoute || {}).State) === 'Unparsed'; },
+        datum: 'Device.DefaultRoute.State',
+        evidence: function (ctx) { return { route: ctx.device.DefaultRoute }; },
+    },
+    {
+        // The next hop has to be on a subnet this device holds an address on, or it cannot ARP for it.
+        // Read off R1's units, which is the only place the snapshot carries a configured prefix.
+        id: 'gateway-not-on-a-local-subnet', layer: 'L3', severity: 'error', scope: 'device',
+        title: 'The default gateway is on no subnet this device has an address on',
+        only: function (ctx) { return nextHopOf(ctx) !== null && inetPrefixes(ctx).length > 0; },
+        guard: function (ctx) { return firstGap(needDevice(ctx, 'DefaultRoute'), needDevice(ctx, 'LogicalUnits')); },
+        when: function (ctx) {
+            var hop = nextHopOf(ctx);
+            return !inetPrefixes(ctx).some(function (cidr) { return cidrContains(cidr, hop) === true; });
+        },
+        datum: 'Device.LogicalUnits[].LocalAddress',
+        evidence: function (ctx) { return { nextHop: nextHopOf(ctx), prefixes: inetPrefixes(ctx) }; },
+    },
+    {
+        // A routed interface administratively up with no link: the device's own L3 presence in that
+        // VLAN is down, which no physical port's state says on its own.
+        id: 'routed-unit-down', layer: 'L3', severity: 'error', scope: 'device',
+        title: 'A routed interface is enabled and down',
+        only: function (ctx) { return inetUnits(ctx).length > 0; },
+        guard: function (ctx) { return needDevice(ctx, 'LogicalUnits'); },
+        when: function (ctx) { return downUnits(ctx).length > 0; },
+        datum: 'Device.LogicalUnits[].Link',
+        evidence: function (ctx) { return { units: downUnits(ctx) }; },
+    },
+    {
+        // A client resolved to an address outside every scope the crawl was told about. Section 6.4's
+        // gateway question, surfaced as a finding rather than swallowed by endpoint resolution.
+        id: 'client-outside-scope', layer: 'L3', severity: 'warning', scope: 'port',
+        title: 'A client on this port has an address outside every scanned scope',
+        only: function (ctx) { return clientsHere(ctx).length > 0; },
+        guard: function (ctx) {
+            // The scopes are the caller's, not the device's: without them the question has no answer,
+            // and answering it anyway would report every address as out of scope.
+            if (!ctx.fleet.allowedScopes.length) return 'option:allowedScopes';
+            return needDevice(ctx, 'Clients');
+        },
+        when: function (ctx) { return offScopeClients(ctx).length > 0; },
+        datum: 'Device.Clients[].IP',
+        evidence: function (ctx) { return { clients: offScopeClients(ctx) }; },
+    },
 ];
 
 var RULES_BY_ID = new Map(RULES.map(function (rule) { return [rule.id, rule]; }));
@@ -642,16 +1150,16 @@ function datumOf(rule) {
     return rule.datum || (rule.field ? 'Interfaces[].' + rule.field : rule.id + ':condition');
 }
 
-function buildSubjects(devices, factsByIp, graph) {
+function buildSubjects(devices, factsByIp, graph, fleet) {
     var ports = [];
     var deviceSubjects = [];
     devices.forEach(function (device) {
         var ip = String(device.DeviceIP);
         var facts = factsByIp.get(ip);
-        deviceSubjects.push({ scope: 'device', device: device, ip: ip, port: null, facts: facts });
+        deviceSubjects.push({ scope: 'device', device: device, ip: ip, port: null, facts: facts, fleet: fleet });
         asList(device.Interfaces).forEach(function (row) {
             if (!row || !row.Port) return;
-            ports.push({ scope: 'port', device: device, ip: ip, port: String(row.Port), row: row, facts: facts });
+            ports.push({ scope: 'port', device: device, ip: ip, port: String(row.Port), row: row, facts: facts, fleet: fleet });
         });
     });
     var edges = [];
@@ -672,7 +1180,7 @@ function buildSubjects(devices, factsByIp, graph) {
                 row: facts.rowsByPort.get(near.port) || null,
                 nearRow: facts.rowsByPort.get(near.port) || null,
                 farRow: farFacts.rowsByPort.get(far.port) || null,
-                facts: facts, farFacts: farFacts,
+                facts: facts, farFacts: farFacts, fleet: fleet,
             });
         });
     });
@@ -703,9 +1211,10 @@ function evaluate(input, options) {
     var factsByIp = new Map();
     devices.forEach(function (device) { factsByIp.set(String(device.DeviceIP), deviceFacts(device, referenceMs)); });
 
-    var needsGraph = rules.some(function (rule) { return rule.scope === 'edge'; });
+    var needsGraph = rules.some(function (rule) { return rule.scope === 'edge' || rule.usesGraph; });
     var graph = opts.graph || (needsGraph && L2 ? L2.buildPortGraph(devices, { allowedScopes: opts.allowedScopes }) : null);
-    var subjects = buildSubjects(devices, factsByIp, graph);
+    var fleet = fleetFacts(devices, factsByIp, graph, opts.allowedScopes);
+    var subjects = buildSubjects(devices, factsByIp, graph, fleet);
 
     var findings = [];
     var records = [];
@@ -816,6 +1325,9 @@ var Rules = {
     NO_CONTRIBUTION: NO_CONTRIBUTION,
     RECENT_BOOT_SECONDS: RECENT_BOOT_SECONDS,
     advertisedAutoneg: advertisedAutoneg,
+    cidrContains: cidrContains,
+    vridOf: vridOf,
+    VRRP_MAC_PREFIX: VRRP_MAC_PREFIX,
     advertisedFrameSize: advertisedFrameSize,
     orgInfo: orgInfo,
 };

@@ -297,6 +297,61 @@ Measured on a clean 60-device fleet (`--seed 5`): 72 findings across 23 rules, w
 every advertisement-versus-local rule at **zero** — which is the point of the wire-property change noted
 at §8.2. The faulted fleet adds 29.
 
+### 3.6 Built — 2026-09-14: the L2 and L3 rules
+
+**Work order item 13.** Sixteen more rules on the same engine — eleven L2, five L3 — one fault injector
+per rule, and the delta oracle extended to cover them. Appendix A's L2 and L3 rows are superseded the
+same way §3.5 superseded the L1 row: the table below is the catalogue.
+
+The scope is set by two things already decided. §3.1 builds only what today's data supports, and item 12
+is **blocked** (no switch to verify against), so a rule needing a §4.3 command is named here and *not*
+declared — a rule reading a section `CAPTURE_SECTIONS` never collects would report `section:X` on every
+device in the fleet, which says "the capture stopped early" about something nobody ever asked for.
+
+| Rule | Reads | Note |
+|---|---|---|
+| `stp-port-not-converged` | `StpDetail[].State` | F9, per scope. The third port state a path computer reading only FWD/BLK has no answer for |
+| `duplicate-mac-across-devices` | `MacTable` across the fleet | F1/F4. Transit ports excluded through the graph's own `transitPorts`: every client is visible on its uplink, and counting those would report the whole estate as duplicated |
+| `mac-in-vlan-not-on-port` | `MacTable[].VlanName` + `Interfaces[].Vlans` | The switch answers both questions and they disagree |
+| `shared-segment-not-a-link` | `groupSharedSegments` | F14. Two ports facing one address-less bridge; chaining them would invent a link |
+| `bridge-without-management-address` | the `addressless-bridge` terminal | R5/F6, single-ended — two ends of one bridge are the row above |
+| `unmanaged-segment-inferred` | the `inferred-segment` terminal | §5.3's fourth fleet edge: three or more MACs behind a port with no neighbour of any kind |
+| `neighbour-never-scanned` | the `unscanned` terminal | `info`. Not a device fault: a coverage gap, and the reason a path stops at F8 |
+| `vlan-absent-on-one-trunk-end` | both ends' `Vlans` | F11, anchored on the end that is **missing** the VLAN |
+| `stp-both-ends-claim-segment` | both ends' `StpDetail[].Role` | §6.3, sharing `l2-path.js`'s `bothEndsClaimSegment` so the rule and the path computer cannot drift apart |
+| `stp-scope-drift` | both ends' `StpDetail` keys | **G2 closed.** One end runs an instance the other does not, so the pruning happens on one side of the wire only |
+| `lldp-one-sided` | `edge.reciprocal` | Both devices answered and only one sees the other |
+| `duplicate-ip-two-macs` | `ArpEntries` across the fleet | C2's ambiguity, reported rather than resolved |
+| `default-route-unreadable` | `DefaultRoute.State` | R9's `Unparsed` sentinel surfaced: no default route, or a shape the regex misses — both want a human |
+| `gateway-not-on-a-local-subnet` | `DefaultRoute.NextHop` + R1's units | The device cannot ARP for a next hop on no subnet it holds an address on |
+| `routed-unit-down` | `LogicalUnits[].Admin/Link` | The device's own L3 presence in a VLAN, enabled and down — no physical port's state says this |
+| `client-outside-scope` | `Clients[].IP` + the caller's scopes | The scopes are an **option**, so without them the guard reports `option:allowedScopes` rather than calling every address out of scope |
+
+**Not built, and why.** `show spanning-tree bridge` carries the topology-change count and time since last
+change per scope (**G4**), which is the "why is this broken *now*" datum; it needs the §4.3 command and
+waits on item 12. **G3** (VRRP) is not a rule at all: a VIP MAC on a trunk is how VRRP is supposed to
+look, so the `00:00:5e:00:01:<VRID>` detection ships as `vridOf`, exported for §6.4's gateway report, and
+`duplicate-mac-across-devices` skips those MACs rather than reporting every redundant gateway in the
+estate. Native-VLAN mismatch (G5's second half) stays blocked on retention — no native-VLAN field exists.
+Firewall-filter rules remain §6.5's "report, do not adjudicate", and §4.4 still stands: nothing here
+reads the configuration.
+
+**The L2 trap, stated so a later rule does not re-derive it.** Asymmetric spanning-tree *state* on one
+wire is normal — the designated end forwards, the alternate end blocks, and that is the tree working.
+What is not normal is two ends holding the same *role*. `l2-path.js` already drew that line for §6.3, so
+the rule imports it instead of restating it, and the role vocabulary is the switch's own (§8.2's fifth
+correction).
+
+**Three rules have no subject on a healthy fleet** — `shared-segment-not-a-link`, `neighbour-never-scanned`
+and `lag-member-down`. Each is a defect or a coverage gap rather than a shape, so the fixture contains
+none until one is injected; the first two have injectors, and the third is §5.3's documented exception.
+The fleet test names all three, so a fourth appearing there is a subject shape that exists nowhere.
+
+Measured on the same clean 60-device fleet (`--seed 5`, 60 devices / 4,816 ports / 136 edges): **76
+findings across 39 rules** — the 72 L1 findings unchanged, plus four true statements about the fixture's
+own topology (two address-less bridges, two inferred segments) and **zero L3 findings**. The faulted
+fleet (`--faults 40`, now 38 injector kinds) reaches 128: +30 L1, +16 L2, +6 L3, with nothing lost.
+
 ---
 
 ## 4. Data model changes
@@ -1413,7 +1468,11 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
     queue behind it, both recorded at §3.5: `poe-denied`'s fault vocabulary, and R15's behaviour when a
     feature-absent command prints nothing. Resume when a switch (or a saved capture of the §4.3 commands
     from one) is available. Items 13 and 14 do not depend on it.
-13. **L2 and L3 rules** gated on the commands they need.
+13. ~~**L2 and L3 rules** gated on the commands they need.~~ **Done 2026-09-14.** Sixteen rules — eleven
+    L2, five L3 — on the item-11 engine, one injector each, the delta oracle extended to all three
+    layers. See §3.6 for the catalogue and for what stayed out: every command-dependent rule (G4
+    included) waits on item 12, and G3 turned out not to be a rule at all. G2 is closed. Appendix A's L2
+    and L3 rows are superseded the way item 11 superseded the L1 row.
 14. **UI**: analysis sub-tab, path highlighting, per-hop drawer links.
 *(There is no config-parsing step. See §4.4 — the configuration is collected and stored for backup
 and manual review, and stays out of the rule engine.)*
@@ -1428,8 +1487,8 @@ not a plan: §3.1 scopes the build to the "supported today" column.
 | Layer | Rules | Supported today | Blocked on retention | Blocked on a command | Not attempted (config-only) | Undetectable passively |
 |---|---|---|---|---|---|---|
 | L1 / link | 45 | 14 (+6 needing a delta) — **built: 23**, see §3.5 | 17 | 8 | — | — |
-| L2 switching | 33 | 15 | 11 | 7 | — | — |
-| L3 / policy | 39 | 9 | 8 | 11 | 5 | 6 |
+| L2 switching | 33 | 15 — **built: 11**, see §3.6 | 11 | 7 | — | — |
+| L3 / policy | 39 | 9 — **built: 5**, see §3.6 | 8 | 11 | 5 | 6 |
 | **Total** | **117** | **~44** | **~36** | **~26** | **5** | **6** |
 
 The shape is the finding: the largest category is data the tool already collects and discards.
@@ -1439,6 +1498,11 @@ in the repo enumerates the rules behind them. §3.5's table is the L1 catalogue 
 rather than 14 — mostly because R10's four link-level error fields and R6's three dot1x states are each
 several rules rather than one. Treat the L2 and L3 rows the same way when item 13 reaches them: the
 column is an order of magnitude, not a list.
+
+**Superseded for L2 and L3, 2026-09-14.** §3.6 is the catalogue for both. It holds fewer rules than the
+"supported today" column rather than more — 11 against 15, and 5 against 9 — because several of the
+audit's counts are one rule per field where the data supports one rule per comparison, and because item
+12 being blocked keeps every command-dependent rule out. The named gaps are in §3.6, not in this table.
 
 The "not attempted" column is the §4.4 decision — those 5 rules are out of scope, not pending. The
 buildable target is therefore **~106 of 117**, and §3.1 scopes the *first* build to the ~44 supported
@@ -1451,7 +1515,7 @@ by today's data.
 | # | Gap |
 |---|---|
 | **G1** | **MAC learning as per-hop path verification.** The spec computes a path and never *checks* it. At each hop, the destination's MAC should be learned on the port facing the next hop — direct forwarding-plane evidence, far stronger than "both ends report FWD". The data exists (1030 entries in the capture) and `:674` discards exactly the transit sightings needed. R3 retains them; nothing in §6 uses them. **The largest missed opportunity in the document.** |
-| G2 | **Per-VLAN STP scope drift between neighbours.** A link where one end runs an instance for VLAN *T* and the other does not. Detectable today by comparing each end's `StpDetail` scope set against its `Vlans` membership. §6.3 only compares states within a scope both ends have. With 4 of 17 VLANs instance-less on one device, not hypothetical |
-| G3 | **VRRP is partly detectable** and §6.3 says it is not. The `00:00:5e:00:01:xx` virtual-MAC prefix appears in the capture's MAC table and identifies both VRRP presence and the VRID. It gives no master/backup, but "this VLAN's gateway is a VIP, so the L3 hop is one of N routers" beats §6.4's single pick |
-| G4 | **Topology-change churn, not root ID.** `show spanning-tree bridge` also carries topology-change count and time since last change per scope. For "why is this broken *now*", a VLAN that reconverged 40 seconds ago explains more than which bridge is root |
+| ~~G2~~ | ~~**Per-VLAN STP scope drift between neighbours.** A link where one end runs an instance for VLAN *T* and the other does not. Detectable today by comparing each end's `StpDetail` scope set against its `Vlans` membership. §6.3 only compares states within a scope both ends have. With 4 of 17 VLANs instance-less on one device, not hypothetical~~ **Closed 2026-09-14 (item 13):** `stp-scope-drift` (§3.6) is the comparison, with an injector that plants it on an already-blocked link so the forwarding tree is untouched |
+| G3 *(placed)* | **VRRP is partly detectable** and §6.3 says it is not. The `00:00:5e:00:01:xx` virtual-MAC prefix appears in the capture's MAC table and identifies both VRRP presence and the VRID. It gives no master/backup, but "this VLAN's gateway is a VIP, so the L3 hop is one of N routers" beats §6.4's single pick. **Placed 2026-09-14 (item 13):** not a rule — a VIP on a trunk is how VRRP is meant to look — so the detection ships as `vridOf` for §6.4 to report with its gateway pick, and `duplicate-mac-across-devices` skips those MACs. The §6.4 half lands with item 14 |
+| G4 *(blocked)* | **Topology-change churn, not root ID.** `show spanning-tree bridge` also carries topology-change count and time since last change per scope. For "why is this broken *now*", a VLAN that reconverged 40 seconds ago explains more than which bridge is root. Needs the §4.3 command, so it queues behind item 12 — see §3.6 |
 | ~~G5~~ | ~~**MTU and native-VLAN mismatch rules are injected as test faults (§8.3) but described nowhere.** R2 retains the LLDP `Maximum Frame Size` TLV without saying what compares it to the local MTU~~ **Closed 2026-09-13 (item 11)** for the MTU half: `mtu-mismatch` (§3.5) is the comparison, with an injector of its own. The native-VLAN half stays open and is blocked on retention rather than undescribed — the snapshot carries no native-VLAN field at all |

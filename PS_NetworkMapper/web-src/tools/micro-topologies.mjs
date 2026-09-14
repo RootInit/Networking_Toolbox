@@ -39,6 +39,8 @@ export function microRow(port, extra = {}) {
     };
 }
 
+const gatewayOf = (deviceIp) => `${String(deviceIp).split('.').slice(0, 3).join('.')}.1`;
+
 export function microNode(deviceIp, hostname, { ports = [], members = 1, model = 'EX4300-48P', extra = {} } = {}) {
     const stack = [];
     for (let i = 0; i < members; i++) {
@@ -50,7 +52,7 @@ export function microNode(deviceIp, hostname, { ports = [], members = 1, model =
         });
     }
     return {
-        DeviceIP: deviceIp, Hostname: hostname, JunosVersion: '22.4R3.25', Gateway: '10.30.0.1',
+        DeviceIP: deviceIp, Hostname: hostname, JunosVersion: '22.4R3.25', Gateway: gatewayOf(deviceIp),
         StackMembers: stack, Neighbors: [], Clients: [], ArpEntries: [],
         Interfaces: ports.map(p => (typeof p === 'string' ? microRow(p) : p)),
         Uptime: '2026-06-01 03:14:00 UTC', LastConfigured: '2026-09-01 11:02:00 UTC',
@@ -61,7 +63,9 @@ export function microNode(deviceIp, hostname, { ports = [], members = 1, model =
         SectionsCaptured: CAPTURE_SECTIONS.slice(), CaptureTimestamp: SCAN_TIMESTAMP, MacTable: [],
         DefaultRoute: {
             Table: 'inet.0', Destination: '0.0.0.0/0', Protocol: 'Static', Preference: 5,
-            NextHop: '10.30.0.1', EgressInterface: 'irb.100', State: 'Parsed',
+            // On the subnet the device holds its own address on: a next hop anywhere else is a finding
+            // of its own, and a micro-topology asserting one would make every rule read it as a fault.
+            NextHop: gatewayOf(deviceIp), EgressInterface: 'vme.0', State: 'Parsed',
         },
         ChassisInventory: stack.map(m => ({
             Item: `FPC ${m.FPC}`, Indent: 0, Level: 0, Version: 'REV 19',
