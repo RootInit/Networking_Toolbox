@@ -1,6 +1,6 @@
 # Networking_Toolbox
 
-Misc networking tools and scripts created by me or stolen from other people.
+Misc networking tools and scripts.
 
 - [`PS_NetworkMapper/`](#ps_networkmapper) — crawls a Juniper switch fleet over SSH and renders an interactive topology map in the browser.
 - [`PS_IPv4Scanner/`](#ps_ipv4scanner) — async IPv4 range/subnet scanner with optional MAC/vendor resolution.
