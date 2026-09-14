@@ -448,6 +448,23 @@ test('no rule lets a truncated extensive section pass as "not a subject"', () =>
     }
 });
 
+// The DOT1X counterpart, which the fixture cannot produce: truncation loses the tail of the batch, so a
+// lost DOT1X section only exists here. An empty supplicant list means "no supplicant" once the section has
+// arrived, and "the capture stopped" before it - the distinction the dot1x subject filter now makes.
+test('a lost DOT1X section is NOT_EVALUATED, not a port without supplicants', () => {
+    const rules = ['dot1x-held', 'dot1x-auth-failed', 'dot1x-unauthenticated-traffic'];
+    const rows = [detailRow('ge-0/0/4', { Dot1x: [], PoeAdminStatus: 'Enabled', PoeOperStatus: 'OFF' })];
+    const blind = oneSwitch(rows, { SectionsCaptured: CAPTURE_SECTIONS.filter(s => s !== 'DOT1X') });
+    const result = evaluate(blind, { rules });
+    assert.equal(result.records.length, rules.length);
+    for (const record of result.records) {
+        assert.equal(record.outcome, OUTCOME.NOT_EVALUATED, record.ruleId);
+        assert.equal(record.missing, 'section:DOT1X', record.ruleId);
+    }
+    // And with the section present the same empty list is no subject at all: no record, not a pass.
+    assert.deepEqual(evaluate(oneSwitch(rows), { rules }).records, []);
+});
+
 test('the reboot suppressor is evaluable on a real fixture device', () => {
     // Uptime is a boot timestamp string, so this is really an assertion that the format parses at all:
     // an unparseable one would silently turn every reboot suppressor into "cannot tell".
