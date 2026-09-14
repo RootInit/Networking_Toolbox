@@ -324,6 +324,9 @@ const SECTION_SUPPLIES = {
                 BpduError: null, LoopDetectPduError: null,
                 EthernetSwitchingError: null, MacRewriteError: null,
                 MacStatistics: {}, PcsStatistics: {}, FecStatistics: {},
+                // C5. "Last flapped" is read from the same extensive block as everything above it, not
+                // from the terse listing, so it leaves with the section.
+                LastFlappedSeconds: null, LastFlappedState: null,
             });
         }
     },
@@ -342,6 +345,18 @@ const SECTION_SUPPLIES = {
         for (const row of node.Interfaces) row.Dot1x = [];
         for (const client of node.Clients) { client.Dot1x_State = 'Unknown'; client.Dot1x_User = 'Unknown'; }
     },
+    // Uptime is fifth-from-last in the batch, so a Partial node really can lose it - which is the case
+    // G-BASELINE (spec 2.4) exists for: a rule suppressing on "rebooted recently" has to report
+    // NOT_EVALUATED rather than assume a long uptime.
+    UPTIME: (node) => {
+        node.Uptime = 'Unknown';
+        node.LastConfigured = 'Unknown';
+        node.LastConfiguredBy = 'Unknown';
+    },
+    // A no-op in shape - an empty Alarms list is also what a healthy device reports - and kept anyway so
+    // the field's section is declared in one place. What separates the two states is SectionsCaptured,
+    // which is why every guard reads that first.
+    ALARMS: (node) => { node.Alarms = []; },
 };
 
 // R3. Derived from the clients already on the device rather than invented: an empty MacTable beside a
@@ -1571,33 +1586,47 @@ function injectOffSubnetClient(rng, fleet) {
 
 // R6. A supplicant stuck in Held is a wiring or policy fault the port's own state does not show: the
 // link stays up and the client keeps appearing in the MAC table.
-function injectDot1xHeld(rng, fleet) {
-    // Only a supplicant that was authenticated: moving one that had already failed would put two
-    // findings on one manifest entry, and the entry is supposed to be the whole story about that port.
-    const held = (d) => d.Clients.filter(c => c.Dot1x_State === 'Authenticated');
-    const hosts = scanned(fleet).filter(d => held(d).length);
-    if (!hosts.length) return null;
-    const host = fPick(rng, hosts);
-    const client = fPick(rng, held(host));
-    const before = client.Dot1x_State;
-    client.Dot1x_State = 'Held';
-    if (client.Dot1x_User === 'Unknown') client.Dot1x_User = `lab\\user${fInt(rng, 100, 999)}`;
-    // R6's per-port view is derived from the client list, so it moves with it.
-    const heldPort = String(client.Port).replace(/\.\d+$/, '');
-    const heldRow = host.Interfaces.find(r => r.Port === heldPort);
-    if (heldRow) {
-        for (const entry of heldRow.Dot1x || []) {
-            if (entry.MacAddress === client.MAC) { entry.State = 'Held'; entry.User = client.Dot1x_User; }
+// One authenticated supplicant moved into a state that is not authenticated. Which state it lands in is
+// the parameter, because the three L1 dot1x rules read three different answers out of the same field.
+function injectDot1xState({ state, kind, finding, sole = false }) {
+    const injector = (rng, fleet) => {
+        // Only a supplicant that was authenticated: moving one that had already failed would put two
+        // findings on one manifest entry, and the entry is supposed to be the whole story about that port.
+        const movable = (d) => d.Clients.filter(c => {
+            if (c.Dot1x_State !== 'Authenticated') return false;
+            // For the "nothing authenticated on a port that learns MACs" rule, this supplicant has to be
+            // the only one on its port: with a second authenticated client the port is still fine.
+            if (!sole) return true;
+            const port = physical(c.Port);
+            return d.Clients.filter(o => physical(o.Port) === port && o.Dot1x_State !== 'Unknown').length === 1;
+        });
+        const hosts = scanned(fleet).filter(d => movable(d).length);
+        if (!hosts.length) return null;
+        const host = fPick(rng, hosts);
+        const client = fPick(rng, movable(host));
+        const before = client.Dot1x_State;
+        client.Dot1x_State = state;
+        if (client.Dot1x_User === 'Unknown') client.Dot1x_User = `lab\\user${fInt(rng, 100, 999)}`;
+        // R6's per-port view is derived from the client list, so it moves with it.
+        const port = physical(client.Port);
+        const row = host.Interfaces.find(r => r.Port === port);
+        if (row) {
+            for (const entry of row.Dot1x || []) {
+                if (entry.MacAddress === client.MAC) { entry.State = state; entry.User = client.Dot1x_User; }
+            }
         }
-    }
-    return {
-        // No section 7 row: R6 data, and a rule of its own rather than a path failure.
-        kind: 'dot1x-held', failureModes: [], deviceIp: host.DeviceIP,
-        port: String(client.Port).replace(/\.\d+$/, ''), mac: client.MAC,
-        params: { previousState: before, user: client.Dot1x_User },
-        expected: { finding: 'dot1x-held', deviceIp: host.DeviceIP, port: String(client.Port).replace(/\.\d+$/, '') },
+        return {
+            // No section 7 row: R6 data, and a rule of its own rather than a path failure.
+            kind: kind, failureModes: [], deviceIp: host.DeviceIP, port: port, mac: client.MAC,
+            params: { previousState: before, state: state, user: client.Dot1x_User },
+            expected: { finding: finding, deviceIp: host.DeviceIP, port: port },
+        };
     };
+    Object.defineProperty(injector, 'name', { value: `injectDot1x${state}` });
+    return injector;
 }
+
+const injectDot1xHeld = injectDot1xState({ state: 'Held', kind: 'dot1x-held', finding: 'dot1x-held' });
 
 // F9. A port still learning is neither forwarding nor blocking. It is left on a port the tree already
 // blocked, so the forwarding subgraph is untouched and stays the spanning tree the assertion checked -
@@ -1618,32 +1647,92 @@ function injectStpUnconverged(rng, fleet) {
 
 // R2. The two ends of one link advertising different autonegotiation state. Neither port alone looks
 // wrong, so nothing short of comparing the pair across two devices finds it.
-function injectAutonegAsymmetric(rng, fleet) {
+// One link both ends report, resolved down to the two interface rows and the two LLDP entries that
+// describe it. Matching the back-entry on the port as well as the address matters once a pair of devices
+// is joined by more than one wire: by address alone, a fault meant for one wire lands half on another.
+function pickReciprocalLink(rng, fleet) {
     const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
+    const usable = (d) => d.ScanStatus === 'Ok' && d.SectionsCaptured.includes('INTERFACES_EXT');
     const candidates = [];
-    for (const d of scanned(fleet)) {
-        for (const n of d.Neighbors) {
-            const peer = byIp.get(String(n.ManagementIP));
-            if (peer && peer.ScanStatus === 'Ok' && peer.Neighbors.some(x => String(x.ManagementIP) === String(d.DeviceIP))) {
-                candidates.push([d, n, peer]);
-            }
+    for (const device of fleet.filter(usable)) {
+        for (const neighbor of device.Neighbors) {
+            const peer = byIp.get(String(neighbor.ManagementIP));
+            if (!peer || !usable(peer)) continue;
+            const nearPort = physical(neighbor.LocalPort);
+            const farPort = physical(neighbor.RemotePort);
+            const back = peer.Neighbors.find(x => String(x.ManagementIP) === String(device.DeviceIP)
+                && physical(x.LocalPort) === farPort && physical(x.RemotePort) === nearPort);
+            if (!back) continue;
+            const nearRow = device.Interfaces.find(r => r.Port === nearPort);
+            const farRow = peer.Interfaces.find(r => r.Port === farPort);
+            if (!nearRow || !farRow) continue;
+            if (String(nearRow.Link).toLowerCase() !== 'up' || String(farRow.Link).toLowerCase() !== 'up') continue;
+            candidates.push({ device, peer, neighbor, back, nearPort, farPort, nearRow, farRow });
         }
     }
-    if (!candidates.length) return null;
-    const [device, neighbor, peer] = fPick(rng, candidates);
-    const back = peer.Neighbors.find(x => String(x.ManagementIP) === String(device.DeviceIP));
-    const phy = (entry) => (entry.OrgInfo || []).find(o => String(o.Subtype).startsWith('MAC/PHY'));
-    const near = phy(neighbor);
-    const far = phy(back);
+    return candidates.length ? fPick(rng, candidates) : null;
+}
+
+const physical = (port) => String(port).replace(/\.\d+$/, '');
+const tlv = (entry, subtypePrefix) => (entry.OrgInfo || []).find(o => String(o.Subtype).startsWith(subtypePrefix));
+// The Junos wording, the same strings lldpCommon emits. A fault written in a paraphrase would only ever
+// be findable by a rule written in the same paraphrase.
+const AUTONEG_TLV = {
+    Enabled: 'Autonegotiation [supported, enabled (0x3)], PMD Autonegotiation Capability (0xc036), MAU Type (0x0)',
+    Disabled: 'Autonegotiation [not supported, disabled (0x0)], PMD Autonegotiation Capability (0x0), MAU Type (0x0)',
+};
+
+// A wire whose two ends disagree about autonegotiation. What a device ADVERTISES and what its own row
+// says are one fact seen twice, so both move together: flipping only the TLV would make the fixture, not
+// the network, the thing that is wrong - and a rule could then be written that never works on hardware.
+function injectAutonegAsymmetric(rng, fleet) {
+    const link = pickReciprocalLink(rng, fleet);
+    if (!link) return null;
+    const near = tlv(link.neighbor, 'MAC/PHY');
+    const far = tlv(link.back, 'MAC/PHY');
     if (!near || !far) return null;
-    near.Info = 'Autonegotiation disabled, 1000BaseTFD';
-    far.Info = 'Autonegotiation enabled, 1000BaseTFD';
+    near.Info = AUTONEG_TLV.Disabled;            // what the peer advertises to this device
+    link.farRow.AutoNegotiation = 'Disabled';
+    far.Info = AUTONEG_TLV.Enabled;
+    link.nearRow.AutoNegotiation = 'Enabled';
     return {
         // No section 7 row: the 802.3 TLVs R2 retains are what make it visible at all.
-        kind: 'autoneg-asymmetric', failureModes: [], deviceIp: device.DeviceIP,
-        port: String(neighbor.LocalPort).replace(/\.\d+$/, ''), mac: null,
-        params: { peerIp: peer.DeviceIP, peerPort: String(back.LocalPort).replace(/\.\d+$/, '') },
-        expected: { finding: 'autoneg-mismatch', deviceIp: device.DeviceIP, port: String(neighbor.LocalPort).replace(/\.\d+$/, '') },
+        kind: 'autoneg-asymmetric', failureModes: [], deviceIp: link.device.DeviceIP,
+        port: link.nearPort, mac: null,
+        params: { peerIp: link.peer.DeviceIP, peerPort: link.farPort },
+        expected: { finding: 'autoneg-mismatch', deviceIp: link.device.DeviceIP, port: link.nearPort },
+    };
+}
+
+// G5. The local MTU against the frame size the far end advertises - the comparison R2 retained the
+// Maximum Frame Size TLV for and that nothing in revision 2 named.
+function injectMtuMismatch(rng, fleet) {
+    const link = pickReciprocalLink(rng, fleet);
+    if (!link) return null;
+    const advertised = tlv(link.neighbor, 'Maximum Frame Size');
+    if (!advertised || typeof link.nearRow.Mtu !== 'number') return null;
+    const raised = link.nearRow.Mtu === 1514 ? 9192 : 1514;
+    link.farRow.Mtu = raised;
+    advertised.Info = `MTU Size (${raised})`;
+    return {
+        kind: 'mtu-mismatch', failureModes: [], deviceIp: link.device.DeviceIP, port: link.nearPort, mac: null,
+        params: { peerIp: link.peer.DeviceIP, peerPort: link.farPort, localMtu: link.nearRow.Mtu, farMtu: raised },
+        expected: { finding: 'mtu-mismatch', deviceIp: link.device.DeviceIP, port: link.nearPort },
+    };
+}
+
+// Half-duplex on one end of a wire whose other end is full. The finding is anchored on the half-duplex
+// end, because that is the port an operator has to go and look at.
+function injectDuplexMismatch(rng, fleet) {
+    const link = pickReciprocalLink(rng, fleet);
+    if (!link) return null;
+    if (link.nearRow.Duplex !== 'Full-duplex') return null;
+    link.farRow.Duplex = 'Half-duplex';
+    link.farRow.DuplexNegotiated = 'Half-duplex';
+    return {
+        kind: 'duplex-mismatch', failureModes: [], deviceIp: link.peer.DeviceIP, port: link.farPort, mac: null,
+        params: { peerIp: link.device.DeviceIP, peerPort: link.nearPort },
+        expected: { finding: 'duplex-mismatch', deviceIp: link.peer.DeviceIP, port: link.farPort },
     };
 }
 
@@ -1710,9 +1799,125 @@ function injectVlanMissingFromTrunk(rng, fleet) {
     };
 }
 
+// One injector per single-ended L1 rule (spec section 3), from a table rather than written out: an entry
+// names the rule its fault has to make fire and the smallest mutation that makes it fire.
+//
+// Two constraints shape every mutation. It lands on a CLIENT port unless the rule needs otherwise,
+// because a defect on a trunk is read by the rule at the far end too and a manifest entry is supposed to
+// be the whole story about one location. And it keeps the row self-consistent - a PoE string agrees with
+// the PoE fields, a duplex change carries the negotiated value with it - because a fault that contradicts
+// itself teaches a rule to fire on a state no switch produces (section 8.2).
+//
+// `lag-member-down` has no entry: the fixture holds no aggregate at all, and an aggregate is ordinary
+// topology rather than a fault, so inventing one here would put a normal shape behind a fault manifest.
+// It is covered by the `lag-two-members-one-down` micro-topology instead.
+const L1_PORT_DEFECTS = [
+    {
+        finding: 'duplex-half-on-up-link',
+        apply: (row) => { row.Duplex = 'Half-duplex'; row.DuplexNegotiated = 'Half-duplex'; },
+    },
+    { finding: 'negotiation-incomplete', apply: (row) => { row.NegotiationStatus = 'Incomplete'; } },
+    {
+        finding: 'autoneg-disabled',
+        // Only a port that was negotiating, so the fault is a change rather than a restatement.
+        where: (row) => row.AutoNegotiation === 'Enabled',
+        apply: (row) => { row.AutoNegotiation = 'Disabled'; },
+    },
+    {
+        finding: 'crc-align-errors',
+        where: (row) => !!(row.MacStatistics || {})['CRC/Align errors'],
+        apply: (row, rng) => { row.MacStatistics['CRC/Align errors'].Receive = fInt(rng, 11, 9000); },
+    },
+    { finding: 'input-errors-present', apply: (row, rng) => { row.InputErrors.Errors = fInt(rng, 1, 40000); } },
+    { finding: 'output-errors-present', apply: (row, rng) => { row.OutputErrors.Errors = fInt(rng, 1, 40000); } },
+    { finding: 'framing-errors-present', apply: (row, rng) => { row.InputErrors['Framing errors'] = fInt(rng, 1, 900); } },
+    { finding: 'remote-fault', apply: (row) => { row.RemoteFault = 'Offline'; } },
+    {
+        finding: 'link-alarm-on-up-port',
+        apply: (row) => { row.ActiveAlarms = 'LINK'; row.ActiveDefects = 'LINK'; },
+    },
+    { finding: 'bpdu-error', apply: (row) => { row.BpduError = 'Detected'; } },
+    { finding: 'loop-detect-pdu-error', apply: (row) => { row.LoopDetectPduError = 'Detected'; } },
+    { finding: 'ethernet-switching-error', apply: (row) => { row.EthernetSwitchingError = 'Detected'; } },
+    { finding: 'mac-rewrite-error', apply: (row) => { row.MacRewriteError = 'Detected'; } },
+    {
+        finding: 'port-flapped-recently',
+        // Not on a device that booted within the hour: the rule suppresses there, correctly, and the
+        // manifest would be claiming a finding the engine is right to withhold.
+        host: (node) => {
+            const booted = Date.parse(node.Uptime);
+            const seen = Date.parse(node.CaptureTimestamp);
+            return isFinite(booted) && isFinite(seen) && (seen - booted) / 1000 > 3600;
+        },
+        apply: (row, rng) => { row.LastFlappedSeconds = fInt(rng, 30, 3500); row.LastFlappedState = 'Parsed'; },
+    },
+    {
+        // R7's whole point: without AdminStatus, this reads the same as a phone that is not drawing power.
+        finding: 'poe-admin-disabled-with-endpoint',
+        ports: (node) => {
+            const med = new Set(node.MedNeighbors.map(m => physical(m.LocalPort)));
+            return node.Interfaces.filter(r => med.has(r.Port) && r.PoeAdminStatus !== null);
+        },
+        apply: (row) => {
+            row.PoeAdminStatus = 'Disabled';
+            row.PoeOperStatus = 'OFF';
+            row.PoePowerConsumption = '0.0W';
+            row.PoeClass = 'not-applicable';
+            row.PoE = 'Disabled';
+        },
+    },
+    {
+        finding: 'poe-denied',
+        ports: (node) => node.Interfaces.filter(r => r.PoeOperStatus !== null && String(r.Link).toLowerCase() === 'up'),
+        apply: (row) => {
+            row.PoeOperStatus = 'Denied';
+            row.PoePowerConsumption = '0.0W';
+            row.PoeClass = 'not-applicable';
+            row.PoE = 'Enabled';
+        },
+    },
+];
+
+// A live port with the extensive section behind it, no LLDP neighbour and no MED endpoint: the defect
+// lands somewhere only one rule at one location can see it.
+const plainPorts = (node) => {
+    if (!node.SectionsCaptured.includes('INTERFACES_EXT')) return [];
+    const med = new Set(node.MedNeighbors.map(m => physical(m.LocalPort)));
+    return clientPorts(node).filter(r => !med.has(r.Port));
+};
+
+function injectPortDefect(defect) {
+    const portsOf = (node) => {
+        if (!node.SectionsCaptured.includes('INTERFACES_EXT')) return [];
+        const rows = defect.ports ? defect.ports(node) : plainPorts(node);
+        return defect.where ? rows.filter(defect.where) : rows;
+    };
+    const injector = (rng, fleet) => {
+        const hosts = scanned(fleet).filter(d => (!defect.host || defect.host(d)) && portsOf(d).length);
+        if (!hosts.length) return null;
+        const host = fPick(rng, hosts);
+        const row = fPick(rng, portsOf(host));
+        defect.apply(row, rng);
+        return {
+            // No section 7 row: these are single-device L1 defects, not path failure modes.
+            kind: `l1-${defect.finding}`, failureModes: [], deviceIp: host.DeviceIP, port: row.Port, mac: null,
+            params: {},
+            expected: { finding: defect.finding, deviceIp: host.DeviceIP, port: row.Port },
+        };
+    };
+    Object.defineProperty(injector, 'name', { value: `inject_${defect.finding.replace(/-/g, '_')}` });
+    return injector;
+}
+
 const INJECTORS = [
     injectDuplicateMac, injectDuplicateIp, injectOffSubnetClient, injectDot1xHeld,
     injectStpUnconverged, injectAutonegAsymmetric, injectSharedSegment, injectVlanMissingFromTrunk,
+    // The L1 rule family. Appended rather than interleaved so a given --faults N keeps injecting the
+    // structural faults it injected before this landed.
+    injectMtuMismatch, injectDuplexMismatch,
+    injectDot1xState({ state: 'Failed', kind: 'dot1x-auth-failed', finding: 'dot1x-auth-failed' }),
+    injectDot1xState({ state: 'Connecting', kind: 'dot1x-connecting', finding: 'dot1x-unauthenticated-traffic', sole: true }),
+    ...L1_PORT_DEFECTS.map(injectPortDefect),
 ];
 
 function injectFaults(fleet, snapshotIndex, count) {

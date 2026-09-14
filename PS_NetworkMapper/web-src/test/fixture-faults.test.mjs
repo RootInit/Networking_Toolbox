@@ -26,8 +26,9 @@ function generate(args) {
 }
 
 const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
-// Nine against eight kinds, so the cycle wraps and a second instance of a kind has to place as well.
-const faulted = generate([...ARGS, '--faults', '9']);
+// Thirty against 28 kinds, so every injector places once and the cycle wraps: a second instance of a
+// kind has to place as well.
+const faulted = generate([...ARGS, '--faults', '30']);
 const clean = generate(ARGS);
 
 const byIp = (snapshot) => new Map(snapshot.Topology.map(d => [String(d.DeviceIP), d]));
@@ -63,7 +64,7 @@ test('a manifest is written per snapshot and names the map it describes', () => 
     assert.equal(faulted.manifests.length, faulted.names.length);
     for (const [i, m] of faulted.faults.entries()) {
         assert.equal(m.Map, faulted.names[i], 'the manifest and the map must pair by timestamp');
-        assert.equal(m.Requested, 9);
+        assert.equal(m.Requested, 30);
         assert.ok(m.Faults.length > 0, 'a 60-device fleet is large enough to place every kind');
     }
 });
@@ -87,10 +88,18 @@ test('--faults 0 writes an empty manifest rather than none', () => {
 
 test('every fault kind places, and each entry carries an oracle a rule can be checked against', () => {
     const kinds = new Set(entries.map(f => f.kind));
+    // The L1 family (item 11) is one injector per rule, so this list grows with the rule table: a kind
+    // here that no rule names, or a rule with no kind, is what the rules suite asserts separately.
     assert.deepEqual([...kinds].sort(), [
-        'autoneg-asymmetric', 'dot1x-held', 'duplicate-ip', 'duplicate-mac',
-        'off-subnet-client', 'stp-unconverged', 'unmanaged-bridge-shared-segment',
-        'vlan-missing-from-trunk',
+        'autoneg-asymmetric', 'dot1x-auth-failed', 'dot1x-connecting', 'dot1x-held',
+        'duplex-mismatch', 'duplicate-ip', 'duplicate-mac',
+        'l1-autoneg-disabled', 'l1-bpdu-error', 'l1-crc-align-errors',
+        'l1-duplex-half-on-up-link', 'l1-ethernet-switching-error', 'l1-framing-errors-present',
+        'l1-input-errors-present', 'l1-link-alarm-on-up-port', 'l1-loop-detect-pdu-error',
+        'l1-mac-rewrite-error', 'l1-negotiation-incomplete', 'l1-output-errors-present',
+        'l1-poe-admin-disabled-with-endpoint', 'l1-poe-denied', 'l1-port-flapped-recently',
+        'l1-remote-fault', 'mtu-mismatch', 'off-subnet-client', 'stp-unconverged',
+        'unmanaged-bridge-shared-segment', 'vlan-missing-from-trunk',
     ]);
     const ids = entries.map(f => f.id);
     assert.equal(new Set(ids).size, ids.length, 'ids must be unique across snapshots');
@@ -297,13 +306,13 @@ test('injection does not perturb the main PRNG: untouched devices are byte-ident
         for (const [ip, device] of a) {
             if (namedIps.has(ip)) continue;
             assert.equal(JSON.stringify(b.get(ip)), JSON.stringify(device),
-                `${ip} differs between --faults 0 and --faults 9, so an injector reached the main PRNG`);
+                `${ip} differs between --faults 0 and --faults 30, so an injector reached the main PRNG`);
             compared++;
         }
     }
-    // Every device a manifest entry names anywhere is excluded, and eight kinds across two snapshots
-    // name a good third of a 60-device fleet - so the bar is "most of the fleet", not a fixed count.
-    assert.ok(compared > 60, `only ${compared} devices compared; the guard is not covering the fleet`);
+    // Every device a manifest entry names anywhere is excluded, and 30 faults across two snapshots name
+    // half a 60-device fleet - so the bar is "much of the fleet", not a fixed count.
+    assert.ok(compared > 30, `only ${compared} devices compared; the guard is not covering the fleet`);
 });
 
 test('a fleet too small to hold a fault reports fewer faults rather than claiming one', () => {

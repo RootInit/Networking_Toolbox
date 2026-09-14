@@ -196,6 +196,70 @@ the device rebooted recently.
 - *(Revision 1 also forbade an `ActiveAlarms == 'LINK'` rule outright. Scope the suppression to
   `Link -ne 'up'` instead — `LINK` on a port reporting `up` is a real alarm.)*
 
+### 3.5 Built — 2026-09-13: `web-src/rules.js` and the L1 catalogue
+
+**Work order item 11.** The engine and 23 L1 rules, with one fault injector per rule and the delta
+oracle §8.3 asks for. Five things came out differently from the plan above, and one of them is the whole
+reason the file is worth having.
+
+**There was no rule catalogue to build from.** Appendix A's 117 rules are a count from an audit that is
+not in this tree, and nothing in the repo or its history enumerates them. So the table in `rules.js`
+**is** the catalogue, derived from §4.1's *Unlocks* column (the fields Phase 1 retained specifically so
+these rules could exist), §3.4's three traps, and G5. Appendix A's "L1: 14 supported today" is superseded
+by the 23 below; the estimate was not wrong so much as unattributable.
+
+| Rule | Reads | Note |
+|---|---|---|
+| `duplex-half-on-up-link` | `Duplex` | §3.4's second trap: gated on `Link = up` by the rule's `only`, so a dark port is not a subject at all |
+| `negotiation-incomplete` | `NegotiationStatus` | |
+| `autoneg-disabled` | `AutoNegotiation` | Fires on 26 of a clean 60-device fleet's ports, and is suppressed on 31 more facing MED endpoints. R2's stated purpose |
+| `autoneg-mismatch` | `AutoNegotiation` + the neighbour's `MAC/PHY` TLV | R2 without scanning the peer |
+| `mtu-mismatch` | `Mtu` + the neighbour's `Maximum Frame Size` TLV | **G5, which the spec listed as described nowhere.** In the measured capture the local `MTU: 1514` and the TLV `MTU Size (1514)` carry the same number on one wire, which is what makes equality the right comparison |
+| `duplex-mismatch` | both ends' `Duplex` | The only two-ended rule, and so the only user of the two-ended G-NOSCAN gate. Anchored on the half-duplex end |
+| `crc-align-errors` | `MacStatistics[CRC/Align errors]` | R4's own purpose — the one non-zero CRC value in the capture sits in a table the counter parser cannot reach |
+| `input-errors-present`, `output-errors-present`, `framing-errors-present` | `InputErrors`/`OutputErrors` keys | **Never `Drops`** — §3.4's first trap |
+| `remote-fault` | `RemoteFault` | R10, field-line scoped |
+| `link-alarm-on-up-port` | `ActiveAlarms` | §3.4's third trap, the one revision 1 had backwards |
+| `bpdu-error`, `loop-detect-pdu-error`, `ethernet-switching-error`, `mac-rewrite-error` | R10's four error fields | They print on every port's link-level line and none was parsed before Phase 1 |
+| `port-flapped-recently` | `LastFlappedSeconds` + `LastFlappedState` | C5's reason for two fields: `Never` is the healthy case, not a missing duration |
+| `lag-member-down` | `BundleMembers` + each member's `Link` | §5.3. The one rule with no fixture injector — see below |
+| `poe-admin-disabled-with-endpoint` | `PoeAdminStatus` + `MedNeighbors` | R7's own purpose: without `AdminStatus` this reads the same as a phone drawing nothing |
+| `poe-denied` | `PoeOperStatus` | |
+| `dot1x-held`, `dot1x-auth-failed`, `dot1x-unauthenticated-traffic` | `Dot1x[].State` (+ `MacTable`) | R6. The third is the state the MAC-keyed parse structurally could not represent |
+
+Excluded deliberately: every rule needing a counter **delta** (Appendix A's "+6"), which waits on
+G-BASELINE's reset detection. No rule reads the configuration (§4.4).
+
+- **Four outcomes per subject, and a fifth thing that is not an outcome.** `FIRED`, `PASSED`,
+  `SUPPRESSED`, `NOT_EVALUATED` are recorded per subject and counted per rule, with a `missing` histogram
+  keyed by datum. *Skipped* is separate and uncounted in those four: a rule whose `only` predicate says
+  the subject does not exist here (no aggregate on this row, no neighbour on this port, a dark port for a
+  duplex rule) has not passed. On a clean 60-device fleet that is most of the 4,220 port subjects, and
+  folding them into `PASSED` would bury the histogram the outcomes exist to produce.
+- **The guard reads `SectionsCaptured` through one `FIELD_SECTION` map before it reads the field**, so
+  `section:INTERFACES_EXT` and `Interfaces[].Duplex` stay distinct strings — "the capture stopped" and
+  "the platform does not report this" call for different actions. A test asserts `FIELD_SECTION` against
+  the fixture's own section-blanking table in both directions; it immediately found `LastFlappedSeconds`
+  surviving a dropped `INTERFACES_EXT` in the generator, which is the false clean §3.2 is about.
+- **The load-bearing test is a mutation, not an assertion about a `Partial` node.** Reading the truncated
+  node and finding `NOT_EVALUATED` proves little on its own. So the test then sets `Duplex =
+  'Half-duplex'` and `Link = 'up'` on that node while leaving `SectionsCaptured` truncated — exactly the
+  state a `needs: ['Interfaces[].Duplex']` list passes — and asserts the rule *still* reports
+  `section:INTERFACES_EXT`.
+- **Suppression has three states, not two.** A suppressor can itself be unevaluable: whether a port faces
+  an MED endpoint is unknown when the LLDP section never arrived, and whether the device rebooted
+  recently is unknown when `Uptime` (fifth-from-last in the batch) is missing. A finding records
+  `{by, evaluated, unevaluated}`, because "not suppressed" and "cannot tell whether it is suppressed" are
+  different facts and the second one is what a `Partial` node produces.
+- **`lag-member-down` has no fault injector, deliberately.** The fixture contains no aggregate at all, and
+  an aggregate is ordinary topology rather than a fault — inventing one inside `injectFaults` would put a
+  normal shape behind a fault manifest and make the delta oracle describe the generator's own gap. The
+  `lag-two-members-one-down` micro-topology covers the rule; the fixture-side gap is recorded at §8.2.
+
+Measured on a clean 60-device fleet (`--seed 5`): 71 findings across 23 rules, with every two-ended and
+every advertisement-versus-local rule at **zero** — which is the point of the wire-property change noted
+at §8.2. The faulted fleet adds 28.
+
 ---
 
 ## 4. Data model changes
@@ -479,7 +543,10 @@ its acceptance tests. `computeNeighborEdges` is untouched; the diagram keeps it.
   endpoint resolution uses the same definition — a MAC on one of those ports is a sighting in passing,
   not a location (F4).
 - **The generated fixture has no LAG at all**, so bundle collapse is covered only by the micros. That is
-  an `accessRow` gap, not a graph gap; it lands with the interface-field work.
+  an `accessRow` gap, not a graph gap; ~~it lands with the interface-field work.~~ **Still open after that
+  work (item 11).** Filling the interface rows did not create an aggregate: a LAG is a topology shape the
+  generator would have to build in `linkDevices`, and the fault injector is the wrong place for it (§3.5).
+  It is why `lag-member-down` is the one L1 rule the fixture-scale suite cannot exercise.
 - Two micro-topologies were added for this item: `transit-sighting` (F4) and
   `inferred-unmanaged-segment` (F14, §5.3's fourth case), taking the set to twelve.
 
@@ -813,7 +880,7 @@ membership too.
   edit.
 
 **Done 2026-09-13 (work order item 8, injection half).** `--faults N` in `generate-fixture.mjs`, one
-`FaultManifest_<stamp>.fixture.json` per snapshot, eight kinds: `duplicate-mac` (F1),
+`FaultManifest_<stamp>.fixture.json` per snapshot, eight kinds at first (28 after item 11 — see below): `duplicate-mac` (F1),
 `duplicate-ip`/`off-subnet-client`/`dot1x-held`/`autoneg-asymmetric` (F4), `stp-unconverged` (F9),
 `unmanaged-bridge-shared-segment` (F14), `vlan-missing-from-trunk` (F11). Default is 0 — a fault nobody has a manifest for is worth
 less than a clean fleet. Deviations from the plan above:
@@ -827,7 +894,7 @@ less than a clean fleet. Deviations from the plan above:
   derived `MacTable` and `LogicalUnits` by then, so an injected client carries its own MAC-table row.
   That is §8.2 applied to injection.
 - **The sub-PRNG rule is a test, not a review note.** Untouched devices must be byte-identical between
-  `--faults 0` and `--faults 9`; an injector that reached `rnd()` shifts the main stream and fails it.
+  `--faults 0` and `--faults 30`; an injector that reached `rnd()` shifts the main stream and fails it.
   Verified by making one injector call `int()` and watching the test fail.
 - **The manifest is not named `NetworkMap_*`.** Both loaders match `/^NetworkMap_.*\.json$/`, so a
   manifest named after its map would be offered to the operator as a snapshot to open.
@@ -835,7 +902,7 @@ less than a clean fleet. Deviations from the plan above:
   so there is no membership to remove. It lands with the VLAN retention work.~~ **Landed 2026-09-13
   with item 10**, which is that work's consumer: `vlan-missing-from-trunk` removes one tag from one end
   of one otherwise healthy trunk, from the node's `Vlans[]` and the port row alike. It is an eighth
-  kind, so `--faults 9` still wraps the cycle. The test is the strongest oracle in this file: the clean
+  kind, so `--faults 9` still wrapped the cycle. The test is the strongest oracle in this file: the clean
   fleet has **no** trunk whose two ends disagree, so every disagreement in the faulted fleet must be one
   the manifest names, and every named one must be present on the end the manifest names.
 - **A fault kind §7 does not catalogue carries an empty `failureModes`**, not a label chosen to fill the
@@ -849,6 +916,29 @@ less than a clean fleet. Deviations from the plan above:
 - `stp-unconverged` only ever relabels an already-blocked port, so the forwarding subgraph the
   generator asserted is untouched; the test states that as an equality against the clean run rather
   than as `devices - 1`, because a placeholder device's links are unobservable in the written snapshot.
+
+**Extended 2026-09-13 (work order item 11).** Twenty more kinds, one per L1 rule, so §3.5's table has an
+oracle per row: `mtu-mismatch`, `duplex-mismatch`, `dot1x-auth-failed`, `dot1x-connecting`, and sixteen
+`l1-*` port defects generated from a table by `injectPortDefect`. `--faults 30` against 28 kinds, so every
+injector places once and the cycle still wraps. Four notes:
+
+- **The delta is the oracle, in both directions.** The fleet is byte-identical between `--faults 0` and
+  `--faults 30` apart from the faults, so `findings(30) − findings(0)` is exactly what the faults caused.
+  Every `expected.finding` the manifest promised must appear in that set, **and** every finding in it must
+  sit at a device and port some manifest entry names — the second direction is what catches a rule firing
+  on collateral. Measured: 28 new findings against 28 entries.
+- **A fault's collateral is part of its location, not noise.** An asymmetric autoneg is visible from both
+  ends, so the manifest records `params.peerIp`/`peerPort` and the oracle accepts findings there;
+  a supplicant moved out of `Authenticated` takes `dot1x-unauthenticated-traffic` with it on the same
+  port. What the oracle rejects is a finding somewhere else entirely.
+- **A mutation has to move every mirror of the fact it changes.** What a device advertises over LLDP and
+  what its own interface row says are one fact seen twice, so `injectAutonegAsymmetric` now writes the TLV
+  *and* the row at both ends. It previously wrote only the TLVs, and in invented wording — a rule written
+  against that string would have worked on fixtures and on nothing else.
+- **A defect lands on a client port unless the rule needs otherwise**, because a defect on a trunk is read
+  by the rule at the far end too; and `port-flapped-recently` refuses a device that booted within the
+  hour, where the engine correctly suppresses and the manifest would be promising a finding that is right
+  to be withheld.
 
 ### 8.4 Hand-built micro-topologies
 
@@ -1226,7 +1316,13 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
     `web-src/l2-path.js`. Two prerequisites landed with it and are noted at §8.2 and §8.3: the fixture
     had no VLAN membership at all, which made §6.2's first filter vacuous, and the F11 injector item 8
     deferred now exists. F2's threshold is reported rather than applied — measured, see §6.2.
-11. **Rule framework** (§3) and the L1 rules — the best-supported layer.
+11. ~~**Rule framework** (§3) and the L1 rules — the best-supported layer.~~ **Done 2026-09-13.**
+    `web-src/rules.js`: the engine, 23 L1 rules, one fault injector per rule and the delta oracle. See
+    §3.5 for the catalogue and the five deviations, §8.3 for the injectors. Two deviations matter beyond
+    this item: there was no rule catalogue in the tree to build from, so §3.5's table is now it and
+    Appendix A's L1 column is superseded; and `lag-member-down` has no fixture injector, because the
+    fixture holds no aggregate at all and one invented inside `injectFaults` would put ordinary topology
+    behind a fault manifest.
 12. **Phase 3 command changes** (§4.3): verify the two upgrades on real hardware, then land the three
     in-place replacements and `show spanning-tree bridge`, measuring session time against the 120 s
     cap each time. The exact-matcher fix is worth doing alongside but no longer gates this.
@@ -1244,12 +1340,18 @@ not a plan: §3.1 scopes the build to the "supported today" column.
 
 | Layer | Rules | Supported today | Blocked on retention | Blocked on a command | Not attempted (config-only) | Undetectable passively |
 |---|---|---|---|---|---|---|
-| L1 / link | 45 | 14 (+6 needing a delta) | 17 | 8 | — | — |
+| L1 / link | 45 | 14 (+6 needing a delta) — **built: 23**, see §3.5 | 17 | 8 | — | — |
 | L2 switching | 33 | 15 | 11 | 7 | — | — |
 | L3 / policy | 39 | 9 | 8 | 11 | 5 | 6 |
 | **Total** | **117** | **~44** | **~36** | **~26** | **5** | **6** |
 
 The shape is the finding: the largest category is data the tool already collects and discards.
+
+**Superseded for L1, 2026-09-13.** These counts come from an audit that is not in this tree, and nothing
+in the repo enumerates the rules behind them. §3.5's table is the L1 catalogue and it holds 23 rules
+rather than 14 — mostly because R10's four link-level error fields and R6's three dot1x states are each
+several rules rather than one. Treat the L2 and L3 rows the same way when item 13 reaches them: the
+column is an order of magnitude, not a list.
 
 The "not attempted" column is the §4.4 decision — those 5 rules are out of scope, not pending. The
 buildable target is therefore **~106 of 117**, and §3.1 scopes the *first* build to the ~44 supported
@@ -1265,4 +1367,4 @@ by today's data.
 | G2 | **Per-VLAN STP scope drift between neighbours.** A link where one end runs an instance for VLAN *T* and the other does not. Detectable today by comparing each end's `StpDetail` scope set against its `Vlans` membership. §6.3 only compares states within a scope both ends have. With 4 of 17 VLANs instance-less on one device, not hypothetical |
 | G3 | **VRRP is partly detectable** and §6.3 says it is not. The `00:00:5e:00:01:xx` virtual-MAC prefix appears in the capture's MAC table and identifies both VRRP presence and the VRID. It gives no master/backup, but "this VLAN's gateway is a VIP, so the L3 hop is one of N routers" beats §6.4's single pick |
 | G4 | **Topology-change churn, not root ID.** `show spanning-tree bridge` also carries topology-change count and time since last change per scope. For "why is this broken *now*", a VLAN that reconverged 40 seconds ago explains more than which bridge is root |
-| G5 | **MTU and native-VLAN mismatch rules are injected as test faults (§8.3) but described nowhere.** R2 retains the LLDP `Maximum Frame Size` TLV without saying what compares it to the local MTU |
+| ~~G5~~ | ~~**MTU and native-VLAN mismatch rules are injected as test faults (§8.3) but described nowhere.** R2 retains the LLDP `Maximum Frame Size` TLV without saying what compares it to the local MTU~~ **Closed 2026-09-13 (item 11)** for the MTU half: `mtu-mismatch` (§3.5) is the comparison, with an injector of its own. The native-VLAN half stays open and is blocked on retention rather than undescribed — the snapshot carries no native-VLAN field at all |

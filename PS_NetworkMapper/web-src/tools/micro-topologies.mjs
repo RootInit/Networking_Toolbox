@@ -125,8 +125,10 @@ export function setStp(node, port, scopes) {
 const LLDP_COMMON = {
     Reachable: true,
     OrgInfo: [
-        { OUI: '00-12-0f', Subtype: 'MAC/PHY Configuration/Status (1)', Info: 'Autonegotiation enabled, 1000BaseTFD' },
-        { OUI: '00-12-0f', Subtype: 'Maximum Frame Size (4)', Info: '9216' },
+        // The Junos wording, as the generator's own TLVs carry it: a rule written against a paraphrase is
+        // a rule that only ever works here.
+        { OUI: '00-12-0f', Subtype: 'MAC/PHY Configuration/Status (1)', Info: 'Autonegotiation [supported, enabled (0x3)], PMD Autonegotiation Capability (0xc036), MAU Type (0x0)' },
+        { OUI: '00-12-0f', Subtype: 'Maximum Frame Size (4)', Info: 'MTU Size (9216)' },
     ],
     AgeoutCount: 0, TimeToLive: 120, TimeMark: null, AgeSeconds: 30,
     Manufacturer: null, ModelName: null, SerialNumber: null,
