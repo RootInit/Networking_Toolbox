@@ -282,16 +282,42 @@ blocks advertise `[not supported, disabled (0x0)]`, **every one of them a switch
 `poe-denied`'s fault vocabulary is **provisional**: the capture's PoE table prints only `ON` and `OFF`,
 and `OFF` with Admin `Enabled` is the ordinary "nothing plugged in" state, so the values the rule matches
 are derived from documentation rather than observed. A fixture pass there is evidence the plumbing works,
-not that those are the strings a PoE fault prints. It stays provisional: no switch is available to
-confirm it against (2026-09-13), and item 12, which would have settled it, is blocked for the same
-reason. Treat a `poe-denied` finding on hardware as unverified until a real PoE fault has been seen.
+not that those are the strings a PoE fault prints. Treat a `poe-denied` finding on hardware as unverified
+until a real PoE fault has been seen.
+
+**Narrowed 2026-09-14 (item 12).** Juniper's published output-field table for `show poe interface`
+enumerates the Oper-status column as **`ON` / `OFF` / `FAULT` / `Disabled`** — four values, where this
+rule matched five, of which four (`Denied`, `Power-Denied`, `Overload`, `Powered-down`) were invented.
+Matching invented strings made the rule look better-founded than it was, so the predicate is now a
+case-insensitive substring test for `fault` alone, and the fault *reason* (`Overload`,
+`Connection Check error`, …) is documented as a separate `Operational status detail` field the brief
+table does not carry. Still unconfirmed against hardware: what changed is that the guess is now the
+documentation's, not this project's.
 
 The same holds for **R15 on a chassis whose PoE command prints nothing at all**. `Get-JunosCapturedSections`
 records a section key when the command's output is non-whitespace, and a feature-absent command normally
 prints an error, which counts. A command that prints *nothing* is indistinguishable from truncation, and
 the engine would then report `section:POE` — "the capture stopped early" — on a switch that simply has no
-PoE. Unverified for the same reason; the fix, if it turns out to be needed, is worker-side: record the key
-on the command marker rather than on its content.
+PoE.
+
+**Answered 2026-09-14 (item 12), and without needing to know what any given chassis prints.** No public
+capture shows what an EX with no PoE hardware answers, and guessing the string would have been the same
+mistake §8.2 catalogues four times. The fix is structural instead, and it holds whatever the string turns
+out to be. Three states, recorded separately:
+
+| State | `SectionsAttempted` | `SectionsCaptured` | `SectionErrors` | Means |
+|---|---|---|---|---|
+| Normal | yes | yes | — | the command answered with data |
+| Refused | yes | yes | the message | the CLI rejected it — a feature-absent chassis, or a release without the command |
+| Silent | yes | no | — | the command ran and printed nothing |
+| Truncated | no | no | — | the session ended before the command was issued |
+
+`SectionsAttempted` is recorded from the **echoed command line**, which proves the command was issued
+whatever it printed, so truncation is now the only state in which a key is absent from it.
+`Get-JunosSectionErrors` anchors on `error:` / `unknown command` / `syntax error` **in the first three
+non-blank lines only** — the word "error" inside an interface counter block is not a refused command.
+The remaining unknown is narrow and harmless: which of "refused" and "silent" a non-PoE EX actually
+produces. Both are now distinguishable from truncation, which is what the guard framework needed.
 
 Measured on a clean 60-device fleet (`--seed 5`): 72 findings across 23 rules, with every two-ended and
 every advertisement-versus-local rule at **zero** — which is the point of the wire-property change noted
@@ -391,7 +417,7 @@ different hat: every "N ports, M down" the UI derives from `Interfaces` would ch
 | R11 **[done]** | VC member `Status` column and `Neighbor List` continuation rows | `lib/Get-JunosNodeData.ps1:314-335` | A stack member that dropped out is invisible |
 | R12 **[done]** | Per-device capture timestamp | `:194-210`, `lib/FleetCrawl.ps1:111-122` | One `ScanTimestamp` covers a crawl spanning many minutes |
 | R13 **[done]** | LLDP-MED `Model name`, `Manufacturer`, `Serial number`, revisions | `:517-552` | Present on 25 of 43 blocks; phone/AP model is currently unknowable |
-| R15 **[done]** | **`SectionsCaptured[]` from `$DataDict`** | `lib/Get-JunosNodeData.ps1:264-292` | §2.4. The only truncation signal that survives §4.3 |
+| R15 **[done]** | **`SectionsCaptured[]` from `$DataDict`**, joined 2026-09-14 by `SectionsAttempted[]` and `SectionErrors{}` | `lib/Get-JunosNodeData.ps1:264-292` | §2.4. The truncation signal that survives §4.3 — now three signals, which is what tells a refused command and a silent one apart from a session that ended early (§3.5) |
 
 **R14 (comments, not behaviour). [done]** Document at the field that `Vlans[].RoutingInstance`
 (`lib/JunosParsers.ps1:92`) is the **L2 switching instance, not an L3 VRF**; and that `Interfaces[]`
@@ -472,15 +498,88 @@ rather than a prerequisite. Everything else is cut unless it earns a place.
 
 | Replace | With | Gains | Risk |
 |---|---|---|---|
-| `show arp no-resolve` | `show arp no-resolve expiration-time` | ARP entry age, which materially cuts duplicate-IP false positives | **Low — verified.** Same table plus one TTE column; documented option since 8.1. The added column shifts the optional `Flags` capture at `:663`, so the regex needs updating with it |
-| `show vlans` | `show vlans extensive` | Per-interface `ge-0/0/20.0*, tagged, trunk` lines: the active marker, **tagged/untagged (i.e. native VLAN)** and **port mode** — which is most of what `show ethernet-switching interface` was wanted for | **Medium — needs a one-off check on hardware.** Juniper's published sample output for `extensive` shows **no routing instance**, and the parser keys `$VlanDict` on `"<instance>\|<name>"` to disambiguate a VLAN name reused across instances (`:580-586`). Harmless on a single-instance fleet; on a multi-instance fleet the name-only fallback must detect two same-named VLANs with different tags and refuse the join rather than guess. **Confirm the ELS form before committing** |
-| `show dot1x interface` | `show dot1x interface detail` | `Authenticated VLAN` and `Guest VLAN member` per port — i.e. whether a client landed in a fallback VLAN rather than its intended one | **Medium — size unverified.** Per-port stanzas; on a fleet with dot1x on every access port that is ~48 stanzas per switch. **Measure the output against the 120 s cap before committing**; if it is large, keep the brief form and take per-port state from R6 instead |
+| `show arp no-resolve` | `show arp no-resolve expiration-time` | ARP entry age, which materially cuts duplicate-IP false positives | ~~**Low — verified.** Same table plus one TTE column; documented option since 8.1. The added column shifts the optional `Flags` capture at `:663`, so the regex needs updating with it~~ **Landed 2026-09-14 — see §4.3.1.** The documentation also settled two things this row did not anticipate: `Flags` can be two words, and a non-expiring entry prints no TTE at all |
+| `show vlans` | `show vlans extensive` | Per-interface `ge-0/0/20.0*, tagged, trunk` lines: the active marker, **tagged/untagged (i.e. native VLAN)** and **port mode** — which is most of what `show ethernet-switching interface` was wanted for | ~~**Medium — needs a one-off check on hardware.** Juniper's published sample output for `extensive` shows **no routing instance**, and the parser keys `$VlanDict` on `"<instance>\|<name>"` to disambiguate a VLAN name reused across instances (`:580-586`). Harmless on a single-instance fleet; on a multi-instance fleet the name-only fallback must detect two same-named VLANs with different tags and refuse the join rather than guess.~~ **Landed 2026-09-14 — see §4.3.1.** The risk is RETIRED: the ELS stanza does print `Routing instance:`. The real change was that the tag index had to move off the table and onto the parsed objects |
+| `show dot1x interface` | `show dot1x interface detail` | `Authenticated VLAN` and `Guest VLAN member` per port — i.e. whether a client landed in a fallback VLAN rather than its intended one | ~~**Medium — size unverified.** Per-port stanzas; on a fleet with dot1x on every access port that is ~48 stanzas per switch. **Measure the output against the 120 s cap before committing**; if it is large, keep the brief form and take per-port state from R6 instead~~ **Landed 2026-09-14 — see §4.3.1.** ~1,000 lines per switch against `show interfaces extensive`, which already emits several times that — so the size worry is answered by arithmetic. The cap itself stays unmeasured until a switch is available |
 
 #### Added (one command)
 
 | Command | Unlocks |
 |---|---|
-| `show spanning-tree bridge` | Root bridge ID, root cost, root port and protocol per scope — and **topology-change count and time since last change**, which for "why is this broken *now*" matters more than the root ID. Small output (one stanza per scope). Today the root is only *inferred* from "a node with no `ROOT`-role port", and `DesignatedBridge` is not the root ID |
+| `show spanning-tree bridge` | Root bridge ID, root cost, root port and protocol per scope — and **topology-change count and time since last change**, which for "why is this broken *now*" matters more than the root ID. Small output (one stanza per scope). Today the root is only *inferred* from "a node with no `ROOT`-role port", and `DesignatedBridge` is not the root ID **Landed 2026-09-14 — see §4.3.1.** Its headings name the scope, and the parser normalises them to the strings the per-port view uses, so the two join |
+
+### 4.3.1 Built — 2026-09-14: landed from published output, unverified on hardware
+
+All four command changes are in `lib/Get-JunosNodeData.ps1`'s batch, with parsers, fixture data and
+tests. **Every shape below is derived from Juniper's published sample output and from published lab
+captures — not from a device this project has seen.** No switch is available (§3.5), and the user's
+direction was to make the best-supported guess from the documentation rather than leave the item
+blocked. So this is *provisional in a specific way*: the plumbing is tested end to end, and the
+question of whether a real EX prints these exact strings is open. The samples live in the PowerShell
+suite with their source URLs beside them, which is what a real capture gets diffed against.
+
+**What the documentation settled — each of these changed the design:**
+
+- **`show vlans extensive` on ELS DOES print `Routing instance:`**, as the first line of each stanza.
+  §4.3's stated risk — that it does not, and that `$VlanDict`'s `"<instance>|<name>"` key would have
+  nothing to build from — is **retired**. The pre-ELS form prints no instance and falls back to the
+  name-only index, which already refuses a name two instances disagree about.
+- **There are two extensive layouts, not one.** ELS: `VLAN Name:` / `Tag:` / `Interfaces:
+  ge-0/0/0.0*,tagged,trunk`. Pre-ELS: `VLAN: NAME, Created at: …` / `802.1Q Tag: 100, …` with members
+  indented as `ge-0/0/20.0*, tagged, trunk`. Both are parsed, plus `show vlans detail`'s
+  `Untagged interfaces:` / `Tagged interfaces:` lists, so a fleet that answers one command with
+  another still yields membership instead of an empty VLAN list.
+- **The tag index had to move off the table.** The extensive form has no columns to read, so
+  `$VlanDict` and `$VlanNameTagIndex` are now built from the **parsed `Vlans[]` objects**. That is the
+  load-bearing change in the worker: `Clients[].VLAN_Tag` depends on that index, and it now cannot
+  disagree with `Vlans[].Tag` because both come from one parse.
+- **`show arp … expiration-time` appends `TTE` after `Flags`, and `Flags` can be two words**
+  (`permanent published`), while a non-expiring entry prints **no TTE at all**. A "one token" flags
+  capture would have swallowed the number or reported a TTE as a flag, so the capture is anchored to
+  the documented vocabulary (`none|permanent|published|gateway|remote`) with the TTE as its own
+  numeric group. The bracketed physical port the worker already read survives in front of both.
+- **The dot1x size worry is answered by arithmetic, not by hardware.** A detail stanza is ~20 lines;
+  48 ports is ~1,000 lines, against `show interfaces extensive`, which already emits several times
+  that on the same switch and is deliberately issued last for exactly that reason. The brief form's
+  parser is kept for old snapshots and detected by content, not by configuration.
+- **`show spanning-tree bridge`'s headings name the scope**: `STP bridge parameters` (the single
+  RSTP/STP instance), `… for VLAN 100` (VSTP), `… for CIST` and `… for MSTI 1` (MSTP). The parser
+  normalises these to the **same strings `show spanning-tree interface` prints in its own headings** —
+  `instance 0`, `VLAN 100`, `MSTI 1` — because the only reason to collect the bridge view is to join
+  it to per-port state, and a join on two spellings of one instance is not a join. A bare heading
+  mapping to `instance 0` is the one inference here rather than a quotation.
+
+**What is still unmeasured, and cannot be measured without a switch:** the 120-second session cap with
+four changed commands, and whether any given release reflows these stanzas. The parsers read by label
+rather than by column or indentation for that reason, and every one of them returns an empty result
+rather than throwing on text it does not recognise.
+
+**New data on the node**, all additive (§9.5) and `$null`/empty on every existing snapshot:
+
+| Field | From | Unlocks |
+|---|---|---|
+| `Vlans[].Interfaces[].Tagged`, `.Mode` — mirrored onto `Interfaces[].Vlans[]` | `show vlans extensive` | The **native VLAN**: an untagged member of a tagged VLAN on a trunk. G5's second half is no longer blocked on retention |
+| `Interfaces[].Dot1x[].AuthenticatedVlan`, `.GuestVlan` | `show dot1x interface detail` | A supplicant that authenticated **into the wrong VLAN** — guest or server-fail fallback — which the brief form cannot express |
+| `ArpEntries[].Tte` | `show arp no-resolve expiration-time` | Entry age, against duplicate-IP false positives |
+| `StpBridge[]` — `Scope`, `EnabledProtocol`, `RootId`, `RootCost`, `RootPort`, `BridgeId`, `TopologyChangeCount`, `TimeSinceLastChangeSeconds` | `show spanning-tree bridge` | G4. Also makes "this switch **is** the root" a fact rather than an inference from the absence of a `ROOT`-role port |
+| `SectionsAttempted[]`, `SectionErrors{}` | the section splitter | §3.5's R15 question, below |
+
+**Nothing reads the new fields yet, and that is deliberate.** `hasSection` in `rules.js` still consults
+`SectionsCaptured` alone, so a refused PoE section today produces ordinary skips — correct, since those
+ports are not subjects — rather than a "the command was refused" row in the §2.4 histogram. Three
+follow-ons, none of them part of this item: G4's topology-change rule over `StpBridge[]`, a native-VLAN
+mismatch rule over `Tagged`/`Mode`, a dot1x fallback-VLAN rule over `AuthenticatedVlan`, and the
+Diagnostics tab reading `SectionErrors` so the histogram can say *refused* instead of *missing*.
+
+**Provenance of each sample in `Run-Tests.ps1` §19**, graded, because that is the point of keeping them:
+
+| Sample | Grade | Source |
+|---|---|---|
+| `show vlans extensive`, pre-ELS stanza | **Verbatim** from the published sample | the Junos 12.3 `show vlans` page |
+| `show vlans extensive`, ELS stanza | **Summarised** — the current doc page would not render its sample blocks on fetch, so the field names and the `Interfaces: ge-0/0/0.0*,tagged,trunk` spelling come from a search engine's rendering of that page | the current CLI-reference `show vlans` page |
+| `show arp … expiration-time` | **Verbatim** column order and flag vocabulary; the "no TTE on a non-expiring entry" case is read off the published sample's own first row | the Junos 12.3 and current `show arp` pages |
+| `show dot1x interface detail` | **Inferred** — the label strings are documented in the output-field table, the stanza LAYOUT is the standard Junos detail shape and is this project's inference. The parser reads by label for exactly that reason | the current `show dot1x interface` page |
+| `show spanning-tree bridge` | **Documented headings and label list**, plus a published lab capture for the VSTP per-VLAN heading | the EX `show spanning-tree bridge` page and a public VSTP lab writeup |
 
 #### Cut
 
@@ -1188,6 +1287,12 @@ the repo.** Existing invariants to preserve: error counters keyed by label, neve
 member-line matching case-sensitive (`LOBBY`/`GENERAL`/`EMERGENCY` collide with `lo`/`ge`/`em` under
 PowerShell's case-insensitive `-match`).
 
+**§19, added 2026-09-14 with item 12: the provenance section.** 23 cases over the four Phase 3
+commands, each sample carrying the URL it was derived from. These are the tree's record of what
+Juniper's documentation says these commands print, and they exist to be *diffed against a real
+capture* when one becomes available — a case failing there is the documentation being wrong about
+hardware, which is a finding rather than a regression. Nothing in them came from a device.
+
 ### 8.6 Automation
 
 No CI, no test script, both suites manual. A single runner is a cheap prerequisite — but it **must
@@ -1528,15 +1633,20 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
     Appendix A's L1 column is superseded; and `lag-member-down` has no fixture injector, because the
     fixture holds no aggregate at all and one invented inside `injectFaults` would put ordinary topology
     behind a fault manifest.
-12. **Phase 3 command changes** (§4.3): verify the two upgrades on real hardware, then land the three
+12. ~~**Phase 3 command changes** (§4.3): verify the two upgrades on real hardware, then land the three
     in-place replacements and `show spanning-tree bridge`, measuring session time against the 120 s
-    cap each time. The exact-matcher fix is worth doing alongside but no longer gates this.
-    **BLOCKED 2026-09-13 — no switch available.** Every part of this item is a claim about what a real
-    device prints and how long it takes to print it; a fixture cannot produce that evidence, and writing
-    parsers against guessed output is how the four vocabulary defects at §8.2 got in. Two open questions
-    queue behind it, both recorded at §3.5: `poe-denied`'s fault vocabulary, and R15's behaviour when a
-    feature-absent command prints nothing. Resume when a switch (or a saved capture of the §4.3 commands
-    from one) is available. Items 13 and 14 do not depend on it.
+    cap each time.~~ **Landed 2026-09-14 from published output; UNVERIFIED on hardware.** Blocked
+    2026-09-13 for want of a switch, then re-scoped on direction: make the best-supported guess from
+    Juniper's documentation and published lab captures rather than leave the item stalled. All four
+    command changes, their parsers, their fixture counterparts and 23 PowerShell cases are in — see
+    §4.3.1 for what the documentation settled (the ELS stanza *does* carry `Routing instance:`, the
+    two extensive layouts, the ARP column order, the bridge-view headings) and for the two things that
+    stay unmeasured: the 120 s session cap with four changed commands, and whether a given release
+    reflows these stanzas. The parsers read by label rather than by column for that reason. §3.5's two
+    open questions are answered with it: `poe-denied`'s vocabulary is narrowed to the documented
+    `FAULT`, and R15's third state is now structural (`SectionsAttempted` / `SectionErrors`) rather
+    than dependent on a string nobody has seen. **What is still owed is a hardware capture of the four
+    commands, diffed against the samples in `Run-Tests.ps1` §19.**
 13. ~~**L2 and L3 rules** gated on the commands they need.~~ **Done 2026-09-14.** Sixteen rules — eleven
     L2, five L3 — on the item-11 engine, one injector each, the delta oracle extended to all three
     layers. See §3.6 for the catalogue and for what stayed out: every command-dependent rule (G4
@@ -1591,5 +1701,5 @@ by today's data.
 | **G1** | **MAC learning as per-hop path verification.** The spec computes a path and never *checks* it. At each hop, the destination's MAC should be learned on the port facing the next hop — direct forwarding-plane evidence, far stronger than "both ends report FWD". The data exists (1030 entries in the capture) and `:674` discards exactly the transit sightings needed. R3 retains them; nothing in §6 uses them. **The largest missed opportunity in the document.** |
 | ~~G2~~ | ~~**Per-VLAN STP scope drift between neighbours.** A link where one end runs an instance for VLAN *T* and the other does not. Detectable today by comparing each end's `StpDetail` scope set against its `Vlans` membership. §6.3 only compares states within a scope both ends have. With 4 of 17 VLANs instance-less on one device, not hypothetical~~ **Closed 2026-09-14 (item 13):** `stp-scope-drift` (§3.6) is the comparison, with an injector that plants it on an already-blocked link so the forwarding tree is untouched |
 | ~~G3~~ | ~~**VRRP is partly detectable** and §6.3 says it is not. The `00:00:5e:00:01:xx` virtual-MAC prefix appears in the capture's MAC table and identifies both VRRP presence and the VRID. It gives no master/backup, but "this VLAN's gateway is a VIP, so the L3 hop is one of N routers" beats §6.4's single pick. **Placed 2026-09-14 (item 13):** not a rule — a VIP on a trunk is how VRRP is meant to look — so the detection ships as `vridOf` for §6.4 to report with its gateway pick, and `duplicate-mac-across-devices` skips those MACs.~~ **Closed 2026-09-14 (item 14):** `gatewayCandidates` reports every VIP and its VRID beside its candidates, filtered by the path's VLAN — see §6.4 |
-| G4 *(blocked)* | **Topology-change churn, not root ID.** `show spanning-tree bridge` also carries topology-change count and time since last change per scope. For "why is this broken *now*", a VLAN that reconverged 40 seconds ago explains more than which bridge is root. Needs the §4.3 command, so it queues behind item 12 — see §3.6 |
-| ~~G5~~ | ~~**MTU and native-VLAN mismatch rules are injected as test faults (§8.3) but described nowhere.** R2 retains the LLDP `Maximum Frame Size` TLV without saying what compares it to the local MTU~~ **Closed 2026-09-13 (item 11)** for the MTU half: `mtu-mismatch` (§3.5) is the comparison, with an injector of its own. The native-VLAN half stays open and is blocked on retention rather than undescribed — the snapshot carries no native-VLAN field at all |
+| G4 *(unblocked)* | **Topology-change churn, not root ID.** `show spanning-tree bridge` also carries topology-change count and time since last change per scope. For "why is this broken *now*", a VLAN that reconverged 40 seconds ago explains more than which bridge is root. ~~Needs the §4.3 command, so it queues behind item 12~~ **The command landed 2026-09-14 (§4.3.1)**: `StpBridge[].TopologyChangeCount` and `.TimeSinceLastChangeSeconds` are retained and in the fixture, per scope, joinable to `StpDetail` by scope string. No rule reads them yet — the rule is the follow-on |
+| ~~G5~~ | ~~**MTU and native-VLAN mismatch rules are injected as test faults (§8.3) but described nowhere.** R2 retains the LLDP `Maximum Frame Size` TLV without saying what compares it to the local MTU~~ **Closed 2026-09-13 (item 11)** for the MTU half: `mtu-mismatch` (§3.5) is the comparison, with an injector of its own. ~~The native-VLAN half stays open and is blocked on retention rather than undescribed — the snapshot carries no native-VLAN field at all~~ **Unblocked 2026-09-14 (item 12):** `show vlans extensive` annotates each member `tagged`/`untagged` with its port mode, so an untagged member of a tagged VLAN on a trunk IS the native VLAN. `Vlans[].Interfaces[].Tagged`/`.Mode` are retained and in the fixture, where every trunk carries exactly one untagged VLAN so the two ends agree by construction and a mismatch can only be injected deliberately. The comparison itself is the follow-on rule |

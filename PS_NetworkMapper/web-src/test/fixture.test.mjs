@@ -1207,5 +1207,125 @@ test('R3: the MAC table is consistent with Clients and contains a duplicate to d
     }
 });
 
+// Section 4.3's three command upgrades and one addition, as data. These are what a hardware capture
+// gets diffed against: every field here is derived from Juniper's published output, not from a device
+// this project has seen, and a real capture disagreeing with one of them is the finding.
+test('the bridge view is per scope, and joins to the per-port view by the same scope string', () => {
+    const scanned = topology.filter(d => d.ScanStatus === 'Ok' && d.SectionsCaptured.includes('STP_BRIDGE'));
+    assert.ok(scanned.length > 5, 'no scanned device reports the bridge view');
+    let roots = 0;
+    for (const d of scanned) {
+        assert.equal(d.StpBridge.length, 1, `${d.DeviceIP} runs one RSTP instance, so it has one stanza`);
+        const bridge = d.StpBridge[0];
+        // The whole reason to collect this: a join on two spellings of one instance is not a join.
+        const portScopes = new Set(d.Interfaces.flatMap(r => Object.keys(r.StpDetail || {})));
+        assert.ok(portScopes.has(bridge.Scope), `${d.DeviceIP} bridge scope ${bridge.Scope} matches no port scope`);
+        assert.ok(Number.isInteger(bridge.TopologyChangeCount) && bridge.TopologyChangeCount >= 0);
+        assert.ok(bridge.TimeSinceLastChangeSeconds >= 3600, 'a converged fleet last reconverged long ago');
+        assert.ok(/^\d+\.[0-9A-F:]{17}$/.test(bridge.BridgeId), `bad bridge id ${bridge.BridgeId}`);
+        if (bridge.RootId === bridge.BridgeId) {
+            roots++;
+            // Being the root IS having no root port and no cost to reach it - the fact the engine
+            // currently has to infer from the absence of a ROOT-role port.
+            assert.equal(bridge.RootPort, null);
+            assert.equal(bridge.RootCost, 0);
+        } else {
+            assert.ok(bridge.RootPort, `${d.DeviceIP} is not the root, so it has a root port`);
+            const row = d.Interfaces.find(r => r.Port === bridge.RootPort);
+            assert.ok(row, `${d.DeviceIP} root port ${bridge.RootPort} is not one of its ports`);
+            assert.equal((row.StpDetail['instance 0'] || {}).Role, 'ROOT',
+                'the port the bridge view names as root is the port the per-port view roles ROOT');
+        }
+    }
+    assert.equal(roots, 1, 'exactly one device in the fleet is the root bridge');
+});
+
+test('VLAN membership carries tagging and port mode - the native VLAN, which is G5s other half', () => {
+    let natives = 0;
+    let access = 0;
+    for (const d of topology.filter(x => x.ScanStatus === 'Ok')) {
+        for (const vlan of d.Vlans) {
+            for (const member of vlan.Interfaces) {
+                assert.ok(member.Mode === 'trunk' || member.Mode === 'access', `bad mode ${member.Mode}`);
+                assert.equal(typeof member.Tagged, 'boolean');
+                // An access port's VLAN is always untagged; that is what access means.
+                if (member.Mode === 'access') { assert.equal(member.Tagged, false); access++; }
+            }
+        }
+        // Per trunk port: exactly one untagged VLAN, and that is the native VLAN.
+        const trunkPorts = new Map();
+        for (const vlan of d.Vlans) {
+            for (const m of vlan.Interfaces.filter(x => x.Mode === 'trunk')) {
+                if (!trunkPorts.has(m.Port)) trunkPorts.set(m.Port, []);
+                trunkPorts.get(m.Port).push({ tag: vlan.Tag, tagged: m.Tagged });
+            }
+        }
+        for (const [port, members] of trunkPorts) {
+            const untagged = members.filter(m => !m.tagged);
+            assert.equal(untagged.length, 1, `${d.DeviceIP} ${port} has ${untagged.length} native VLANs`);
+            natives++;
+        }
+        // The per-port view carries the same two fields, or a rule reading one of them sees nothing.
+        for (const row of d.Interfaces) {
+            for (const v of row.Vlans || []) {
+                assert.equal(typeof v.Tagged, 'boolean', `${d.DeviceIP} ${row.Port} VLAN ${v.Tag} has no Tagged`);
+                assert.ok(v.Mode, `${d.DeviceIP} ${row.Port} VLAN ${v.Tag} has no Mode`);
+            }
+        }
+    }
+    assert.ok(natives > 10 && access > 10, `only ${natives} trunks and ${access} access members exercise this`);
+});
+
+test('dot1x carries the VLAN a supplicant actually landed in, and only when it is authenticated', () => {
+    let authenticated = 0;
+    let guest = 0;
+    for (const d of topology.filter(x => x.ScanStatus === 'Ok')) {
+        for (const row of d.Interfaces) {
+            for (const entry of row.Dot1x || []) {
+                assert.ok('AuthenticatedVlan' in entry && 'GuestVlan' in entry);
+                if (entry.State === 'Authenticated') {
+                    assert.ok(entry.AuthenticatedVlan, `${d.DeviceIP} ${row.Port} is authenticated into no VLAN`);
+                    authenticated++;
+                } else {
+                    // Not authenticated is not "authenticated into nothing"; it has no VLAN at all.
+                    assert.equal(entry.AuthenticatedVlan, null);
+                }
+                if (entry.GuestVlan) guest++;
+            }
+        }
+    }
+    assert.ok(authenticated > 10, `only ${authenticated} authenticated supplicants`);
+    assert.ok(guest > 0, 'no port has a guest VLAN configured, so the fallback case is untested');
+});
+
+test('ARP entries carry seconds-to-expiry', () => {
+    const entries = topology.flatMap(d => d.ArpEntries);
+    assert.ok(entries.length > 20, 'not enough ARP entries to test');
+    for (const entry of entries) {
+        assert.ok(Number.isInteger(entry.Tte) && entry.Tte > 0 && entry.Tte <= 1200,
+            `${entry.IP} has a nonsensical TTE: ${entry.Tte}`);
+    }
+});
+
+test('a chassis with no PoE hardware says the command was refused, not that the capture stopped', () => {
+    const refused = topology.filter(d => d.SectionErrors && d.SectionErrors.POE);
+    assert.ok(refused.length > 0, 'no non-PoE chassis in the fleet, so R15s third state is untested');
+    for (const d of refused) {
+        // The section IS captured - the refusal is its content - so a reader that only checks
+        // SectionsCaptured sees no gap, which is exactly why the error map has to exist.
+        assert.ok(d.SectionsCaptured.includes('POE'));
+        assert.ok(d.Interfaces.every(r => r.PoeOperStatus === null),
+            `${d.DeviceIP} refused the PoE command and still reports PoE status`);
+        assert.ok(d.StackMembers.every(m => !/-\d+(P|MP)$/i.test(m.Model)),
+            `${d.DeviceIP} has PoE hardware and should not be refusing the command`);
+    }
+    // And every device that answered has the two lists agreeing, which is what makes a disagreement
+    // meaningful at all.
+    for (const d of topology.filter(x => x.ScanStatus === 'Ok')) {
+        assert.deepEqual(d.SectionsAttempted, d.SectionsCaptured,
+            `${d.DeviceIP}: a section that was attempted and printed nothing is not modelled yet`);
+    }
+});
+
 // Mirrors window.asArray, which is what the app uses for every PowerShell-emitted collection.
 function window_asArray(v) { return Array.isArray(v) ? v : (v === null || v === undefined ? [] : [v]); }

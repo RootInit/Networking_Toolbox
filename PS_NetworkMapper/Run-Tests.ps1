@@ -2247,8 +2247,11 @@ Test-Case "C4: the client join defaults to `$null, the same absent-tag value Vla
         $JunosNodeDataSrc -notmatch '\$VlanTag = "Unknown"'
 }
 Test-Case "C4: the name-to-tag dictionaries the join reads hold ints, not the regex's strings" {
-    $JunosNodeDataSrc -match '\$TagForRow = \[int\]\$TagForRow' -and
-        $JunosNodeDataSrc -match '\$VlanDict\[\$Matches\.name\] = \[int\]\$Matches\.tag'
+    # Since section 4.3 replaced "show vlans" with "show vlans extensive" there is no table to read the
+    # index off, so it is built from the parsed Vlans[] - whose Tag the case above pins to [int].
+    $JunosNodeDataSrc -match '(?m)^\s*\$Tag = \[int\]\$Vlan\.Tag\s*$' -and
+        $JunosNodeDataSrc -match '\$VlanDict\[\$Vlan\.Name\] = \$Tag' -and
+        $JunosNodeDataSrc -match '\$VlanDict\["\$\(\$Vlan\.RoutingInstance\)\|\$\(\$Vlan\.Name\)"\] = \$Tag'
 }
 
 # C5. $null seconds meant both "Never" - the healthy state - and "this parser could not read it".
@@ -2280,6 +2283,280 @@ Test-Case "C5: Never and unreadable are distinguishable, which is the whole poin
 Test-Case "C5: the worker reads both halves through the shared parser" {
     $JunosNodeDataSrc -match '\$Flap = ConvertFrom-JunosLastFlapped -Block \$Block' -and
         $JunosNodeDataSrc -match '\$NodeData\.Interfaces\[\$p\]\.LastFlappedState = \$Flap\.State'
+}
+
+Write-Host "`n--- 19. Phase 3 command upgrades (section 4.3) ---" -ForegroundColor Cyan
+
+# Every sample below is shaped after Juniper's PUBLISHED sample output, with the source beside it. No
+# device this project has seen has run these commands - section 4.3 says so, and these cases are what a
+# real capture gets diffed against when one becomes available.
+
+# https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-vlans-bridging-qfx-series.html
+$VlansElsExtensive = @"
+Routing instance: default-switch
+VLAN Name: DATA_VLAN
+State: Active
+Tag: 110
+Internal index: 16, Generation Index: 21, Origin: Static
+MAC aging time: 300 seconds
+Interfaces: ge-0/0/0.0*,tagged,trunk
+           ge-0/0/5.0*,untagged,access
+Number of interfaces: Tagged 1 , Untagged 1
+Total MAC count: 4
+
+Routing instance: default-switch
+VLAN Name: NATIVE_VLAN
+State: Active
+Tag: 999
+Interfaces: ge-0/0/0.0*,untagged,trunk
+Number of interfaces: Tagged 0 , Untagged 1
+Total MAC count: 0
+"@
+$VlansEls = @(ConvertFrom-JunosVlanTable -Text $VlansElsExtensive)
+Test-Case "show vlans extensive (ELS): stanzas yield the same VLAN objects the table form does" {
+    $VlansEls.Count -eq 2 -and
+        $VlansEls[0].Name -eq 'DATA_VLAN' -and $VlansEls[0].Tag -eq 110 -and $VlansEls[0].Tag -is [int] -and
+        $VlansEls[0].RoutingInstance -eq 'default-switch' -and $VlansEls[0].Interfaces.Count -eq 2
+}
+Test-Case "show vlans extensive: the member's tagging and port mode are kept - G5's native VLAN" {
+    $Trunk = @($VlansEls[0].Interfaces | Where-Object { $_.Port -eq 'ge-0/0/0' })[0]
+    $Access = @($VlansEls[0].Interfaces | Where-Object { $_.Port -eq 'ge-0/0/5' })[0]
+    # An UNTAGGED member of a TAGGED VLAN on a trunk port is that trunk's native VLAN, and this is the
+    # only output the scan collects that says so.
+    $Native = @($VlansEls[1].Interfaces)[0]
+    $Trunk.Tagged -eq $true -and $Trunk.Mode -eq 'trunk' -and $Trunk.Active -eq $true -and
+        $Access.Tagged -eq $false -and $Access.Mode -eq 'access' -and
+        $Native.Tagged -eq $false -and $Native.Mode -eq 'trunk' -and $VlansEls[1].Tag -eq 999
+}
+Test-Case "show vlans (table form) leaves Tagged and Mode `$null - unmeasured, not untagged" {
+    $Member = @($VlansRi[0].Interfaces)[0]
+    $null -eq $Member.Tagged -and $null -eq $Member.Mode
+}
+
+# https://www.juniper.net/documentation/en_US/junos12.3/topics/reference/command-summary/show-vlans-bridging-ex-series.html
+$VlansPreElsExtensive = @"
+VLAN: COM1, Created at: Tue May 11 18:16:05 2010
+802.1Q Tag: 100, Internal index: 3, Admin State: Enabled, Origin: Static
+Protocol: Port Mode, Mac aging time: 300 seconds
+Number of interfaces: Tagged 2 (Active = 2), Untagged  1 (Active = 1)
+      ge-0/0/20.0*, tagged, trunk
+      ge-0/0/22.0*, tagged, trunk, pvlan-trunk
+      ge-0/0/7.0, untagged, access
+
+VLAN: legacy, Created at: Tue May 11 18:16:05 2010
+Internal index: 5, Admin State: Enabled, Origin: Static
+Number of interfaces: Tagged 0 (Active = 0), Untagged  0 (Active = 0)
+"@
+$VlansPreEls = @(ConvertFrom-JunosVlanTable -Text $VlansPreElsExtensive)
+Test-Case "show vlans extensive (pre-ELS): the other stanza layout parses too" {
+    $VlansPreEls.Count -eq 2 -and $VlansPreEls[0].Name -eq 'COM1' -and $VlansPreEls[0].Tag -eq 100 -and
+        $VlansPreEls[0].Interfaces.Count -eq 3 -and
+        @($VlansPreEls[0].Interfaces | Where-Object { $_.Port -eq 'ge-0/0/7' })[0].Tagged -eq $false -and
+        # A down member prints no "*", and a VLAN with no 802.1Q tag prints no tag line at all.
+        @($VlansPreEls[0].Interfaces | Where-Object { $_.Port -eq 'ge-0/0/7' })[0].Active -eq $false -and
+        $null -eq $VlansPreEls[1].Tag -and $VlansPreEls[1].Interfaces.Count -eq 0
+}
+Test-Case "an unrecognised VLANS layout yields no VLANs rather than throwing" {
+    @(ConvertFrom-JunosVlanTable -Text "error: syntax error, expecting <command>").Count -eq 0
+}
+
+# The join the whole Clients[].VLAN_Tag path depends on is now built from these objects, since the
+# extensive form has no table to read columns off.
+Test-Case "the name-to-tag index survives the upgrade: every tagged VLAN is in it, as an int" {
+    $Index = @{}
+    foreach ($V in $VlansEls) { if ($null -ne $V.Tag) { $Index[$V.Name] = [int]$V.Tag } }
+    $Index['DATA_VLAN'] -eq 110 -and $Index['NATIVE_VLAN'] -eq 999 -and $Index.Count -eq 2
+}
+
+# https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-dot1x-interface-802-1x-security.html
+$Dot1xDetailSample = @"
+ge-0/0/16.0
+  Role: Authenticator
+  Administrative state: Auto
+  Supplicant mode: Multiple
+  Guest VLAN member: guest-vlan
+  Number of connected supplicants: 2
+    Supplicant: user1, 00:00:00:00:13:23
+      Operational state: Authenticated
+      Authentication method: Radius
+      Authenticated VLAN: v200
+      Session Reauth interval: 60 seconds
+    Supplicant: 00:30:48:8c:66:bd, 00:30:48:8c:66:bd
+      Operational state: Held
+      Authentication method: Mac Radius
+      Authenticated VLAN: <not configured>
+ge-0/0/17.0
+  Role: Authenticator
+  Guest VLAN member: <not configured>
+  Number of connected supplicants: 0
+"@
+$Dot1xDetail = ConvertFrom-JunosDot1xInterface -Text $Dot1xDetailSample
+Test-Case "show dot1x interface detail: one row per supplicant, keyed by physical port" {
+    $Dot1xDetail.Keys.Count -eq 2 -and @($Dot1xDetail['ge-0/0/16']).Count -eq 2 -and
+        @($Dot1xDetail['ge-0/0/16'])[0].State -eq 'Authenticated' -and
+        @($Dot1xDetail['ge-0/0/16'])[0].MacAddress -eq '00:00:00:00:13:23' -and
+        @($Dot1xDetail['ge-0/0/16'])[0].User -eq 'user1' -and
+        @($Dot1xDetail['ge-0/0/16'])[1].State -eq 'Held'
+}
+Test-Case "show dot1x interface detail: the fallback-VLAN fields the upgrade is for" {
+    # Authenticated AND on the wrong network is a state the brief table cannot express.
+    @($Dot1xDetail['ge-0/0/16'])[0].AuthenticatedVlan -eq 'v200' -and
+        @($Dot1xDetail['ge-0/0/16'])[0].GuestVlan -eq 'guest-vlan' -and
+        # "<not configured>" is the switch saying there is none, which is not a VLAN named that.
+        $null -eq @($Dot1xDetail['ge-0/0/16'])[1].AuthenticatedVlan -and
+        $null -eq @($Dot1xDetail['ge-0/0/17'])[0].GuestVlan
+}
+Test-Case "a dot1x port with no supplicant still yields a row - R6's whole point" {
+    @($Dot1xDetail['ge-0/0/17']).Count -eq 1 -and
+        $null -eq @($Dot1xDetail['ge-0/0/17'])[0].State -and
+        @($Dot1xDetail['ge-0/0/17'])[0].Role -eq 'Authenticator'
+}
+Test-Case "under MAC RADIUS the username IS the MAC, and is not recorded as a username" {
+    $null -eq @($Dot1xDetail['ge-0/0/16'])[1].User -and
+        @($Dot1xDetail['ge-0/0/16'])[1].MacAddress -eq '00:30:48:8c:66:bd'
+}
+Test-Case "the brief dot1x table still parses, with the detail-only fields `$null" {
+    $Brief = ConvertFrom-JunosDot1xInterface -Text "  ge-0/0/1.0     Authenticator     Authenticated    00:11:22:33:44:55  CORP\\jdoe"
+    @($Brief['ge-0/0/1']).Count -eq 1 -and @($Brief['ge-0/0/1'])[0].State -eq 'Authenticated' -and
+        $null -eq @($Brief['ge-0/0/1'])[0].AuthenticatedVlan
+}
+Test-Case "the MAC-keyed dot1x dictionary is built from the parsed rows, not a second table regex" {
+    # A second regex over the raw text would have silently emptied every client's dot1x state the
+    # moment the command became "detail", which prints stanzas rather than a table.
+    $JunosNodeDataSrc -match '(?m)^\s*foreach \(\$D1xPort in \$Dot1xByPort\.Keys\) \{\s*$' -and
+        $JunosNodeDataSrc -match '\$Dot1xDict\[\$Entry\.MacAddress\] = @\{'
+}
+
+# https://www.juniper.net/documentation/en_US/junos/topics/reference/command-summary/show-spanning-tree-bridge-spanning-trees-ex-series.html
+# https://netlabs.gitbook.io/juniper/6-stp-rstp-vstp-mstp/vstp
+$StpBridgeSample = @"
+STP bridge parameters
+  Context ID                          : 0
+  Enabled protocol                    : RSTP
+  Root ID                             : 32768.00:13:c3:9e:c8:80
+  Root cost                           : 20000
+  Root port                           : ge-0/0/0
+  Hello time                          : 2 seconds
+  Number of topology changes          : 3
+  Time since last topology change     : 1191 seconds
+  Local parameters
+    Bridge ID                         : 32768.00:19:e2:50:9e:80
+    Extended system ID                : 0
+
+STP bridge parameters for VLAN 100
+  Root ID                             : 100.02:05:86:71:d7:02
+  Number of topology changes          : 1
+  Time since last topology change     : 40 seconds
+  Local parameters
+    Bridge ID                         : 100.02:05:86:71:d7:02
+
+STP bridge parameters for MSTI 1
+  Root ID                             : 32769.00:13:c3:9e:c8:80
+  Number of topology changes          : 0
+"@
+$StpBridge = @(ConvertFrom-JunosStpBridge -Text $StpBridgeSample)
+Test-Case "show spanning-tree bridge: one record per scope, in the scope strings the port view uses" {
+    # The ONLY reason to collect this is to join it to per-port state, and a join on two spellings of
+    # one instance is not a join: "show spanning-tree interface" heads the single RSTP instance
+    # "instance 0", so a bare "STP bridge parameters" heading has to normalise to the same string.
+    $StpBridge.Count -eq 3 -and
+        $StpBridge[0].Scope -eq 'instance 0' -and $StpBridge[1].Scope -eq 'VLAN 100' -and
+        $StpBridge[2].Scope -eq 'MSTI 1'
+}
+Test-Case "show spanning-tree bridge: G4's two fields, plus root and local bridge identity" {
+    $StpBridge[0].TopologyChangeCount -eq 3 -and $StpBridge[0].TimeSinceLastChangeSeconds -eq 1191 -and
+        $StpBridge[0].RootId -eq '32768.00:13:c3:9e:c8:80' -and $StpBridge[0].RootCost -eq 20000 -and
+        $StpBridge[0].RootPort -eq 'ge-0/0/0' -and $StpBridge[0].EnabledProtocol -eq 'RSTP' -and
+        # Local parameters, so "this switch IS the root" stops being an inference from role columns.
+        $StpBridge[0].BridgeId -eq '32768.00:19:e2:50:9e:80'
+}
+Test-Case "show spanning-tree bridge: a scope that prints fewer fields leaves them `$null, not zero" {
+    $null -eq $StpBridge[2].TimeSinceLastChangeSeconds -and $StpBridge[2].TopologyChangeCount -eq 0 -and
+        $null -eq $StpBridge[2].RootPort -and @(ConvertFrom-JunosStpBridge -Text $null).Count -eq 0
+}
+Test-Case "the spanning-tree bridge section has its own key and cannot collide with the port view" {
+    # The section splitter is a prefix chain, so the two spanning-tree commands must land on different
+    # keys: "spanning-tree bridge" and "spanning-tree interface" share no prefix, and each is matched
+    # by its own branch. The parse is wired to the new key, not to the old one.
+    $JunosNodeDataSrc -match '(?m)spanning-tree bridge\\b.*\$DataDict\["STP_BRIDGE"\] = \$Matches\.content' -and
+        $JunosNodeDataSrc -match '(?m)spanning-tree interface\\b.*\$DataDict\["STP"\] = \$Matches\.content' -and
+        $JunosNodeDataSrc -match '\$NodeData\.StpBridge = @\(ConvertFrom-JunosStpBridge -Text \$DataDict\["STP_BRIDGE"\]\)'
+}
+
+# R15's second open question, answered without knowing what any given chassis prints: a section whose
+# command was REFUSED is not the same as one that never ran.
+$SectionDict = @{
+    POE   = "error: PoE is not supported on this platform"
+    STP   = "Spanning tree interface parameters for instance 0`n  Interface  Port ID"
+    VLANS = "    ^`nsyntax error."
+    LLDP  = ""
+}
+$SectionErrors = Get-JunosSectionErrors -DataDict $SectionDict
+Test-Case "a refused command is recorded as an error, not as a captured section's contents" {
+    $SectionErrors.Count -eq 2 -and $SectionErrors['POE'] -match '^error: PoE' -and
+        $SectionErrors['VLANS'] -match '^syntax error' -and -not $SectionErrors.ContainsKey('STP')
+}
+Test-Case "the word error inside real output is not a refused command" {
+    $Errors = Get-JunosSectionErrors -DataDict @{ INTERFACES_EXT = "  Input errors:`n    Errors: 0, Drops: 0" }
+    $Errors.Count -eq 0
+}
+Test-Case "Get-JunosSectionErrors tolerates a null dictionary the way the captured-sections reader does" {
+    (Get-JunosSectionErrors -DataDict $null).Count -eq 0
+}
+Test-Case "the worker records which sections were ATTEMPTED, so silence and truncation differ" {
+    # A command that printed NOTHING is captured=no, attempted=yes; one the session never reached is
+    # attempted=no. Section 3.5 could not tell those apart, and on a non-PoE chassis that read as
+    # "the capture stopped early" on every port.
+    $JunosNodeDataSrc -match '\$NodeData\.SectionsAttempted = @\(\$DataDict\.Keys' -and
+        $JunosNodeDataSrc -match '\$NodeData\.SectionErrors = Get-JunosSectionErrors'
+}
+
+# The ARP upgrade: one added column, and the flags capture that sits in front of it.
+Test-Case "show arp no-resolve expiration-time: TTE is captured and flags do not swallow it" {
+    $ArpFlagWords = 'none|permanent|published|gateway|remote'
+    $Pattern = "(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)(?:\s+(?<iface>\S+)(?:\s+\[(?<phys>[^\]]+)\])?(?:\s+(?<flags>(?i:$ArpFlagWords)(?:\s+(?i:$ArpFlagWords))*))?(?:\s+(?<tte>\d+))?)?"
+    $Rows = @(
+        @{ Line = "00:90:69:96:00:01 10.10.45.5      fe-0/0/1.0    none 1157"; Flags = 'none'; Tte = '1157' }
+        # Flags are several words on a published static entry, and the number still lands in TTE.
+        @{ Line = "00:00:00:00:00:01 203.0.113.1     fe-0/0/0.0    permanent published"; Flags = 'permanent published'; Tte = '' }
+        # The bracketed physical port the worker already read has to survive the new column.
+        @{ Line = "aa:bb:cc:dd:ee:ff 10.30.9.20      irb.188 [ge-0/0/7.0]  none  300"; Flags = 'none'; Tte = '300' }
+    )
+    $Ok = $true
+    foreach ($Row in $Rows) {
+        if ($Row.Line -notmatch $Pattern) { $Ok = $false; continue }
+        if ($Matches.flags -ne $Row.Flags) { $Ok = $false }
+        if ([string]$Matches.tte -ne $Row.Tte) { $Ok = $false }
+    }
+    $Ok
+}
+Test-Case "an ARP bracket holding a routing instance is not reported as a physical port" {
+    # "irb.500 [.local..9]" - EVPN and logical-system platforms put an instance token where the
+    # other platforms put a port. The bracket capture is old; the gate on it is not.
+    $Line = "aa:bb:cc:dd:ee:01 198.51.100.7    irb.500 [.local..9]  none 1157"
+    $ArpFlagWords = 'none|permanent|published|gateway|remote'
+    $Pattern = "(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)(?:\s+(?<iface>\S+)(?:\s+\[(?<phys>[^\]]+)\])?(?:\s+(?<flags>(?i:$ArpFlagWords)(?:\s+(?i:$ArpFlagWords))*))?(?:\s+(?<tte>\d+))?)?"
+    $Ok = ($Line -match $Pattern) -and $Matches.phys -eq '.local..9'
+    # The gate itself: the instance token must fail the physical-port test that a real port passes.
+    $Ok = $Ok -and ('.local..9' -notmatch "^$Script:JunosPhysPortPattern") -and
+        ('ge-0/0/7.0' -match "^$Script:JunosPhysPortPattern")
+    $Ok -and ($JunosNodeDataSrc -match '\$Matches\.phys -match "\^\$Script:JunosPhysPortPattern"')
+}
+Test-Case "the worker's own ARP regex is the one just proven, and keeps the TTE" {
+    $JunosNodeDataSrc -match "\`$ArpFlagWords = 'none\|permanent\|published\|gateway\|remote'" -and
+        $JunosNodeDataSrc -match 'Tte\s+= if \(\$Matches\.tte\) \{ \[int\]\$Matches\.tte \}'
+}
+
+Test-Case "the batch runs the upgraded commands, in place, and adds only the bridge view" {
+    # Section 4.3's resolution to the prefix collision: replace, never add alongside - the section keys
+    # and the batch length are what must not change.
+    $JunosNodeDataSrc -match 'WriteLine\("show vlans extensive"\)' -and
+        $JunosNodeDataSrc -notmatch 'WriteLine\("show vlans"\)' -and
+        $JunosNodeDataSrc -match 'WriteLine\("show dot1x interface detail"\)' -and
+        $JunosNodeDataSrc -notmatch 'WriteLine\("show dot1x interface"\)' -and
+        $JunosNodeDataSrc -match 'WriteLine\("show arp no-resolve expiration-time"\)' -and
+        $JunosNodeDataSrc -notmatch 'WriteLine\("show arp no-resolve"\)' -and
+        $JunosNodeDataSrc -match 'WriteLine\("show spanning-tree bridge"\)'
 }
 
 Write-Host "`n============================================" -ForegroundColor Cyan

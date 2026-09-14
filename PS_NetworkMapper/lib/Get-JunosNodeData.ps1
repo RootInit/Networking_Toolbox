@@ -149,12 +149,19 @@ function Invoke-InteractiveBatch {
         $Process.StandardInput.WriteLine("show interfaces terse")
         $Process.StandardInput.WriteLine("show interfaces descriptions")
         $Process.StandardInput.WriteLine("show spanning-tree interface")
+        # Section 4.3. One stanza per spanning-tree scope: root ID, root port, and the topology-change
+        # count and age that answer "why is this broken NOW". The only net-new command in the batch;
+        # "spanning-tree bridge" and "spanning-tree interface" are distinct prefixes, so no collision.
+        $Process.StandardInput.WriteLine("show spanning-tree bridge")
         $Process.StandardInput.WriteLine("show poe interface")
-        $Process.StandardInput.WriteLine("show dot1x interface")
+        # Three upgrades in place, not additions: each is a more detailed form of the command it
+        # replaces, so the section key and the batch length are unchanged and the prefix collision
+        # section 4.3 documents never arises.
+        $Process.StandardInput.WriteLine("show dot1x interface detail")
         $Process.StandardInput.WriteLine("show lldp neighbors detail")
-        $Process.StandardInput.WriteLine("show vlans")
+        $Process.StandardInput.WriteLine("show vlans extensive")
         $Process.StandardInput.WriteLine("show ethernet-switching table")
-        $Process.StandardInput.WriteLine("show arp no-resolve")
+        $Process.StandardInput.WriteLine("show arp no-resolve expiration-time")
         # ORDERING: after ARP, then smallest/most-critical first, so a timeout costs the least.
         $Process.StandardInput.WriteLine("show system uptime")
         $Process.StandardInput.WriteLine("show chassis alarms")
@@ -226,6 +233,14 @@ $NodeData = @{
     # subset belonging to it as a filtered view of the same parse.
     LogicalUnits = @()
     SectionsCaptured = @()
+    # R15's other two states: every section key whose command was echoed back (attempted), and the ones
+    # the CLI refused, with the message. Attempted-but-not-captured is "it printed nothing"; captured
+    # with an error here is "the command was refused"; absent from both is truncation.
+    SectionsAttempted = @()
+    SectionErrors = @{}
+    # Section 4.3. Per-scope spanning-tree bridge state: root ID, root port, topology-change count and
+    # the age of the last change. Scope strings match Interfaces[].StpDetail's keys so the two join.
+    StpBridge = @()
     # R12. When THIS device was read. One ScanTimestamp covers a crawl that can span many minutes,
     # which is too coarse to compare counters or last-seen times between devices. $null on a device
     # that never answered - a placeholder has no capture to timestamp.
@@ -297,6 +312,7 @@ try {
         elseif ($Sec -match '^(?i)interfaces descriptions\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["INTERFACES_DESC"] = $Matches.content }
         elseif ($Sec -match '^(?i)interfaces extensive\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["INTERFACES_EXT"] = $Matches.content }
         elseif ($Sec -match '^(?i)spanning-tree interface\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["STP"] = $Matches.content }
+        elseif ($Sec -match '^(?i)spanning-tree bridge\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["STP_BRIDGE"] = $Matches.content }
         elseif ($Sec -match '^(?i)poe interface\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["POE"] = $Matches.content }
         elseif ($Sec -match '^(?i)dot1x interface\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["DOT1X"] = $Matches.content }
         elseif ($Sec -match '^(?i)lldp neighbors detail\b[^\r\n]*[\r\n]+(?<content>(?s).*)$') { $DataDict["LLDP"] = $Matches.content }
@@ -312,6 +328,11 @@ try {
     }
 
     $NodeData.SectionsCaptured = @(Get-JunosCapturedSections -DataDict $DataDict)
+    # R15, extended. A key is ATTEMPTED once its echoed command line was seen, whatever it printed - so
+    # a command that answered with nothing at all (a feature-absent chassis on some releases) is no
+    # longer indistinguishable from a session that was cut off before reaching it.
+    $NodeData.SectionsAttempted = @($DataDict.Keys | Sort-Object | ForEach-Object { [string]$_ })
+    $NodeData.SectionErrors = Get-JunosSectionErrors -DataDict $DataDict
 
     # A virtual chassis emits one "fpcN:" block per member, so a bare -match takes fpc0's, which is not
     # necessarily the master. The prompt's {master:N} marker names the RE that answered - otherwise a
@@ -527,6 +548,9 @@ try {
         if ($NodeData.Interfaces.ContainsKey($Bundle)) { $NodeData.Interfaces[$Bundle].BundleMembers += $MemberPort }
     }
 
+    # Per-scope bridge state, alongside the per-port state below and keyed the same way.
+    $NodeData.StpBridge = @(ConvertFrom-JunosStpBridge -Text $DataDict["STP_BRIDGE"])
+
     # "show spanning-tree interface" repeats a port per VLAN, and a trunk can be BLK in some. The field
     # stays one state string, so repeats collapse by precedence rather than last-VLAN-wins.
     $StpStatePrecedence = @{ BLK = 5; LST = 4; LRN = 3; FWD = 2; DIS = 1 }
@@ -578,10 +602,17 @@ try {
         if ($NodeData.Interfaces.ContainsKey($D1xPort)) { $NodeData.Interfaces[$D1xPort].Dot1x = @($Dot1xByPort[$D1xPort]) }
     }
 
+    # The MAC-keyed view the client join needs, taken from the SAME rows as the per-port view above
+    # rather than from a second regex over the raw text. The detail form (section 4.3) is stanzas, not
+    # a table, so a second table-shaped regex would have silently emptied every client's dot1x state.
     $Dot1xDict = @{}
-    foreach ($Line in ($DataDict["DOT1X"] -split "`n")) {
-        if ($Line -match "(?<interface>\S+)\s+(?:Authenticator)?\s+(?<state>Authenticated|Initialize|Connecting|Held|Auto)\s+(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})(?:\s+(?<user>[^\s\r\n]+))?") {
-            $Dot1xDict[$Matches.mac.ToLower()] = @{ State = $Matches.state; User = if ($Matches.user) { $Matches.user } else { "Unknown" } }
+    foreach ($D1xPort in $Dot1xByPort.Keys) {
+        foreach ($Entry in $Dot1xByPort[$D1xPort]) {
+            if (-not $Entry.MacAddress) { continue }
+            $Dot1xDict[$Entry.MacAddress] = @{
+                State = if ($Entry.State) { $Entry.State } else { "Unknown" }
+                User  = if ($Entry.User) { $Entry.User } else { "Unknown" }
+            }
         }
     }
 
@@ -647,56 +678,43 @@ try {
         }
     }
 
-    # "show vlans" is "VLAN name  Tag  Interfaces", but gains a leading "Routing instance" column under
-    # e.g. default-switch - detect the layout from the header, or VLAN_Tag is $null for every
-    # client. $VlanDict is keyed "<instance>|<name>" there; $VlanNameTagIndex is a name-only fallback
-    # for the MAC-table join, nulled the moment two instances disagree.
+    # ONE parse of the VLANS section, whichever command produced it. "show vlans" prints a table and
+    # "show vlans extensive" prints one stanza per VLAN (section 4.3), so the name->tag index the whole
+    # Clients[].VLAN_Tag join depends on can no longer be read off the table's columns - it is built
+    # from the parsed objects instead, which also means the join and Vlans[] cannot disagree about a tag.
+    # $VlanDict is keyed "<instance>|<name>" where an instance is printed; $VlanNameTagIndex is the
+    # name-only fallback, nulled the moment two instances disagree about one name.
+    $NodeData.Vlans = @(ConvertFrom-JunosVlanTable -Text $DataDict["VLANS"])
     $VlanDict = @{}
     $VlanNameTagIndex = @{}
-    $HasRoutingInstanceColumn = $DataDict["VLANS"] -match "(?im)^\s*Routing instance\s"
-    $LastSeenInstance = $null
-    foreach ($Line in ($DataDict["VLANS"] -split "`n")) {
-        if ($HasRoutingInstanceColumn) {
-            $InstForRow = $null
-            $NameForRow = $null
-            $TagForRow = $null
-            if ($Line -match "^(?<inst>\S+)\s+(?<name>\S+)\s+(?<tag>\d+)") {
-                $InstForRow = $Matches.inst
-                $NameForRow = $Matches.name
-                $TagForRow = $Matches.tag
-                $LastSeenInstance = $InstForRow
-            } elseif ($LastSeenInstance -and $Line -match "^(?<name>\S+)\s+(?<tag>\d+)") {
-                # Carry the last instance forward across a continuation row; gated on a prior 3-token row.
-                $InstForRow = $LastSeenInstance
-                $NameForRow = $Matches.name
-                $TagForRow = $Matches.tag
-            }
-            if ($null -ne $InstForRow) {
-                # C4. Int, not the regex's string: Vlans[].Tag is already an int and Clients[].VLAN_Tag
-                # read from this dictionary, so the two shapes disagreed for the same VLAN.
-                $TagForRow = [int]$TagForRow
-                $VlanDict["$InstForRow|$NameForRow"] = $TagForRow
-                if ($VlanNameTagIndex.ContainsKey($NameForRow)) {
-                    if ($null -ne $VlanNameTagIndex[$NameForRow] -and $VlanNameTagIndex[$NameForRow] -ne $TagForRow) {
-                        $VlanNameTagIndex[$NameForRow] = $null
-                    }
-                } else {
-                    $VlanNameTagIndex[$NameForRow] = $TagForRow
-                }
+    foreach ($Vlan in $NodeData.Vlans) {
+        # C4. Already an int from the parser; a VLAN with no 802.1Q tag has $null and is not a join key.
+        if ($null -eq $Vlan.Tag -or [string]::IsNullOrWhiteSpace([string]$Vlan.Name)) { continue }
+        $Tag = [int]$Vlan.Tag
+        if ([string]::IsNullOrWhiteSpace([string]$Vlan.RoutingInstance)) {
+            $VlanDict[$Vlan.Name] = $Tag
+        } else {
+            $VlanDict["$($Vlan.RoutingInstance)|$($Vlan.Name)"] = $Tag
+        }
+        if ($VlanNameTagIndex.ContainsKey($Vlan.Name)) {
+            if ($null -ne $VlanNameTagIndex[$Vlan.Name] -and $VlanNameTagIndex[$Vlan.Name] -ne $Tag) {
+                $VlanNameTagIndex[$Vlan.Name] = $null
             }
         } else {
-            if ($Line -match "^(?<name>\S+)\s+(?<tag>\d+)") { $VlanDict[$Matches.name] = [int]$Matches.tag }
+            $VlanNameTagIndex[$Vlan.Name] = $Tag
         }
     }
 
-    # The same section parsed for everything it carries, not just the name->tag join above. Kept as a
-    # second pass so the tag lookup the MAC-table join depends on is unchanged by this.
-    $NodeData.Vlans = @(ConvertFrom-JunosVlanTable -Text $DataDict["VLANS"])
+    # Membership onto the per-port view, from the same parse the tag index above came from.
     foreach ($Vlan in $NodeData.Vlans) {
         foreach ($Member in $Vlan.Interfaces) {
             if (-not $NodeData.Interfaces.ContainsKey($Member.Port)) { continue }
             $NodeData.Interfaces[$Member.Port].Vlans += [PSCustomObject]@{
                 Name = $Vlan.Name; Tag = $Vlan.Tag; Unit = $Member.Unit; Active = $Member.Active
+                # Only "show vlans extensive" prints these (section 4.3). $null is unmeasured: an
+                # untagged member of a tagged VLAN on a trunk is that trunk's native VLAN, and a
+                # missing field must not be read as "tagged" or the comparison inverts.
+                Tagged = $Member.Tagged; Mode = $Member.Mode
             }
         }
     }
@@ -760,15 +778,25 @@ try {
         # The Interface column names the L3 interface the entry was learned on ("irb.188"), optionally
         # followed by the physical port in brackets - the only per-IP statement of which VLAN an
         # address lives on that the scan collects.
-        if ($Line -match "(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)(?:\s+(?<iface>\S+)(?:\s+\[(?<phys>[^\]]+)\])?(?:\s+(?<flags>\S+))?)?") {
+        # The Flags capture is anchored to the documented vocabulary rather than to "one token", because
+        # "show arp no-resolve expiration-time" appends a seconds-to-expiry column after it (section
+        # 4.3) and a greedy flags capture would swallow the number - or, worse, report a TTE as a flag.
+        # Flags can be several words ("permanent published"), and a non-expiring entry prints no TTE.
+        $ArpFlagWords = 'none|permanent|published|gateway|remote'
+        if ($Line -match "(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s+(?<ip>\b(?:\d{1,3}\.){3}\d{1,3}\b)(?:\s+(?<iface>\S+)(?:\s+\[(?<phys>[^\]]+)\])?(?:\s+(?<flags>(?i:$ArpFlagWords)(?:\s+(?i:$ArpFlagWords))*))?(?:\s+(?<tte>\d+))?)?") {
             $macLower = $Matches.mac.ToLower()
             $ArpDict[$macLower] = $Matches.ip
             $NodeData.ArpEntries += [PSCustomObject]@{
                 MAC       = $macLower
                 IP        = $Matches.ip
                 Interface = if ($Matches.iface) { $Matches.iface } else { $null }
-                Port      = if ($Matches.phys) { ConvertTo-JunosPhysicalPort -Port $Matches.phys } else { $null }
+                # On EVPN and logical-system platforms the bracket holds a routing-instance token
+                # ("irb.500 [.local..9]") rather than a port, so it is only read when it looks like one.
+                Port      = if ($Matches.phys -and $Matches.phys -match "^$Script:JunosPhysPortPattern") { ConvertTo-JunosPhysicalPort -Port $Matches.phys } else { $null }
                 Flags     = if ($Matches.flags) { $Matches.flags } else { $null }
+                # Seconds until this entry expires. $null means unmeasured - either the brief form ran
+                # or the entry does not expire at all; it never means "expiring now".
+                Tte       = if ($Matches.tte) { [int]$Matches.tte } else { $null }
             }
         }
     }

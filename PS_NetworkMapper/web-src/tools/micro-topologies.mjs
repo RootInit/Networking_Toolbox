@@ -23,7 +23,7 @@ export const STP_PRECEDENCE = { BLK: 5, LST: 4, LRN: 3, FWD: 2, DIS: 1 };
 // Get-JunosNodeData.ps1's $CAPTURE_SECTIONS order. A truncated capture loses the tail.
 export const CAPTURE_SECTIONS = [
     'VERSION', 'VIRTUAL_CHASSIS', 'CHASSIS_HARDWARE', 'ROUTE', 'INTERFACES_TERSE',
-    'INTERFACES_DESC', 'STP', 'POE', 'DOT1X', 'LLDP', 'VLANS', 'MAC_TABLE', 'ARP_TABLE',
+    'INTERFACES_DESC', 'STP', 'STP_BRIDGE', 'POE', 'DOT1X', 'LLDP', 'VLANS', 'MAC_TABLE', 'ARP_TABLE',
     'UPTIME', 'ALARMS', 'ROUTING_ENGINE', 'CONFIG', 'INTERFACES_EXT',
 ];
 
@@ -61,6 +61,9 @@ export function microNode(deviceIp, hostname, { ports = [], members = 1, model =
         Configuration: `set system host-name ${hostname.split('.')[0]}\nset protocols rstp\n`,
         ScanStatus: 'Ok', ScanError: null, Vlans: [],
         SectionsCaptured: CAPTURE_SECTIONS.slice(), CaptureTimestamp: SCAN_TIMESTAMP, MacTable: [],
+        // Section 4.3. Every command in these hand-built nodes answered, so attempted == captured and
+        // nothing was refused.
+        SectionsAttempted: CAPTURE_SECTIONS.slice(), SectionErrors: {}, StpBridge: [],
         DefaultRoute: {
             Table: 'inet.0', Destination: '0.0.0.0/0', Protocol: 'Static', Preference: 5,
             // On the subnet the device holds its own address on: a next hop anywhere else is a finding
@@ -526,6 +529,9 @@ function partialNode() {
     b.ScanStatus = 'Partial';
     // Truncated at STP, so everything from there on is absent - the tail order is the worker's.
     b.SectionsCaptured = CAPTURE_SECTIONS.slice(0, CAPTURE_SECTIONS.indexOf('STP'));
+    // The session died before the rest were issued, so they were never attempted either: that is what
+    // makes truncation different from a command that ran and printed nothing (section 4.3).
+    b.SectionsAttempted = b.SectionsCaptured.slice();
     b.ScanError = `session closed after ${b.SectionsCaptured.length} of ${CAPTURE_SECTIONS.length} sections`;
     // Dropping a section has to drop what that section supplies, or the node asserts a state no real
     // switch produces (section 8.2) and a guard-gated rule reads NOT_EVALUATED beside visible data.

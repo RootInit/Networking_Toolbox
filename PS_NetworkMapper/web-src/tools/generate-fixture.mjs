@@ -289,6 +289,9 @@ function blankNode(deviceIp) {
         Configuration: 'Unknown', ScanStatus: 'Ok', ScanError: null, Vlans: [],
         // R15/R12/R3. All empty on a node that never answered, as New-PlaceholderNodeLocal has them.
         SectionsCaptured: [], CaptureTimestamp: null, MacTable: [],
+        // Section 4.3. Attempted-but-not-captured is "the command printed nothing"; an entry in
+        // SectionErrors is "the CLI refused it"; in neither is "the session never got that far".
+        SectionsAttempted: [], SectionErrors: {}, StpBridge: [],
         // R9/R8. A node that never answered has no route and no inventory to report.
         DefaultRoute: {}, ChassisInventory: [], LogicalUnits: [],
     };
@@ -299,7 +302,7 @@ function blankNode(deviceIp) {
 // deliberately asks for "show interfaces extensive" last because it is the largest.
 const CAPTURE_SECTIONS = [
     'VERSION', 'VIRTUAL_CHASSIS', 'CHASSIS_HARDWARE', 'ROUTE', 'INTERFACES_TERSE',
-    'INTERFACES_DESC', 'STP', 'POE', 'DOT1X', 'LLDP', 'VLANS', 'MAC_TABLE', 'ARP_TABLE',
+    'INTERFACES_DESC', 'STP', 'STP_BRIDGE', 'POE', 'DOT1X', 'LLDP', 'VLANS', 'MAC_TABLE', 'ARP_TABLE',
     'UPTIME', 'ALARMS', 'ROUTING_ENGINE', 'CONFIG', 'INTERFACES_EXT',
 ];
 
@@ -330,6 +333,8 @@ const SECTION_SUPPLIES = {
             });
         }
     },
+    // Section 4.3's added command, which supplies exactly one field.
+    STP_BRIDGE: (node) => { node.StpBridge = []; },
     // The other two sections whose absence has to take their fields with them. Neither is in the tail
     // a truncated capture loses today, so both are guards against a future batch reordering rather
     // than states the generator currently produces.
@@ -447,8 +452,20 @@ function stampCapture(node, scanTime) {
 
     const dropped = chance(0.07) ? int(1, 3) : 0;
     node.SectionsCaptured = CAPTURE_SECTIONS.slice(0, CAPTURE_SECTIONS.length - dropped);
+    // R15's three states. A truncated session never asked for the tail, so attempted == captured there;
+    // a chassis with no PoE hardware is asked and REFUSES, which is a fourth thing that used to look
+    // like truncation on 48 ports (section 3.5).
+    node.SectionsAttempted = node.SectionsCaptured.slice();
+    node.SectionErrors = {};
     for (const name of CAPTURE_SECTIONS.slice(CAPTURE_SECTIONS.length - dropped)) {
         if (SECTION_SUPPLIES[name]) SECTION_SUPPLIES[name](node);
+    }
+    const noPoeHardware = node.StackMembers.every(m => !/-\d+(P|MP)$/i.test(m.Model));
+    if (noPoeHardware && node.SectionsCaptured.includes('POE')) {
+        // The section arrived and its content is the refusal, so the key stays in SectionsCaptured -
+        // that is what the switch did. What changes is that a reader can now tell why it is empty.
+        node.SectionErrors.POE = 'error: PoE is not supported on this platform';
+        SECTION_SUPPLIES.POE(node);
     }
 }
 
@@ -755,7 +772,10 @@ function addClient(node, gatewayNode, row, tag, macOverride) {
     // Keyed by address on a real device, so a second draw landing on an address already in the table
     // would be a duplicate-IP fault the generator never meant to inject.
     if (gatewayNode && !gatewayNode.ArpEntries.some(e => e.IP === clientIp)) {
-        gatewayNode.ArpEntries.push({ MAC: mac, IP: clientIp });
+        // Tte: seconds to expiry, from "show arp no-resolve expiration-time" (section 4.3). Spread
+        // across the default 1200 s ARP timer, and derived from the MAC rather than drawn from the
+        // shared rng - a new draw here would shift every later random value in the fleet.
+        gatewayNode.ArpEntries.push({ MAC: mac, IP: clientIp, Tte: 30 + (detailHash(mac) % 1171) });
     }
     return client;
 }
@@ -1042,6 +1062,28 @@ function computeSpanningTree(fleet) {
                 portIdOf.get(String(d.DeviceIP)).get(row.Port) || null);
         }
     }
+    // Section 4.3's one added command, per device: the same single RSTP instance the per-port view
+    // reports, under the same scope string, so the two can be joined. The root's own row has no root
+    // port and zero cost - that is what being the root means, and it is the fact the engine currently
+    // has to infer from the absence of a ROOT-role port.
+    for (const d of bridges) {
+        const ip = String(d.DeviceIP);
+        const isRoot = ip === String(root.DeviceIP);
+        d.StpBridge = [{
+            Scope: 'instance 0',
+            EnabledProtocol: 'RSTP',
+            RootId: bridgeId(root),
+            RootCost: isRoot ? 0 : (rootCost.has(ip) ? rootCost.get(ip) : null),
+            RootPort: isRoot ? null : (rootPort.has(ip) ? rootPort.get(ip).port : null),
+            BridgeId: bridgeId(d),
+            // Derived from the device's own identity rather than drawn from the shared rng: a new draw
+            // here would shift every later random value and change an otherwise unrelated fixture.
+            TopologyChangeCount: detailHash(ip) % 15,
+            // G4's field. A converged fleet's last change is old; a churn injector is what would make one
+            // recent, so nothing here is closer than an hour.
+            TimeSinceLastChangeSeconds: 3600 + (detailHash(ip + '|tc') % 896400),
+        }];
+    }
     return { rootLabel: `${root.Hostname} (${bridgeId(root)})`, rootCost: rootCost, rootPort: rootPort };
 }
 
@@ -1189,21 +1231,35 @@ function applyVlanMembership(fleet) {
         const trunks = trunkTags.get(node);
         for (const row of node.Interfaces) row.Vlans = [];
         const members = new Map(node.vlanTags.map(t => [t, []]));
-        const claim = (tag, row, active) => {
+        // Section 4.3. "show vlans extensive" annotates each member with tagged/untagged and the port
+        // mode, and the ONE thing that combination states is the native VLAN: an untagged member of a
+        // tagged VLAN on a trunk. Every trunk here carries the device's lowest VLAN untagged, so the
+        // field is exercised rather than constant - and so G5's native-VLAN comparison has both ends to
+        // compare once a rule for it exists.
+        const claim = (tag, row, active, mode, untaggedTag) => {
             if (!members.has(tag)) return;
             if (members.get(tag).some(m => m.Port === row.Port)) return;
-            members.get(tag).push({ Port: row.Port, Unit: `${row.Port}.0`, Active: active });
+            members.get(tag).push({
+                Port: row.Port, Unit: `${row.Port}.0`, Active: active,
+                Tagged: mode === 'trunk' ? tag !== untaggedTag : false,
+                Mode: mode,
+            });
         };
         for (const [port, carried] of trunks) {
             const row = rows.get(port);
             if (!row || String(row.Link).toLowerCase() !== 'up') continue;   // a dark trunk has no members
-            for (const tag of carried) claim(tag, row, row.STP === 'FWD');
+            // Every trunk has exactly one native VLAN - the lowest tag it carries, so the two ends of a
+            // link agree on it by construction and a DISagreement can only be injected deliberately
+            // (G5's other half). A trunk carries the intersection of both ends' VLANs, so a per-device
+            // native could fall outside what a given trunk carries and leave the port with none.
+            const native = carried.length ? Math.min(...carried) : null;
+            for (const tag of carried) claim(tag, row, row.STP === 'FWD', 'trunk', native);
         }
         for (const client of node.Clients) {
             const port = String(client.Port).replace(/\.\d+$/, '');
             if (trunks.has(port)) continue;
             const row = rows.get(port);
-            if (row) claim(client.VLAN_Tag, row, String(row.Link).toLowerCase() === 'up');
+            if (row) claim(client.VLAN_Tag, row, String(row.Link).toLowerCase() === 'up', 'access', null);
         }
         // A configured VLAN with no member port still prints in "show vlans", which is why the list comes
         // from vlanTags and not from the membership.
@@ -1215,7 +1271,10 @@ function applyVlanMembership(fleet) {
         }));
         for (const vlan of node.Vlans) {
             for (const m of vlan.Interfaces) {
-                rows.get(m.Port).Vlans.push({ Name: vlan.Name, Tag: vlan.Tag, Unit: m.Unit, Active: m.Active });
+                rows.get(m.Port).Vlans.push({
+                    Name: vlan.Name, Tag: vlan.Tag, Unit: m.Unit, Active: m.Active,
+                    Tagged: m.Tagged, Mode: m.Mode,
+                });
             }
         }
     }
@@ -1345,6 +1404,9 @@ function applyPortDetail(fleet, snapshotIndex) {
             // nothing on it - the state the MAC-keyed parse structurally could not represent. Derived
             // from Clients so the two cannot disagree about who is authenticated where.
             row.Dot1x = [];
+            // Configured on a minority of access ports, as it is in practice - and never on a port
+            // with no dot1x at all, which is what makes "$null" mean "not measured here".
+            const guestVlanName = (h % 7) === 0 ? 'GUEST' : null;
             const onPort = clientsByPort.get(row.Port) || [];
             const supplicants = onPort.filter(c => c.Dot1x_State !== 'Unknown');
             for (const [i, client] of supplicants.entries()) {
@@ -1352,10 +1414,18 @@ function applyPortDetail(fleet, snapshotIndex) {
                     Interface: `${row.Port}.0`, Role: i === 0 ? 'Authenticator' : null,
                     State: client.Dot1x_State, MacAddress: client.MAC,
                     User: client.Dot1x_User === 'Unknown' ? null : client.Dot1x_User,
+                    // Section 4.3's dot1x upgrade. An authenticated supplicant is put in the VLAN its
+                    // port carries; a guest VLAN is configured on some ports and not others, and a
+                    // supplicant that is not authenticated has no VLAN at all.
+                    AuthenticatedVlan: client.Dot1x_State === 'Authenticated' ? (client.VLAN_Name || null) : null,
+                    GuestVlan: guestVlanName,
                 });
             }
             if (!supplicants.length && !onPort.length && live && !medPorts.has(row.Port) && (h % 5) === 0) {
-                row.Dot1x.push({ Interface: `${row.Port}.0`, Role: 'Authenticator', State: 'Initialize', MacAddress: null, User: null });
+                row.Dot1x.push({
+                    Interface: `${row.Port}.0`, Role: 'Authenticator', State: 'Initialize',
+                    MacAddress: null, User: null, AuthenticatedVlan: null, GuestVlan: guestVlanName,
+                });
             }
         }
     }
@@ -1573,7 +1643,9 @@ const claimMembership = (node, row, tag) => {
     const unit = `${row.Port}.0`;
     if (!vlan.Interfaces.some(m => m.Port === row.Port)) vlan.Interfaces.push({ Port: row.Port, Unit: unit, Active: true });
     row.Vlans = row.Vlans || [];
-    if (!row.Vlans.some(v => v.Tag === tag)) row.Vlans.push({ Name: vlan.Name, Tag: tag, Unit: unit, Active: true });
+    if (!row.Vlans.some(v => v.Tag === tag)) {
+        row.Vlans.push({ Name: vlan.Name, Tag: tag, Unit: unit, Active: true, Tagged: true, Mode: 'trunk' });
+    }
 };
 const macRow = (client, port) => ({
     RoutingInstance: 'default-switch', VlanName: client.VLAN_Name, MacAddress: client.MAC,
@@ -1617,7 +1689,7 @@ function injectDuplicateIp(rng, fleet) {
     const host = fPick(rng, hosts);
     const entry = fPick(rng, host.ArpEntries);
     const mac = faultClientMac(rng);
-    host.ArpEntries.push({ MAC: mac, IP: entry.IP });
+    host.ArpEntries.push({ MAC: mac, IP: entry.IP, Tte: 30 + (detailHash(mac) % 1171) });
     return {
         // F7: the endpoint becomes findable twice over, which the correlation has to report as
         // ambiguous rather than resolve by picking one.
@@ -1643,7 +1715,7 @@ function injectOffSubnetClient(rng, fleet) {
     };
     host.Clients.push(client);
     host.MacTable.push(macRow(client, row.Port));
-    host.ArpEntries.push({ MAC: client.MAC, IP: client.IP });
+    host.ArpEntries.push({ MAC: client.MAC, IP: client.IP, Tte: 30 + (detailHash(client.MAC) % 1171) });
     claimMembership(host, row, vlan.Tag);
     return {
         // No section 7 row: an address outside every scope is a section 6.4 gateway question.
@@ -1963,11 +2035,12 @@ const L1_PORT_DEFECTS = [
         ports: (node) => node.Interfaces.filter(r => r.PoeOperStatus !== null && String(r.Link).toLowerCase() === 'up'),
         apply: (row) => {
             // The capture's PoE table only ever prints ON and OFF, so the fault vocabulary here is
-            // derived rather than observed - see the note on the rule in rules.js.
-            row.PoeOperStatus = 'Fault';
+            // derived rather than observed - see the note on the rule in rules.js. FAULT is the spelling
+            // Juniper's published output-field table uses for this column.
+            row.PoeOperStatus = 'FAULT';
             row.PoePowerConsumption = '0.0W';
             row.PoeClass = 'not-applicable';
-            row.PoE = 'Fault (0.0W)';
+            row.PoE = 'FAULT (0.0W)';
         },
     },
 ];

@@ -815,16 +815,22 @@ var RULES = [
         field: 'PoeAdminStatus', cmp: 'eqi', value: 'Disabled',
     },
     {
-        // PROVISIONAL vocabulary. The measured capture's PoE table prints only ON and OFF in the
-        // Oper-status column, and OFF with Admin Enabled is the ordinary "nothing plugged in" state - so
-        // the fault values below are derived from Junos documentation rather than observed, and the
-        // fixture's injector plants one of them. A pass here is evidence the plumbing works, not that
-        // these are the strings a PoE fault prints. Confirm against hardware with item 12.
+        // PROVISIONAL vocabulary, narrowed 2026-09-14. The measured capture's PoE table prints only ON
+        // and OFF in the Oper-status column, and OFF with Admin Enabled is the ordinary "nothing plugged
+        // in" state, so no fault string here was ever observed. Juniper's published output-field table
+        // enumerates the column as ON / OFF / FAULT / Disabled, which is narrower than the five values
+        // this used to match - the extra four were invented. Still unconfirmed against hardware.
         id: 'poe-denied', layer: 'L1', severity: 'error', scope: 'port',
         title: 'PoE reports a fault state on the port',
         only: poeCapable,
         guard: function (ctx) { return needPort(ctx, 'PoeOperStatus'); },
-        field: 'PoeOperStatus', cmp: 'in', value: ['Fault', 'Denied', 'Power-Denied', 'Overload', 'Powered-down'],
+        // Juniper documents exactly four Oper status values - ON, OFF, FAULT, Disabled - so the four
+        // extra strings this used to match ("Denied", "Power-Denied", "Overload", "Powered-down") were
+        // invented, and matching them made the rule look better-founded than it was. The FAULT REASON
+        // is a separate "Operational status detail" field the brief table does not carry. Matched
+        // case-insensitively and by substring, because the one thing the capture proves is that this
+        // column's case is not stable across releases.
+        field: 'PoeOperStatus', cmp: 'contains', value: 'fault',
     },
     {
         // R6 exists because the MAC-keyed parse could not represent a port with nothing authenticated.

@@ -37,6 +37,13 @@ function ConvertFrom-JunosVlanTable {
     $Vlans = @()
     if ([string]::IsNullOrWhiteSpace($Text)) { return $Vlans }
 
+    # "show vlans extensive" is not a table at all - it is one stanza per VLAN, in two shapes. Detected
+    # here rather than by the caller, so the section key, the returned shape and every consumer stay the
+    # same whichever command produced the text.
+    if ($Text -match '(?im)^\s*(?:VLAN Name\s*:|VLAN:\s*\S)') {
+        return (ConvertFrom-JunosVlanExtensive -Text $Text)
+    }
+
     $HasRoutingInstanceColumn = $Text -match '(?im)^\s*Routing instance\s'
     $LastInstance = $null
     $Current = $null
@@ -55,6 +62,9 @@ function ConvertFrom-JunosVlanTable {
                 Port   = (ConvertTo-JunosPhysicalPort -Port $Name)
                 Unit   = $Name
                 Active = $M.Groups['active'].Success
+                # The table form does not print either; $null is "not measured", not "untagged".
+                Tagged = $null
+                Mode   = $null
             }
         }
     }
@@ -101,6 +111,138 @@ function ConvertFrom-JunosVlanTable {
         }
         $Vlans += $Current
         Add-Members -Vlan $Current -Fragment $Rest
+    }
+
+    return $Vlans
+}
+
+function ConvertFrom-JunosVlanExtensive {
+    <#
+    .SYNOPSIS
+    Parses "show vlans extensive" (and "show vlans detail") into the same objects the table form yields.
+
+    .DESCRIPTION
+    Two stanza layouts, one per platform generation:
+
+      ELS (EX2300/EX3400/EX4300/QFX)          pre-ELS EX
+      Routing instance: default-switch        VLAN: COM1, Created at: Tue May 11 18:16:05 2010
+      VLAN Name: c1                           802.1Q Tag: 100, Internal index: 3, Admin State: Enabled
+      State: Active                           Protocol: Port Mode, Mac aging time: 300 seconds
+      Tag: 20                                 Number of interfaces: Tagged 3 (Active = 3), Untagged 1
+      MAC aging time: 300 seconds                   ge-0/0/20.0*, tagged, trunk
+      Interfaces: ge-0/0/0.0*,tagged,trunk          ge-0/0/7.0*, untagged, access
+                 ge-1/0/0.0*,tagged,trunk
+
+    The member lines are the reason for the upgrade: they carry tagged/untagged and the port mode, which
+    is the only place a NATIVE VLAN is visible - an untagged member of a tagged VLAN on a trunk port. The
+    table form carries neither, so `Tagged` and `Mode` stay $null there rather than being guessed (S9.5:
+    a field absent from an older snapshot is unmeasured, never false).
+
+    Layouts seen only in "show vlans detail" ("Untagged interfaces: a, b, c") are read too, so a fleet
+    that answers one command with another still yields membership rather than an empty VLAN list.
+
+    Shapes are derived from Juniper's published sample output, NOT from a device this project has seen:
+    https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-vlans-bridging-qfx-series.html
+    https://www.juniper.net/documentation/en_US/junos12.3/topics/reference/command-summary/show-vlans-bridging-ex-series.html
+    #>
+    param([string]$Text)
+
+    $Vlans = @()
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Vlans }
+
+    # "ge-0/0/20.0*, tagged, trunk" and the ELS spelling with no spaces. The tagging word is required:
+    # without it this is an ordinary member list and the table parser's rules apply.
+    $MemberPattern = "(?-i)(?<if>$Script:JunosAnyPortPattern)(?<active>\*)?\s*,\s*(?i)(?<tagging>tagged|untagged)(?:\s*,\s*(?<mode>access|trunk))?"
+    $PendingInstance = $null
+    $Current = $null
+
+    $AddMembers = {
+        param($Vlan, [string]$Fragment, $DefaultTagged)
+        if (-not $Vlan -or [string]::IsNullOrWhiteSpace($Fragment)) { return }
+        $Matched = $false
+        foreach ($M in [regex]::Matches($Fragment, $MemberPattern)) {
+            $Matched = $true
+            $Name = $M.Groups['if'].Value
+            $Vlan.Interfaces += [PSCustomObject]@{
+                Port   = (ConvertTo-JunosPhysicalPort -Port $Name)
+                Unit   = $Name
+                Active = $M.Groups['active'].Success
+                # R2/G5. $true means the frame leaves this port with its 802.1Q tag; $false means it
+                # leaves untagged, which on a trunk is that trunk's native VLAN.
+                Tagged = $M.Groups['tagging'].Value.ToLower() -eq 'tagged'
+                Mode   = if ($M.Groups['mode'].Success) { $M.Groups['mode'].Value.ToLower() } else { $null }
+            }
+        }
+        if ($Matched -or $null -eq $DefaultTagged) { return }
+        # "show vlans detail" prints the two lists separately and annotates neither member.
+        foreach ($M in [regex]::Matches($Fragment, "(?-i)(?<if>$Script:JunosAnyPortPattern)(?<active>\*)?")) {
+            $Name = $M.Groups['if'].Value
+            $Vlan.Interfaces += [PSCustomObject]@{
+                Port   = (ConvertTo-JunosPhysicalPort -Port $Name)
+                Unit   = $Name
+                Active = $M.Groups['active'].Success
+                Tagged = $DefaultTagged
+                Mode   = $null
+            }
+        }
+    }
+
+    foreach ($RawLine in ($Text -split "`n")) {
+        $Line = ($RawLine -replace "`r", "").TrimEnd()
+        if ([string]::IsNullOrWhiteSpace($Line)) { continue }
+        if ($Line -match '^\S+@\S+[>#]') { continue }
+
+        if ($Line -match '(?i)^\s*Routing instance\s*:\s*(?<inst>\S+)\s*$') {
+            $PendingInstance = $Matches.inst
+            continue
+        }
+        # ELS opens the stanza with the name and prints the tag on its own line further down.
+        if ($Line -match '(?i)^\s*VLAN Name\s*:\s*(?<name>\S+)\s*$') {
+            $Current = [PSCustomObject]@{
+                RoutingInstance = $PendingInstance
+                Name            = $Matches.name
+                Tag             = $null
+                Interfaces      = @()
+            }
+            $Vlans += $Current
+            continue
+        }
+        # pre-ELS opens with "VLAN: name, Created at: ..." - and "show vlans detail" with
+        # "VLAN: name, Tag: 802.1Q Tag 3, Admin state: Enabled", so the tag can be on this line too.
+        if ($Line -match '(?i)^\s*VLAN\s*:\s*(?<name>[^,\s]+)\s*(?<rest>,.*)?$') {
+            # Both taken before the next -match: $Matches is global and the tag test below replaces it.
+            $Name = $Matches.name
+            $Rest = if ($Matches.rest) { $Matches.rest } else { '' }
+            $Tag = $null
+            if ($Rest -match '(?i)(?:802\.1Q\s+)?Tag\s*:?\s*(?:802\.1Q\s+Tag\s+)?(?<tag>\d+)\b') { $Tag = [int]$Matches.tag }
+            $Current = [PSCustomObject]@{
+                RoutingInstance = $PendingInstance
+                Name            = $Name
+                Tag             = $Tag
+                Interfaces      = @()
+            }
+            $Vlans += $Current
+            continue
+        }
+        if (-not $Current) { continue }
+
+        # "Tag: 20" (ELS) and "802.1Q Tag: 100, Internal index: 3, ..." (pre-ELS). "Untagged" and "None"
+        # are the switch saying this VLAN carries no 802.1Q tag, which is not a tag whose value is zero.
+        if ($null -eq $Current.Tag -and $Line -match '(?i)^\s*(?:802\.1Q\s+)?Tag\s*:\s*(?<tag>\d+)\b') {
+            $Current.Tag = [int]$Matches.tag
+            continue
+        }
+        if ($Line -match '(?i)^\s*Interfaces\s*:\s*(?<rest>.*)$') {
+            & $AddMembers $Current $Matches.rest $null
+            continue
+        }
+        if ($Line -match '(?i)^\s*(?<tagging>Tagged|Untagged) interfaces\s*:\s*(?<rest>.*)$') {
+            & $AddMembers $Current $Matches.rest ($Matches.tagging.ToLower() -eq 'tagged')
+            continue
+        }
+        # A continuation line of members, indented under either of the above. Counted lines
+        # ("Number of interfaces: Tagged 3 , Untagged 0") carry no interface name and fall through.
+        if ($Line -match '^\s') { & $AddMembers $Current $Line $null }
     }
 
     return $Vlans
@@ -363,6 +505,41 @@ function ConvertFrom-JunosInterfaceExtensive {
 # survives once the command set is trimmed, and it is what tells "this switch has no LLDP
 # neighbours" apart from "the session died before it was asked". A section whose body is blank does
 # not count as captured: an echoed command with no output is the shape a cut-off session leaves.
+function Get-JunosSectionErrors {
+    <#
+    .SYNOPSIS
+    Section keys whose command was refused by the CLI, mapped to the message it printed.
+
+    .DESCRIPTION
+    Section 3.5's second open question, answered without needing to know the exact string a given
+    chassis prints. `SectionsCaptured` records a key when its output is non-whitespace, so three
+    different things used to look alike: the section arrived, the command was refused (an error IS
+    output, so the key was recorded and the parse then found nothing), and the session was cut off
+    before the command ran. The caller now records which commands were ATTEMPTED - the echoed prompt
+    proves that much - and this says which of them answered with an error instead of data.
+
+    A feature-absent command on a chassis without that feature (PoE on a non-PoE model) lands here, so
+    the engine can report "the command was refused" rather than "the capture stopped early" on a switch
+    that is simply built differently.
+    #>
+    param([AllowNull()]$DataDict)
+
+    $Errors = @{}
+    if ($null -eq $DataDict) { return $Errors }
+    foreach ($Key in $DataDict.Keys) {
+        $Body = [string]$DataDict[$Key]
+        if ([string]::IsNullOrWhiteSpace($Body)) { continue }
+        # Junos prints the offending token under a caret on a syntax error, and a leading "error:" for
+        # everything else. Anchored to the first few lines: the word "error" inside a config or an
+        # interface counter name is not a refused command.
+        $Head = ($Body -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 3) -join "`n"
+        if ($Head -match '(?im)^\s*(?<msg>(?:error:|unknown command|syntax error)[^\r\n]*)') {
+            $Errors[[string]$Key] = $Matches.msg.Trim()
+        }
+    }
+    return $Errors
+}
+
 function Get-JunosCapturedSections {
     # Not Mandatory: binding rejects $null before the body runs, and a caller whose section split
     # produced nothing should get an empty array rather than a binding exception.
@@ -479,6 +656,13 @@ function ConvertFrom-JunosDot1xInterface {
     $ByPort = @{}
     if ([string]::IsNullOrWhiteSpace($Text)) { return $ByPort }
 
+    # "show dot1x interface detail" is stanzas, not a table. Same rows out either way, with the two
+    # fields only the detail form carries: which VLAN the supplicant was actually put in, and whether a
+    # guest VLAN is configured on the port - i.e. whether a client landed in a fallback VLAN.
+    if ($Text -match '(?im)^\s*(?:Role\s*:|Number of connected supplicants\s*:|Supplicant\s*:)') {
+        return (ConvertFrom-JunosDot1xDetail -Text $Text)
+    }
+
     foreach ($Line in ($Text -split "`r?`n")) {
         if ($Line -notmatch ('(?i)^\s*(?<iface>' + $Script:JunosPhysPortPattern + ')\s+(?<rest>\S.*)$')) { continue }
         $Rest = $Matches.rest
@@ -492,6 +676,9 @@ function ConvertFrom-JunosDot1xInterface {
             State      = $Matches.state
             MacAddress = $null
             User       = $null
+            # Only the detail form prints these; unmeasured here, never "no fallback VLAN".
+            AuthenticatedVlan = $null
+            GuestVlan         = $null
         }
         if ($Tail -match '(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})\s*(?<user>\S+)?') {
             $Entry.MacAddress = $Matches.mac.ToLower()
@@ -502,6 +689,181 @@ function ConvertFrom-JunosDot1xInterface {
         $ByPort[$Port] += $Entry
     }
     return $ByPort
+}
+
+function ConvertFrom-JunosDot1xDetail {
+    <#
+    .SYNOPSIS
+    Parses "show dot1x interface detail" into the same per-port rows the brief table yields.
+
+    .DESCRIPTION
+    One stanza per interface, "Label: value" one field per line, with a nested block per connected
+    supplicant. Read by LABEL rather than by indentation: the labels are documented, the column the
+    values start in is not, and a release that reflows the stanza must not empty the section.
+
+    The two fields the upgrade is for are `Authenticated VLAN` (which VLAN the supplicant was actually
+    put in - a client in the guest or server-fail VLAN is authenticated AND on the wrong network, which
+    the brief form cannot show) and `Guest VLAN member`.
+
+    A port whose stanza lists no supplicant still yields one row, with State $null: "dot1x is configured
+    here and nothing is authenticated" is a state R6 exists to represent, and dropping the port would
+    make it indistinguishable from a port with no dot1x at all.
+
+    Field labels are from Juniper's published output-field table, NOT from a device this project has
+    seen. The layout is inferred from the standard Junos "detail" stanza shape:
+    https://www.juniper.net/documentation/us/en/software/junos/cli-reference/topics/ref/command/show-dot1x-interface-802-1x-security.html
+    #>
+    param([string]$Text)
+
+    $ByPort = @{}
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $ByPort }
+
+    $States = 'Authenticated|Authenticating|Initialize|Connecting|Held|Auto|Disconnected|Failed'
+    $Iface = $null
+    $PortRole = $null
+    $PortGuestVlan = $null
+    $Rows = @()          # supplicant rows for the interface currently open
+    $Current = $null     # the supplicant row being filled
+
+    $Flush = {
+        if (-not $Iface) { return }
+        $Port = ConvertTo-JunosPhysicalPort -Port $Iface
+        if (-not $Rows.Count) {
+            $Rows = @([PSCustomObject]@{
+                Interface = $Iface; Role = $PortRole; State = $null; MacAddress = $null; User = $null
+                AuthenticatedVlan = $null; GuestVlan = $PortGuestVlan
+            })
+        }
+        if (-not $ByPort.ContainsKey($Port)) { $ByPort[$Port] = @() }
+        $ByPort[$Port] += $Rows
+    }
+
+    foreach ($RawLine in ($Text -split "`n")) {
+        $Line = ($RawLine -replace "`r", "").TrimEnd()
+        if ([string]::IsNullOrWhiteSpace($Line)) { continue }
+        if ($Line -match '^\S+@\S+[>#]') { continue }
+
+        # A bare interface name on its own line opens the stanza; some releases label it.
+        if ($Line -match ('(?i)^\s*(?:Interface\s*:\s*)?(?<iface>' + $Script:JunosPhysPortPattern + ')\s*$')) {
+            & $Flush
+            $Iface = $Matches.iface
+            $PortRole = $null; $PortGuestVlan = $null
+            $Rows = @(); $Current = $null
+            continue
+        }
+        if (-not $Iface) { continue }
+
+        if ($Line -match '(?i)^\s*Role\s*:\s*(?<role>\S+)') { $PortRole = $Matches.role; continue }
+        if ($Line -match '(?i)^\s*Guest VLAN member\s*:\s*(?<vlan>\S+)') {
+            # "<not configured>" is the switch saying there is none; keep it out of the data as $null.
+            $PortGuestVlan = if ($Matches.vlan -match '^<') { $null } else { $Matches.vlan }
+            continue
+        }
+        if ($Line -match '(?i)^\s*Supplicant\s*:\s*(?<rest>\S.*)$') {
+            $Rest = $Matches.rest
+            $Current = [PSCustomObject]@{
+                Interface = $Iface; Role = $PortRole; State = $null; MacAddress = $null; User = $null
+                AuthenticatedVlan = $null; GuestVlan = $PortGuestVlan
+            }
+            if ($Rest -match '(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})') { $Current.MacAddress = $Matches.mac.ToLower() }
+            # "Supplicant: <user>, <mac>" - and under MAC RADIUS the username IS the MAC, which is not
+            # a username worth recording twice.
+            $Name = ($Rest -split ',')[0].Trim()
+            if ($Name -and $Name -notmatch '^(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$') { $Current.User = $Name }
+            $Rows += $Current
+            continue
+        }
+        if (-not $Current) {
+            # Port-level lines that precede any supplicant, e.g. a MAC printed for the port itself.
+            continue
+        }
+        if ($Line -match "(?i)^\s*(?:Operational state|State)\s*:\s*(?<state>$States)\b") { $Current.State = $Matches.state; continue }
+        if ($Line -match '(?i)^\s*Authenticated VLAN\s*:\s*(?<vlan>\S+)') {
+            $Current.AuthenticatedVlan = if ($Matches.vlan -match '^<') { $null } else { $Matches.vlan }
+            continue
+        }
+        if ($null -eq $Current.MacAddress -and $Line -match '(?i)^\s*MAC address\s*:\s*(?<mac>(?:[0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2})') {
+            $Current.MacAddress = $Matches.mac.ToLower()
+        }
+    }
+    & $Flush
+
+    return $ByPort
+}
+
+function ConvertFrom-JunosStpBridge {
+    <#
+    .SYNOPSIS
+    Parses "show spanning-tree bridge" into one record per spanning-tree scope.
+
+    .DESCRIPTION
+    One stanza per instance, opened by a heading whose tail names the scope:
+
+      STP bridge parameters                  -> RSTP/STP, the single instance
+      STP bridge parameters for VLAN 100     -> VSTP
+      STP bridge parameters for CIST         -> MSTP's common instance
+      STP bridge parameters for MSTI 1       -> MSTP
+
+    `Scope` is normalised to the SAME strings "show spanning-tree interface" prints in its own headings
+    ("instance 0", "VLAN 100", "MSTI 1"), because the only reason to collect this is to join it to
+    per-port state - and a join on two spellings of one instance is not a join.
+
+    The fields that earn the command are `TopologyChangeCount` and `TimeSinceLastChangeSeconds`: for
+    "why is this broken now", a VLAN that reconverged forty seconds ago says more than which bridge is
+    root (Appendix B, G4). Root ID is collected too - today the root is only inferred from the absence
+    of a ROOT-role port.
+
+    Headings and labels are from Juniper's published documentation and a published lab capture, NOT from
+    a device this project has seen:
+    https://www.juniper.net/documentation/en_US/junos/topics/reference/command-summary/show-spanning-tree-bridge-spanning-trees-ex-series.html
+    https://netlabs.gitbook.io/juniper/6-stp-rstp-vstp-mstp/vstp
+    #>
+    param([string]$Text)
+
+    $Scopes = @()
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $Scopes }
+
+    $Current = $null
+    foreach ($RawLine in ($Text -split "`n")) {
+        $Line = ($RawLine -replace "`r", "").TrimEnd()
+        if ([string]::IsNullOrWhiteSpace($Line)) { continue }
+        if ($Line -match '^\S+@\S+[>#]') { continue }
+
+        if ($Line -match '(?i)^\s*STP bridge parameters(?:\s+for\s+(?<scope>.+?))?\s*:?\s*$') {
+            $Scope = if ($Matches.scope) { $Matches.scope.Trim() } else { 'instance 0' }
+            # VSTP prints "VLAN 100"; MSTP "CIST" and "MSTI 1"; a bare heading is the single RSTP
+            # instance, which the interface command calls "instance 0".
+            if ($Scope -match '(?i)^CIST$') { $Scope = 'CIST' }
+            $Current = [PSCustomObject]@{
+                Scope                      = $Scope
+                EnabledProtocol            = $null
+                RootId                     = $null
+                RootCost                   = $null
+                RootPort                   = $null
+                BridgeId                   = $null
+                TopologyChangeCount        = $null
+                TimeSinceLastChangeSeconds = $null
+            }
+            $Scopes += $Current
+            continue
+        }
+        if (-not $Current) { continue }
+
+        if ($Line -match '(?i)^\s*Enabled protocol\s*:\s*(?<v>\S+)') { $Current.EnabledProtocol = $Matches.v; continue }
+        if ($Line -match '(?i)^\s*Root ID\s*:\s*(?<v>\S+)') { $Current.RootId = $Matches.v; continue }
+        if ($Line -match '(?i)^\s*Root cost\s*:\s*(?<v>\d+)') { $Current.RootCost = [int]$Matches.v; continue }
+        if ($Line -match '(?i)^\s*Root port\s*:\s*(?<v>\S+)') { $Current.RootPort = $Matches.v; continue }
+        # "Local parameters" opens the local bridge's own block; Bridge ID is the only field there this
+        # collects, and it is what makes "this switch IS the root" a fact rather than an inference.
+        if ($Line -match '(?i)^\s*Bridge ID\s*:\s*(?<v>\S+)') { $Current.BridgeId = $Matches.v; continue }
+        if ($Line -match '(?i)^\s*Number of topology changes\s*:\s*(?<v>\d+)') { $Current.TopologyChangeCount = [int]$Matches.v; continue }
+        if ($Line -match '(?i)^\s*Time since last topology change\s*:\s*(?<v>\d+)') {
+            $Current.TimeSinceLastChangeSeconds = [int]$Matches.v
+            continue
+        }
+    }
+
+    return $Scopes
 }
 
 # R7. The whole PoE row, keyed by physical port.

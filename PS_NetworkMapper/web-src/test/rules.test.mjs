@@ -92,6 +92,8 @@ test('a field is declared against the section that supplies it, and the fixture 
     const UNREAD_BY_RULES = [
         'MasterCpuUtilization', 'MasterMemoryUtilization', 'LastConfigured', 'LastConfiguredBy',
         'Dot1x_State', 'Dot1x_User',
+        // Section 4.3's added command. No rule reads it yet - G4's churn rule is what will.
+        'StpBridge',
     ];
     for (const [section, lines] of bodies) {
         const text = lines.join('\n');
@@ -562,6 +564,29 @@ test('a VRRP virtual MAC is not a duplicated host', () => {
     }).Topology[0];
     const both = { Topology: [vip('10.30.9.10', 'ge-0/0/4'), vip('10.30.9.11', 'ge-0/0/5')], ScanTimestamp: SCAN_TIMESTAMP };
     assert.deepEqual(evaluate(both, { rules: ['duplicate-mac-across-devices'] }).findings, []);
+});
+
+test('poe-denied matches the documented FAULT vocabulary, in any case, and nothing else', () => {
+    // Section 3.5's first open question, narrowed by documentation: the column is ON / OFF / FAULT /
+    // Disabled. OFF with Admin Enabled is the ordinary "nothing is plugged in" state and must stay a
+    // pass, or the rule fires on every empty jack in the estate.
+    const port = (status) => ({
+        Port: 'ge-0/0/1', Link: 'up', Admin: 'up', PoeAdminStatus: 'Enabled', PoeOperStatus: status,
+        Vlans: [], Dot1x: [], StpDetail: {},
+    });
+    const fire = (status) => {
+        const device = {
+            DeviceIP: '10.30.1.1', Hostname: 'poe', ScanStatus: 'Ok', SectionsCaptured: ['POE'],
+            Interfaces: [port(status)], Clients: [], MacTable: [], Neighbors: [], ArpEntries: [],
+        };
+        const out = evaluate([device], { rules: ['poe-denied'] });
+        return out.findings.length;
+    };
+    assert.equal(fire('FAULT'), 1);
+    assert.equal(fire('Fault'), 1, 'the column\'s case is not stable across releases');
+    assert.equal(fire('OFF'), 0, 'nothing plugged in is not a fault');
+    assert.equal(fire('ON'), 0);
+    assert.equal(fire('Disabled'), 0);
 });
 
 test('a prefix contains the addresses inside it and nothing else', () => {
