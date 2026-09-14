@@ -282,7 +282,16 @@ blocks advertise `[not supported, disabled (0x0)]`, **every one of them a switch
 `poe-denied`'s fault vocabulary is **provisional**: the capture's PoE table prints only `ON` and `OFF`,
 and `OFF` with Admin `Enabled` is the ordinary "nothing plugged in" state, so the values the rule matches
 are derived from documentation rather than observed. A fixture pass there is evidence the plumbing works,
-not that those are the strings a PoE fault prints. Confirm with item 12.
+not that those are the strings a PoE fault prints. It stays provisional: no switch is available to
+confirm it against (2026-09-13), and item 12, which would have settled it, is blocked for the same
+reason. Treat a `poe-denied` finding on hardware as unverified until a real PoE fault has been seen.
+
+The same holds for **R15 on a chassis whose PoE command prints nothing at all**. `Get-JunosCapturedSections`
+records a section key when the command's output is non-whitespace, and a feature-absent command normally
+prints an error, which counts. A command that prints *nothing* is indistinguishable from truncation, and
+the engine would then report `section:POE` — "the capture stopped early" — on a switch that simply has no
+PoE. Unverified for the same reason; the fix, if it turns out to be needed, is worker-side: record the key
+on the command marker rather than on its content.
 
 Measured on a clean 60-device fleet (`--seed 5`): 72 findings across 23 rules, with every two-ended and
 every advertisement-versus-local rule at **zero** — which is the point of the wire-property change noted
@@ -1380,6 +1389,12 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
 12. **Phase 3 command changes** (§4.3): verify the two upgrades on real hardware, then land the three
     in-place replacements and `show spanning-tree bridge`, measuring session time against the 120 s
     cap each time. The exact-matcher fix is worth doing alongside but no longer gates this.
+    **BLOCKED 2026-09-13 — no switch available.** Every part of this item is a claim about what a real
+    device prints and how long it takes to print it; a fixture cannot produce that evidence, and writing
+    parsers against guessed output is how the four vocabulary defects at §8.2 got in. Two open questions
+    queue behind it, both recorded at §3.5: `poe-denied`'s fault vocabulary, and R15's behaviour when a
+    feature-absent command prints nothing. Resume when a switch (or a saved capture of the §4.3 commands
+    from one) is available. Items 13 and 14 do not depend on it.
 13. **L2 and L3 rules** gated on the commands they need.
 14. **UI**: analysis sub-tab, path highlighting, per-hop drawer links.
 *(There is no config-parsing step. See §4.4 — the configuration is collected and stored for backup
