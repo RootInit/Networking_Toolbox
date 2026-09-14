@@ -36,6 +36,14 @@ var NO_CONTRIBUTION = ['AuthFailed', 'Unreachable', 'Error', 'Timeout', 'Aborted
 // the section a human would look for in the transcript. Parity with the fixture's own section-blanking
 // table is asserted by the test suite: a field listed here that a dropped section does not actually take
 // with it would make this guard decorative.
+//
+// R15's semantics, which this depends on: a section key lands in SectionsCaptured when its command
+// produced any output at all (`Get-JunosCapturedSections`, keyed on non-whitespace content). A feature
+// the chassis does not have therefore still records its section - the command's error text is output -
+// and the fields stay null, which each rule's `only` reads as "no subject here". A command that prints
+// NOTHING is the one case indistinguishable from truncation. Unverified against a non-PoE chassis; if
+// one turns out to print nothing, the fix is worker-side (record the key on the command marker rather
+// than on its content), not here.
 var FIELD_SECTION = {
     // "show interfaces extensive", issued last and so lost first.
     Mtu: 'INTERFACES_EXT', SpeedConfigured: 'INTERFACES_EXT', SpeedNegotiated: 'INTERFACES_EXT',
@@ -143,13 +151,18 @@ function orgInfo(neighbor, subtypePrefix) {
     return found === null || found === undefined ? null : String(found);
 }
 
-// Junos prints "Autonegotiation [supported, enabled (0x3)], ..." or "[not supported, disabled (0x0)]".
-// Disabled is tested first because the enabled form contains neither word the other way round.
+// Junos prints two facts in this TLV, not one: whether the far end SUPPORTS the field and whether it is
+// ENABLED - "Autonegotiation [supported, enabled (0x3)]" or "[not supported, disabled (0x0)]".
+//
+// `not supported` is unmeasured, not off (section 2.5). Twenty-seven of the measured capture's 43 LLDP
+// blocks advertise it, every one of them a switch on an optical port, where there is no autonegotiation
+// to report - so reading it as "autonegotiation is disabled" would fire a mismatch on every fibre uplink
+// in the estate. Only `supported, disabled` is evidence that somebody turned it off.
 function advertisedAutoneg(info) {
     if (info === null) return null;
-    if (/\bdisabled\b/i.test(info)) return 'Disabled';
-    if (/\benabled\b/i.test(info)) return 'Enabled';
-    return null;
+    var match = /\[\s*(not supported|supported)\s*,\s*(enabled|disabled)/i.exec(info);
+    if (!match || /not supported/i.test(match[1])) return null;
+    return /enabled/i.test(match[2]) ? 'Enabled' : 'Disabled';
 }
 
 // "Info: MTU Size (1514)". In the measured capture the local `MTU: 1514` and this TLV carry the same
@@ -284,10 +297,13 @@ var RULES = [
         field: 'Duplex', cmp: 'eqi', value: 'Half-duplex',
     },
     {
+        // Gated on live AND on autonegotiation being enabled: the status is only meaningful where
+        // negotiation was attempted, and all 25 of the capture's down ports print Incomplete because the
+        // link is down. Without the second gate this would restate every autoneg-disabled finding.
         id: 'negotiation-incomplete', layer: 'L1', severity: 'warning', scope: 'port',
         title: 'Port is up but autonegotiation never completed',
-        only: live,
-        guard: function (ctx) { return needPort(ctx, 'NegotiationStatus'); },
+        only: function (ctx) { return live(ctx) && lower(ctx.row.AutoNegotiation) === 'enabled'; },
+        guard: function (ctx) { return firstGap(needPort(ctx, 'AutoNegotiation'), needPort(ctx, 'NegotiationStatus')); },
         field: 'NegotiationStatus', cmp: 'eqi', value: 'Incomplete',
         suppressors: ['faces-med-endpoint'],
     },
@@ -531,11 +547,16 @@ var RULES = [
         field: 'PoeAdminStatus', cmp: 'eqi', value: 'Disabled',
     },
     {
+        // PROVISIONAL vocabulary. The measured capture's PoE table prints only ON and OFF in the
+        // Oper-status column, and OFF with Admin Enabled is the ordinary "nothing plugged in" state - so
+        // the fault values below are derived from Junos documentation rather than observed, and the
+        // fixture's injector plants one of them. A pass here is evidence the plumbing works, not that
+        // these are the strings a PoE fault prints. Confirm against hardware with item 12.
         id: 'poe-denied', layer: 'L1', severity: 'error', scope: 'port',
-        title: 'PoE is enabled but the port is not delivering power',
+        title: 'PoE reports a fault state on the port',
         only: poeCapable,
         guard: function (ctx) { return needPort(ctx, 'PoeOperStatus'); },
-        field: 'PoeOperStatus', cmp: 'in', value: ['Denied', 'Fault', 'Overload', 'Power-Denied'],
+        field: 'PoeOperStatus', cmp: 'in', value: ['Fault', 'Denied', 'Power-Denied', 'Overload', 'Powered-down'],
     },
     {
         // R6 exists because the MAC-keyed parse could not represent a port with nothing authenticated.

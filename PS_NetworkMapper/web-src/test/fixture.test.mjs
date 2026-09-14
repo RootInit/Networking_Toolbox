@@ -663,7 +663,11 @@ test('the two ends of a link agree about the wire, and about what each advertise
                 if (!dev.SectionsCaptured.includes('INTERFACES_EXT')) continue;
                 const row = rowFor(dev, entry.LocalPort);
                 if (!row) continue;
-                const advertised = /not supported, disabled/.test(tlv(entry, 'MAC/PHY').Info) ? 'Disabled' : 'Enabled';
+                // Three states, and the middle one is the point: "not supported" is the field being
+                // unavailable (optics), which the row reports as absent rather than as disabled.
+                const info = tlv(entry, 'MAC/PHY').Info;
+                const advertised = /not supported/.test(info) ? null
+                    : /supported, disabled/.test(info) ? 'Disabled' : 'Enabled';
                 assert.equal(row.AutoNegotiation, advertised, `${dev.DeviceIP} ${row.Port} contradicts its own TLV`);
                 assert.equal(`MTU Size (${row.Mtu})`, tlv(entry, 'Maximum Frame').Info, `${dev.DeviceIP} ${row.Port} MTU`);
             }
@@ -682,9 +686,19 @@ test('the extensive-derived fields reproduce the states section 3.4 warns about'
     const down = rows.filter(r => r.Link === 'down');
     assert.ok(up.length > 100 && down.length > 100);
 
-    // Trap two: every DOWN port prints Half-duplex, so an ungated duplex rule fires on all of them.
-    assert.ok(down.every(r => r.Duplex === 'Half-duplex'), 'a down port reports Half-duplex');
-    assert.ok(up.every(r => r.Duplex === 'Full-duplex'), 'an up port reports Full-duplex');
+    // Trap two: every DOWN copper port prints Half-duplex, so an ungated duplex rule fires on all of
+    // them. On optics the field is absent entirely, together with autonegotiation and remote fault -
+    // a rule reading any of the four on a fibre port has no datum, not a healthy one.
+    const copper = (rows) => rows.filter(r => r.MediaType === 'Copper');
+    const fibre = (rows) => rows.filter(r => r.MediaType === 'Fiber');
+    assert.ok(copper(down).length && copper(up).length && fibre(up).length, 'both media are represented');
+    assert.ok(copper(down).every(r => r.Duplex === 'Half-duplex'), 'a down copper port reports Half-duplex');
+    assert.ok(copper(up).every(r => r.Duplex === 'Full-duplex'), 'an up copper port reports Full-duplex');
+    for (const row of fibre(up.concat(down))) {
+        assert.deepEqual(
+            [row.Duplex, row.DuplexNegotiated, row.AutoNegotiation, row.NegotiationStatus, row.RemoteFault],
+            [null, null, null, null, null], `${row.Port} reports fields a fibre port does not have`);
+    }
     // Trap three: LINK is noise on a down port and a real alarm on an up one.
     assert.ok(down.every(r => r.ActiveAlarms === 'LINK'), 'a down port carries the LINK alarm');
     assert.ok(up.every(r => r.ActiveAlarms === 'None'), 'no up port carries an alarm in a clean fleet');
@@ -715,7 +729,8 @@ test('the extensive-derived fields reproduce the states section 3.4 warns about'
                 assert.ok(client, `${row.Port} has a dot1x row for a MAC that is not on the port`);
                 assert.equal(entry.State, client.Dot1x_State);
             }
-            if (row.PoeOperStatus === 'Delivering') assert.match(row.PoE, /^Delivering/);
+            // The display string is built from the same two columns as the fields, so they agree.
+            if (row.PoeOperStatus) assert.equal(row.PoE, `${row.PoeOperStatus} (${row.PoePowerConsumption})`);
             if (row.PoE === 'Unknown') assert.equal(row.PoeAdminStatus, null);
         }
     }

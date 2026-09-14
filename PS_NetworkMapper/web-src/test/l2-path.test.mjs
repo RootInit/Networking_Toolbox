@@ -315,6 +315,7 @@ test('on the generated fleet, a pruned VLAN leaves exactly one path between scan
     // pair whose route crosses it is entitled to a different answer.
     const f11 = manifest.Faults.find(f => f.kind === 'vlan-missing-from-trunk');
     const scanned = snapshot.Topology.filter(d => d.ScanStatus === 'Ok').map(d => String(d.DeviceIP));
+    const scannedSet = new Set(scanned);
     const tagsOf = (ip) => (byIp.get(ip).Vlans || []).map(v => v.Tag);
 
     let checked = 0;
@@ -331,14 +332,24 @@ test('on the generated fleet, a pruned VLAN leaves exactly one path between scan
         const result = computePath(graph, { from, to, vlanTag: tag });
         if (result.status === 'NO_PATH' && result.reasons.some(r => r.ends.some(e => e.ip === String(f11.deviceIp)))) continue;
         checked++;
-        assert.equal(result.status, 'PATH',
+        assert.notEqual(result.status, 'NO_PATH',
             `${from} -> ${to} in VLAN ${tag}: ${result.status} (${result.reasons.map(r => r.detail).join('; ')})`);
-        assert.equal(result.paths.length, 1);
         assert.equal(result.truncated, false);
-        levels.set(result.paths[0].confidence, (levels.get(result.paths[0].confidence) || 0) + 1);
-        if (result.paths[0].macCoherent === false) spreadOver++;
+        // The spanning tree is unique among the devices that ANSWERED. A device that never answered
+        // carries no STP state, so nothing prunes a route through it and it survives as a second
+        // candidate - which section 6.5 reports rather than adjudicates. So the assertion is that exactly
+        // one path stays inside the scanned fleet, and any other crosses a hole in it.
+        const certified = result.paths.filter(p => visited(p).every(ip => scannedSet.has(ip)));
+        assert.equal(certified.length, 1,
+            `${from} -> ${to} in VLAN ${tag}: ${certified.length} paths among scanned devices`);
+        for (const extra of result.paths.filter(p => !certified.includes(p))) {
+            assert.ok(visited(extra).some(ip => !scannedSet.has(ip)),
+                `${from} -> ${to} in VLAN ${tag} has a second path entirely inside the scanned fleet`);
+        }
+        levels.set(certified[0].confidence, (levels.get(certified[0].confidence) || 0) + 1);
+        if (certified[0].macCoherent === false) spreadOver++;
         // No hop may be a repeat: a simple path visits each device once.
-        const seen = visited(result.paths[0]);
+        const seen = visited(certified[0]);
         assert.equal(new Set(seen).size, seen.length, `${from} -> ${to} revisits a device`);
     }
     assert.ok(checked > 30, `only ${checked} pairs checked`);

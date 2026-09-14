@@ -212,8 +212,8 @@ by the 23 below; the estimate was not wrong so much as unattributable.
 |---|---|---|
 | `duplex-half-on-up-link` | `Duplex` | §3.4's second trap: gated on `Link = up` by the rule's `only`, so a dark port is not a subject at all |
 | `negotiation-incomplete` | `NegotiationStatus` | |
-| `autoneg-disabled` | `AutoNegotiation` | Fires on 26 of a clean 60-device fleet's ports, and is suppressed on 31 more facing MED endpoints. R2's stated purpose |
-| `autoneg-mismatch` | `AutoNegotiation` + the neighbour's `MAC/PHY` TLV | R2 without scanning the peer |
+| `autoneg-disabled` | `AutoNegotiation` | Fires on 11 of a clean 60-device fleet's ports and is suppressed on 38 more facing MED endpoints. Copper only — see the fourth trap below |
+| `autoneg-mismatch` | `AutoNegotiation` + the neighbour's `MAC/PHY` TLV | R2 without scanning the peer. Has subjects only on copper trunks (19 of the fleet's 136 links) |
 | `mtu-mismatch` | `Mtu` + the neighbour's `Maximum Frame Size` TLV | **G5, which the spec listed as described nowhere.** In the measured capture the local `MTU: 1514` and the TLV `MTU Size (1514)` carry the same number on one wire, which is what makes equality the right comparison |
 | `duplex-mismatch` | both ends' `Duplex` | The only two-ended rule, and so the only user of the two-ended G-NOSCAN gate. Anchored on the half-duplex end |
 | `crc-align-errors` | `MacStatistics[CRC/Align errors]` | R4's own purpose — the one non-zero CRC value in the capture sits in a table the counter parser cannot reach |
@@ -256,9 +256,28 @@ G-BASELINE's reset detection. No rule reads the configuration (§4.4).
   normal shape behind a fault manifest and make the delta oracle describe the generator's own gap. The
   `lag-two-members-one-down` micro-topology covers the rule; the fixture-side gap is recorded at §8.2.
 
-Measured on a clean 60-device fleet (`--seed 5`): 71 findings across 23 rules, with every two-ended and
+**A fourth trap, found in the capture while writing these rules and not in revision 2's list.** A fibre
+port's link-level line carries **no `Link-mode`, no `Auto-negotiation` and no `Remote fault`**, and no
+autonegotiation stanza follows it: on optics those four fields are absent, not zero. And the LLDP
+`MAC/PHY` TLV states two things, `[supported|not supported, enabled|disabled]` — 27 of the capture's 43
+blocks advertise `[not supported, disabled (0x0)]`, **every one of them a switch on an optical port**. So:
+
+- `advertisedAutoneg` returns `null` for `not supported`. Reading it as "disabled" — which the first cut
+  of this file did — fires `autoneg-mismatch` on every fibre uplink in the estate, 27 of 43 here.
+- `negotiation-incomplete` is gated on autonegotiation being *enabled* as well as on the link being up.
+  All 25 of the capture's down ports print `Incomplete`; the status means nothing where negotiation was
+  never attempted.
+- The fixture was wrong in the same three places and now reproduces all of them, plus the PoE table's real
+  vocabulary — see §8.2.
+
+`poe-denied`'s fault vocabulary is **provisional**: the capture's PoE table prints only `ON` and `OFF`,
+and `OFF` with Admin `Enabled` is the ordinary "nothing plugged in" state, so the values the rule matches
+are derived from documentation rather than observed. A fixture pass there is evidence the plumbing works,
+not that those are the strings a PoE fault prints. Confirm with item 12.
+
+Measured on a clean 60-device fleet (`--seed 5`): 72 findings across 23 rules, with every two-ended and
 every advertisement-versus-local rule at **zero** — which is the point of the wire-property change noted
-at §8.2. The faulted fleet adds 28.
+at §8.2. The faulted fleet adds 29.
 
 ---
 
@@ -861,6 +880,26 @@ currently forwarding for a VLAN moves when the tree does. `Vlans` accordingly le
 the MAC table and the membership are one fact told twice — the injectors that add a client add its
 membership too.
 
+**Four vocabularies corrected against the capture — 2026-09-13 (item 11).** Writing the L1 rules meant
+reading what the switch actually prints, and the fixture was inventing four things. Each one is a rule
+that would have passed here and misbehaved on hardware, which is what §8.2 exists to prevent:
+
+- **Optics report no duplex, no autonegotiation and no remote fault.** Every fibre port in the capture
+  omits `Link-mode`, `Auto-negotiation` and `Remote fault` from its link-level line and prints no
+  autonegotiation stanza; the fixture filled all four on every port. Now null on fibre, and the trap test
+  asserts it.
+- **`Autonegotiation [not supported, disabled (0x0)]` is the field being unavailable**, not
+  autonegotiation switched off — 27 of 43 blocks, every one a switch on an optical port. The fixture had
+  been using that string for "disabled". The deliberate-off form is `[supported, disabled (0x1)]`, which
+  the capture shows the same TLV family using on its `Aggregation Status` line.
+- **The media is the transceiver's, not the cage's.** One uplink in five now carries a copper SFP, because
+  with every trunk optical the three rules that compare a wire's two ends would have no subject at all at
+  fixture scale — and the mismatch injectors could never place.
+- **The PoE table prints `ON`/`OFF`, `2P/AT`, a bare class digit.** `PoE` is `"$oper ($consumption)"`
+  built by the worker at `Get-JunosNodeData.ps1:559`, so the fixture's `Delivering (12.3W)` and
+  `Class 3` were shapes no switch emits. The test now asserts the display string against the two fields
+  it is built from rather than matching a prefix.
+
 ### 8.3 Fault injection
 
 - **Two injection sites, not one.** `assertNothingOrphaned` is at `:572` but `addClients` runs at
@@ -922,11 +961,17 @@ oracle per row: `mtu-mismatch`, `duplex-mismatch`, `dot1x-auth-failed`, `dot1x-c
 `l1-*` port defects generated from a table by `injectPortDefect`. `--faults 30` against 28 kinds, so every
 injector places once and the cycle still wraps. Four notes:
 
-- **The delta is the oracle, in both directions.** The fleet is byte-identical between `--faults 0` and
+- **The delta is the oracle, in three directions.** The fleet is byte-identical between `--faults 0` and
   `--faults 30` apart from the faults, so `findings(30) − findings(0)` is exactly what the faults caused.
-  Every `expected.finding` the manifest promised must appear in that set, **and** every finding in it must
-  sit at a device and port some manifest entry names — the second direction is what catches a rule firing
-  on collateral. Measured: 28 new findings against 28 entries.
+  Every `expected.finding` the manifest promised must appear in that set; every finding in it must sit at
+  a device and port some manifest entry names; and **no finding may disappear**. The second direction
+  catches a rule firing on collateral, and the third caught a real defect in `injectAutonegAsymmetric`,
+  which asserted `Enabled` on the near end and so silenced an `autoneg-disabled` finding the clean fleet
+  legitimately reported there. It now changes the far end only. Measured: 29 new findings, none lost.
+- **An injector whose fault has a narrow home has to filter before it draws, not after.** Autoneg and
+  duplex mismatches only exist on copper, which is 19 of this fleet's 136 links; picking a link blind and
+  giving up placed the fault about one time in twelve, and a kind that usually fails to place is a kind
+  whose manifest entry usually cannot be checked. `pickReciprocalLink` takes the predicate.
 - **A fault's collateral is part of its location, not noise.** An asymmetric autoneg is visible from both
   ends, so the manifest records `params.peerIp`/`peerPort` and the oracle accepts findings there;
   a supplicant moved out of `Authenticated` takes `dot1x-unauthenticated-traffic` with it on the same

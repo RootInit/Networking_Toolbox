@@ -301,7 +301,10 @@ test('a device that booted within the hour suppresses its own flap findings', ()
 
 test('the neighbour advertisement is compared against the local row, in the real TLV wording', () => {
     assert.equal(Rules.advertisedAutoneg('Autonegotiation [supported, enabled (0x3)], PMD Autonegotiation Capability (0xc036), MAU Type (0x0)'), 'Enabled');
-    assert.equal(Rules.advertisedAutoneg('Autonegotiation [not supported, disabled (0x0)], PMD Autonegotiation Capability (0x0), MAU Type (0x0)'), 'Disabled');
+    assert.equal(Rules.advertisedAutoneg('Autonegotiation [supported, disabled (0x1)], PMD Autonegotiation Capability (0xc036), MAU Type (0x0)'), 'Disabled');
+    // The form 27 of the capture's 43 blocks advertise, every one of them a switch on an optical port:
+    // the field is unavailable, which is no evidence either way rather than evidence of "off".
+    assert.equal(Rules.advertisedAutoneg('Autonegotiation [not supported, disabled (0x0)], PMD Autonegotiation Capability (0x0), MAU Type (0x0)'), null);
     assert.equal(Rules.advertisedFrameSize('MTU Size (1514)'), 1514);
 
     const a = microNode('10.30.9.10', 'micro-tlv-a.example.net', { ports: [detailRow('xe-0/0/0', { AutoNegotiation: 'Disabled' })] });
@@ -375,9 +378,13 @@ test('the clean fleet holds no disagreement between two ends of one wire', () =>
         assert.deepEqual(result.findings.map(f => `${f.ruleId} ${f.deviceIp} ${f.port}`), [],
             'a wire property drawn per end rather than per wire shows up here as the fault the '
             + 'injector is supposed to be the only source of');
-        // Not vacuous: the rules ran on real subjects.
-        for (const id of ['autoneg-mismatch', 'mtu-mismatch']) assert.ok(result.stats[id].evaluated > 50);
-        assert.ok(result.stats['duplex-mismatch'].evaluated > 50);
+        // Not vacuous: the rules ran on real subjects. The two that need a duplex or an autonegotiation
+        // state at both ends only have subjects on the fleet's copper trunks - on optics neither field
+        // exists - so their floor is much lower than the MTU rule's, which optics do report.
+        assert.ok(result.stats['mtu-mismatch'].evaluated > 50, `mtu ${result.stats['mtu-mismatch'].evaluated}`);
+        for (const id of ['autoneg-mismatch', 'duplex-mismatch']) {
+            assert.ok(result.stats[id].evaluated > 10, `${id} evaluated ${result.stats[id].evaluated}`);
+        }
     }
 });
 

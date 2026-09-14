@@ -467,7 +467,11 @@ function accessRow(port, poe, isCage) {
         // Overwritten by computeSpanningTree; a port it never reaches is on a device that never
         // answered, and "Unknown" is the honest value there.
         STP: 'Unknown',
-        PoE: poe ? (live && chance(0.5) ? `Delivering (${(rnd() * 25 + 3).toFixed(1)}W)` : 'Enabled') : 'Unknown',
+        // The worker builds this string as "$oper ($consumption)" from the PoE table's Oper-status and
+        // Power-consumption columns (Get-JunosNodeData.ps1:559), and the real Oper-status values are ON
+        // and OFF. "Delivering"/"Enabled" was this generator's invention, and a rule matching it would
+        // have worked on fixtures only.
+        PoE: poe ? (live && chance(0.5) ? `ON (${(rnd() * 12 + 1.4).toFixed(1)}W)` : 'OFF (0.0W)') : 'Unknown',
         // The sort needs a spread across the 72h/6-month bands plus a slice with no value at all.
         LastFlappedSeconds: live ? int(60, 72 * 3600)
             : chance(0.15) ? null
@@ -577,17 +581,35 @@ function setFlap(row, seconds) {
 // properties of the wire: drawing them on each side independently made a quarter of the clean fleet's
 // links carry an autoneg mismatch and nearly half an MTU mismatch, which is the F11 trap again - the
 // fault the injector is supposed to be the only source of was the fleet's normal state.
-function attachment() {
-    const autoneg = chance(0.25) ? 'disabled' : 'enabled';
-    return { autoneg: autoneg, mtu: chance(0.15) ? 9192 : 1514 };
+// Autonegotiation is a copper property. In the measured capture every fibre port - and every fibre
+// port's LLDP advertisement - reports it as NOT SUPPORTED, and the switch prints no `Auto-negotiation`
+// field and no negotiation stanza on those ports at all. Drawing "disabled" on a 10G cage would be a
+// state no switch produces, and it is the state that would make an autoneg rule fire on every uplink.
+// The media is the TRANSCEIVER's, not the cage's: a 10G cage carrying a copper SFP+ reports Copper and
+// negotiates, which is why one uplink in five here is copper. Without those, every switch-to-switch link
+// in the fleet would be optical and the three rules that compare a wire's two ends would have no subject
+// to run on at fixture scale.
+function attachment(cage) {
+    const fibre = cage ? !chance(0.2) : false;
+    const autoneg = fibre ? 'unsupported' : chance(0.25) ? 'disabled' : 'enabled';
+    return { autoneg: autoneg, mtu: chance(0.15) ? 9192 : 1514, fibre: fibre };
 }
 
 // The Junos wording, verbatim from a real capture's TLVs rather than paraphrased: R2 keeps `Info` as
 // the switch printed it, so a rule written against an invented string is a rule that works only here.
+// Three forms, and the difference between the last two is the whole point: `not supported` is the field
+// being unavailable (every fibre port in the capture, 27 of its 43 LLDP blocks) and `supported, disabled`
+// is autonegotiation deliberately off. Conflating them makes an autoneg rule fire on every 10G uplink.
+// The (0x1) form is derived from the same TLV's bit layout, which the capture shows in use on the
+// neighbouring `Aggregation Status [supported, disabled (0x1)]` line.
 const autonegInfo = (state) => (state === 'enabled'
     ? 'Autonegotiation [supported, enabled (0x3)], PMD Autonegotiation Capability (0xc036), MAU Type (0x0)'
-    : 'Autonegotiation [not supported, disabled (0x0)], PMD Autonegotiation Capability (0x0), MAU Type (0x0)');
+    : state === 'disabled'
+        ? 'Autonegotiation [supported, disabled (0x1)], PMD Autonegotiation Capability (0xc036), MAU Type (0x0)'
+        : 'Autonegotiation [not supported, disabled (0x0)], PMD Autonegotiation Capability (0x0), MAU Type (0x0)');
 const frameSizeInfo = (mtu) => `MTU Size (${mtu})`;
+// The optical cages, by port name: the generator's jacks are ge and its cages xe/et.
+const isFibre = (port) => /^(?:xe|et)/.test(String(port));
 
 // R2/R2b/R13/R5. The fields every LLDP neighbour row carries, switch or endpoint. Omitting them here
 // is how the fixture silently stops matching production shape, so both neighbour builders use this.
@@ -620,7 +642,8 @@ function linkDevices(a, b, descPrefix) {
     const pa = freeUplinks(a).shift();
     const pb = freeUplinks(b).shift();
     if (!pa || !pb) return false;
-    const wire = attachment();
+    // Both ends of an uplink are the same media, and the uplink cages are optical.
+    const wire = attachment(isFibre(pa) || isFibre(pb));
     const stamp = (from, to, localPort, remotePort) => {
         from.Neighbors.push({
             LocalPort: localPort, RemotePort: remotePort, Hostname: to.Hostname,
@@ -654,7 +677,7 @@ function addClients(node, gatewayNode, vlanTags) {
         if (isPhone || isAp) {
             // The endpoint's attachment, drawn once and kept on the port as a switch-to-switch link's
             // is: an endpoint advertises the same wire its switch port sits on.
-            const wire = attachment();
+            const wire = attachment(isFibre(row.Port));
             row._wire = wire;
             node.MedNeighbors.push({
                 LocalPort: row.Port, Hostname: row.Desc, MacAddress: first.MAC,
@@ -1197,19 +1220,27 @@ function applyPortDetail(fleet, snapshotIndex) {
             const h = detailHash(`${node.DeviceIP}|${row.Port}|${snapshotIndex}`);
             const live = String(row.Link).toLowerCase() === 'up';
             const wire = row._wire || null;
-            const fibre = /^(?:xe|et)/.test(row.Port);
+            // The wire knows its own media; a port with no wire falls back to what its cage implies.
+            const fibre = wire ? wire.fibre : isFibre(row.Port);
 
             row.LinkLevelType = 'Ethernet';
             row.MediaType = fibre ? 'Fiber' : 'Copper';
             row.Mtu = wire ? wire.mtu : 1514;
-            row.AutoNegotiation = wire && wire.autoneg === 'disabled' ? 'Disabled' : 'Enabled';
-            // Section 3.4's second trap, reproduced rather than described: every DOWN port prints
+            // A fibre port's link-level line carries no Link-mode, no Auto-negotiation and no Remote
+            // fault, and no autonegotiation stanza follows it: on optics these four fields are absent,
+            // not zero. Every one of the capture's fibre ports is shaped this way, and a fixture that
+            // fills them lets a rule pass here that reports NOT_EVALUATED on real hardware.
+            row.AutoNegotiation = fibre ? null : wire && wire.autoneg === 'disabled' ? 'Disabled' : 'Enabled';
+            // Section 3.4's second trap, reproduced rather than described: every DOWN copper port prints
             // Half-duplex, so a duplex rule that does not hard-gate on Link fires across the estate.
-            row.Duplex = live ? 'Full-duplex' : 'Half-duplex';
-            row.DuplexNegotiated = live ? 'Full-duplex' : null;
-            row.NegotiationStatus = live ? 'Complete' : 'Incomplete';
-            row.SpeedConfigured = 'Auto';
-            row.SpeedNegotiated = live ? (fibre ? '10 Gbps' : '1000 Mbps') : null;
+            row.Duplex = fibre ? null : live ? 'Full-duplex' : 'Half-duplex';
+            row.DuplexNegotiated = !fibre && live ? 'Full-duplex' : null;
+            // Incomplete is what all 25 of the capture's down ports print; it is the link being down,
+            // not a negotiation that failed on a live wire.
+            row.NegotiationStatus = fibre ? null : live ? 'Complete' : 'Incomplete';
+            // The `Speed:` field the parser reads: "Auto" on copper, the rate itself on optics.
+            row.SpeedConfigured = fibre ? '10Gbps' : 'Auto';
+            row.SpeedNegotiated = !fibre && live ? (isFibre(row.Port) ? '10 Gbps' : '1000 Mbps') : null;
             row.MacAddress = ['02', 'ab', ((h >>> 24) & 0xff), ((h >>> 16) & 0xff), ((h >>> 8) & 0xff), (h & 0xff)]
                 .map(x => (typeof x === 'string' ? x : x.toString(16).padStart(2, '0'))).join(':');
             row.InterfaceFlags = live ? 'SNMP-Traps Internal: 0x4000' : 'Hardware-Down SNMP-Traps Internal: 0x4000';
@@ -1218,7 +1249,7 @@ function applyPortDetail(fleet, snapshotIndex) {
             row.ActiveAlarms = live ? 'None' : 'LINK';
             row.ActiveDefects = live ? 'None' : 'LINK';
             row.StatisticsLastCleared = 'Never';
-            row.RemoteFault = 'Online';
+            row.RemoteFault = fibre ? null : 'Online';
             row.BpduError = 'None';
             row.LoopDetectPduError = 'None';
             row.EthernetSwitchingError = 'None';
@@ -1262,14 +1293,17 @@ function applyPortDetail(fleet, snapshotIndex) {
                 row.PoeAdminStatus = null; row.PoeOperStatus = null; row.PoePairMode = null;
                 row.PoeMaxPower = null; row.PoePriority = null; row.PoePowerConsumption = null; row.PoeClass = null;
             } else {
-                const delivering = row.PoE.startsWith('Delivering');
+                // Every value here is a column of the capture's own `show poe interface` table: ON/OFF,
+                // 2P/AT, the max power tracking the negotiated class, a bare class digit, and
+                // not-applicable where nothing is drawing power.
+                const on = row.PoE.startsWith('ON');
                 row.PoeAdminStatus = 'Enabled';
-                row.PoeOperStatus = delivering ? 'Delivering' : 'OFF';
-                row.PoePairMode = '4-pair';
-                row.PoeMaxPower = '30.0W';
+                row.PoeOperStatus = on ? 'ON' : 'OFF';
+                row.PoePairMode = '2P/AT';
+                row.PoeMaxPower = on ? '4.0W' : '15.4W';
                 row.PoePriority = medPorts.has(row.Port) ? 'High' : 'Low';
-                row.PoePowerConsumption = delivering ? row.PoE.replace(/^\D+\(|\)$/g, '') : '0.0W';
-                row.PoeClass = delivering ? `Class ${1 + (h % 4)}` : 'not-applicable';
+                row.PoePowerConsumption = on ? row.PoE.replace(/^\D+\(|\)$/g, '') : '0.0W';
+                row.PoeClass = on ? String(1 + (h % 4)) : 'not-applicable';
             }
 
             // R6. One row per authenticated client, and an Initialize row for a configured port with
@@ -1650,7 +1684,7 @@ function injectStpUnconverged(rng, fleet) {
 // One link both ends report, resolved down to the two interface rows and the two LLDP entries that
 // describe it. Matching the back-entry on the port as well as the address matters once a pair of devices
 // is joined by more than one wire: by address alone, a fault meant for one wire lands half on another.
-function pickReciprocalLink(rng, fleet) {
+function pickReciprocalLink(rng, fleet, eligible) {
     const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
     const usable = (d) => d.ScanStatus === 'Ok' && d.SectionsCaptured.includes('INTERFACES_EXT');
     const candidates = [];
@@ -1667,7 +1701,12 @@ function pickReciprocalLink(rng, fleet) {
             const farRow = peer.Interfaces.find(r => r.Port === farPort);
             if (!nearRow || !farRow) continue;
             if (String(nearRow.Link).toLowerCase() !== 'up' || String(farRow.Link).toLowerCase() !== 'up') continue;
-            candidates.push({ device, peer, neighbor, back, nearPort, farPort, nearRow, farRow });
+            const link = { device, peer, neighbor, back, nearPort, farPort, nearRow, farRow };
+            // Filtered before the draw, not after: a fault that only lands on a copper trunk and picks
+            // blind places about one time in twelve on this fleet, and a kind that usually fails to place
+            // is a kind the manifest usually cannot be checked against.
+            if (eligible && !eligible(link)) continue;
+            candidates.push(link);
         }
     }
     return candidates.length ? fPick(rng, candidates) : null;
@@ -1679,22 +1718,29 @@ const tlv = (entry, subtypePrefix) => (entry.OrgInfo || []).find(o => String(o.S
 // be findable by a rule written in the same paraphrase.
 const AUTONEG_TLV = {
     Enabled: 'Autonegotiation [supported, enabled (0x3)], PMD Autonegotiation Capability (0xc036), MAU Type (0x0)',
-    Disabled: 'Autonegotiation [not supported, disabled (0x0)], PMD Autonegotiation Capability (0x0), MAU Type (0x0)',
+    // `supported, disabled` - autonegotiation deliberately off, which is a different fact from the
+    // `not supported` an optical port advertises. A fault written in the second form is unreadable: a
+    // rule is right to treat "the field is unavailable" as no evidence at all.
+    Disabled: 'Autonegotiation [supported, disabled (0x1)], PMD Autonegotiation Capability (0xc036), MAU Type (0x0)',
 };
 
 // A wire whose two ends disagree about autonegotiation. What a device ADVERTISES and what its own row
 // says are one fact seen twice, so both move together: flipping only the TLV would make the fixture, not
 // the network, the thing that is wrong - and a rule could then be written that never works on hardware.
 function injectAutonegAsymmetric(rng, fleet) {
-    const link = pickReciprocalLink(rng, fleet);
+    // Copper at both ends: an optical port has no autonegotiation to disagree about and reports the field
+    // nowhere, so the fault would be invisible by construction. And both ends negotiating already, so
+    // only the FAR end has to change - asserting a value on the near end too would silence an
+    // autoneg-disabled finding the clean fleet legitimately reports there, and a fault that takes a
+    // finding away is one the delta oracle cannot attribute.
+    const link = pickReciprocalLink(rng, fleet, (l) =>
+        l.nearRow.AutoNegotiation === 'Enabled' && l.farRow.AutoNegotiation === 'Enabled'
+        && tlv(l.neighbor, 'MAC/PHY') && tlv(l.back, 'MAC/PHY'));
     if (!link) return null;
-    const near = tlv(link.neighbor, 'MAC/PHY');
-    const far = tlv(link.back, 'MAC/PHY');
-    if (!near || !far) return null;
-    near.Info = AUTONEG_TLV.Disabled;            // what the peer advertises to this device
+    // `back`'s TLV - what this device advertises to the peer - is left alone: it already says Enabled,
+    // which is what the near row says, so the fault is the disagreement rather than a second edit.
+    tlv(link.neighbor, 'MAC/PHY').Info = AUTONEG_TLV.Disabled;   // what the peer advertises to us
     link.farRow.AutoNegotiation = 'Disabled';
-    far.Info = AUTONEG_TLV.Enabled;
-    link.nearRow.AutoNegotiation = 'Enabled';
     return {
         // No section 7 row: the 802.3 TLVs R2 retains are what make it visible at all.
         kind: 'autoneg-asymmetric', failureModes: [], deviceIp: link.device.DeviceIP,
@@ -1707,10 +1753,10 @@ function injectAutonegAsymmetric(rng, fleet) {
 // G5. The local MTU against the frame size the far end advertises - the comparison R2 retained the
 // Maximum Frame Size TLV for and that nothing in revision 2 named.
 function injectMtuMismatch(rng, fleet) {
-    const link = pickReciprocalLink(rng, fleet);
+    const link = pickReciprocalLink(rng, fleet, (l) =>
+        typeof l.nearRow.Mtu === 'number' && !!tlv(l.neighbor, 'Maximum Frame Size'));
     if (!link) return null;
     const advertised = tlv(link.neighbor, 'Maximum Frame Size');
-    if (!advertised || typeof link.nearRow.Mtu !== 'number') return null;
     const raised = link.nearRow.Mtu === 1514 ? 9192 : 1514;
     link.farRow.Mtu = raised;
     advertised.Info = `MTU Size (${raised})`;
@@ -1724,9 +1770,10 @@ function injectMtuMismatch(rng, fleet) {
 // Half-duplex on one end of a wire whose other end is full. The finding is anchored on the half-duplex
 // end, because that is the port an operator has to go and look at.
 function injectDuplexMismatch(rng, fleet) {
-    const link = pickReciprocalLink(rng, fleet);
+    // Copper again: optics report no duplex at all.
+    const link = pickReciprocalLink(rng, fleet, (l) =>
+        l.nearRow.Duplex === 'Full-duplex' && l.farRow.Duplex === 'Full-duplex');
     if (!link) return null;
-    if (link.nearRow.Duplex !== 'Full-duplex') return null;
     link.farRow.Duplex = 'Half-duplex';
     link.farRow.DuplexNegotiated = 'Half-duplex';
     return {
@@ -1814,12 +1861,16 @@ function injectVlanMissingFromTrunk(rng, fleet) {
 const L1_PORT_DEFECTS = [
     {
         finding: 'duplex-half-on-up-link',
+        // Copper only, and the same for the three below: on optics the field is absent, and a defect
+        // planted in an absent field is a state the fixture would be alone in producing.
+        needs: 'Duplex',
         apply: (row) => { row.Duplex = 'Half-duplex'; row.DuplexNegotiated = 'Half-duplex'; },
     },
-    { finding: 'negotiation-incomplete', apply: (row) => { row.NegotiationStatus = 'Incomplete'; } },
+    { finding: 'negotiation-incomplete', needs: 'NegotiationStatus', apply: (row) => { row.NegotiationStatus = 'Incomplete'; } },
     {
         finding: 'autoneg-disabled',
         // Only a port that was negotiating, so the fault is a change rather than a restatement.
+        needs: 'AutoNegotiation',
         where: (row) => row.AutoNegotiation === 'Enabled',
         apply: (row) => { row.AutoNegotiation = 'Disabled'; },
     },
@@ -1831,7 +1882,7 @@ const L1_PORT_DEFECTS = [
     { finding: 'input-errors-present', apply: (row, rng) => { row.InputErrors.Errors = fInt(rng, 1, 40000); } },
     { finding: 'output-errors-present', apply: (row, rng) => { row.OutputErrors.Errors = fInt(rng, 1, 40000); } },
     { finding: 'framing-errors-present', apply: (row, rng) => { row.InputErrors['Framing errors'] = fInt(rng, 1, 900); } },
-    { finding: 'remote-fault', apply: (row) => { row.RemoteFault = 'Offline'; } },
+    { finding: 'remote-fault', needs: 'RemoteFault', apply: (row) => { row.RemoteFault = 'Offline'; } },
     {
         finding: 'link-alarm-on-up-port',
         apply: (row) => { row.ActiveAlarms = 'LINK'; row.ActiveDefects = 'LINK'; },
@@ -1863,17 +1914,20 @@ const L1_PORT_DEFECTS = [
             row.PoeOperStatus = 'OFF';
             row.PoePowerConsumption = '0.0W';
             row.PoeClass = 'not-applicable';
-            row.PoE = 'Disabled';
+            // The display string the worker builds from the same two columns, so the two agree.
+            row.PoE = 'OFF (0.0W)';
         },
     },
     {
         finding: 'poe-denied',
         ports: (node) => node.Interfaces.filter(r => r.PoeOperStatus !== null && String(r.Link).toLowerCase() === 'up'),
         apply: (row) => {
-            row.PoeOperStatus = 'Denied';
+            // The capture's PoE table only ever prints ON and OFF, so the fault vocabulary here is
+            // derived rather than observed - see the note on the rule in rules.js.
+            row.PoeOperStatus = 'Fault';
             row.PoePowerConsumption = '0.0W';
             row.PoeClass = 'not-applicable';
-            row.PoE = 'Enabled';
+            row.PoE = 'Fault (0.0W)';
         },
     },
 ];
@@ -1889,7 +1943,8 @@ const plainPorts = (node) => {
 function injectPortDefect(defect) {
     const portsOf = (node) => {
         if (!node.SectionsCaptured.includes('INTERFACES_EXT')) return [];
-        const rows = defect.ports ? defect.ports(node) : plainPorts(node);
+        let rows = defect.ports ? defect.ports(node) : plainPorts(node);
+        if (defect.needs) rows = rows.filter(r => r[defect.needs] !== null && r[defect.needs] !== undefined);
         return defect.where ? rows.filter(defect.where) : rows;
     };
     const injector = (rng, fleet) => {
