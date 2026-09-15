@@ -764,9 +764,6 @@ test('the findings a faulted fleet grows are exactly the faults the manifest nam
         const after = evaluate(snap, { records: false, ...FLEET }).findings;
         const delta = after.filter(f => !before.has(located(f)));
         const afterKeys = new Set(after.map(located));
-        const vanished = [...before].filter(key => !afterKeys.has(key));
-        assert.deepEqual(vanished, [], 'an injected fault took an unrelated finding away with it');
-
         const manifest = faulted.faults[index].Faults;
         assert.equal(faulted.faults[index].Map, faulted.names[index]);
         // Every location a fault touched: the device and port it names, plus the far end where the fault
@@ -795,6 +792,13 @@ test('the findings a faulted fleet grows are exactly the faults the manifest nam
             assert.ok(touched.has(`${finding.deviceIp} ${finding.port}`),
                 `snapshot ${index} grew ${located(finding)}, which no manifest entry accounts for`);
         }
+        // A reboot rewrites the whole chassis, and a rule that reads the chassis is entitled to go quiet
+        // because of it: the boot stamp moves, so every flap that predates the new boot IS the boot and
+        // is correctly suppressed. Only that kind gets the licence, and only on the device it names.
+        const wholeDevice = new Set(manifest.filter(f => f.kind === 'rebooted-device').map(f => f.deviceIp));
+        const vanished = [...before].filter(key => !afterKeys.has(key))
+            .filter(key => !wholeDevice.has(key.split(' ')[1]));
+        assert.deepEqual(vanished, [], 'an injected fault took an unrelated finding away with it');
         assert.ok(delta.length >= 16, `only ${delta.length} findings changed; the oracle is going soft`);
     }
 });

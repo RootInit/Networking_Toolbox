@@ -2425,7 +2425,12 @@ const silentPort = (row, host) => ![...(host.Neighbors || []), ...(host.MedNeigh
 // a reset must never be able to produce. Link down, because on the measured fleet zero input and a dark
 // port are coextensive: no up port there has zero input bytes.
 const injectNeverUsedPort = (rng, fleet) => plantLastUsed('never-used-port', 'NEVER_USED_THIS_EPOCH', rng, fleet,
-    (row) => typeof row.InputBytes === 'number' && !(row.Vlans || []).some(v => v.Mode === 'trunk'),
+    // Silent and holding no MAC. applyTransitLearning has already run, and a dynamic MAC on the port is
+    // E2 - which outranks E5 and is right to: something down there transmitted within the aging time.
+    // A port promised as never used has to be one where no other source has anything to say.
+    (row, host) => typeof row.InputBytes === 'number' && !(row.Vlans || []).some(v => v.Mode === 'trunk')
+        && silentPort(row, host) && !(host.MacTable || []).some(m => physical(m.PhysicalPort || m.Interface) === row.Port)
+        && !(host.Clients || []).some(c => physical(c.Port) === row.Port),
     (row) => { forceLive(row, false); row.InputBytes = 0; row.InputPackets = 0; row.InputBps = 0; return { inputBytes: 0 }; });
 
 // Carried traffic once, carries none now. The bound is the epoch, because a single reading of a
@@ -2492,13 +2497,21 @@ function injectRebootedDevice(rng, fleet) {
     const wasSeconds = host.UptimeSeconds;
     // Every member, because a chassis reboot is not a linecard reboot - the per-FPC case already has its
     // own subject in ageFleet, and mixing the two here would make neither testable.
+    const bootedMs = Date.parse(host.CaptureTimestamp) - 900 * 1000;
     host.UptimeSeconds = 900;
-    host.FpcUptimes = (host.FpcUptimes || []).map(r => ({ ...r, UptimeSeconds: 900 }));
+    host.FpcUptimes = (host.FpcUptimes || []).map(r => ({ ...r, UptimeSeconds: 900, SystemBooted: iso(new Date(bootedMs)) }));
+    // The boot STAMP moves with the seconds. A chassis that says it booted years ago and fifteen minutes
+    // ago at once is the self-contradicting fault this file's own rule forbids - and section 4.2's boot
+    // filter reads exactly that pair, so leaving them apart teaches it to fire on an impossible state.
+    host.Uptime = iso(new Date(bootedMs));
     for (const r of host.Interfaces) {
         if (typeof r.InputBytes !== 'number') continue;
         r.InputBytes = r.Link === 'up' ? 120000 : 0;
         r.InputPackets = r.Link === 'up' ? 200 : 0;
         r.InputBps = 0;
+        // A live port on a box that booted 15 minutes ago came up at boot: its flap IS the boot event,
+        // which is what the filter is there to discard. A dark port never transitioned and keeps its own.
+        if (String(r.Link).toLowerCase() === 'up') { r.LastFlappedSeconds = 870; r.LastFlappedState = 'Parsed'; }
     }
     return {
         kind: 'rebooted-device', failureModes: [], deviceIp: host.DeviceIP, port: row.Port, mac: null,

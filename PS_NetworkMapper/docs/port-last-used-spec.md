@@ -386,7 +386,7 @@ Revision 1's §10.6 claimed "`resolveDeviceIdentity` handles the device half". I
 | # | Requirement | Site | Without it |
 |---|---|---|---|
 | **P0** | **Parse LLDP `Age`, `Time mark`, `Ageout Count` per local interface** | `lib/Get-JunosNodeData.ps1:517-552` | E0 — the only direct per-port last-seen — does not exist |
-| P1 | `UptimeSeconds` from the relative form, **per FPC** | `lib/Get-JunosNodeData.ps1:350` | The boot filter and the reset test both fail (§4.2, §4.3) |
+| ~~P1~~ | ~~`UptimeSeconds` from the relative form, **per FPC**~~ **Closed 2026-09-15** (§11 item 1): `ConvertFrom-JunosSystemUptime` emits one row per member and `$NodeData.UptimeSeconds` takes the master's | `lib/JunosParsers.ps1`, `lib/Get-JunosNodeData.ps1` | The boot filter and the reset test both fail (§4.2, §4.3) |
 | P2 | `Statistics last cleared`, absolute + relative | `lib/JunosParsers.ps1:262-299` | E4/E5 cannot state their epoch; a manual clear looks like "never used" |
 | P3 | Per-device capture timestamp | `lib/Get-JunosNodeData.ps1:194-210`, `lib/FleetCrawl.ps1:111-122` | `epochStart` undefinable; every interval widened by the crawl span |
 | P4 | `Input packets` / `Output packets` | `lib/JunosParsers.ps1:285-289` | No mean frame size, so §2.3's floor falls back to the coarser pps form |
@@ -490,7 +490,7 @@ Synthetic samples only; no byte of the production capture enters the repo.
 | `Admin: down` | `DISABLED`; absent from the reclaim view |
 | Static MAC only (flag `S`) | Does not satisfy E2 *(requires P5)* |
 | Port with > 4 MACs | E2 confidence downgraded |
-| Re-run over the same snapshots **through the persisted path** | Byte-identical; no drift — §8.4 |
+| ~~Re-run over the same snapshots **through the persisted path**~~ | ~~Byte-identical; no drift — §8.4~~ **Struck 2026-09-15**: §11 item 6 declined §8, so there is no persisted path to re-run through |
 
 Every path must return `evidence` and `caveats` populated; assert that generically.
 
@@ -538,8 +538,9 @@ only specified work not blocked on hardware. Same rhythm as that document's §10
 each landing with its tests, and anything touching `lib/` verified on the 5.1 VM before it is pushed.
 
 **What is already done.** §7's prerequisites landed as a side effect of the diagnostics Phase 1
-retention pass — P0, P2, P3, P4, P5, P6, P7 are all in `lib/`, and P9 is closed (see its row). **P1
-is the only prerequisite still open**, and §4.2's boot filter and §4.3's reset test both rest on it.
+retention pass — P0, P2, P3, P4, P5, P6, P7 are all in `lib/`, and P9 is closed (see its row). P1,
+the one that was still open when this order was written, closed with item 1 below: §7's table is now
+clear, and §4.2's boot filter and §4.3's reset test rest on a parser that exists.
 
 1. **P1 — `UptimeSeconds`, per FPC.** `ConvertFrom-JunosSystemUptime` over the whole `show system
    uptime` output, one row per member, standalone boxes reporting as FPC 0. The relative-duration
