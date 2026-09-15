@@ -2566,6 +2566,111 @@ Test-Case "the batch runs the upgraded commands, in place, and adds only the bri
         $JunosNodeDataSrc -match 'WriteLine\("show spanning-tree bridge"\)'
 }
 
+Write-Host "`n--- 20. Per-FPC uptime in seconds (port-last-used P1) ---" -ForegroundColor Cyan
+
+# port-last-used-spec.md section 9.1. The relative "(... ago)" form is the only one read: the absolute
+# stamp's abbreviated timezone is unresolvable, and both sides of every comparison stay switch-relative
+# so the switch-vs-collector offset cancels.
+
+Test-Case "the relative duration reads weeks, days, hours and minutes as one total" {
+    (ConvertFrom-JunosRelativeDuration -Text 'System booted: 2026-08-27 05:41:12 PDT (2w4d 06:18 ago)') -eq
+        (2 * 604800 + 4 * 86400 + 6 * 3600 + 18 * 60)
+}
+Test-Case "the y unit is read, so a device up over a year is not silently unreadable (P9)" {
+    (ConvertFrom-JunosRelativeDuration -Text '(1y2w3d 04:05:06 ago)') -eq
+        (31536000 + 2 * 604800 + 3 * 86400 + 4 * 3600 + 5 * 60 + 6)
+}
+Test-Case "the seconds-only form is read" {
+    (ConvertFrom-JunosRelativeDuration -Text '(45 secs ago)') -eq 45
+}
+Test-Case "an empty parenthesis group is unreadable, not zero seconds" {
+    # Every unit is optional, so "( ago)" matches them all and sums to a number that reads as "this
+    # second" - which against a later snapshot is a reboot that did not happen.
+    $null -eq (ConvertFrom-JunosRelativeDuration -Text '( ago)')
+}
+Test-Case "text carrying no relative form at all yields null" {
+    ($null -eq (ConvertFrom-JunosRelativeDuration -Text 'System booted: 2026-08-27 05:41:12 PDT')) -and
+        ($null -eq (ConvertFrom-JunosRelativeDuration -Text ''))
+}
+Test-Case "ConvertFrom-JunosLastFlapped still separates Never from unreadable, on the shared helper" {
+    $Never = ConvertFrom-JunosLastFlapped -Block "  Last flapped   : Never`n"
+    $Junk  = ConvertFrom-JunosLastFlapped -Block "  Last flapped   : 2026-01-01 (who knows)`n"
+    $Good  = ConvertFrom-JunosLastFlapped -Block "  Last flapped   : 2026-08-27 05:41:12 PDT (3d 01:00 ago)`n"
+    $None  = ConvertFrom-JunosLastFlapped -Block "  Description: nothing here`n"
+    $Never.State -eq 'Never' -and $null -eq $Never.Seconds -and
+        $Junk.State -eq 'Unparsed' -and $null -eq $Junk.Seconds -and
+        $Good.State -eq 'Parsed' -and $Good.Seconds -eq (3 * 86400 + 3600) -and
+        $null -eq $None.State
+}
+
+$UptimeVc = @"
+fpc0:
+--------------------------------------------------------------------------
+Current time: 2026-09-15 12:00:00 UTC
+Time Source:  LOCAL CLOCK
+System booted: 2026-08-27 05:41:12 UTC (2w4d 06:18 ago)
+Protocols started: 2026-08-27 05:46:30 UTC (2w4d 06:13 ago)
+Last configured: 2026-09-01 10:00:00 UTC (1w6d 02:00 ago) by admin
+12:00PM  up 18 days,  6:18, 1 user, load averages: 0.10, 0.12, 0.09
+
+fpc1:
+--------------------------------------------------------------------------
+Current time: 2026-09-15 12:00:04 UTC
+System booted: 2026-09-14 09:00:00 UTC (1d 03:00 ago)
+12:00PM  up 1 day,  3:00, 0 users, load averages: 0.05, 0.07, 0.02
+"@
+
+$VcUptimes = @(ConvertFrom-JunosSystemUptime -Text $UptimeVc)
+Test-Case "show system uptime yields one row per virtual-chassis member" {
+    $VcUptimes.Count -eq 2 -and $VcUptimes[0].FPC -eq '0' -and $VcUptimes[1].FPC -eq '1'
+}
+Test-Case "a member that rebooted on its own carries its own uptime, not the master's" {
+    # Section 4.3's first failure: the master's stamp does not move when a linecard reboots, so a
+    # device-level uptime reports no reset while that member's ports' counters have all restarted.
+    $VcUptimes[0].UptimeSeconds -eq (2 * 604800 + 4 * 86400 + 6 * 3600 + 18 * 60) -and
+        $VcUptimes[1].UptimeSeconds -eq (86400 + 3 * 3600)
+}
+Test-Case "the absolute stamp is kept raw beside the seconds, and never parsed into them" {
+    $VcUptimes[0].SystemBooted -eq '2026-08-27 05:41:12 UTC'
+}
+Test-Case "a standalone box reports as FPC 0, which is what its port names say" {
+    $Standalone = @(ConvertFrom-JunosSystemUptime -Text @"
+Current time: 2026-09-15 12:00:00 UTC
+System booted: 2026-09-08 12:00:00 UTC (7d 00:00 ago)
+"@)
+    $Standalone.Count -eq 1 -and $Standalone[0].FPC -eq '0' -and $Standalone[0].UptimeSeconds -eq (7 * 86400)
+}
+Test-Case "a member block with no System booted line is reported with a null uptime, not dropped" {
+    # An absent row and a row whose uptime could not be read call for different answers: the first is
+    # a member that is not there, the second is a segment boundary of unknown type.
+    $Partial = @(ConvertFrom-JunosSystemUptime -Text @"
+fpc0:
+--------------------------------------------------------------------------
+System booted: 2026-09-08 12:00:00 UTC (7d 00:00 ago)
+
+fpc1:
+--------------------------------------------------------------------------
+Current time: 2026-09-15 12:00:00 UTC
+"@)
+    $Partial.Count -eq 2 -and $Partial[1].FPC -eq '1' -and $null -eq $Partial[1].UptimeSeconds
+}
+Test-Case "no uptime output at all yields no rows" {
+    (@(ConvertFrom-JunosSystemUptime -Text '')).Count -eq 0
+}
+
+Test-Case "the worker records UptimeSeconds and FpcUptimes, and picks the master's row" {
+    $JunosNodeDataSrc -match '\$NodeData\.FpcUptimes = @\(ConvertFrom-JunosSystemUptime -Text \$DataDict\["UPTIME"\]\)' -and
+        # From the UNSCOPED output: the master scoping a few lines above is exactly what this exists to
+        # see past, and reading $UptimeScope here would give every member the master's boot time.
+        $JunosNodeDataSrc -notmatch '\$NodeData\.FpcUptimes = @\(ConvertFrom-JunosSystemUptime -Text \$UptimeScope\)' -and
+        $JunosNodeDataSrc -match '\$NodeData\.UptimeSeconds = \$MasterUptimeRow\.UptimeSeconds'
+}
+Test-Case "a placeholder node's uptime is null, never zero" {
+    # Zero would read as "booted this second", which is a reset against every later snapshot.
+    $FleetCrawlSrc = Get-Content (Join-Path $LibDir 'FleetCrawl.ps1') -Raw
+    $FleetCrawlSrc -match 'UptimeSeconds = \$null; FpcUptimes = @\(\)'
+}
+
 Write-Host "`n============================================" -ForegroundColor Cyan
 if ($script:Passed -eq $script:Total) {
     Write-Host "$($script:Passed)/$($script:Total) passed" -ForegroundColor Green

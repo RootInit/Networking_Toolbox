@@ -245,6 +245,13 @@ $NodeData = @{
     # which is too coarse to compare counters or last-seen times between devices. $null on a device
     # that never answered - a placeholder has no capture to timestamp.
     CaptureTimestamp = $null
+    # P1. Uptime as SECONDS, which Uptime above is not - that field holds the raw "System booted:"
+    # stamp, whose abbreviated timezone the codebase already declares unresolvable. Both of these are
+    # switch-relative, so the switch-vs-collector offset cancels when they are compared.
+    # FpcUptimes carries one row per virtual-chassis member, because a non-master member reboots its
+    # own ports' counters without moving the master's stamp; UptimeSeconds is the master's row.
+    UptimeSeconds = $null
+    FpcUptimes = @()
 }
 
 try {
@@ -397,6 +404,18 @@ try {
     $NodeData.ChassisInventory = @(ConvertFrom-JunosChassisHardware -Text $DataDict["CHASSIS_HARDWARE"])
 
     if ($UptimeScope -match "(?i)System booted:\s*(?<boot>[^\(\r\n]+)") { $NodeData.Uptime = $Matches.boot.Trim() }
+
+    # P1. Every member's uptime, from the unscoped output - the master scoping above is what this row
+    # set exists to see past. The master's own row is picked by the prompt's {master:N} marker, and on a
+    # standalone box there is one row and it is FPC 0.
+    $NodeData.FpcUptimes = @(ConvertFrom-JunosSystemUptime -Text $DataDict["UPTIME"])
+    $MasterUptimeRow = if ($null -ne $MasterFpcId) {
+        $NodeData.FpcUptimes | Where-Object { $_.FPC -eq $MasterFpcId } | Select-Object -First 1
+    } elseif ($NodeData.FpcUptimes.Count -eq 1) {
+        $NodeData.FpcUptimes[0]
+    } else { $null }
+    if ($MasterUptimeRow) { $NodeData.UptimeSeconds = $MasterUptimeRow.UptimeSeconds }
+
     if ($UptimeScope -match "(?i)Last configured:\s*(?<cfg>[^\(\r\n]+?)\s*\([^\)]*\)\s*by\s+(?<user>\S+)") {
         $NodeData.LastConfigured = $Matches.cfg.Trim()
         $NodeData.LastConfiguredBy = $Matches.user.Trim()

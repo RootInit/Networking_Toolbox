@@ -1142,6 +1142,39 @@ test('R12: capture timestamps are per-device, inside the crawl window, and absen
     }
 });
 
+// P1 (port-last-used-spec.md section 7). Uptime in seconds, per member, against this device's own
+// capture instant - the pair R12 exists to make comparable.
+test('P1: per-FPC uptimes are measured against the capture instant, and agree with the boot stamp', () => {
+    const scanned = topology.filter(d => d.ScanStatus === 'Ok');
+    assert.ok(scanned.length > 10);
+    let stacks = 0;
+    for (const d of scanned) {
+        assert.equal(d.FpcUptimes.length, d.StackMembers.length,
+            `${d.DeviceIP} reports ${d.FpcUptimes.length} member uptimes for ${d.StackMembers.length} members`);
+        if (d.StackMembers.length > 1) stacks += 1;
+        assert.deepEqual(d.FpcUptimes.map(r => r.FPC), d.StackMembers.map(m => String(m.FPC)));
+        const master = d.FpcUptimes[d.StackMembers.findIndex(m => m.IsMaster)];
+        assert.equal(d.UptimeSeconds, master.UptimeSeconds, `${d.DeviceIP} device uptime is not the master's`);
+        assert.equal(typeof d.UptimeSeconds, 'number');
+        // The pair has to agree: Uptime is the raw boot stamp, UptimeSeconds is the age of that stamp
+        // at capture. A device whose two disagree is one no chassis can be.
+        const derived = (Date.parse(d.CaptureTimestamp) - Date.parse(d.Uptime)) / 1000;
+        assert.ok(Math.abs(derived - d.UptimeSeconds) <= 5,
+            `${d.DeviceIP}: Uptime says ${derived}s, UptimeSeconds says ${d.UptimeSeconds}s`);
+    }
+    assert.ok(stacks > 0, 'no virtual chassis in the fixture, so the per-member shape is untested');
+    for (const d of topology.filter(x => x.ScanStatus !== 'Ok')) {
+        // null, not 0: zero reads as "booted this second", which is a reset against every later snapshot.
+        assert.equal(d.UptimeSeconds, null, `${d.DeviceIP} never answered, so its uptime is unknown`);
+        assert.deepEqual(d.FpcUptimes, []);
+    }
+});
+
+// No P1 counterpart for "the capture lost UPTIME": truncation drops at most three sections and UPTIME
+// is fifth-from-last, so no fixture node can currently reach that state. What holds the fields to their
+// section is the SECTION_SUPPLIES coupling test in rules.test.mjs, which reads the blanker's source
+// rather than needing a node in the state - the same guard the POE and DOT1X blankers rely on.
+
 // R15: the truncation signal. Section names must be real, a truncated capture must lose its TAIL
 // (the worker asks for the largest command last), and dropping a section must drop what it supplies
 // - otherwise the fixture asserts a state no switch can produce.

@@ -1109,6 +1109,11 @@ equality against it, so the test fails in **both** directions — a new initiali
 accounted for widens the list, filling one in narrows it, and either way that list is what gets
 edited, deliberately. Both directions were verified by injecting each kind of drift.
 
+**Closed 2026-09-15.** `ACCESS_ROW_GAP` is now empty and the assertion is unchanged, so it still fails
+in both directions — a new initializer field nobody accounted for now fails immediately rather than
+widening a list. It grew from 23 to 44 before it shrank (§4.2), because Phase 1 and Phase 3 added
+fields faster than the fixture filled them in; the paragraph below is why that was the right order.
+
 Closing the gap now was deliberately declined: the fixture's values have to be meaningful
 (consistent with link state, spread across the bands the sorts depend on), and 23 fields of
 plausible-looking data invented before the initializer settles would bake in assumptions Phase 1 is

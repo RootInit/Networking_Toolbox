@@ -92,6 +92,9 @@ test('a field is declared against the section that supplies it, and the fixture 
     const UNREAD_BY_RULES = [
         'MasterCpuUtilization', 'MasterMemoryUtilization', 'LastConfigured', 'LastConfiguredBy',
         'Dot1x_State', 'Dot1x_User',
+        // P1's fields. Read by port-last-used.js, which is not the rule engine - the first counter-delta
+        // rule is what moves them into FIELD_SECTION, and it does not exist yet (spec 3.1).
+        'UptimeSeconds', 'FpcUptimes',
     ];
     for (const [section, lines] of bodies) {
         const text = lines.join('\n');

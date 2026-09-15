@@ -294,6 +294,9 @@ function blankNode(deviceIp) {
         SectionsAttempted: [], SectionErrors: {}, StpBridge: [],
         // R9/R8. A node that never answered has no route and no inventory to report.
         DefaultRoute: {}, ChassisInventory: [], LogicalUnits: [],
+        // P1. null, not 0: zero uptime reads as "booted this second", which is a reset against every
+        // later snapshot. Uptime above is the raw stamp and is not the same field.
+        UptimeSeconds: null, FpcUptimes: [],
     };
 }
 
@@ -357,6 +360,10 @@ const SECTION_SUPPLIES = {
         node.Uptime = 'Unknown';
         node.LastConfigured = 'Unknown';
         node.LastConfiguredBy = 'Unknown';
+        // P1 comes from the same command, so it leaves with it. This is the "Unknown on either side"
+        // case of port-last-used-spec.md section 4.3: neither a reset nor a continuation.
+        node.UptimeSeconds = null;
+        node.FpcUptimes = [];
     },
     // A no-op in shape - an empty Alarms list is also what a healthy device reports - and kept anyway so
     // the field's section is declared in one place. What separates the two states is SectionsCaptured,
@@ -413,11 +420,23 @@ function managementGateway(deviceIp) {
     return `${String(deviceIp).split('.').slice(0, 3).join('.')}.1`;
 }
 
-function stampCapture(node, scanTime) {
+function stampCapture(node, scanTime, fpcBooted) {
     // A fleet crawl spans minutes and scanTime is when the snapshot was written, so each device was
     // read somewhere in the window before it. That spread is the whole point of R12: one
     // ScanTimestamp is too coarse to compare counters or last-seen times across devices.
     node.CaptureTimestamp = new Date(scanTime.getTime() - int(0, 14 * 60000)).toISOString();
+    // P1. Uptime in SECONDS, per member, measured against this device's own capture instant - which is
+    // the only reason R12 exists. A member that rebooted on its own carries a shorter uptime than the
+    // master here, and that difference is what port-last-used-spec.md section 4.3 splits segments on.
+    const capturedMs = Date.parse(node.CaptureTimestamp);
+    node.FpcUptimes = (node.StackMembers || []).map((m) => {
+        const bootedMs = (fpcBooted || {})[m.FPC];
+        const seconds = isFinite(bootedMs) && isFinite(capturedMs)
+            ? Math.max(0, Math.round((capturedMs - bootedMs) / 1000)) : null;
+        return { FPC: String(m.FPC), UptimeSeconds: seconds, SystemBooted: isFinite(bootedMs) ? iso(new Date(bootedMs)) : null };
+    });
+    const master = node.FpcUptimes.find((_, i) => (node.StackMembers || [])[i].IsMaster) || node.FpcUptimes[0] || null;
+    node.UptimeSeconds = master ? master.UptimeSeconds : null;
     node.MacTable = buildMacTable(node);
     // R9. Every scanned device reached its gateway, so the route parsed; "Unparsed" is the state a
     // parser bug produces, not something a healthy fixture should claim.
@@ -574,6 +593,9 @@ function makeDevice({ deviceIp, bldg, seq, models, role, gateway }) {
     node.MasterMemoryUtilization = memValue();
     // A handful of recent boots so the reboot badge has something to flag; the rest span years.
     node.Uptime = iso(chance(0.04) ? daysAgo(rnd() * 0.02) : daysAgo(int(3, 1100)));
+    // Members boot together and finish ifd init a few seconds apart - the measured spread in
+    // port-last-used-spec.md section 1.2 is 4 s per member. ageFleet is what makes one of them differ.
+    node._fpcBooted = Object.fromEntries(node.StackMembers.map((m, i) => [String(m.FPC), Date.parse(node.Uptime) + i * 4000]));
     // Crosses crawlAgeStaleMin so the "recently changed" and "stale" config views differ.
     node.LastConfigured = iso(daysAgo(chance(0.2) ? rnd() * 0.5 : int(1, 700)));
     node.LastConfiguredBy = pick(CONFIG_USERS);
@@ -1530,7 +1552,13 @@ function ageFleet(days) {
         node.MasterMemoryUtilization = memValue();
     }
     // Reboots are detected from boot timestamps, so a fleet whose Uptime never moves reports none.
-    for (const node of shuffled(topology).slice(0, int(2, 5))) node.Uptime = iso(daysAgo(rnd() * days));
+    for (const node of shuffled(topology).slice(0, int(2, 5))) {
+        node.Uptime = iso(daysAgo(rnd() * days));
+        // P1's rows come from the same event, so they move with it: a device whose Uptime says it
+        // rebooted while its members' uptimes still span years is a state no chassis can be in.
+        const bootedMs = Date.parse(node.Uptime);
+        node._fpcBooted = Object.fromEntries(node.StackMembers.map((m, i) => [String(m.FPC), bootedMs + i * 4000]));
+    }
     for (const node of shuffled(topology).slice(0, Math.max(2, Math.round(topology.length * 0.04)))) {
         node.Configuration += `\nset system syslog file interactive-commands interactive-commands any\nset snmp trap-group audit targets 10.${node.zone.net}.0.4${days}`;
         node.LastConfigured = iso(daysAgo(rnd() * days));
@@ -1576,7 +1604,7 @@ function withFailures(fleet, snapshotIndex, scanTime) {
     }
     // Dropped before the clone: bldg.zone.buildings points back at bldg, so a clone would recurse.
     const SCRATCH = ['zone', 'bldg', 'role', 'bridgeMac', 'bridgePriority', '_freeUplinks', '_byPort',
-        '_ownTags', '_extraConfig', 'vlanTags', '_wire', '_uplinkIp'];
+        '_ownTags', '_extraConfig', 'vlanTags', '_wire', '_uplinkIp', '_fpcBooted'];
     return fleet.map(node => {
         const copy = JSON.parse(JSON.stringify(node, (key, value) => (SCRATCH.includes(key) ? undefined : value)));
         if (failing.has(node.DeviceIP)) {
@@ -1588,7 +1616,9 @@ function withFailures(fleet, snapshotIndex, scanTime) {
             Object.assign(copy, blank);
             return copy; // a device that never answered captured nothing - blankNode's values stand
         }
-        stampCapture(copy, scanTime);
+        // The boot map comes from the SOURCE node: it is scratch, so the clone above has already
+        // dropped it, and a failing device returns before this line and must not keep it either.
+        stampCapture(copy, scanTime, node._fpcBooted);
         return copy;
     });
 }

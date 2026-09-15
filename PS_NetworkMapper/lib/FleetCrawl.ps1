@@ -168,6 +168,9 @@ function Invoke-FleetCrawl {
             # Same reason: no command was attempted, so none was refused and none answered.
             SectionsAttempted = @(); SectionErrors = @{}; StpBridge = @()
             DefaultRoute = @{}; ChassisInventory = @(); LogicalUnits = @()
+            # P1. $null, not 0: a device that never answered has an unknown uptime, and zero would read
+            # as "booted this second" - which is a reset against every later snapshot.
+            UptimeSeconds = $null; FpcUptimes = @()
             ScanStatus = $Status
             ScanError  = $ScanErrorText
         }

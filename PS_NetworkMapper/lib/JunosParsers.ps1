@@ -1217,39 +1217,99 @@ function Get-JunosScanFailureClass {
     return "Error"
 }
 
+# The "(1y2w3d 04:05:06 ago)" trailer Junos appends to an absolute timestamp, as seconds. Returns
+# $null when the text carries no such trailer, so a caller can tell a duration it could not read from
+# one it read as zero.
+#
+# Only the relative half is ever read: the absolute timestamp's abbreviated timezone is not reliably
+# resolvable and the switch clock may differ from the scan host's, so keeping both sides of every
+# comparison switch-relative is what makes the offset cancel.
+#
+# Shared by every caller rather than copied. The y unit precedes w and was missing from the first
+# copy, which made the longest-running ports - and, once port-last-used-spec.md P1 reads uptimes the
+# same way, the longest-running devices - the ones reported as unreadable. A second copy is how that
+# comes back.
+function ConvertFrom-JunosRelativeDuration {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    if ($Text -match '\(\s*(?:(?<y>\d+)y)?\s*(?:(?<w>\d+)w)?\s*(?:(?<d>\d+)d)?\s*(?:(?<h>\d+):(?<m>\d+)(?::(?<s>\d+))?)?\s*ago\s*\)') {
+        # An empty parenthesis group matches every optional unit and yields zero, which is a real value
+        # for something that happened this second - so require that at least one unit actually matched.
+        if ($Matches.y -or $Matches.w -or $Matches.d -or $Matches.h) {
+            $TotalSeconds = 0
+            if ($Matches.y) { $TotalSeconds += [int]$Matches.y * 31536000 }
+            if ($Matches.w) { $TotalSeconds += [int]$Matches.w * 604800 }
+            if ($Matches.d) { $TotalSeconds += [int]$Matches.d * 86400 }
+            if ($Matches.h) { $TotalSeconds += [int]$Matches.h * 3600 }
+            if ($Matches.m) { $TotalSeconds += [int]$Matches.m * 60 }
+            if ($Matches.s) { $TotalSeconds += [int]$Matches.s }
+            return $TotalSeconds
+        }
+    }
+    if ($Text -match '\(\s*(?<secs>\d+)\s*secs?\s*ago\s*\)') { return [int]$Matches.secs }
+    return $null
+}
+
 # C5. "Last flapped" from one "show interfaces extensive" block, as a duration and a state.
 #
 # The state exists because $null seconds meant two opposite things: "Never" - the port has not flapped
 # since boot, which is the healthy case - and a duration this parser could not decode, which is a bug
-# to chase. Only the relative "(... ago)" part is read: the absolute timestamp's abbreviated timezone
-# is not reliably resolvable and the switch clock may differ from the scan host's.
+# to chase.
 function ConvertFrom-JunosLastFlapped {
     param([string]$Block)
 
-    if ([string]::IsNullOrWhiteSpace($Block) -or $Block -notmatch '(?im)^\s*Last flapped\s*:') {
+    if ([string]::IsNullOrWhiteSpace($Block) -or $Block -notmatch '(?im)^\s*Last flapped\s*:(?<rest>[^\r\n]*)') {
         return @{ Seconds = $null; State = $null }
     }
-    if ($Block -match '(?im)^\s*Last flapped\s*:\s*Never') {
-        return @{ Seconds = $null; State = 'Never' }
+    $Rest = $Matches.rest
+    if ($Rest -match '(?i)^\s*Never\b') { return @{ Seconds = $null; State = 'Never' } }
+
+    $Seconds = ConvertFrom-JunosRelativeDuration -Text $Rest
+    if ($null -ne $Seconds) { return @{ Seconds = $Seconds; State = 'Parsed' } }
+    return @{ Seconds = $null; State = 'Unparsed' }
+}
+
+# P1 (port-last-used-spec.md section 7). "show system uptime", one row per virtual-chassis member.
+#
+# A bare -match over this output takes fpc0's block, which is not necessarily the master, and a
+# non-master member that reboots resets ITS ports' counters while the master's timestamp does not
+# move - so section 4.3's reset test is per FPC or it is wrong on every virtual chassis. A standalone
+# box prints no fpcN: header and reports as FPC 0, which is also what its port names say.
+#
+# UptimeSeconds is the relative form and $null when it could not be read; the absolute stamp is kept
+# raw beside it for display only, never for arithmetic (see ConvertFrom-JunosRelativeDuration).
+function ConvertFrom-JunosSystemUptime {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) { return @() }
+
+    $Blocks = [ordered]@{}
+    $MemberMatches = [regex]::Matches($Text, "(?ms)^fpc(?<fpc>\d+):[^\r\n]*\r?\n(?:-+\r?\n)?(?<body>.*?)(?=^fpc\d+:|\z)")
+    if ($MemberMatches.Count -gt 0) {
+        foreach ($M in $MemberMatches) { $Blocks[$M.Groups['fpc'].Value] = $M.Groups['body'].Value }
+    } else {
+        $Blocks['0'] = $Text
     }
-    # The y unit precedes w, and an interface up for over a year matched neither branch below - so the
-    # longest-running ports in a fleet were the ones reported as unreadable.
-    if ($Block -match '(?im)^\s*Last flapped\s*:[^\(]*\(\s*(?:(?<y>\d+)y)?\s*(?:(?<w>\d+)w)?\s*(?:(?<d>\d+)d)?\s*(?:(?<h>\d+):(?<m>\d+)(?::(?<s>\d+))?)?\s*ago\s*\)') {
-        $TotalSeconds = 0
-        if ($Matches.y) { $TotalSeconds += [int]$Matches.y * 31536000 }
-        if ($Matches.w) { $TotalSeconds += [int]$Matches.w * 604800 }
-        if ($Matches.d) { $TotalSeconds += [int]$Matches.d * 86400 }
-        if ($Matches.h) { $TotalSeconds += [int]$Matches.h * 3600 }
-        if ($Matches.m) { $TotalSeconds += [int]$Matches.m * 60 }
-        if ($Matches.s) { $TotalSeconds += [int]$Matches.s }
-        # An empty parenthesis group matches every optional unit and yields zero, which is a real value
-        # for a port that flapped this second - so require that at least one unit was actually present.
-        if ($Matches.y -or $Matches.w -or $Matches.d -or $Matches.h) {
-            return @{ Seconds = $TotalSeconds; State = 'Parsed' }
+
+    $Rows = @()
+    foreach ($Fpc in $Blocks.Keys) {
+        $Body = $Blocks[$Fpc]
+        $Booted = $null
+        $Seconds = $null
+        if ($Body -match '(?im)^\s*System booted\s*:(?<rest>[^\r\n]*)') {
+            $Rest = $Matches.rest
+            if ($Rest -match '^\s*(?<abs>[^\(]+?)\s*(?:\(|$)') { $Booted = $Matches.abs.Trim() }
+            $Seconds = ConvertFrom-JunosRelativeDuration -Text $Rest
+        }
+        # A member block with no "System booted:" line at all is still reported: an absent row and a row
+        # whose uptime is unreadable call for different answers, and section 4.3 turns the second into a
+        # segment boundary of unknown type rather than a reset.
+        $Rows += [PSCustomObject]@{
+            FPC = $Fpc
+            UptimeSeconds = $Seconds
+            SystemBooted = $Booted
         }
     }
-    if ($Block -match '(?im)^\s*Last flapped\s*:[^\(]*\(\s*(?<secs>\d+)\s*secs?\s*ago\s*\)') {
-        return @{ Seconds = [int]$Matches.secs; State = 'Parsed' }
-    }
-    return @{ Seconds = $null; State = 'Unparsed' }
+    return $Rows
 }

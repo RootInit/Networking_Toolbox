@@ -394,7 +394,7 @@ Revision 1's §10.6 claimed "`resolveDeviceIdentity` handles the device half". I
 | P6 | PoE `Admin status` and `Power consumption` retained separately | `lib/Get-JunosNodeData.ps1:502-504` | E0b unavailable; admin-disabled and no-PD both read `OFF` |
 | P7 | Per-port dot1x state keyed by interface | `lib/Get-JunosNodeData.ps1:509-513` | E0c unavailable; `Initialize` rows dropped entirely |
 | ~~P8~~ | ~~MAC aging time from `Configuration`~~ — **dropped.** The configuration is not parsed (`diagnostics-spec.md` §4.4). E2 assumes the 300 s default and says so in `caveats` | — | A nominal bound on one evidence source, which E2 already carries a caveat for. Note dot1x session pinning may override aging on this fleet, so the configured value would not have been authoritative either |
-| P9 | `y` (year) unit in the relative-duration regex | `lib/Get-JunosNodeData.ps1:432` | An interface or device up over a year yields `$null` silently. Inherited by P1 |
+| ~~P9~~ | ~~`y` (year) unit in the relative-duration regex~~ **Closed 2026-09-13** (`diagnostics-spec.md` item 6, C5): `ConvertFrom-JunosLastFlapped` accepts `y` and requires at least one unit to have matched, so an empty parenthesis group no longer reads as zero seconds | `lib/JunosParsers.ps1:1226` | An interface or device up over a year yields `$null` silently. Inherited by P1 — which is why P1 shares that parser's duration helper rather than carrying a second copy of the regex |
 
 Already retained: `InputBytes`, `OutputBytes`, `InputBps`, `OutputBps`, `CarrierTransitions`,
 `LastFlappedSeconds`, `Link`, `Admin`, `Uptime`.
@@ -496,10 +496,15 @@ Every path must return `evidence` and `caveats` populated; assert that generical
 
 ### 9.3 Fixture
 
-`generate-fixture.mjs:298` (`accessRow`) emits none of the counter fields. The three snapshots are
-**not** generated independently — `ageFleet` (`:658-690`) mutates the same topology in place between
-writes, which is the right hook: add counters to `accessRow`, then advance them inside `ageFleet` in
-step with each port's link state.
+~~`generate-fixture.mjs:298` (`accessRow`) emits none of the counter fields.~~ **Stale as written,
+2026-09-15:** `accessRow` emits every field the interface initializer does — `ACCESS_ROW_GAP` is
+empty, and `diagnostics-spec.md` §8.1 closed it one field at a time. The counters are *present* and
+**frozen**, which is the harder problem: the three snapshots are **not** generated independently,
+`ageFleet` mutates the same topology in place between writes, and it never touches `InputBytes`. A
+fleet whose byte counters are identical in all three snapshots makes every delta zero, so E3 can
+never fire and every port in the fixture reads idle. Advance them inside `ageFleet` in step with each
+port's link state — the same class of defect as the two impossible topologies in
+`diagnostics-spec.md` §8.2, and found the same way.
 
 Inject: a never-used port, an idle-since port, an active port, a chattering-but-idle port (the §2.3
 case), a port whose device rebooted between snapshots, and one whose counters were cleared without a
@@ -523,3 +528,50 @@ reboot.
    FPC has no history and no equivalent mechanism.
 9. **JavaScript `Number` is exact to 2⁵³, not 2⁶⁴.** Deltas are far above the rounding error, so no
    wrong answer follows — but `InputBytes` must never be compared for *equality*.
+
+---
+
+## 11. Work order
+
+Written 2026-09-15, after `diagnostics-spec.md`'s items 1–16 closed and left this document as the
+only specified work not blocked on hardware. Same rhythm as that document's §10: one item per commit,
+each landing with its tests, and anything touching `lib/` verified on the 5.1 VM before it is pushed.
+
+**What is already done.** §7's prerequisites landed as a side effect of the diagnostics Phase 1
+retention pass — P0, P2, P3, P4, P5, P6, P7 are all in `lib/`, and P9 is closed (see its row). **P1
+is the only prerequisite still open**, and §4.2's boot filter and §4.3's reset test both rest on it.
+
+1. **P1 — `UptimeSeconds`, per FPC.** `ConvertFrom-JunosSystemUptime` over the whole `show system
+   uptime` output, one row per member, standalone boxes reporting as FPC 0. The relative-duration
+   regex is **extracted from `ConvertFrom-JunosLastFlapped` into a shared helper** rather than copied:
+   §7 says P9 is inherited by P1, and a second copy of that regex is how the `y` bug comes back. Lands
+   with §9.1's PowerShell cases. Any new `$NodeData` field breaks the device-level parity test
+   (`fixture.test.mjs`), so `blankNode` and the `FleetCrawl.ps1` placeholder move in the same commit.
+2. **Fixture realism** (§9.3). Three defects, fixed together because each hides the next:
+   - `ageFleet` never advances the counters, so every delta is zero and every port reads idle.
+   - It reboots devices by moving `Uptime` while their counters keep climbing — a reboot that resets
+     nothing is not a reboot, and §5.2's regression case cannot exist at fleet scale until it is.
+     One **non-master FPC** reboot goes in with it, for §4.3's first failure.
+   - `CarrierTransitions` is `live ? 1 + (h % 7) : 0`, so half the live ports are even and violate
+     §4.2's parity invariant before anything asserts it.
+   Then §9.3's six injections, each with a manifest entry, as `diagnostics-spec.md` §8.3 requires.
+3. **`web-src/port-last-used.js`** — §5.1's gather-then-reduce, `splitOnResets` (§4.3), E0–E8, the
+   §5.3 states, and §9.2's case table. Every numeric comparison behind `typeof x === 'number'`, with
+   one generic test that feeds `null` into each counter and asserts neither a state change nor a
+   silent pass: §2.4 names that as the single most likely way this ships a confidently wrong answer.
+4. **§6 identity.** Resolve once per port-history and merge on intersecting key sets. The fixture's
+   `chronicallyFailing` placeholders already produce the `serial:` → `hostname:` flip, so the
+   fleet-scale test comes free with item 3's module.
+5. **UI.** The spec names a reclaim view in §5.3 and §9.2 and has no UI section — a per-port state in
+   the interface table plus a reclaim list is the minimum that makes the state observable. Browser
+   smoke test required, not optional: that is where `diagnostics-spec.md` items 15 and 16 each found
+   code that could not run.
+6. **§8 persistence — not built**, and recorded as declined rather than pending. §8.1 is the reason:
+   the loaded window *is* the resolution window, and §8.2 measures the naive store at ~2× the origin
+   quota. The last row of §9.2's table goes with it.
+
+**G-BASELINE.** `diagnostics-spec.md` §2.4 names it as an integrity gate and points here for its
+form. It is `splitOnResets` from item 3, exported — not a separate mechanism. No counter-delta rule
+exists in `rules.js` yet, and none is enumerated anywhere in the tree, so plumbing a two-snapshot
+input into the rule engine ahead of its first consumer would be building a gate with nothing behind
+it. The engine imports it when the first delta rule lands.
