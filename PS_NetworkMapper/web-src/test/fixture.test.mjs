@@ -1170,6 +1170,80 @@ test('P1: per-FPC uptimes are measured against the capture instant, and agree wi
     }
 });
 
+// port-last-used-spec.md section 4.2. The counter increments on every carrier state change, so its
+// parity tracks the current link state - measured 48 of 48 up ports odd, 25 of 25 down even, no
+// violations. It costs nothing to assert and a violation means a reset or a missed transition.
+test('carrier transitions are odd on an up port and even on a down one', () => {
+    const rows = fixture.snapshots.flatMap(s => s.Topology)
+        .filter(d => d.ScanStatus === 'Ok').flatMap(d => d.Interfaces)
+        .filter(r => typeof r.CarrierTransitions === 'number');
+    assert.ok(rows.length > 100);
+    const wrong = rows.filter(r => r.CarrierTransitions % 2 !== (String(r.Link).toLowerCase() === 'up' ? 1 : 0));
+    assert.deepEqual(wrong.map(r => `${r.Port}:${r.Link}:${r.CarrierTransitions}`), []);
+});
+
+// Section 2.3 and section 9.3. Counters are cumulative since the port's epoch, so a delta between two
+// snapshots means something. They used to be re-rolled per snapshot from a hash that included the
+// snapshot index, which made InputBytes fall as often as it rose - and a decrease is a counter reset,
+// so every delta in the fixture was uninterpretable.
+test('input counters only ever climb while a port stays up and its FPC does not reboot', () => {
+    const snaps = fixture.snapshots.map(s => new Map(s.Topology.map(d => [String(d.DeviceIP), d])));
+    let compared = 0;
+    for (let i = 1; i < snaps.length; i++) {
+        for (const [ip, now] of snaps[i]) {
+            const before = snaps[i - 1].get(ip);
+            if (!before || now.ScanStatus !== 'Ok' || before.ScanStatus !== 'Ok') continue;
+            const wasUp = new Map(before.Interfaces.map(r => [r.Port, r]));
+            const uptimeNow = new Map((now.FpcUptimes || []).map(r => [r.FPC, r.UptimeSeconds]));
+            const uptimeWas = new Map((before.FpcUptimes || []).map(r => [r.FPC, r.UptimeSeconds]));
+            for (const row of now.Interfaces) {
+                const prev = wasUp.get(row.Port);
+                if (!prev || row.Link !== 'up' || prev.Link !== 'up') continue;
+                if (typeof row.InputBytes !== 'number' || typeof prev.InputBytes !== 'number') continue;
+                const fpc = /^[a-z]+-(\d+)\//.exec(row.Port);
+                const key = fpc ? fpc[1] : null;
+                // A reboot is a legitimate reset, and is exactly what section 5.2 needs to exist here.
+                if (!(uptimeNow.get(key) > uptimeWas.get(key))) continue;
+                compared += 1;
+                assert.ok(row.InputBytes >= prev.InputBytes,
+                    `${ip} ${row.Port} input fell ${prev.InputBytes} -> ${row.InputBytes} with no reset`);
+            }
+        }
+    }
+    assert.ok(compared > 500, `only ${compared} port-pairs compared - the walk found almost nothing`);
+});
+
+// Section 2.3's regression case, as a property of the fixture rather than of a rule: a minority of live
+// ports carry ~72 B frames at a fraction of a packet per second. Under a naive byte-delta rule every one
+// reads active at the highest confidence, and they are exactly the ports a reclaim view exists for.
+test('live ports are bimodal in mean frame size, so the rate floor has both clusters to separate', () => {
+    const live = topology.filter(d => d.ScanStatus === 'Ok').flatMap(d => d.Interfaces)
+        .filter(r => r.Link === 'up' && r.InputPackets > 0);
+    assert.ok(live.length > 50);
+    const frames = live.map(r => r.InputBytes / r.InputPackets);
+    assert.ok(frames.some(f => f < 128), 'no chattering port: section 2.3 has nothing to regress against');
+    assert.ok(frames.some(f => f > 400), 'no ordinary traffic either, so the two clusters are one');
+});
+
+// Section 4.3's first failure. The master's stamp does not move when a linecard reboots, so nothing at
+// device level says anything happened while every counter on that member's ports has restarted.
+test('a non-master member reboots on its own, leaving the device-level uptime untouched', () => {
+    const snaps = fixture.snapshots.map(s => new Map(s.Topology.map(d => [String(d.DeviceIP), d])));
+    const found = [];
+    for (let i = 1; i < snaps.length; i++) {
+        for (const [ip, now] of snaps[i]) {
+            const before = snaps[i - 1].get(ip);
+            if (!before || now.ScanStatus !== 'Ok' || before.ScanStatus !== 'Ok') continue;
+            if (!(now.UptimeSeconds > before.UptimeSeconds)) continue;   // the device itself rebooted
+            const was = new Map((before.FpcUptimes || []).map(r => [r.FPC, r.UptimeSeconds]));
+            for (const row of now.FpcUptimes || []) {
+                if (was.has(row.FPC) && row.UptimeSeconds < was.get(row.FPC)) found.push(`${ip} fpc${row.FPC}`);
+            }
+        }
+    }
+    assert.ok(found.length > 0, 'no member ever reboots alone, so the per-FPC reset test has no subject');
+});
+
 // No P1 counterpart for "the capture lost UPTIME": truncation drops at most three sections and UPTIME
 // is fifth-from-last, so no fixture node can currently reach that state. What holds the fields to their
 // section is the SECTION_SUPPLIES coupling test in rules.test.mjs, which reads the blanker's source

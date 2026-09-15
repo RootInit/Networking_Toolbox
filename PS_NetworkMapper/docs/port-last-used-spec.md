@@ -554,7 +554,13 @@ is the only prerequisite still open**, and §4.2's boot filter and §4.3's reset
      One **non-master FPC** reboot goes in with it, for §4.3's first failure.
    - `CarrierTransitions` is `live ? 1 + (h % 7) : 0`, so half the live ports are even and violate
      §4.2's parity invariant before anything asserts it.
-   Then §9.3's six injections, each with a manifest entry, as `diagnostics-spec.md` §8.3 requires.
+   §9.3's six injections land with **item 3**, not here: a fault is only worth injecting once something
+   can be asked whether it sees it, and until the module exists each one would be a manifest entry with
+   nothing to check it against.
+
+   **Done 2026-09-15.** All three, plus a fourth this work uncovered: two injectors could pick the same
+   port and the second overwrote the first, leaving a manifest entry promising a finding that was no
+   longer in the snapshot — see `diagnostics-spec.md` §8.3.
 3. **`web-src/port-last-used.js`** — §5.1's gather-then-reduce, `splitOnResets` (§4.3), E0–E8, the
    §5.3 states, and §9.2's case table. Every numeric comparison behind `typeof x === 'number'`, with
    one generic test that feeds `null` into each counter and asserts neither a state change nor a

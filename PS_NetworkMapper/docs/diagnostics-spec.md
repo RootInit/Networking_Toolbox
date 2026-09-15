@@ -1315,6 +1315,14 @@ less than a clean fleet. Deviations from the plan above:
 - `stp-unconverged` only ever relabels an already-blocked port, so the forwarding subgraph the
   generator asserted is untouched; the test states that as an equality against the clean run rather
   than as `devices - 1`, because a placeholder device's links are unobservable in the written snapshot.
+- **One port, one fault — added 2026-09-15.** `CLAIMED_PORTS` is cleared per snapshot and every picker
+  skips a port an earlier injector already used. Without it two injectors wanting the same shape take
+  the same port and the second overwrites the first: `stp-unconverged` relabels a blocked alternate
+  port and `stp-scope-drift`, which wants an alternate port too, then empties that row's `StpDetail` —
+  leaving the first manifest entry promising a finding the snapshot no longer contains. The delta
+  oracle survives a fault it cannot place; it cannot survive one the manifest lies about. Found by a
+  fixture change that shifted the PRNG, which is to say: it was always reachable, and which ports
+  collide is a property of the seed.
 
 **Extended 2026-09-13 (work order item 11).** Twenty more kinds, one per L1 rule, so §3.5's table has an
 oracle per row: `mtu-mismatch`, `duplex-mismatch`, `dot1x-auth-failed`, `dot1x-connecting`, and sixteen

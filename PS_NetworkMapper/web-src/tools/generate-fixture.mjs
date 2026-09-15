@@ -1323,7 +1323,27 @@ const MAC_STAT_LABELS = ['Total octets', 'Total packets', 'Unicast packets', 'Br
     'Multicast packets', 'CRC/Align errors', 'FIFO errors', 'MAC control frames', 'MAC pause frames',
     'Oversized frames', 'Jabber frames', 'Fragment frames', 'VLAN tagged frames', 'Code violations'];
 
-function applyPortDetail(fleet, snapshotIndex) {
+// The FPC a port lives on, which is the scope a counter epoch belongs to: a linecard reboots its own
+// ports and nothing else's. An aggregate spans members and has no single one, so it reports the
+// chassis master's.
+function fpcOfPort(port) {
+    const m = /^[a-z]+-(\d+)\//.exec(String(port));
+    return m ? m[1] : null;
+}
+
+// port-last-used-spec.md section 2.3. Every live port's traffic profile, stable across snapshots so
+// the counters derived from it are cumulative rather than re-rolled. The bimodal mean frame size is
+// the measured shape: a minority of ports carry ~72 B frames at a fraction of a packet per second -
+// EAPOL/ARP/keepalive chatter from a present but unattended NIC - and the rest carry ~300-1400 B.
+// Those chatterers are exactly the ports a reclaim view exists to surface, and under a naive
+// byte-delta rule they read as the busiest thing on the switch.
+function trafficProfile(deviceIp, port) {
+    const r = detailHash(`${deviceIp}|${port}|rate`);
+    if ((r % 17) === 0) return { pps: 0.07 + (r % 18) / 100, frame: 72 + (r % 5) };
+    return { pps: 1 + (r % 4000) / 10, frame: 300 + (r % 1100) };
+}
+
+function applyPortDetail(fleet, snapshotIndex, scanTime) {
     for (const node of fleet) {
         const medPorts = new Set(node.MedNeighbors.map(m => String(m.LocalPort).replace(/\.\d+$/, '')));
         const clientsByPort = new Map();
@@ -1370,15 +1390,32 @@ function applyPortDetail(fleet, snapshotIndex) {
             row.LoopDetectPduError = 'None';
             row.EthernetSwitchingError = 'None';
             row.MacRewriteError = 'None';
-            row.CarrierTransitions = live ? 1 + (h % 7) : 0;
+            // Section 4.2: the counter increments on EVERY carrier state change, so its parity tracks
+            // the current link state - 48 of 48 up ports odd, 25 of 25 down ports even, no violations.
+            // "1 + (h % 7)" made half the live ports even, which is a state no switch reports.
+            row.CarrierTransitions = live ? 1 + 2 * (h % 4) : 0;
 
-            const packets = live ? 100000 + (h % 90000000) : 0;
+            // Counters are cumulative since the epoch - here, since the port's own FPC booted - at a
+            // rate that does not change between snapshots. They used to be re-rolled per snapshot from
+            // a hash that included the snapshot index, so InputBytes moved at random and as often fell
+            // as rose: a decrease is a counter reset, so the fixture asserted a fleet resetting its
+            // counters on every crawl, and no delta computed across it meant anything.
+            const profile = trafficProfile(node.DeviceIP, row.Port);
+            const bootedMs = (node._fpcBooted || {})[fpcOfPort(row.Port)];
+            const epochSeconds = isFinite(bootedMs) && scanTime
+                ? Math.max(0, (scanTime.getTime() - bootedMs) / 1000) : 0;
+            const packets = live ? Math.round(profile.pps * epochSeconds) : 0;
             row.InputPackets = packets;
-            row.OutputPackets = live ? Math.floor(packets * 0.8) : 0;
-            row.InputBytes = packets * 700;
-            row.OutputBytes = Math.floor(packets * 0.8) * 700;
-            row.InputBps = live ? (h % 40000000) : 0;
-            row.OutputBps = live ? ((h >>> 3) % 40000000) : 0;
+            row.InputBytes = packets * profile.frame;
+            // Output exceeds input on most up ports - the switch floods broadcast and multicast out
+            // every port in the VLAN whether or not anything is listening (measured median 1.62x), so
+            // output climbs on a port whose device is powered off but linked. It corroborates; it is
+            // never evidence that the far end did anything.
+            const outRatio = live ? 1.1 + (h % 160) / 100 : 0;
+            row.OutputPackets = Math.round(packets * outRatio);
+            row.OutputBytes = row.OutputPackets * profile.frame;
+            row.InputBps = live ? Math.round(profile.pps * profile.frame * 8) : 0;
+            row.OutputBps = live ? Math.round(profile.pps * outRatio * profile.frame * 8) : 0;
 
             row.InputErrors = {};
             row.OutputErrors = {};
@@ -1559,6 +1596,15 @@ function ageFleet(days) {
         const bootedMs = Date.parse(node.Uptime);
         node._fpcBooted = Object.fromEntries(node.StackMembers.map((m, i) => [String(m.FPC), bootedMs + i * 4000]));
     }
+    // One linecard reboots on its own - section 4.3's first failure, and the case a device-level
+    // uptime cannot see: the master's stamp does not move, so nothing at device level says anything
+    // happened, while every counter on that member's ports has restarted from zero.
+    const stacked = topology.filter(d => d.StackMembers.length > 1 && d._fpcBooted);
+    if (stacked.length > 0) {
+        const node = pick(stacked);
+        const member = node.StackMembers.filter(m => !m.IsMaster)[0];
+        if (member) node._fpcBooted[String(member.FPC)] = daysAgo(rnd() * days).getTime();
+    }
     for (const node of shuffled(topology).slice(0, Math.max(2, Math.round(topology.length * 0.04)))) {
         node.Configuration += `\nset system syslog file interactive-commands interactive-commands any\nset snmp trap-group audit targets 10.${node.zone.net}.0.4${days}`;
         node.LastConfigured = iso(daysAgo(rnd() * days));
@@ -1641,6 +1687,21 @@ function withFailures(fleet, snapshotIndex, scanTime) {
 // fixture, and the manifest is only an oracle if --faults 0 and --faults N describe the same fleet.
 const fInt = (rng, lo, hi) => lo + Math.floor(rng() * (hi - lo + 1));
 const fPick = (rng, arr) => arr[Math.floor(rng() * arr.length)];
+
+// One port, one fault. Two injectors that both want a blocked alternate port will otherwise pick the
+// same one, and the second overwrites what the first did - leaving the manifest promising a finding
+// the snapshot no longer contains, which is the one thing the delta oracle cannot survive. Cleared per
+// snapshot, because each snapshot is injected into its own clone.
+const CLAIMED_PORTS = new Set();
+const portKey = (ip, port) => `${ip}|${port}`;
+const portIsFree = (ip, port) => !CLAIMED_PORTS.has(portKey(ip, port));
+function claimEntry(entry) {
+    if (entry.port) CLAIMED_PORTS.add(portKey(entry.deviceIp, entry.port));
+    // Two-ended faults own both ends: the far end is where several of them anchor their finding.
+    const p = entry.params || {};
+    if (p.peerIp && p.peerPort) CLAIMED_PORTS.add(portKey(p.peerIp, p.peerPort));
+    if (p.ownerIp && p.ownerPort) CLAIMED_PORTS.add(portKey(p.ownerIp, p.ownerPort));
+}
 const fHexByte = (rng) => fInt(rng, 0, 255).toString(16).padStart(2, '0');
 const faultClientMac = (rng) => ['aa', 'bb', fHexByte(rng), fHexByte(rng), fHexByte(rng), fHexByte(rng)].join(':');
 const faultSwitchMac = (rng) => ['02', 'ab', fHexByte(rng), fHexByte(rng), fHexByte(rng), fHexByte(rng)].join(':').toUpperCase();
@@ -1808,10 +1869,11 @@ function injectStpUnconverged(rng, fleet) {
     // alternate port - anywhere else there is no edge for a path computer to cross.
     const blockedOnLink = (row) => (row.StpDetail || {})['instance 0']
         && row.StpDetail['instance 0'].Role === 'ALT';
-    const hosts = scanned(fleet).filter(d => d.Interfaces.some(blockedOnLink));
+    const free = (d) => d.Interfaces.filter(r => blockedOnLink(r) && portIsFree(d.DeviceIP, r.Port));
+    const hosts = scanned(fleet).filter(d => free(d).length > 0);
     if (!hosts.length) return null;
     const host = fPick(rng, hosts);
-    const row = fPick(rng, host.Interfaces.filter(blockedOnLink));
+    const row = fPick(rng, free(host));
     row.STP = 'LRN';
     for (const scope of Object.keys(row.StpDetail || {})) row.StpDetail[scope].State = 'LRN';
     return {
@@ -1843,6 +1905,9 @@ function pickReciprocalLink(rng, fleet, eligible) {
             const farRow = peer.Interfaces.find(r => r.Port === farPort);
             if (!nearRow || !farRow) continue;
             if (String(nearRow.Link).toLowerCase() !== 'up' || String(farRow.Link).toLowerCase() !== 'up') continue;
+            // Neither end may already carry a fault: a second injector writing over the first leaves the
+            // first's manifest entry promising a finding that is no longer there.
+            if (!portIsFree(device.DeviceIP, nearPort) || !portIsFree(peer.DeviceIP, farPort)) continue;
             const link = { device, peer, neighbor, back, nearPort, farPort, nearRow, farRow };
             // Filtered before the draw, not after: a fault that only lands on a copper trunk and picks
             // blind places about one time in twelve on this fleet, and a kind that usually fails to place
@@ -2527,12 +2592,16 @@ function injectFaults(fleet, snapshotIndex, count) {
     // same faults in the same places.
     const rng = makeRng((Math.imul(SEED, 0x9E3779B9) + snapshotIndex * 0x85EBCA6B) >>> 0);
     const manifest = [];
+    CLAIMED_PORTS.clear();
     for (let n = 0; n < count; n++) {
         const injector = INJECTORS[n % INJECTORS.length];
         const entry = injector(rng, fleet);
         // A fleet too small to hold the fault, not an error: a 4-device run has no second host for a
         // duplicate MAC, and a manifest that claims one would be the lie this whole file avoids.
-        if (entry) manifest.push({ id: `${snapshotIndex}-${manifest.length + 1}-${entry.kind}`, ...entry });
+        if (entry) {
+            manifest.push({ id: `${snapshotIndex}-${manifest.length + 1}-${entry.kind}`, ...entry });
+            claimEntry(entry);
+        }
     }
     return manifest;
 }
@@ -2553,7 +2622,7 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     assertForwardingIsSpanningTree(topology);
     // After the tree, because the "*" marking a member as currently forwarding for a VLAN follows it.
     applyVlanMembership(topology);
-    applyPortDetail(topology, i);
+    applyPortDetail(topology, i, scanTime);
     const fleet = withFailures(topology, i, scanTime);
     // After withFailures, because it is the pass that blanks a truncated device's MAC table: learning
     // into one and then blanking it would be the same fiction the other way round.
