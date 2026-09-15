@@ -92,8 +92,6 @@ test('a field is declared against the section that supplies it, and the fixture 
     const UNREAD_BY_RULES = [
         'MasterCpuUtilization', 'MasterMemoryUtilization', 'LastConfigured', 'LastConfiguredBy',
         'Dot1x_State', 'Dot1x_User',
-        // Section 4.3's added command. No rule reads it yet - G4's churn rule is what will.
-        'StpBridge',
     ];
     for (const [section, lines] of bodies) {
         const text = lines.join('\n');
@@ -375,12 +373,13 @@ const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
 const FLEET = { allowedScopes: ['10.'] };
 const clean = generate(ARGS);
 // One fault per injector plus a wrap, so every injector places at least once in every snapshot.
-const faulted = generate([...ARGS, '--faults', '40']);
+const faulted = generate([...ARGS, '--faults', '43']);
 
 test('the clean fleet holds no disagreement between two ends of one wire', () => {
     for (const snap of clean.snapshots) {
         const result = evaluate(snap, { rules: ['duplex-mismatch', 'autoneg-mismatch', 'mtu-mismatch',
-            'vlan-absent-on-one-trunk-end', 'stp-both-ends-claim-segment', 'stp-scope-drift', 'lldp-one-sided'] });
+            'vlan-absent-on-one-trunk-end', 'stp-both-ends-claim-segment', 'stp-scope-drift', 'lldp-one-sided',
+            'native-vlan-mismatch'] });
         assert.deepEqual(result.findings.map(f => `${f.ruleId} ${f.deviceIp} ${f.port}`), [],
             'a wire property drawn per end rather than per wire shows up here as the fault the '
             + 'injector is supposed to be the only source of');
@@ -394,7 +393,7 @@ test('the clean fleet holds no disagreement between two ends of one wire', () =>
         // The L2 pair comparisons have a subject on every edge, both ends: a VLAN set, a spanning-tree
         // instance and an LLDP reciprocity are all properties of the wire rather than of the transceiver.
         for (const id of ['vlan-absent-on-one-trunk-end', 'stp-both-ends-claim-segment', 'stp-scope-drift',
-            'lldp-one-sided']) {
+            'lldp-one-sided', 'native-vlan-mismatch']) {
             assert.ok(result.stats[id].evaluated > 100, `${id} evaluated ${result.stats[id].evaluated}`);
         }
     }
@@ -450,7 +449,8 @@ test('a truncated node in the fleet explains its silence by section, not by fiel
 // rule that reads a field from it must show that section among its missing data.
 const EXT_DEPENDENT = RULES.filter(rule => rule.layer === 'L1').map(rule => rule.id)
     .filter(id => ['poe-admin-disabled-with-endpoint', 'poe-denied', 'lag-member-down',
-        'dot1x-held', 'dot1x-auth-failed', 'dot1x-unauthenticated-traffic'].indexOf(id) === -1);
+        'dot1x-held', 'dot1x-auth-failed', 'dot1x-unauthenticated-traffic',
+        'dot1x-fallback-vlan'].indexOf(id) === -1);
 const NO_EXT_DEPENDENCE = RULES.map(rule => rule.id).filter(id => EXT_DEPENDENT.indexOf(id) === -1);
 
 test('no rule lets a truncated extensive section pass as "not a subject"', () => {
@@ -608,6 +608,129 @@ test('the reboot suppressor is evaluable on a real fixture device', () => {
     const result = evaluate(clean.snapshots[0], { rules: ['port-flapped-recently'] });
     const decided = result.records.filter(r => r.suppressors && r.suppressors.evaluated.includes('recently-rebooted'));
     assert.ok(decided.length > 0, 'no device in the fleet had an Uptime this engine could read');
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The rules the section 4.3 commands unblocked (item 15). Every field they read is UNVERIFIED on
+// hardware (spec 4.3.1), which is the reason each of these asserts the unmeasured case as loudly as the
+// firing one: if a release prints these stanzas differently, the parser returns nothing and the right
+// answer is a NOT_EVALUATED row in the histogram, never a clean fleet.
+
+// G5. The brief form of "show vlans" annotates nothing, so Tagged is null on every member - and null is
+// unmeasured (section 2.5). A fleet captured that way must report the gap, not pass.
+test('a capture with no tagged/untagged annotation is NOT_EVALUATED for the native VLAN, not clean', () => {
+    const snap = clone(clean.snapshots[0]);
+    for (const device of snap.Topology) {
+        for (const row of device.Interfaces || []) {
+            for (const member of row.Vlans || []) { member.Tagged = null; member.Mode = null; }
+        }
+        for (const vlan of device.Vlans || []) {
+            for (const member of vlan.Interfaces || []) { member.Tagged = null; member.Mode = null; }
+        }
+    }
+    const result = evaluate(snap, { rules: ['native-vlan-mismatch'] });
+    const stats = result.stats['native-vlan-mismatch'];
+    assert.deepEqual(result.findings, [], 'an unannotated capture cannot state a native VLAN either way');
+    assert.equal(stats.evaluated, 0, 'nothing was evaluable, so nothing may be counted as evaluated');
+    assert.ok(stats.notEvaluated > 100, `only ${stats.notEvaluated} ends reported the gap`);
+    assert.ok(stats.missing['Interfaces[].Vlans[].Tagged'] > 0
+        || stats.missing['far.Interfaces[].Vlans[].Tagged'] > 0,
+        `the gap was named ${JSON.stringify(stats.missing)} rather than by the annotation it needs`);
+});
+
+test('a trunk end whose untagged VLAN differs from its peer is one finding on the wire', () => {
+    const snap = clone(clean.snapshots[0]);
+    const before = evaluate(snap, { rules: ['native-vlan-mismatch'] });
+    assert.deepEqual(before.findings, [], 'the clean fleet agrees on every trunk by construction');
+    // Move one end's native VLAN to another tag the SAME trunk already carries, so nothing but the
+    // annotation changes - no VLAN appears or disappears, and both ends still forward.
+    const device = snap.Topology.find(d => (d.Interfaces || []).some(row => {
+        const trunk = (row.Vlans || []).filter(v => v.Mode === 'trunk');
+        return trunk.filter(v => v.Tagged === false).length === 1 && trunk.length > 1;
+    }));
+    assert.ok(device, 'the fixture no longer has a trunk carrying more than one VLAN');
+    const row = device.Interfaces.find(r => {
+        const trunk = (r.Vlans || []).filter(v => v.Mode === 'trunk');
+        return trunk.filter(v => v.Tagged === false).length === 1 && trunk.length > 1;
+    });
+    const trunk = row.Vlans.filter(v => v.Mode === 'trunk');
+    // Both members are picked before either is changed: flipping one and then searching for "the tagged
+    // one" would find the member just flipped and put it straight back.
+    const was = trunk.find(v => v.Tagged === false);
+    const now = trunk.find(v => v.Tagged === true);
+    was.Tagged = true;
+    now.Tagged = false;
+    const after = evaluate(snap, { rules: ['native-vlan-mismatch'] });
+    // One finding, not two: the rule anchors on the lower end of the wire, whichever end the engine
+    // reached first.
+    assert.equal(after.findings.length, 1, JSON.stringify(after.findings.map(f => `${f.deviceIp} ${f.port}`)));
+    const ends = [String(device.DeviceIP), String(after.findings[0].evidence.farIp)];
+    assert.ok(ends.includes(String(after.findings[0].deviceIp)));
+    assert.notEqual(after.findings[0].evidence.here, after.findings[0].evidence.far);
+});
+
+// G4. The bridge view carries a change COUNT and an AGE, and only the age is read: with no previous
+// snapshot to subtract it from, a large count is an old switch rather than a fault.
+test('a recent topology change is a finding; a large change count on its own is not', () => {
+    const snap = clone(clean.snapshots[0]);
+    for (const device of snap.Topology) {
+        for (const stanza of device.StpBridge || []) stanza.TopologyChangeCount = 900000;
+    }
+    assert.deepEqual(evaluate(snap, { rules: ['stp-topology-change-recent'] }).findings, [],
+        'the count alone fired, which is the comparison that needs a baseline (G-BASELINE)');
+
+    const device = snap.Topology.find(d => (d.StpBridge || []).length);
+    assert.ok(device, 'the fixture no longer carries a bridge view');
+    device.StpBridge[0].TimeSinceLastChangeSeconds = 42;
+    const result = evaluate(snap, { rules: ['stp-topology-change-recent'] });
+    const finding = only(result.findings);
+    assert.equal(String(finding.deviceIp), String(device.DeviceIP));
+    assert.equal(finding.port, null, 'the bridge view is per bridge, not per port');
+    const scope = only(finding.evidence.scopes);
+    assert.equal(scope.scope, device.StpBridge[0].Scope);
+    assert.equal(scope.seconds, 42);
+    // Joined to the per-port view on the scope string, so the finding names ports rather than only a VLAN.
+    assert.ok(scope.ports.length > 0, 'no port was joined to the scope that reconverged');
+});
+
+test('a bridge view that prints no age at all is NOT_EVALUATED, not a quiet tree', () => {
+    const snap = clone(clean.snapshots[0]);
+    for (const device of snap.Topology) {
+        for (const stanza of device.StpBridge || []) stanza.TimeSinceLastChangeSeconds = null;
+    }
+    const result = evaluate(snap, { rules: ['stp-topology-change-recent'] });
+    const stats = result.stats['stp-topology-change-recent'];
+    assert.deepEqual(result.findings, []);
+    assert.equal(stats.evaluated, 0);
+    assert.ok(stats.missing['Device.StpBridge[].TimeSinceLastChangeSeconds'] > 0,
+        `named ${JSON.stringify(stats.missing)} instead`);
+});
+
+// The dot1x detail stanza. Fires on the landing, not on the configuration: a guest VLAN that exists and
+// nobody is in is the normal case.
+test('a supplicant authenticated into the guest VLAN is reported, and one in its own VLAN is not', () => {
+    const dot1x = (state, authVlan, guestVlan) => [{
+        Interface: 'ge-0/0/3.0', Role: 'Authenticator', State: state,
+        MacAddress: '02:ab:00:00:00:09', User: 'host/desk-14',
+        AuthenticatedVlan: authVlan, GuestVlan: guestVlan,
+    }];
+    const on = (rows) => ruleOn([detailRow('ge-0/0/3', { Dot1x: rows })], 'dot1x-fallback-vlan');
+
+    const placed = on(dot1x('Authenticated', 'STAFF', 'GUEST'));
+    assert.equal(placed.record.outcome, OUTCOME.PASSED);
+
+    const fallback = on(dot1x('Authenticated', 'GUEST', 'GUEST'));
+    assert.equal(fallback.record.outcome, OUTCOME.FIRED);
+    assert.equal(only(fallback.finding.evidence.clients).vlan, 'GUEST');
+
+    // Not authenticated at all is another rule's finding, not this one's.
+    assert.equal(on(dot1x('Held', null, 'GUEST')).record.outcome, OUTCOME.PASSED);
+    // No guest VLAN configured on the port: nothing to fall back INTO.
+    assert.equal(on(dot1x('Authenticated', 'STAFF', null)).record.outcome, OUTCOME.PASSED);
+    // The brief form names no VLAN, and an authenticated port with none is unmeasured rather than placed.
+    const brief = on(dot1x('Authenticated', null, 'GUEST'));
+    assert.equal(brief.record.outcome, OUTCOME.NOT_EVALUATED);
+    assert.equal(brief.record.missing, 'Interfaces[].Dot1x[].AuthenticatedVlan');
 });
 
 // ---------------------------------------------------------------------------------------------------

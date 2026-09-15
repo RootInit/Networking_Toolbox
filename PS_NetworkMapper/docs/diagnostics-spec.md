@@ -329,9 +329,10 @@ at §8.2. The faulted fleet adds 29.
 per rule, and the delta oracle extended to cover them. Appendix A's L2 and L3 rows are superseded the
 same way §3.5 superseded the L1 row: the table below is the catalogue.
 
-The scope is set by two things already decided. §3.1 builds only what today's data supports, and item 12
+The scope is set by two things already decided. §3.1 builds only what today's data supports, and ~~item 12
 is **blocked** (no switch to verify against), so a rule needing a §4.3 command is named here and *not*
-declared — a rule reading a section `CAPTURE_SECTIONS` never collects would report `section:X` on every
+declared~~ — *item 12 landed 2026-09-14 (§4.3.1) and the three rules that waited on it are in §3.7; while
+it was blocked, a rule needing a §4.3 command was named here and not declared* — a rule reading a section `CAPTURE_SECTIONS` never collects would report `section:X` on every
 device in the fleet, which says "the capture stopped early" about something nobody ever asked for.
 
 | Rule | Reads | Note |
@@ -353,12 +354,13 @@ device in the fleet, which says "the capture stopped early" about something nobo
 | `routed-unit-down` | `LogicalUnits[].Admin/Link` | The device's own L3 presence in a VLAN, enabled and down — no physical port's state says this |
 | `client-outside-scope` | `Clients[].IP` + the caller's scopes | The scopes are an **option**, so without them the guard reports `option:allowedScopes` rather than calling every address out of scope |
 
-**Not built, and why.** `show spanning-tree bridge` carries the topology-change count and time since last
+**Not built, and why.** ~~`show spanning-tree bridge` carries the topology-change count and time since last
 change per scope (**G4**), which is the "why is this broken *now*" datum; it needs the §4.3 command and
-waits on item 12. **G3** (VRRP) is not a rule at all: a VIP MAC on a trunk is how VRRP is supposed to
+waits on item 12.~~ **Built 2026-09-14 (item 15) — see §3.7.** **G3** (VRRP) is not a rule at all: a VIP MAC on a trunk is how VRRP is supposed to
 look, so the `00:00:5e:00:01:<VRID>` detection ships as `vridOf`, exported for §6.4's gateway report, and
 `duplicate-mac-across-devices` skips those MACs rather than reporting every redundant gateway in the
-estate. Native-VLAN mismatch (G5's second half) stays blocked on retention — no native-VLAN field exists.
+estate. ~~Native-VLAN mismatch (G5's second half) stays blocked on retention — no native-VLAN field exists.~~
+**Built 2026-09-14 (item 15) — see §3.7.**
 Firewall-filter rules remain §6.5's "report, do not adjudicate", and §4.4 still stands: nothing here
 reads the configuration.
 
@@ -377,6 +379,44 @@ Measured on the same clean 60-device fleet (`--seed 5`, 60 devices / 4,816 ports
 findings across 39 rules** — the 72 L1 findings unchanged, plus four true statements about the fixture's
 own topology (two address-less bridges, two inferred segments) and **zero L3 findings**. The faulted
 fleet (`--faults 40`, now 38 injector kinds) reaches 128: +30 L1, +16 L2, +6 L3, with nothing lost.
+*(Item 15 adds three injectors, so the faulted run is `--faults 43` over 41 kinds.)*
+
+### 3.7 Built — 2026-09-14: the three rules item 12 unblocked
+
+**Work order item 15.** Three rules on the same engine, one injector each, the delta oracle extended to
+them, and the §2.4 histogram taught to say *refused* where a section was refused rather than absent.
+
+**Every field these read is UNVERIFIED on hardware** (§4.3.1). That is one statement about all three, not
+three separate caveats: if a release prints those stanzas differently the parsers return nothing, and the
+right outcome then is a `NOT_EVALUATED` row naming the datum — never a clean fleet. Each rule has a test
+for exactly that case, which is the part of this item that matters most.
+
+| Rule | Reads | Note |
+|---|---|---|
+| `native-vlan-mismatch` (L2, `error`, edge) | both ends' `Vlans[].Tagged`/`.Mode` | **G5 closed.** The untagged member of a trunk *is* the native VLAN. Untagged frames leaving one end arrive in a different broadcast domain at the other, and nothing else in the snapshot reports it. `Tagged = null` (the brief form) is unmeasured, so a fleet captured that way reports the gap rather than passing |
+| `stp-topology-change-recent` (L2, `warning`, device) | `StpBridge[].TimeSinceLastChangeSeconds` | **G4 closed.** Device-scope, because the bridge view is per bridge; the ports are joined on from `StpDetail` by the scope string the parser normalises, so a finding names ports and not only a VLAN |
+| `dot1x-fallback-vlan` (L1, `info`, port) | `Dot1x[].AuthenticatedVlan` vs `.GuestVlan` | The supplicant authenticated and landed in the guest VLAN: it is on the network, so no other rule sees anything wrong. Fires on the landing, never on the configuration — a guest VLAN nobody is in is the normal case |
+
+**`TopologyChangeCount` is retained and deliberately not read.** With no previous snapshot to subtract it
+from, a large count is an old switch rather than a fault; that comparison belongs behind G-BASELINE (§2.4)
+and is a different rule. A test asserts the count alone fires nothing.
+
+**A snapshot captured before item 12 grows rows here, and that is the right answer.** On a scan that
+predates the four commands, `stp-topology-change-recent` reports `section:STP_BRIDGE` on every device and
+`native-vlan-mismatch` reports `Interfaces[].Vlans[].Tagged` on every edge end — the data was never
+collected, so §2.5 says unmeasured, not clean. Expect the §6.6 unevaluated count to rise on old captures;
+it reads like truncation and is not, and `SectionsAttempted` — which would say "never asked" — does not
+exist on those snapshots either.
+
+**Refusals are their own line, not a histogram annotation - and the difference was found on screen.**
+The first build annotated `section:X` rows with the refusal. That annotation could never appear: a refused
+command still prints output, so `Get-JunosCapturedSections` records the key, the rules reading it skip
+those ports as non-subjects, and there is no unevaluated subject to make a row from. The silence is
+*correct* and *invisible*, which is exactly what wanted saying - so `sectionRefusals` renders it as its
+own sentence above the table ("`POE` on 20 devices - error: PoE is not supported on this platform",
+measured on the 60-device fixture). `hasSection` still reads `SectionsCaptured` alone: a port on a chassis
+without the feature is not a subject, and making it one would turn a non-PoE switch into a fleet of
+findings.
 
 ---
 
@@ -564,12 +604,13 @@ rather than throwing on text it does not recognise.
 | `StpBridge[]` — `Scope`, `EnabledProtocol`, `RootId`, `RootCost`, `RootPort`, `BridgeId`, `TopologyChangeCount`, `TimeSinceLastChangeSeconds` | `show spanning-tree bridge` | G4. Also makes "this switch **is** the root" a fact rather than an inference from the absence of a `ROOT`-role port |
 | `SectionsAttempted[]`, `SectionErrors{}` | the section splitter | §3.5's R15 question, below |
 
-**Nothing reads the new fields yet, and that is deliberate.** `hasSection` in `rules.js` still consults
-`SectionsCaptured` alone, so a refused PoE section today produces ordinary skips — correct, since those
-ports are not subjects — rather than a "the command was refused" row in the §2.4 histogram. Three
-follow-ons, none of them part of this item: G4's topology-change rule over `StpBridge[]`, a native-VLAN
-mismatch rule over `Tagged`/`Mode`, a dot1x fallback-VLAN rule over `AuthenticatedVlan`, and the
-Diagnostics tab reading `SectionErrors` so the histogram can say *refused* instead of *missing*.
+**Nothing read the new fields when this landed, and that was deliberate** — the parsers and the rules
+went in as two steps so a defect in either could be found on its own. ~~Three follow-ons, none of them
+part of this item~~ **all four landed 2026-09-14 as item 15 (§3.7)**: G4's topology-change rule over
+`StpBridge[]`, a native-VLAN mismatch rule over `Tagged`/`Mode`, a dot1x fallback-VLAN rule over
+`AuthenticatedVlan`, and the Diagnostics tab reading `SectionErrors` so the histogram says *refused*
+rather than *missing*. `hasSection` still consults `SectionsCaptured` alone, which is the right
+reading: a port on a chassis without the feature is not a subject.
 
 **Provenance of each sample in `Run-Tests.ps1` §19**, graded, because that is the point of keeping them:
 
@@ -580,6 +621,15 @@ Diagnostics tab reading `SectionErrors` so the histogram can say *refused* inste
 | `show arp … expiration-time` | **Verbatim** column order and flag vocabulary; the "no TTE on a non-expiring entry" case is read off the published sample's own first row | the Junos 12.3 and current `show arp` pages |
 | `show dot1x interface detail` | **Inferred** — the label strings are documented in the output-field table, the stanza LAYOUT is the standard Junos detail shape and is this project's inference. The parser reads by label for exactly that reason | the current `show dot1x interface` page |
 | `show spanning-tree bridge` | **Documented headings and label list**, plus a published lab capture for the VSTP per-VLAN heading | the EX `show spanning-tree bridge` page and a public VSTP lab writeup |
+
+**Cross-checked 2026-09-14 against `Juniper/py-junos-eznc`** (Juniper's own Python library), at the
+user's suggestion. It speaks XML RPC rather than CLI text, so it holds no sample of any of these four
+commands — but two things in it bear on this section. Its `op/vlan.yml` view names `vlan-instance`,
+`vlan-tag` and `vlan-member-interface`, which is the pre-ELS stanza's field set and corroborates the
+layout graded *verbatim* above. And its `rpc-reply` fixtures carry two genuine Junos refusal shapes,
+`error: device asdf not found` and a bare `permission denied` — the second has no `error:` prefix, so
+`Get-JunosSectionErrors` now anchors on it too (`Run-Tests.ps1` §19). The library remains a good source
+for *field names*, and no source at all for what the CLI prints around them.
 
 #### Cut
 
@@ -1658,6 +1708,16 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
     passes the resolved PORTS into `computePath` — which is the functional half, recorded at §6.2. §6.4's
     gateway report lands with it, which closes G3's placed half. See §6.6 for what the screen does and the
     three decisions that are easy to undo by accident.
+15. ~~**The rules item 12 unblocked**: G4's topology-change rule, G5's native-VLAN comparison, a dot1x
+    fallback-VLAN rule, and `SectionErrors` in the §2.4 histogram.~~ **Done 2026-09-14.** See §3.7 for the
+    catalogue and for the two decisions that are easy to undo by accident: `TopologyChangeCount` is
+    retained and not read, and the refusal annotation is presentation only. G4 and G5 close with it.
+    Every field these rules read is **unverified on hardware** — item 12's hardware capture is still owed,
+    and it is what would confirm them.
+16. **G1 — per-hop MAC learning as path verification** (§6, Appendix B). §6 computes a path and never
+    *checks* it: at each hop the destination's MAC should be learned on the port facing the next hop,
+    which is forwarding-plane evidence rather than "both ends report FWD". R3 already retains the
+    sightings and nothing in §6 uses them. Not started; the largest remaining item in the document.
 *(There is no config-parsing step. See §4.4 — the configuration is collected and stored for backup
 and manual review, and stays out of the rule engine.)*
 
@@ -1698,8 +1758,8 @@ by today's data.
 
 | # | Gap |
 |---|---|
-| **G1** | **MAC learning as per-hop path verification.** The spec computes a path and never *checks* it. At each hop, the destination's MAC should be learned on the port facing the next hop — direct forwarding-plane evidence, far stronger than "both ends report FWD". The data exists (1030 entries in the capture) and `:674` discards exactly the transit sightings needed. R3 retains them; nothing in §6 uses them. **The largest missed opportunity in the document.** |
+| **G1** | **MAC learning as per-hop path verification.** The spec computes a path and never *checks* it. At each hop, the destination's MAC should be learned on the port facing the next hop — direct forwarding-plane evidence, far stronger than "both ends report FWD". The data exists (1030 entries in the capture) and `:674` discards exactly the transit sightings needed. R3 retains them; nothing in §6 uses them. **The largest missed opportunity in the document.** **Placed 2026-09-14 as work order item 16**; not started |
 | ~~G2~~ | ~~**Per-VLAN STP scope drift between neighbours.** A link where one end runs an instance for VLAN *T* and the other does not. Detectable today by comparing each end's `StpDetail` scope set against its `Vlans` membership. §6.3 only compares states within a scope both ends have. With 4 of 17 VLANs instance-less on one device, not hypothetical~~ **Closed 2026-09-14 (item 13):** `stp-scope-drift` (§3.6) is the comparison, with an injector that plants it on an already-blocked link so the forwarding tree is untouched |
 | ~~G3~~ | ~~**VRRP is partly detectable** and §6.3 says it is not. The `00:00:5e:00:01:xx` virtual-MAC prefix appears in the capture's MAC table and identifies both VRRP presence and the VRID. It gives no master/backup, but "this VLAN's gateway is a VIP, so the L3 hop is one of N routers" beats §6.4's single pick. **Placed 2026-09-14 (item 13):** not a rule — a VIP on a trunk is how VRRP is meant to look — so the detection ships as `vridOf` for §6.4 to report with its gateway pick, and `duplicate-mac-across-devices` skips those MACs.~~ **Closed 2026-09-14 (item 14):** `gatewayCandidates` reports every VIP and its VRID beside its candidates, filtered by the path's VLAN — see §6.4 |
-| G4 *(unblocked)* | **Topology-change churn, not root ID.** `show spanning-tree bridge` also carries topology-change count and time since last change per scope. For "why is this broken *now*", a VLAN that reconverged 40 seconds ago explains more than which bridge is root. ~~Needs the §4.3 command, so it queues behind item 12~~ **The command landed 2026-09-14 (§4.3.1)**: `StpBridge[].TopologyChangeCount` and `.TimeSinceLastChangeSeconds` are retained and in the fixture, per scope, joinable to `StpDetail` by scope string. No rule reads them yet — the rule is the follow-on |
-| ~~G5~~ | ~~**MTU and native-VLAN mismatch rules are injected as test faults (§8.3) but described nowhere.** R2 retains the LLDP `Maximum Frame Size` TLV without saying what compares it to the local MTU~~ **Closed 2026-09-13 (item 11)** for the MTU half: `mtu-mismatch` (§3.5) is the comparison, with an injector of its own. ~~The native-VLAN half stays open and is blocked on retention rather than undescribed — the snapshot carries no native-VLAN field at all~~ **Unblocked 2026-09-14 (item 12):** `show vlans extensive` annotates each member `tagged`/`untagged` with its port mode, so an untagged member of a tagged VLAN on a trunk IS the native VLAN. `Vlans[].Interfaces[].Tagged`/`.Mode` are retained and in the fixture, where every trunk carries exactly one untagged VLAN so the two ends agree by construction and a mismatch can only be injected deliberately. The comparison itself is the follow-on rule |
+| ~~G4~~ | ~~**Topology-change churn, not root ID.** `show spanning-tree bridge` also carries topology-change count and time since last change per scope. For "why is this broken *now*", a VLAN that reconverged 40 seconds ago explains more than which bridge is root. ~~Needs the §4.3 command, so it queues behind item 12~~ **The command landed 2026-09-14 (§4.3.1)**: `StpBridge[].TopologyChangeCount` and `.TimeSinceLastChangeSeconds` are retained and in the fixture, per scope, joinable to `StpDetail` by scope string.~~ **Closed 2026-09-14 (item 15):** `stp-topology-change-recent` (§3.7) reads the AGE, per scope, and joins the ports on; the count stays unread and says why |
+| ~~G5~~ | ~~**MTU and native-VLAN mismatch rules are injected as test faults (§8.3) but described nowhere.** R2 retains the LLDP `Maximum Frame Size` TLV without saying what compares it to the local MTU~~ **Closed 2026-09-13 (item 11)** for the MTU half: `mtu-mismatch` (§3.5) is the comparison, with an injector of its own. ~~The native-VLAN half stays open and is blocked on retention rather than undescribed — the snapshot carries no native-VLAN field at all~~ **Unblocked 2026-09-14 (item 12):** `show vlans extensive` annotates each member `tagged`/`untagged` with its port mode, so an untagged member of a tagged VLAN on a trunk IS the native VLAN. `Vlans[].Interfaces[].Tagged`/`.Mode` are retained and in the fixture, where every trunk carries exactly one untagged VLAN so the two ends agree by construction and a mismatch can only be injected deliberately.~~ **Closed 2026-09-14 (item 15):** `native-vlan-mismatch` (§3.7) is the comparison |

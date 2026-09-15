@@ -8,9 +8,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import L2Graph from '../l2-graph.js';
-import { MICRO_TOPOLOGIES, byName, ALLOWED_SCOPES } from '../tools/micro-topologies.mjs';
+import { MICRO_TOPOLOGIES, byName, ALLOWED_SCOPES, microNode, microRow, link } from '../tools/micro-topologies.mjs';
 
 const { buildPortGraph, groupSharedSegments, edgesFor } = L2Graph;
+const only = (list) => { assert.equal(list.length, 1, `expected exactly one, got ${list.length}`); return list[0]; };
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..', '..');
 const GENERATOR = path.join(ROOT, 'web-src', 'tools', 'generate-fixture.mjs');
@@ -263,6 +264,28 @@ test('an unmanaged segment is inferred from the MAC table, and never from an upl
 
 // The generated fleet is the scale test: the micros prove the cases, this proves nothing blows up on a
 // fleet with LAGs, stacks, failed scans and address-less neighbours all at once.
+// G5's comparison reads the annotation through the graph, so an edge half that dropped it would leave
+// the rule with nothing to compare and no gap to report either.
+test('an edge half carries the tagged/untagged annotation, and absent is null rather than untagged', () => {
+    const near = microRow('ge-0/0/1', { Link: 'up', Vlans: [
+        { Name: 'STAFF', Tag: 10, Unit: 'ge-0/0/1.0', Active: true, Tagged: false, Mode: 'trunk' },
+        { Name: 'VOICE', Tag: 20, Unit: 'ge-0/0/1.0', Active: true, Tagged: true, Mode: 'trunk' },
+    ] });
+    // A brief-form capture: the members are there and the annotation is not.
+    const far = microRow('ge-0/0/2', { Link: 'up', Vlans: [{ Name: 'STAFF', Tag: 10, Unit: 'ge-0/0/2.0', Active: true }] });
+    const a = microNode('10.30.9.10', 'a.example.net', { ports: [near] });
+    const b = microNode('10.30.9.11', 'b.example.net', { ports: [far] });
+    link(a, 'ge-0/0/1', b, 'ge-0/0/2');
+    const graph = buildPortGraph([a, b]);
+    const edge = only(graph.edges);
+    const ends = [edge.a, edge.b];
+    const here = ends.find(e => e.ip === '10.30.9.10');
+    const there = ends.find(e => e.ip === '10.30.9.11');
+    assert.deepEqual(here.vlans.members.map(m => [m.Tag, m.Tagged, m.Mode]), [[10, false, 'trunk'], [20, true, 'trunk']]);
+    assert.deepEqual(there.vlans.members.map(m => [m.Tag, m.Tagged, m.Mode]), [[10, null, null]],
+        'an unannotated member must read as unmeasured, not as the untagged one');
+});
+
 test('the generated fixture builds a graph consistent with its own neighbour list', () => {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_l2_'));
     execFileSync(process.execPath, [GENERATOR, '--out', out, '--devices', '60', '--seed', '7', '--snapshots', '1'],

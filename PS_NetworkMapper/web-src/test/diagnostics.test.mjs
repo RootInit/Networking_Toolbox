@@ -20,15 +20,17 @@ function load() {
         pick(/var DIAG_TIER = \{[^}]*\};/),
         pick(/var DIAG_SEVERITY_ORDER = \[[^\]]*\];/),
         pick(/function groupFindings\(result\)[\s\S]*?\n\}/),
+        pick(/function sectionRefusals\(devices\)[\s\S]*?\n\}/),
         pick(/function missingHistogram\(result\)[\s\S]*?\n\}/),
         pick(/function inferVlanTag\(resolution\)[\s\S]*?\n\}/),
         pick(/function pathPanelModel\(fromResolution, toResolution, requestedTag\)[\s\S]*?\n\}/),
-        'return { groupFindings, missingHistogram, inferVlanTag, pathPanelModel, DIAG_TIER, DIAG_SEVERITY_ORDER };',
+        'return { groupFindings, missingHistogram, sectionRefusals, inferVlanTag, pathPanelModel, DIAG_TIER, DIAG_SEVERITY_ORDER };',
     ].join('\n');
     return new Function(body)();
 }
 
-const evaluated = () => Rules.evaluate(byName('partial-node-missing-stp-section').snapshot, { allowedScopes: ALLOWED_SCOPES });
+const evaluatedSnapshot = () => byName('partial-node-missing-stp-section').snapshot;
+const evaluated = () => Rules.evaluate(evaluatedSnapshot(), { allowedScopes: ALLOWED_SCOPES });
 
 test('every severity a rule can carry has a tier, including the info the L2 rules introduced', () => {
     const { DIAG_TIER, DIAG_SEVERITY_ORDER } = load();
@@ -81,6 +83,34 @@ test('the missing histogram reports the silence the findings cannot', () => {
     assert.ok(rows.every(row => row.notEvaluated > 0));
     const sorted = rows.map(row => row.notEvaluated);
     assert.deepEqual(sorted, [...sorted].sort((a, b) => b - a));
+});
+
+// Section 3.5's third state on screen, and the reason it is NOT a histogram row: a refused command still
+// prints output, so its section lands in SectionsCaptured and the rules reading it correctly skip those
+// ports as non-subjects. That silence is right and invisible, which is what this line is for.
+test('a refused command is reported as a refusal, not as a missing section', () => {
+    const { missingHistogram, sectionRefusals } = load();
+    const snapshot = evaluatedSnapshot();
+    assert.deepEqual(sectionRefusals(snapshot.Topology), [], 'nothing refused a command in this topology');
+    assert.deepEqual(sectionRefusals(null), [], 'a snapshot with no devices cannot claim a refusal');
+
+    const devices = snapshot.Topology.map((device, index) => (index === 0 ? device : {
+        ...device, SectionErrors: { POE: 'error: PoE is not supported on this platform' },
+    }));
+    const refusals = sectionRefusals(devices);
+    assert.equal(refusals.length, 1);
+    assert.deepEqual(refusals[0], {
+        section: 'POE', devices: devices.length - 1,
+        message: 'error: PoE is not supported on this platform',
+    });
+
+    // And it stays out of the histogram, which counts UNEVALUATED SUBJECTS and nothing else. The
+    // micro-topology's truncated node does produce a `section:POE` row - that one is a lost section, not
+    // a refusal - and the row carries the datum and its count, with no refusal leaking into it.
+    const result = evaluated();
+    const poe = missingHistogram(result).flatMap(row => row.missing).filter(e => e.datum === 'section:POE');
+    assert.ok(poe.length, 'the truncated node no longer loses its PoE section');
+    for (const entry of poe) assert.deepEqual(Object.keys(entry).sort(), ['count', 'datum']);
 });
 
 test('a path query needs two settled endpoints and a VLAN, and says which it is missing', () => {

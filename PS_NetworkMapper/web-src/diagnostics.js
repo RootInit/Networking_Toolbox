@@ -45,6 +45,29 @@ function groupFindings(result) {
     }).filter(function (band) { return band.rules.length > 0; });
 }
 
+// Section 3.5's third state, on screen. A REFUSED command is not a truncated capture - a non-PoE chassis
+// answers "show poe interface" with an error, which IS output, so the section lands in SectionsCaptured
+// and every PoE rule correctly skips those ports as non-subjects. Correct, and silent: the histogram has
+// no row to show, because there is no unevaluated subject. This is the line that explains the silence.
+//
+// Presentation only. `hasSection` still reads SectionsCaptured alone; making a refused section missing
+// would turn a switch that is simply built differently into a fleet of findings.
+function sectionRefusals(devices) {
+    var bySection = new Map();
+    (devices || []).forEach(function (device) {
+        var errors = device && device.SectionErrors;
+        if (!errors) return;
+        Object.keys(errors).forEach(function (section) {
+            if (!bySection.has(section)) bySection.set(section, { section: section, devices: 0, message: null });
+            var entry = bySection.get(section);
+            entry.devices += 1;
+            if (!entry.message) entry.message = String(errors[section]);
+        });
+    });
+    return Array.from(bySection.values())
+        .sort(function (x, y) { return y.devices - x.devices || (x.section < y.section ? -1 : 1); });
+}
+
 // Section 2.4's deliverable: per rule, how many subjects it could not evaluate and which datum was
 // missing each time. Rules that evaluated everything are dropped - the point of the table is the gaps.
 function missingHistogram(result) {
@@ -141,6 +164,7 @@ window.renderDiagnostics = function() {
         counted[severity] = band ? band.count : 0;
     });
     var histogram = missingHistogram(result);
+    var refusals = sectionRefusals(snapshot.topology);
     var unevaluated = histogram.reduce(function (sum, row) { return sum + row.notEvaluated; }, 0);
 
     summary.innerHTML = ''
@@ -183,7 +207,15 @@ window.renderDiagnostics = function() {
                 + '</div>';
         }).join('');
 
-    gaps.innerHTML = !histogram.length
+    var refusalHtml = !refusals.length ? '' : '<p class="diag-note">Commands the chassis refused, which is'
+        + ' why the rules reading them have fewer subjects rather than more gaps: '
+        + refusals.map(function (entry) {
+            return '<code>' + esc(entry.section) + '</code> on ' + entry.devices + ' device'
+                + (entry.devices === 1 ? '' : 's') + ' &mdash; ' + esc(entry.message);
+        }).join('; ')
+        + '</p>';
+
+    gaps.innerHTML = refusalHtml + (!histogram.length
         ? '<p class="diag-empty">Every rule evaluated every subject it had.</p>'
         : '<table class="diag-table"><thead><tr><th>Rule</th><th>Fired</th><th>Evaluated</th><th>Not evaluated</th><th>Missing datum</th></tr></thead><tbody>'
             + histogram.map(function (row) {
@@ -192,7 +224,7 @@ window.renderDiagnostics = function() {
                     + row.missing.map(function (entry) { return esc(entry.datum) + ' &times;' + entry.count; }).join('<br>')
                     + '</td></tr>';
             }).join('')
-            + '</tbody></table>';
+            + '</tbody></table>');
 };
 
 // ---- Path query (sections 6.1, 6.2, 6.4) ----

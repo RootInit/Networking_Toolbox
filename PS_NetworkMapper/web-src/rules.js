@@ -70,7 +70,7 @@ var FIELD_SECTION = {
     PoE: 'POE', PoeAdminStatus: 'POE', PoeOperStatus: 'POE', PoePairMode: 'POE',
     PoeMaxPower: 'POE', PoePriority: 'POE', PoePowerConsumption: 'POE', PoeClass: 'POE',
     Dot1x: 'DOT1X',
-    Vlans: 'VLANS', StpDetail: 'STP', STP: 'STP',
+    Vlans: 'VLANS', StpDetail: 'STP', STP: 'STP', StpBridge: 'STP_BRIDGE',
     Bundle: 'INTERFACES_TERSE', BundleMembers: 'INTERFACES_TERSE',
     Admin: 'INTERFACES_TERSE', Link: 'INTERFACES_TERSE', Desc: 'INTERFACES_DESC',
     // Device-level.
@@ -469,6 +469,91 @@ function vlansComparable(ctx) {
 function vlansOnlyFar(ctx) {
     var here = vlanTagsOf(ctx.near);
     return vlanTagsOf(ctx.far).filter(function (tag) { return here.indexOf(tag) === -1; });
+}
+
+// ---- Native VLAN (G5). "show vlans extensive" annotates each member tagged/untagged with its port
+// mode, and the one thing that combination states is the native VLAN: the untagged member of a trunk.
+
+function vlanMembersOf(end) { return ((end && end.vlans) || {}).members || []; }
+
+// Not "is a trunk" but "is not KNOWN to be an access port": a capture that ran the brief form reports
+// Mode as null on every member, and that end has to stay a subject so the guard can report the gap
+// rather than a subject filter turning an unmeasured fleet into a silent one (section 2.5).
+function trunkish(end) {
+    var members = vlanMembersOf(end);
+    return members.length > 0 && !members.every(function (m) { return lower(m.Mode) === 'access'; });
+}
+
+function nativeVlanComparable(ctx) { return trunkish(ctx.near) && trunkish(ctx.far); }
+
+// The gap the brief form leaves. Named per end, like the section guards, because the two ends are two
+// switches and only one of them may have run the upgraded command.
+function taggingGap(end, prefix) {
+    var members = vlanMembersOf(end);
+    var measured = members.some(function (m) { return m.Tagged === true || m.Tagged === false; });
+    return measured ? null : (prefix || '') + 'Interfaces[].Vlans[].Tagged';
+}
+
+// The untagged tag on a trunk. Two untagged members are not a native VLAN, they are a second question,
+// so the ambiguity returns null and the guard above has already proved the field was measured.
+function nativeVlanOf(end) {
+    var untagged = vlanMembersOf(end).filter(function (m) { return m.Tagged === false; });
+    return untagged.length === 1 ? untagged[0].Tag : null;
+}
+
+function nativeVlanMismatch(ctx) {
+    var here = nativeVlanOf(ctx.near);
+    var there = nativeVlanOf(ctx.far);
+    if (here === null || there === null) return null;
+    return here === there ? null : { here: here, far: there };
+}
+
+// ---- Topology-change churn (G4). "show spanning-tree bridge" carries a change count and a time since
+// the last one, per scope. The COUNT is deliberately not read: with no previous snapshot to subtract it
+// from, a large count is an old switch, not a fault - that comparison belongs behind G-BASELINE.
+var RECENT_TOPOLOGY_CHANGE_SECONDS = 600;
+
+function bridgeStanzas(ctx) { return asList(ctx.device && ctx.device.StpBridge); }
+
+function recentTopologyChanges(ctx) {
+    return bridgeStanzas(ctx).filter(function (stanza) {
+        var seconds = stanza.TimeSinceLastChangeSeconds;
+        return typeof seconds === 'number' && isFinite(seconds) && seconds < RECENT_TOPOLOGY_CHANGE_SECONDS;
+    }).map(function (stanza) {
+        return {
+            scope: stanza.Scope, seconds: stanza.TimeSinceLastChangeSeconds,
+            changes: stanza.TopologyChangeCount, ports: portsInScope(ctx, stanza.Scope),
+        };
+    });
+}
+
+// The bridge view names the scope and nothing else; the per-port view names the ports. Joined on the
+// scope string the parser normalises, so a finding says which ports reconverged rather than only which
+// VLAN did.
+function portsInScope(ctx, scope) {
+    var ports = [];
+    asList(ctx.device.Interfaces).forEach(function (row) {
+        var scopes = stpScopes(row);
+        if (Object.prototype.hasOwnProperty.call(scopes, scope)) ports.push(row.Port);
+    });
+    return ports.sort();
+}
+
+// ---- dot1x fallback VLAN (section 4.3). A supplicant that authenticated INTO the guest VLAN is on the
+// network, so nothing else in the snapshot looks wrong - and it is not on the network it was meant to be.
+function dot1xRows(ctx) { return asList(ctx.row && ctx.row.Dot1x); }
+
+function authenticatedRows(ctx) {
+    return dot1xRows(ctx).filter(function (entry) { return lower(entry.State) === 'authenticated'; });
+}
+
+function fallbackVlanClients(ctx) {
+    return authenticatedRows(ctx).filter(function (entry) {
+        return entry.GuestVlan && entry.AuthenticatedVlan
+            && lower(entry.GuestVlan) === lower(entry.AuthenticatedVlan);
+    }).map(function (entry) {
+        return { mac: entry.MacAddress, user: entry.User, vlan: entry.AuthenticatedVlan };
+    });
 }
 
 // A subject whenever the FAR end runs an instance: an end with none is the drift, not a reason to stop
@@ -878,9 +963,31 @@ var RULES = [
         },
     },
 
+    {
+        // Section 4.3's dot1x upgrade. The supplicant authenticated and landed in the port's GUEST VLAN
+        // rather than the one it was meant to have - it is on the network, so no other rule sees a
+        // problem. Informational: a guest VLAN exists to be landed in. UNVERIFIED on hardware (4.3.1):
+        // the stanza's field LABELS are documented, its layout is this project's inference.
+        id: 'dot1x-fallback-vlan', layer: 'L1', severity: 'info', scope: 'port',
+        title: 'An authenticated supplicant landed in the guest VLAN',
+        only: function (ctx) { return dot1xConfigured(ctx); },
+        guard: function (ctx) {
+            var gap = needPort(ctx, 'Dot1x');
+            if (gap) return gap;
+            var rows = authenticatedRows(ctx);
+            if (!rows.length) return null;   // nothing authenticated here is a pass, not a gap
+            var measured = rows.some(function (entry) { return entry.AuthenticatedVlan; });
+            // The brief form of the command names no VLAN at all, so an authenticated port with no
+            // VLAN on any of its rows is unmeasured rather than correctly placed.
+            return measured ? null : 'Interfaces[].Dot1x[].AuthenticatedVlan';
+        },
+        when: function (ctx) { return fallbackVlanClients(ctx).length > 0; },
+        datum: 'Interfaces[].Dot1x[].AuthenticatedVlan',
+        evidence: function (ctx) { return { clients: fallbackVlanClients(ctx) }; },
+    },
+
     // -----------------------------------------------------------------------------------------------
-    // L2 switching (section 3, item 13). Every rule here reads data the crawler already collects; the
-    // ones that need a section 4.3 command are listed in section 3.6 and not declared.
+    // L2 switching (section 3, item 13).
     {
         // F9. A port mid-transition is neither forwarding nor blocking, and a path computer reading only
         // FWD and BLK has no answer for it. Reported per port, naming the scope it is unconverged in.
@@ -1023,6 +1130,25 @@ var RULES = [
         },
     },
     {
+        // G5. Two trunk ends with different untagged VLANs: untagged frames leaving one end arrive in a
+        // different broadcast domain at the other, which is a VLAN leak in the direction nothing else in
+        // the snapshot reports. Reads the section 4.3 fields, which are UNVERIFIED on hardware (4.3.1).
+        id: 'native-vlan-mismatch', layer: 'L2', severity: 'error', scope: 'edge',
+        title: 'The two ends of this trunk use different native VLANs',
+        only: nativeVlanComparable,
+        guard: function (ctx) {
+            return firstGap(needPort(ctx, 'Vlans'), needFarPort(ctx, 'Vlans'),
+                taggingGap(ctx.near, ''), taggingGap(ctx.far, 'far.'));
+        },
+        when: function (ctx) { return nativeVlanMismatch(ctx) !== null; },
+        anchor: function (ctx) { return lowestEnd(ctx); },
+        datum: 'Interfaces[].Vlans[].Tagged',
+        evidence: function (ctx) {
+            var mismatch = nativeVlanMismatch(ctx) || {};
+            return { here: mismatch.here, far: mismatch.far, farPort: ctx.far.port, farIp: ctx.far.ip };
+        },
+    },
+    {
         // Both devices answered and only one of them sees the other. LLDP off on one end, a one-way
         // fibre pair, or a neighbour entry that has not aged out - all of them worth a look, and all of
         // them a reason section 6.2 will not call the hop VERIFIED.
@@ -1037,6 +1163,30 @@ var RULES = [
         anchor: function (ctx) { return lowestEnd(ctx); },
         datum: 'Neighbors[].ManagementIP',
         evidence: function (ctx) { return { confirmation: ctx.edge.confirmation }; },
+    },
+
+    {
+        // G4. A scope that reconverged in the last few minutes explains "why is this broken NOW" better
+        // than which bridge is root. Device-scope because the bridge view is per bridge, not per port;
+        // the ports are joined on in the evidence. Reads a section 4.3 command, UNVERIFIED (4.3.1).
+        id: 'stp-topology-change-recent', layer: 'L2', severity: 'warning', scope: 'device',
+        title: 'A spanning-tree instance reconverged in the last few minutes',
+        only: function (ctx) { return !hasSection(ctx, 'STP_BRIDGE') || bridgeStanzas(ctx).length > 0; },
+        guard: function (ctx) {
+            var gap = needDevice(ctx, 'StpBridge');
+            if (gap) return gap;
+            var measured = bridgeStanzas(ctx).some(function (stanza) {
+                return typeof stanza.TimeSinceLastChangeSeconds === 'number';
+            });
+            // A scope that prints fewer fields leaves the age null, and null is unmeasured, never "long
+            // ago" (section 2.5) - so a bridge view with no age at all is NOT_EVALUATED, not clean.
+            return measured ? null : 'Device.StpBridge[].TimeSinceLastChangeSeconds';
+        },
+        when: function (ctx) { return recentTopologyChanges(ctx).length > 0; },
+        datum: 'Device.StpBridge[].TimeSinceLastChangeSeconds',
+        evidence: function (ctx) {
+            return { withinSeconds: RECENT_TOPOLOGY_CHANGE_SECONDS, scopes: recentTopologyChanges(ctx) };
+        },
     },
 
     // -----------------------------------------------------------------------------------------------

@@ -533,7 +533,9 @@ function Get-JunosSectionErrors {
         # everything else. Anchored to the first few lines: the word "error" inside a config or an
         # interface counter name is not a refused command.
         $Head = ($Body -split "`r?`n" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -First 3) -join "`n"
-        if ($Head -match '(?im)^\s*(?<msg>(?:error:|unknown command|syntax error)[^\r\n]*)') {
+        # "permission denied" is the message a class-restricted command answers with; it is the one
+        # refusal that carries no "error:" prefix of its own (py-junos-eznc's rpc-error fixture).
+        if ($Head -match '(?im)^\s*(?<msg>(?:error:|unknown command|syntax error|permission denied)[^\r\n]*)') {
             $Errors[[string]$Key] = $Matches.msg.Trim()
         }
     }

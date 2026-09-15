@@ -26,9 +26,9 @@ function generate(args) {
 }
 
 const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
-// Thirty against 28 kinds, so every injector places once and the cycle wraps: a second instance of a
-// kind has to place as well.
-const faulted = generate([...ARGS, '--faults', '40']);
+// More than the injector count, so every injector places once and the cycle wraps: a second instance
+// of a kind has to place as well.
+const faulted = generate([...ARGS, '--faults', '43']);
 const clean = generate(ARGS);
 
 const byIp = (snapshot) => new Map(snapshot.Topology.map(d => [String(d.DeviceIP), d]));
@@ -64,7 +64,7 @@ test('a manifest is written per snapshot and names the map it describes', () => 
     assert.equal(faulted.manifests.length, faulted.names.length);
     for (const [i, m] of faulted.faults.entries()) {
         assert.equal(m.Map, faulted.names[i], 'the manifest and the map must pair by timestamp');
-        assert.equal(m.Requested, 40);
+        assert.equal(m.Requested, 43);
         assert.ok(m.Faults.length > 0, 'a 60-device fleet is large enough to place every kind');
     }
 });
@@ -104,6 +104,8 @@ test('every fault kind places, and each entry carries an oracle a rule can be ch
         'bridge-without-address', 'gateway-off-subnet', 'lldp-one-sided', 'mac-in-unconfigured-vlan',
         'neighbour-never-scanned', 'route-unparsed', 'routed-unit-down', 'stp-role-conflict',
         'stp-scope-drift', 'unrecorded-switch-behind-port',
+        // The rules the section 4.3 commands unblocked (item 15), appended for the same reason.
+        'dot1x-fallback-vlan', 'native-vlan-mismatch', 'stp-recent-topology-change',
     ].sort());
     const ids = entries.map(f => f.id);
     assert.equal(new Set(ids).size, ids.length, 'ids must be unique across snapshots');
@@ -297,6 +299,60 @@ test('vlan-missing-from-trunk removes a tag from exactly one end, and nothing el
 
 // The sub-PRNG rule from section 8.3, stated as a property rather than as a review note: if an injector
 // reached rnd(), the main stream would shift and devices no fault touches would differ between runs.
+test('native-vlan-mismatch moves the native VLAN and changes nothing else about the trunk', () => {
+    for (const entry of find('native-vlan-mismatch')) {
+        const snapshot = snapshotOf(entry);
+        const device = byIp(snapshot).get(String(entry.deviceIp));
+        const row = rowOf(device, entry.port);
+        const trunk = row.Vlans.filter(v => v.Mode === 'trunk');
+        const untagged = trunk.filter(v => v.Tagged === false);
+        // Still exactly one native, and it is the one the manifest names.
+        assert.equal(untagged.length, 1, `${entry.id} left ${untagged.length} untagged VLANs on the trunk`);
+        assert.equal(untagged[0].Tag, entry.params.nowNative);
+        assert.equal(trunk.find(v => v.Tag === entry.params.wasNative).Tagged, true);
+        // The peer still carries the same VLANs, and still calls the old one native: the wire's membership
+        // is untouched and only the annotation disagrees.
+        const peer = byIp(snapshot).get(String(entry.params.peerIp));
+        const peerTrunk = rowOf(peer, entry.params.peerPort).Vlans.filter(v => v.Mode === 'trunk');
+        assert.deepEqual(peerTrunk.map(v => v.Tag).sort(), trunk.map(v => v.Tag).sort());
+        assert.equal(peerTrunk.filter(v => v.Tagged === false)[0].Tag, entry.params.wasNative);
+        // The device's own VLAN list is the same table the port row came from, so it has to agree.
+        const vlan = device.Vlans.find(v => v.Tag === entry.params.nowNative);
+        assert.equal(vlan.Interfaces.find(m => m.Port === entry.port).Tagged, false);
+    }
+});
+
+test('stp-recent-topology-change is the only bridge in the snapshot that changed recently', () => {
+    for (const entry of find('stp-recent-topology-change')) {
+        const snapshot = snapshotOf(entry);
+        const recent = [];
+        for (const device of snapshot.Topology) {
+            for (const stanza of device.StpBridge || []) {
+                if (stanza.TimeSinceLastChangeSeconds < 600) recent.push(`${device.DeviceIP} ${stanza.Scope}`);
+            }
+        }
+        assert.deepEqual(recent, [`${entry.deviceIp} ${entry.params.scope}`],
+            'the baseline is supposed to put every bridge an hour or more back');
+    }
+});
+
+test('dot1x-fallback-vlan leaves the client in the VLAN the MAC table already had it in', () => {
+    for (const entry of find('dot1x-fallback-vlan')) {
+        const snapshot = snapshotOf(entry);
+        const device = byIp(snapshot).get(String(entry.deviceIp));
+        const row = rowOf(device, entry.port);
+        const hit = row.Dot1x.find(e => e.MacAddress === entry.mac);
+        assert.equal(hit.State, 'Authenticated');
+        assert.equal(hit.AuthenticatedVlan, entry.params.guestVlan);
+        assert.equal(hit.GuestVlan, entry.params.guestVlan);
+        // Nothing else moved: the client list and the port's membership still name that VLAN, so the
+        // fault is the fallback landing rather than an invented VLAN.
+        const client = device.Clients.find(c => c.MAC === entry.mac);
+        assert.equal(client.VLAN_Name, entry.params.guestVlan);
+        assert.ok((row.Vlans || []).some(v => v.Name === entry.params.guestVlan));
+    }
+});
+
 test('injection does not perturb the main PRNG: untouched devices are byte-identical', () => {
     const namedIps = new Set();
     const collect = (value) => {

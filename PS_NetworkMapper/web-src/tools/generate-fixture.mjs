@@ -2145,6 +2145,75 @@ function injectStpScopeDrift(rng, fleet) {
     };
 }
 
+// G5. One end of a trunk moves its native VLAN. Every VLAN is still on both ends and both still forward,
+// so only the tagged/untagged annotation differs - untagged frames leaving one end arrive in a different
+// broadcast domain at the other.
+function injectNativeVlanMismatch(rng, fleet) {
+    const trunkMembers = (row) => (row.Vlans || []).filter(v => v.Mode === 'trunk');
+    const link = pickReciprocalLink(rng, fleet, (l) => {
+        const members = trunkMembers(l.nearRow);
+        return members.filter(v => v.Tagged === false).length === 1 && members.length > 1;
+    });
+    if (!link) return null;
+    const members = trunkMembers(link.nearRow);
+    const was = members.find(v => v.Tagged === false);
+    const now = members.find(v => v.Tagged === true);
+    // Both views of the same membership, because a switch prints one table and the crawler splits it:
+    // changing the port row alone would leave the device's own VLAN list disagreeing with it.
+    const setTagged = (tag, tagged) => {
+        for (const v of link.nearRow.Vlans) if (v.Tag === tag) v.Tagged = tagged;
+        const vlan = (link.device.Vlans || []).find(v => v.Tag === tag);
+        if (vlan) for (const m of vlan.Interfaces) if (m.Port === link.nearPort) m.Tagged = tagged;
+    };
+    setTagged(was.Tag, true);
+    setTagged(now.Tag, false);
+    const [anchorIp, anchorPort] = lowerEnd(link);
+    return {
+        kind: 'native-vlan-mismatch', failureModes: [], deviceIp: link.device.DeviceIP, port: link.nearPort, mac: null,
+        params: { wasNative: was.Tag, nowNative: now.Tag, peerIp: link.peer.DeviceIP, peerPort: link.farPort },
+        expected: { finding: 'native-vlan-mismatch', deviceIp: anchorIp, port: anchorPort },
+    };
+}
+
+// G4. One spanning-tree instance reconverged moments before the scan. The baseline's every bridge last
+// changed at least an hour ago, so this is the only recent one in the snapshot.
+function injectRecentTopologyChange(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => (d.StpBridge || []).length);
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    const stanza = fPick(rng, host.StpBridge);
+    stanza.TimeSinceLastChangeSeconds = 12 + fInt(rng, 0, 120);
+    // A change that just happened is a change more than the switch had counted before it.
+    if (typeof stanza.TopologyChangeCount === 'number') stanza.TopologyChangeCount += 1;
+    return {
+        kind: 'stp-recent-topology-change', failureModes: [], deviceIp: host.DeviceIP, port: null, mac: null,
+        params: { scope: stanza.Scope, seconds: stanza.TimeSinceLastChangeSeconds },
+        expected: { finding: 'stp-topology-change-recent', deviceIp: host.DeviceIP, port: null },
+    };
+}
+
+// Section 4.3's dot1x upgrade. A supplicant authenticated into the guest VLAN. Modelled by configuring
+// the guest VLAN to be the production VLAN the client is already in, so the MAC table, the client list
+// and the dot1x rows all still agree - the fault is the fallback landing, not an invented VLAN.
+function injectDot1xFallbackVlan(rng, fleet) {
+    const candidates = [];
+    for (const d of scanned(fleet)) {
+        for (const row of d.Interfaces) {
+            const hit = (row.Dot1x || []).find(e => e.State === 'Authenticated' && e.AuthenticatedVlan);
+            if (hit) candidates.push({ device: d, row: row, entry: hit });
+        }
+    }
+    if (!candidates.length) return null;
+    const hit = fPick(rng, candidates);
+    for (const entry of hit.row.Dot1x) entry.GuestVlan = hit.entry.AuthenticatedVlan;
+    return {
+        kind: 'dot1x-fallback-vlan', failureModes: [], deviceIp: hit.device.DeviceIP, port: hit.row.Port,
+        mac: hit.entry.MacAddress,
+        params: { guestVlan: hit.entry.AuthenticatedVlan },
+        expected: { finding: 'dot1x-fallback-vlan', deviceIp: hit.device.DeviceIP, port: hit.row.Port },
+    };
+}
+
 // Both devices answered and only one of them sees the other: LLDP off at one end, a one-way fibre pair,
 // or a neighbour entry that has not aged out.
 function injectLldpOneSided(rng, fleet) {
@@ -2295,6 +2364,8 @@ const INJECTORS = [
     injectMacInWrongVlan, injectStpRoleConflict, injectStpScopeDrift, injectLldpOneSided,
     injectRouteUnparsed, injectGatewayOffSubnet, injectRoutedUnitDown,
     injectUnscannedNeighbour, injectAddresslessBridge, injectInferredSegment,
+    // The rules the section 4.3 commands unblocked, appended for the same reason.
+    injectNativeVlanMismatch, injectRecentTopologyChange, injectDot1xFallbackVlan,
 ];
 
 function injectFaults(fleet, snapshotIndex, count) {

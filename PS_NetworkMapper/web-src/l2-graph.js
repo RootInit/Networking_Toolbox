@@ -84,8 +84,16 @@ function vlanEndFor(device, row) {
 function vlanMembersFor(row) {
     return asList(row && row.Vlans).map(function (entry) {
         // Pre-C4 snapshots and hand-built inputs can carry a bare VLAN name; keep the shape uniform.
-        if (entry && typeof entry === 'object') return { Name: entry.Name, Tag: entry.Tag, Unit: entry.Unit, Active: entry.Active };
-        return { Name: entry, Tag: null, Unit: null, Active: null };
+        // Tagged/Mode arrive with "show vlans extensive" (section 4.3) and are `null` on a capture that
+        // ran the brief form - unmeasured, not untagged, which is what G5's comparison has to read.
+        if (entry && typeof entry === 'object') {
+            return {
+                Name: entry.Name, Tag: entry.Tag, Unit: entry.Unit, Active: entry.Active,
+                Tagged: entry.Tagged === undefined ? null : entry.Tagged,
+                Mode: entry.Mode === undefined ? null : entry.Mode,
+            };
+        }
+        return { Name: entry, Tag: null, Unit: null, Active: null, Tagged: null, Mode: null };
     });
 }
 

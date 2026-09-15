@@ -2500,6 +2500,13 @@ Test-Case "the word error inside real output is not a refused command" {
     $Errors = Get-JunosSectionErrors -DataDict @{ INTERFACES_EXT = "  Input errors:`n    Errors: 0, Drops: 0" }
     $Errors.Count -eq 0
 }
+Test-Case "a class-restricted command's refusal is an error even with no error: prefix" {
+    # "permission denied" is the message a command the login class does not carry answers with, and it
+    # is the one refusal that names itself without the prefix (py-junos-eznc's rpc-error fixture,
+    # tests/unit/rpc-reply/get-permission-denied.xml).
+    $Errors = Get-JunosSectionErrors -DataDict @{ CONFIG = "permission denied`n" }
+    $Errors.Count -eq 1 -and $Errors['CONFIG'] -eq 'permission denied'
+}
 Test-Case "Get-JunosSectionErrors tolerates a null dictionary the way the captured-sections reader does" {
     (Get-JunosSectionErrors -DataDict $null).Count -eq 0
 }
