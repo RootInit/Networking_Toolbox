@@ -948,6 +948,9 @@
                 <h4 class="diag-subhead">Why a rule stayed silent</h4>
                 <p class="diag-note">Per rule, the subjects it could not evaluate and the datum missing each time. A truncated capture shows up here rather than as a clean fleet.</p>
                 <div id="diagnostics-gaps"></div>
+                <h4 class="diag-subhead">Ports to reclaim</h4>
+                <p class="diag-note">When each port last carried traffic, as a bounded interval rather than a timestamp - "Last flapped" is a link-transition stamp and answers a different question. The resolution column is how wide the bound is, which is usually the gap between the loaded snapshots. Administratively disabled ports are excluded; a port whose counters say a transmitter is present but below the rate floor is listed, because that is a powered device nobody is using.</p>
+                <div id="diagnostics-reclaim"></div>
             </div>
         </div>
         <!-- Deliberately not theme-var'd: this floats over map tiles, which stay light in both themes. -->

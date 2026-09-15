@@ -565,16 +565,50 @@ is the only prerequisite still open**, and §4.2's boot filter and §4.3's reset
    §5.3 states, and §9.2's case table. Every numeric comparison behind `typeof x === 'number'`, with
    one generic test that feeds `null` into each counter and asserts neither a state change nor a
    silent pass: §2.4 names that as the single most likely way this ships a confidently wrong answer.
+
+   **Done 2026-09-15.** `web-src/port-last-used.js` and 33 cases. Two things came out differently from
+   this document and are recorded where they live. §4.3's reset test is `after < before` with slack for
+   the relative form's minute quantization — **not** "grew by less than the inter-scan gap", which fires
+   on a clock step or a mastership change that moved no counter and throws away the history this module
+   exists to keep. And §3's per-source gate turned out to be load-bearing rather than tidy: the fixture
+   blanks a truncated node's counters itself, so until the gate existed the *fixture* was providing
+   §2.5's guarantee. A real `Partial` node carries whatever the parser left behind, and an unmeasured
+   zero is indistinguishable from a measured one.
+
+   §9.3's six injections landed here too, one per state, each promising a **state** rather than a
+   finding. Four of them choose their port by hashing its name so every snapshot plants on the same one
+   — a sustained property that moves between snapshots has the delta measuring the injector — and their
+   predicates read port shape only, never a counter, for the same reason.
 4. **§6 identity.** Resolve once per port-history and merge on intersecting key sets. The fixture's
    `chronicallyFailing` placeholders already produce the `serial:` → `hostname:` flip, so the
    fleet-scale test comes free with item 3's module.
+
+   **Done 2026-09-15, with item 3.** One correction: the caveat is raised when the BEST key a scan could
+   offer changed, not when a device has more than one kind of key. Every device answers to a serial, a
+   hostname and an address, so the first reading flagged the entire fleet.
 5. **UI.** The spec names a reclaim view in §5.3 and §9.2 and has no UI section — a per-port state in
    the interface table plus a reclaim list is the minimum that makes the state observable. Browser
    smoke test required, not optional: that is where `diagnostics-spec.md` items 15 and 16 each found
    code that could not run.
+
+   **Done 2026-09-15.** A "Last used" row in the drawer's per-port detail, beside the existing "Inactive
+   for" — which is the `Last flapped` age and answers §1.1's different question; the contrast is the
+   point, and on the port the browser check landed on the first reads `-` while the second reads
+   *Transmitter present*. And a **Ports to reclaim** section in Diagnostics: a count per state, then the
+   candidates with their resolution, confidence and evidence. `DISABLED` is excluded (§5.3) and
+   `UNKNOWN` is counted but not listed — "we could not tell" is not a recommendation, and dropping it
+   would report a truncated capture as a tidy fleet.
+
+   The smoke test earned its place again: it found that the chattering port's plant was not stable
+   across three snapshots, because the injector's predicate read a counter. Under two snapshots the
+   suite passed; in the browser the state read `IDLE_SINCE`, because the port planted in one snapshot
+   and not the next looks exactly like a counter reset.
 6. **§8 persistence — not built**, and recorded as declined rather than pending. §8.1 is the reason:
    the loaded window *is* the resolution window, and §8.2 measures the naive store at ~2× the origin
    quota. The last row of §9.2's table goes with it.
+
+   **Declined 2026-09-15**, as specified. §8.1 stands: the loaded window is the resolution window, and
+   nothing here writes to `localStorage`.
 
 **G-BASELINE.** `diagnostics-spec.md` §2.4 names it as an integrity gate and points here for its
 form. It is `splitOnResets` from item 3, exported — not a separate mechanism. No counter-delta rule

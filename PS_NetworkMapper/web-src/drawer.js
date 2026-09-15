@@ -738,12 +738,22 @@ window.renderInterfaces = function() {
             var stpBadge = String(intf.STP) === "FWD" ? "green" : (String(intf.STP) === "BLK" ? "red" : "gray");
             var poeTxt = (!intf.PoE || intf.PoE === "Unknown") ? "-" : intf.PoE;
             var inactiveFor = window.inactiveForText(intf);
+            // "Inactive for" above is the age of the LAST FLAPPED stamp, which is a link-transition
+            // timestamp and answers a different question: at boot every connected port transitions once
+            // and then never again. This is the counter-derived answer, with its own bound.
+            var lastUsed = window.portLastUsed
+                ? window.portLastUsed(currentSelectedNodeData.DeviceIP, intf.Port) : null;
+            var lastUsedCell = lastUsed
+                ? `<span title="${esc(lastUsed.evidence.map(e => e.source + ': ' + e.detail).concat(lastUsed.caveats).join('\n'))}">`
+                  + window.lastUsedText(lastUsed) + `</span>`
+                : '-';
             var neighbor = neighborsByPort.get(window.normalizePort(intf.Port));
             var portClients = clientsByPort.get(window.normalizePort(intf.Port)) || [];
             html += `<tr class="intf-detail"><td colspan="4"><div class="intf-detail-grid">
                 <div><label>STP</label><span class="badge ${stpBadge}">${esc(intf.STP) || "?"}</span></div>
                 <div><label>PoE</label>${esc(poeTxt)}</div>
                 <div><label>Inactive for</label>${esc(inactiveFor)}</div>
+                <div><label>Last used</label>${lastUsedCell}</div>
                 <div><label>Port mode</label>${esc(ctx.modeByPort.get(window.normalizePort(intf.Port)) || (neighbor ? 'trunk (LLDP)' : 'unknown'))}</div>
                 ${neighbor ? `<div><label>LLDP neighbour</label>${esc(neighbor.Hostname || 'Unknown')} <span class="intf-remote">${esc(neighbor.ManagementIP || '')} ${esc(neighbor.RemotePort || '')}</span></div>` : ''}
                 <div class="intf-detail-wide"><label>Description</label>${desc ? esc(desc) : '<span class="intf-type-detail">none configured</span>'}</div>

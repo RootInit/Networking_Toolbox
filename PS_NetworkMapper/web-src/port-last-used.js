@@ -734,6 +734,7 @@
         // behind it.
         splitOnResets: splitOnResets,
         deviceKeysOf: deviceKeysOf,
+        preferredKey: preferredKey,
         uptimeForPort: uptimeForPort,
         fpcOfPort: fpcOfPort,
         STATE: STATE,

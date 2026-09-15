@@ -2379,11 +2379,16 @@ function plantLastUsed(kind, state, rng, fleet, pick_, apply) {
         }
     }
     if (!candidates.length) return null;
-    // Chosen by a hash of the port's own name rather than from the stream, so every snapshot plants on
-    // the SAME port. These four kinds are sustained properties of a port - idle, chattering, busy - and
-    // a property has to hold across the window or the delta that reads it is measuring the injector
+    // Chosen by a hash of the port's own NAME rather than from the stream, so every snapshot plants on
+    // the same port. These four kinds are sustained properties of a port - idle, chattering, busy - and
+    // a property has to hold across the window, or the delta reading it is measuring the injector
     // moving rather than the port. The two event kinds below keep the random draw, because an event
     // belongs to the snapshot it happened in.
+    //
+    // Which is why the predicates above must not read anything that MOVES. They test port shape - link
+    // state is set by the plant itself, not required of it - because a predicate reading a counter
+    // makes the candidate set differ between snapshots, the hash then picks a different port, and the
+    // port that was planted in one snapshot and not the next reads as a counter reset.
     let hit = candidates[0];
     let bestHash = Infinity;
     for (const c of candidates) {
@@ -2401,6 +2406,18 @@ function plantLastUsed(kind, state, rng, fleet, pick_, apply) {
 // A port no LLDP neighbour is seen on. E0 is a direct read that the far end spoke seconds ago, and it
 // outranks every counter-derived state - correctly. A kind that promises an IDLE state therefore has to
 // land where the counters are the only evidence there is.
+// Link state as the plant needs it, parity included: section 4.2's counter increments on every carrier
+// state change, so an up port reports an odd count and a down one an even one. A plant that sets the
+// link without the parity writes a state no switch reports, and the fixture asserts that parity.
+function forceLive(row, up) {
+    row.Link = up ? 'up' : 'down';
+    row.Admin = 'up';
+    row.CarrierTransitions = up ? 1 : 0;
+    row.OutputErrors['Carrier transitions'] = row.CarrierTransitions;
+    row.ActiveAlarms = up ? 'None' : 'LINK';
+    row.ActiveDefects = up ? 'None' : 'LINK';
+}
+
 const silentPort = (row, host) => ![...(host.Neighbors || []), ...(host.MedNeighbors || [])]
     .some(n => physical(n.LocalPort) === row.Port);
 
@@ -2408,15 +2425,16 @@ const silentPort = (row, host) => ![...(host.Neighbors || []), ...(host.MedNeigh
 // a reset must never be able to produce. Link down, because on the measured fleet zero input and a dark
 // port are coextensive: no up port there has zero input bytes.
 const injectNeverUsedPort = (rng, fleet) => plantLastUsed('never-used-port', 'NEVER_USED_THIS_EPOCH', rng, fleet,
-    (row) => row.Link === 'down' && row.Admin === 'up' && typeof row.InputBytes === 'number',
-    (row) => { row.InputBytes = 0; row.InputPackets = 0; return { inputBytes: 0 }; });
+    (row) => typeof row.InputBytes === 'number' && !(row.Vlans || []).some(v => v.Mode === 'trunk'),
+    (row) => { forceLive(row, false); row.InputBytes = 0; row.InputPackets = 0; row.InputBps = 0; return { inputBytes: 0 }; });
 
 // Carried traffic once, carries none now. The bound is the epoch, because a single reading of a
 // cumulative counter is a lower bound and nothing more.
 const injectIdlePort = (rng, fleet) => plantLastUsed('idle-port', 'IDLE_SINCE', rng, fleet,
-    (row, host) => row.Link === 'up' && typeof row.InputBytes === 'number' && row.InputBytes > 0
-        && silentPort(row, host),
+    (row, host) => typeof row.InputBytes === 'number' && silentPort(row, host)
+        && !(row.Vlans || []).some(v => v.Mode === 'trunk'),
     (row) => {
+        forceLive(row, true);
         // Frozen at a constant, so every snapshot reads the same number and the delta is exactly zero -
         // which is what "carried traffic once, carries none now" looks like to a cumulative counter.
         row.InputBps = 0;
@@ -2429,9 +2447,10 @@ const injectIdlePort = (rng, fleet) => plantLastUsed('idle-port', 'IDLE_SINCE', 
 // as long as anyone has been watching. Under a naive byte-delta rule this is the busiest port on the
 // switch, and it is the one an operator is trying to find.
 const injectChatteringPort = (rng, fleet) => plantLastUsed('chattering-port', 'TRANSMITTER_PRESENT', rng, fleet,
-    (row) => row.Link === 'up' && typeof row.InputBytes === 'number' && row.InputBytes > 1e6
+    (row, host) => typeof row.InputBytes === 'number' && silentPort(row, host)
         && !(row.Vlans || []).some(v => v.Mode === 'trunk'),
     (row, host) => {
+        forceLive(row, true);
         // Cumulative at 0.1 pps since this device booted, so the delta across the window is real and
         // below the floor on both halves - 64 B frames at a tenth of a packet per second.
         const seconds = typeof host.UptimeSeconds === 'number' ? host.UptimeSeconds : 86400;
@@ -2443,8 +2462,9 @@ const injectChatteringPort = (rng, fleet) => plantLastUsed('chattering-port', 'T
 
 // Busy, and demonstrably so across the gap: a frame size and a rate that clear the floor on both halves.
 const injectActivePort = (rng, fleet) => plantLastUsed('active-port', 'ACTIVE_NOW', rng, fleet,
-    (row) => row.Link === 'up' && typeof row.InputBytes === 'number' && row.InputBytes > 1e6,
+    (row) => typeof row.InputBytes === 'number' && !(row.Vlans || []).some(v => v.Mode === 'trunk'),
     (row, host) => {
+        forceLive(row, true);
         const seconds = typeof host.UptimeSeconds === 'number' ? host.UptimeSeconds : 86400;
         row.InputPackets = Math.max(1, Math.round(50 * seconds));
         row.InputBytes = row.InputPackets * 900;
@@ -2491,9 +2511,10 @@ function injectRebootedDevice(rng, fleet) {
 // are higher than the bytes before, so nothing about the numbers alone says a reset happened. Without P2
 // this is indistinguishable from a busy port, and a delta taken across it is fiction.
 const injectStatisticsCleared = (rng, fleet) => plantLastUsed('statistics-cleared', 'IDLE_SINCE', rng, fleet,
-    (row, host) => row.Link === 'up' && typeof row.InputBytes === 'number'
-        && row.StatisticsLastCleared === 'Never' && silentPort(row, host),
+    (row, host) => typeof row.InputBytes === 'number' && silentPort(row, host)
+        && !(row.Vlans || []).some(v => v.Mode === 'trunk'),
     (row, host) => {
+        forceLive(row, true);
         // Derived from THIS snapshot's capture instant, so the stamp differs between snapshots. A clear
         // is an event: planting the same string in every snapshot would be a port that has always been
         // in the cleared state, which is not a reset and reads as ordinary growth.

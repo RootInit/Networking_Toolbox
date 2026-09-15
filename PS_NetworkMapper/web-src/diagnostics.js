@@ -98,6 +98,89 @@ function activeSnapshot() {
     return loadedSnapshots[activeSnapshotIndex] || null;
 }
 
+// ---------------------------------------------------------------------------------------------
+// port-last-used-spec.md: when each port last carried traffic
+// ---------------------------------------------------------------------------------------------
+
+// Every loaded snapshot up to and including the active one. The loaded window IS the resolution window
+// (section 8.1), which is why this needs no storage of its own - and a snapshot taken AFTER the one on
+// screen is not evidence about the state on screen, so the window stops there.
+function lastUsedWindow(snapshot) {
+    var until = Date.parse(snapshot.scanTimestamp);
+    return loadedSnapshots
+        .filter(function (s) { return !isFinite(until) || Date.parse(s.scanTimestamp) <= until; })
+        .map(function (s) { return { ScanTimestamp: s.scanTimestamp, Topology: s.topology }; });
+}
+
+var lastUsedCache = new WeakMap();
+
+// Keyed by `<deviceKey>|<port>`, the same key buildHistories produces, plus an address index so the
+// drawer can ask by the IP it already has.
+function lastUsedFor(snapshot) {
+    if (!snapshot || !window.PortLastUsed) return null;
+    var cached = lastUsedCache.get(snapshot);
+    if (cached && cached.size === lastUsedWindow(snapshot).length) return cached.index;
+
+    var windowed = lastUsedWindow(snapshot);
+    var index = new Map();
+    window.PortLastUsed.buildHistories(windowed).forEach(function (history) {
+        index.set(history.deviceKey + '|' + history.port, window.PortLastUsed.computeLastUsed(history));
+    });
+    var byIp = new Map();
+    (snapshot.topology || []).forEach(function (device) {
+        var keys = window.PortLastUsed.deviceKeysOf(device);
+        var key = window.PortLastUsed.preferredKey(keys);
+        if (key) byIp.set(String(device.DeviceIP), key);
+    });
+    var built = { index: index, byIp: byIp };
+    lastUsedCache.set(snapshot, { size: windowed.length, index: built });
+    return built;
+}
+
+// What the drawer asks, one port at a time.
+window.portLastUsed = function (deviceIp, port) {
+    var snapshot = activeSnapshot();
+    var built = snapshot ? lastUsedFor(snapshot) : null;
+    if (!built) return null;
+    var key = built.byIp.get(String(deviceIp));
+    return key ? (built.index.get(key + '|' + String(port)) || null) : null;
+};
+
+var RECLAIM_STATES = ['NEVER_USED_THIS_EPOCH', 'IDLE_SINCE', 'TRANSMITTER_PRESENT'];
+
+// Section 5.3: DISABLED is excluded, because a port an operator already turned off is not a port to go
+// and reclaim. UNKNOWN is excluded from the list and counted beside it - "we could not tell" is not a
+// recommendation, and hiding it entirely would report a truncated capture as a tidy fleet.
+function reclaimModel(snapshot) {
+    var built = lastUsedFor(snapshot);
+    if (!built) return null;
+    var counts = {};
+    var rows = [];
+    var byKey = new Map();
+    built.byIp.forEach(function (key, ip) { byKey.set(key, ip); });
+    built.index.forEach(function (result, key) {
+        counts[result.state] = (counts[result.state] || 0) + 1;
+        if (RECLAIM_STATES.indexOf(result.state) === -1) return;
+        var deviceKey = key.slice(0, key.lastIndexOf('|'));
+        var ip = byKey.get(deviceKey);
+        if (!ip) return;      // a device in an earlier snapshot that is not in this one
+        rows.push({
+            deviceIp: ip, port: result.port, state: result.state,
+            notAfter: result.lastActive.notAfter, resolution: result.resolution,
+            confidence: result.confidence,
+            evidence: result.evidence.map(function (e) { return e.source + ': ' + e.detail; }),
+            caveats: result.caveats,
+        });
+    });
+    // Never-used first, then the oldest bound - which is the order an operator works down the list in.
+    rows.sort(function (x, y) {
+        var rank = RECLAIM_STATES.indexOf(x.state) - RECLAIM_STATES.indexOf(y.state);
+        if (rank !== 0) return rank;
+        return (x.notAfter === null ? -1 : x.notAfter) - (y.notAfter === null ? -1 : y.notAfter);
+    });
+    return { counts: counts, rows: rows };
+}
+
 function allowedScopesNow() {
     var settings = window.loadSettings ? window.loadSettings() : {};
     return window.asArray(settings.allowedScopes);
@@ -225,7 +308,87 @@ window.renderDiagnostics = function() {
                     + '</td></tr>';
             }).join('')
             + '</tbody></table>');
+
+    renderReclaim(snapshot);
 };
+
+var LAST_USED_LABEL = {
+    NEVER_USED_THIS_EPOCH: 'Never used this epoch',
+    IDLE_SINCE: 'Idle',
+    TRANSMITTER_PRESENT: 'Transmitter present',
+    ACTIVE_NOW: 'Active',
+    DISABLED: 'Disabled',
+    UNKNOWN: 'Unknown',
+};
+
+// The interval in words. notAfter is an UPPER bound - "not used since at least here" - so it is
+// rendered as an age rather than as a date, which is the only reading that does not invite being
+// mistaken for a timestamp.
+window.lastUsedText = function (result) {
+    if (!result) return '-';
+    var label = LAST_USED_LABEL[result.state] || result.state;
+    if (result.state === 'UNKNOWN') return label;
+    if (result.state === 'ACTIVE_NOW' || result.state === 'DISABLED') return label;
+    if (result.lastActive.notAfter === null) return label;
+    // formatAge already ends in "ago".
+    var age = window.formatAge ? window.formatAge(Date.now() - result.lastActive.notAfter) : null;
+    if (!age) return label;
+    // For NEVER_USED the upper bound IS the epoch start, so the sentence is about the epoch and not
+    // about a last sighting there never was.
+    if (result.state === 'NEVER_USED_THIS_EPOCH') return label + ' &middot; counting since ' + age;
+    // TRANSMITTER_PRESENT saw something; IDLE_SINCE saw nothing. Same bound, opposite sentence, and
+    // reading the second onto the first is how a powered device becomes a port nobody dares unplug.
+    return label + (result.state === 'TRANSMITTER_PRESENT'
+        ? ' &middot; last seen ' + age
+        : ' &middot; nothing since ' + age);
+};
+
+function resolutionText(seconds) {
+    if (seconds === null || seconds === undefined) return 'unbounded';
+    if (seconds < 120) return Math.round(seconds) + ' s';
+    if (seconds < 7200) return Math.round(seconds / 60) + ' min';
+    if (seconds < 172800) return Math.round(seconds / 3600) + ' h';
+    return Math.round(seconds / 86400) + ' d';
+}
+
+function renderReclaim(snapshot) {
+    var host = document.getElementById('diagnostics-reclaim');
+    if (!host) return;
+    var model = reclaimModel(snapshot);
+    if (!model) { host.innerHTML = '<p class="diag-empty">Port last-used is unavailable.</p>'; return; }
+
+    var counts = model.counts;
+    var summary = Object.keys(LAST_USED_LABEL).map(function (state) {
+        return '<div class="fleet-stat-card' + (state === 'NEVER_USED_THIS_EPOCH' && counts[state] ? ' warn' : '') + '">'
+            + '<div class="stat-value">' + (counts[state] || 0) + '</div>'
+            + '<div class="stat-label">' + LAST_USED_LABEL[state] + '</div></div>';
+    }).join('');
+
+    // Capped, with the total stated: a fleet has thousands of dark ports and a table of all of them is
+    // not a work list. The count above is the real answer; this is where to start.
+    var CAP = 200;
+    var shown = model.rows.slice(0, CAP);
+    host.innerHTML = ''
+        + '<div class="fleet-stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 14px;">'
+        + summary + '</div>'
+        + (!model.rows.length
+            ? '<p class="diag-empty">Every port in this window is either carrying traffic or administratively down.</p>'
+            : '<p class="diag-note">' + model.rows.length + ' port(s) are candidates'
+                + (model.rows.length > CAP ? '; the first ' + CAP + ' are listed' : '') + '.</p>'
+              + '<table class="diag-table"><thead><tr><th>Device</th><th>Port</th><th>State</th>'
+              + '<th>Resolution</th><th>Confidence</th><th>Evidence</th></tr></thead><tbody>'
+              + shown.map(function (row) {
+                  return '<tr><td>' + portLink(row.deviceIp, row.port, row.deviceIp) + '</td>'
+                      + '<td><code>' + esc(row.port) + '</code></td>'
+                      + '<td>' + window.lastUsedText({ state: row.state, lastActive: { notAfter: row.notAfter } }) + '</td>'
+                      + '<td>' + esc(resolutionText(row.resolution)) + '</td>'
+                      + '<td>' + esc(row.confidence) + '</td>'
+                      + '<td class="diag-evidence">' + row.evidence.map(esc).join('<br>')
+                      + (row.caveats.length ? '<br><span class="diag-dim">' + row.caveats.map(esc).join('; ') + '</span>' : '')
+                      + '</td></tr>';
+              }).join('')
+              + '</tbody></table>');
+}
 
 // ---- Path query (sections 6.1, 6.2, 6.4) ----
 

@@ -133,6 +133,10 @@ Six levels, used consistently. Revision 1 defined four and then used a fifth.
   fifth-from-last in the batch and may itself be missing on a `Partial` node** — so G-SECTIONS runs
   first and G-BASELINE reports `NOT_EVALUATED` when its own input is absent. See
   `port-last-used-spec.md` §4.3 for the per-FPC form, which is the one to implement.
+  **Built 2026-09-15** as `splitOnResets` in `web-src/port-last-used.js`, per FPC, on relative uptime —
+  there is no second mechanism. It is not wired into `rules.js`: no counter-delta rule exists yet and
+  none is enumerated anywhere in this tree (Appendix A is superseded), so the engine would be carrying
+  a gate with nothing behind it. The first delta rule imports it.
 
 ### 2.5 `$null` means unmeasured
 
