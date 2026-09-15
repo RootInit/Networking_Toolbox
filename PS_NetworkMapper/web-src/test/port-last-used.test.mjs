@@ -51,6 +51,27 @@ function history(observations, extra) {
 
 const sourcesOf = (r) => r.evidence.map(e => e.source);
 
+// One device, one port, one snapshot, read through the real intake path - which is where the
+// per-source section gate lives.
+function onePortHistory(spec) {
+    const device = {
+        DeviceIP: '10.0.0.1',
+        Hostname: 'test-switch',
+        ScanStatus: spec.ScanStatus,
+        CaptureTimestamp: new Date(T0).toISOString(),
+        SectionsCaptured: spec.SectionsCaptured,
+        StackMembers: [{ FPC: '0', Serial: 'ABC123', IsMaster: true }],
+        UptimeSeconds: 21 * 86400,
+        FpcUptimes: [{ FPC: '0', UptimeSeconds: 21 * 86400, SystemBooted: null }],
+        Neighbors: [], MedNeighbors: [], MacTable: [],
+        Interfaces: [spec.row],
+    };
+    const built = buildHistories([{ ScanTimestamp: new Date(T0).toISOString(), Topology: [device] }]);
+    const found = built.find(h => h.port === spec.row.Port);
+    assert.ok(found, 'buildHistories produced no history for the port');
+    return found;
+}
+
 // Every path, on every case in this file - section 2.1 says evidence and caveats are always populated,
 // and a result that explains nothing is as unusable as a wrong one.
 function wellFormed(result) {
@@ -209,6 +230,36 @@ test('blanking any single numeric field never produces an active claim on a quie
             `blanking ${field} made a quiet port look used (${r.state})`);
         wellFormed(r);
     }
+});
+
+test('a truncated capture gates each source, so a blank counter is never read as a real zero', () => {
+    // Section 3. On a Partial node E1/E3/E4/E5/E7 are unavailable and the gate is per source, not a
+    // filter at intake: the JSON still carries whatever the parser left in those fields, and a zero
+    // that was never measured is exactly what produces the strongest claim in the model.
+    // Through buildHistories, because the gate is where an observation is read off a device - a real
+    // truncated node's JSON carries the fields whatever the parser left in them.
+    const r = run(onePortHistory({
+        ScanStatus: 'Partial',
+        SectionsCaptured: ['VERSION', 'INTERFACES_TERSE', 'STP'],
+        row: { Port: 'ge-0/0/12', Admin: 'up', Link: 'up', InputBytes: 0, InputPackets: 0 },
+    }));
+    assert.notEqual(r.state, STATE.NEVER_USED_THIS_EPOCH,
+        'a counter the capture never reached must not read as "nothing ever arrived here"');
+    assert.equal(r.state, STATE.UNKNOWN);
+    assert.ok(r.caveats.includes('section-not-captured:INTERFACES_EXT'));
+});
+
+test('a snapshot older than R15 carries no section list and is read in full, not refused', () => {
+    // SectionsCaptured did not exist before R15. An empty list means "nothing was recorded about
+    // sections", and treating it as "no section arrived" would make every port in an old snapshot
+    // UNKNOWN - a regression dressed up as caution.
+    const r = run(onePortHistory({
+        ScanStatus: 'Ok',
+        SectionsCaptured: [],
+        row: { Port: 'ge-0/0/12', Admin: 'up', Link: 'up', InputBytes: 0, InputPackets: 0 },
+    }));
+    assert.equal(r.state, STATE.NEVER_USED_THIS_EPOCH);
+    assert.ok(!r.caveats.some(c => c.startsWith('section-not-captured')));
 });
 
 test('an Unknown uptime is neither a reset nor a continuation, and says so', () => {
@@ -407,6 +458,41 @@ test('the chattering ports the fixture plants are transmitters, not active ports
     }
     assert.ok(belowFloor.some(r => r.state === STATE.TRANSMITTER_PRESENT),
         'every chattering port had an LLDP neighbour, so the floor decided nothing');
+});
+
+// Section 9.3's six injections are the delta oracle for the states: each manifest entry names a port
+// and the state it was planted to produce, and computeLastUsed has to agree.
+test('every planted port reports the state its manifest entry promised', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_plu_faults_'));
+    execFileSync(process.execPath, [GENERATOR, '--out', out, '--devices', '60', '--seed', '5',
+        '--snapshots', '2', '--faults', '50'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    const names = fs.readdirSync(out).filter(f => /^NetworkMap_.*\.fixture\.json$/.test(f)).sort();
+    const manifests = fs.readdirSync(out).filter(f => /^FaultManifest_/.test(f)).sort()
+        .map(n => JSON.parse(fs.readFileSync(path.join(out, n), 'utf8')));
+
+    let checked = 0;
+    for (let i = 0; i < names.length; i++) {
+        const window = names.slice(0, i + 1)
+            .map(n => JSON.parse(fs.readFileSync(path.join(out, n), 'utf8')));
+        // The window up to and including the snapshot the fault was planted in - which is what the
+        // operator has loaded, and what makes the reboot and the counter clear the cases they are:
+        // both are statements about a CHANGE, and the snapshot they land in cannot carry one alone.
+        const snapshot = window[window.length - 1];
+        const byPort = new Map(buildHistories(window).map(h => [`${h.deviceKey}|${h.port}`, h]));
+        const devices = new Map(snapshot.Topology.map(d => [String(d.DeviceIP), d]));
+        for (const fault of (manifests[i].Faults || [])) {
+            const want = (fault.expected || {}).lastUsed;
+            if (!want) continue;
+            const device = devices.get(String(fault.deviceIp));
+            const key = `${PortLastUsed.deviceKeysOf(device).find(k => k.startsWith('serial:'))}|${fault.port}`;
+            const h = byPort.get(key);
+            assert.ok(h, `${fault.kind}: no history for ${fault.deviceIp} ${fault.port}`);
+            const r = wellFormed(computeLastUsed(h));
+            assert.equal(r.state, want, `${fault.kind} on ${fault.deviceIp} ${fault.port} promised ${want}`);
+            checked += 1;
+        }
+    }
+    assert.ok(checked >= 10, `only ${checked} planted ports checked across ${names.length} snapshots`);
 });
 
 test('a port on a device that stopped answering keeps its history and widens its bound', () => {

@@ -28,7 +28,7 @@ function generate(args) {
 const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
 // More than the injector count, so every injector places once and the cycle wraps: a second instance
 // of a kind has to place as well.
-const faulted = generate([...ARGS, '--faults', '44']);
+const faulted = generate([...ARGS, '--faults', '50']);
 const clean = generate(ARGS);
 
 const byIp = (snapshot) => new Map(snapshot.Topology.map(d => [String(d.DeviceIP), d]));
@@ -64,7 +64,7 @@ test('a manifest is written per snapshot and names the map it describes', () => 
     assert.equal(faulted.manifests.length, faulted.names.length);
     for (const [i, m] of faulted.faults.entries()) {
         assert.equal(m.Map, faulted.names[i], 'the manifest and the map must pair by timestamp');
-        assert.equal(m.Requested, 44);
+        assert.equal(m.Requested, 50);
         assert.ok(m.Faults.length > 0, 'a 60-device fleet is large enough to place every kind');
     }
 });
@@ -86,7 +86,10 @@ test('--faults 0 writes an empty manifest rather than none', () => {
     }
 });
 
-const NO_FINDING = ['mac-learned-off-path'];
+// Kinds whose oracle is not the rule engine. G1's is a computePath call in the path suite; the six
+// port-last-used kinds are a computeLastUsed call in theirs, and each names the state it promises.
+const NO_FINDING = ['mac-learned-off-path', 'never-used-port', 'idle-port', 'chattering-port',
+    'active-port', 'rebooted-device', 'statistics-cleared'];
 
 test('every fault kind places, and each entry carries an oracle a rule can be checked against', () => {
     const kinds = new Set(entries.map(f => f.kind));
@@ -110,6 +113,9 @@ test('every fault kind places, and each entry carries an oracle a rule can be ch
         'dot1x-fallback-vlan', 'native-vlan-mismatch', 'stp-recent-topology-change',
         // G1's fault (item 16), which no rule reads - see NO_FINDING below.
         'mac-learned-off-path',
+        // port-last-used-spec.md section 9.3 (Tier 1 item 3). These promise a STATE, not a finding.
+        'active-port', 'chattering-port', 'idle-port', 'never-used-port',
+        'rebooted-device', 'statistics-cleared',
     ].sort());
     const ids = entries.map(f => f.id);
     assert.equal(new Set(ids).size, ids.length, 'ids must be unique across snapshots');
@@ -383,9 +389,10 @@ test('injection does not perturb the main PRNG: untouched devices are byte-ident
             compared++;
         }
     }
-    // Every device a manifest entry names anywhere is excluded, and 30 faults across two snapshots name
-    // half a 60-device fleet - so the bar is "much of the fleet", not a fixed count.
-    assert.ok(compared > 20, `only ${compared} devices compared; the guard is not covering the fleet`);
+    // Every device a manifest entry names ANYWHERE is excluded, and 50 faults across two snapshots name
+    // most of a 60-device fleet - so the bar is "a real part of the fleet", not a fixed count, and it
+    // falls as kinds are added. Each survivor is still compared whole, in every snapshot.
+    assert.ok(compared > 15, `only ${compared} devices compared; the guard is not covering the fleet`);
 });
 
 test('a fleet too small to hold a fault reports fewer faults rather than claiming one', () => {

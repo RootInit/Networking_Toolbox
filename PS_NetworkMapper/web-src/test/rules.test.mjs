@@ -376,7 +376,7 @@ const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
 const FLEET = { allowedScopes: ['10.'] };
 const clean = generate(ARGS);
 // One fault per injector plus a wrap, so every injector places at least once in every snapshot.
-const faulted = generate([...ARGS, '--faults', '44']);
+const faulted = generate([...ARGS, '--faults', '50']);
 
 test('the clean fleet holds no disagreement between two ends of one wire', () => {
     for (const snap of clean.snapshots) {

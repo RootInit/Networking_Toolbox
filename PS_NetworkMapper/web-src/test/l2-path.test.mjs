@@ -302,7 +302,7 @@ test('VSTP and RSTP on one device resolve per VLAN, not per device', () => {
 test('on the generated fleet a client is confirmed at every hop back to its switch, and a moved row is not', () => {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_macpath_'));
     execFileSync(process.execPath, [GENERATOR, '--out', out, '--devices', '60', '--seed', '11',
-        '--snapshots', '1', '--faults', '44'], { stdio: ['ignore', 'ignore', 'ignore'] });
+        '--snapshots', '1', '--faults', '50'], { stdio: ['ignore', 'ignore', 'ignore'] });
     const mapName = fs.readdirSync(out).find(f => /^NetworkMap_.*\.fixture\.json$/.test(f));
     const manifestName = fs.readdirSync(out).find(f => /^FaultManifest_.*\.fixture\.json$/.test(f));
     const snapshot = JSON.parse(fs.readFileSync(path.join(out, mapName), 'utf8'));
@@ -314,6 +314,14 @@ test('on the generated fleet a client is confirmed at every hop back to its swit
     const moved = manifest.Faults.find(f => f.kind === 'mac-learned-off-path');
     assert.ok(moved, 'the G1 injector did not place');
 
+    // Any OTHER fault that names a MAC has already moved or copied that address somewhere, and a
+    // contradiction on it is then the truth rather than a defect: duplicate-mac exists precisely to put
+    // one address in two places. Those clients are skipped rather than exempted hop by hop, so a second
+    // unplanted contradiction still has nowhere to hide.
+    const disturbed = new Set(manifest.Faults
+        .filter(f => f.mac && f.kind !== 'mac-learned-off-path')
+        .map(f => String(f.mac).toUpperCase()));
+
     // Every hop from a client's own switch outward must see that client on the port facing back toward
     // it. The target is reached by asking for a path, so this is the same join the screen makes.
     const cores = snapshot.Topology.filter(d => d.ScanStatus === 'Ok' && /-core\d/.test(String(d.Hostname)));
@@ -322,7 +330,8 @@ test('on the generated fleet a client is confirmed at every hop back to its swit
     let confirmed = 0;
     for (const device of snapshot.Topology) {
         if (device.ScanStatus !== 'Ok') continue;
-        const client = (device.Clients || []).find(c => c.VLAN_Tag && c.MAC);
+        const client = (device.Clients || []).find(c => c.VLAN_Tag && c.MAC
+            && !disturbed.has(String(c.MAC).toUpperCase()));
         if (!client) continue;
         const core = cores.find(c => String(c.DeviceIP) !== String(device.DeviceIP)
             && (c.Vlans || []).some(v => v.Tag === client.VLAN_Tag));

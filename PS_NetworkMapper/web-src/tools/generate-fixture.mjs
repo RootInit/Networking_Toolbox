@@ -2358,6 +2358,153 @@ function injectMacLearnedOffPath(rng, fleet) {
     };
 }
 
+// port-last-used-spec.md section 9.3. Six ports whose counters say one thing each, so every state in
+// section 5.3 has a named subject at fleet scale rather than only in the hand-built cases.
+//
+// None of them is a rule finding - port-last-used is a question asked of one port, not a sweep - so each
+// promises `lastUsed` instead, and the oracle is a computeLastUsed call rather than an entry in the
+// delta. `finding: null` keeps them out of the delta oracle, the way mac-learned-off-path already is.
+//
+// Each plants its state on BOTH readable snapshots' worth of counters by writing absolute values: the
+// injector runs after stampCapture on a clone, so there is no rate left to advance and the numbers have
+// to be the ones the module will read.
+function plantLastUsed(kind, state, rng, fleet, pick_, apply) {
+    const hosts = scanned(fleet).filter(d => (d.SectionsCaptured || []).includes('INTERFACES_EXT'));
+    const candidates = [];
+    for (const host of hosts) {
+        for (const row of host.Interfaces) {
+            if (!portIsFree(host.DeviceIP, row.Port)) continue;
+            if (!pick_(row, host)) continue;
+            candidates.push({ host, row });
+        }
+    }
+    if (!candidates.length) return null;
+    // Chosen by a hash of the port's own name rather than from the stream, so every snapshot plants on
+    // the SAME port. These four kinds are sustained properties of a port - idle, chattering, busy - and
+    // a property has to hold across the window or the delta that reads it is measuring the injector
+    // moving rather than the port. The two event kinds below keep the random draw, because an event
+    // belongs to the snapshot it happened in.
+    let hit = candidates[0];
+    let bestHash = Infinity;
+    for (const c of candidates) {
+        const h = detailHash(`${kind}|${c.host.DeviceIP}|${c.row.Port}`);
+        if (h < bestHash) { bestHash = h; hit = c; }
+    }
+    const params = apply(hit.row, hit.host, rng) || {};
+    return {
+        kind: kind, failureModes: [], deviceIp: hit.host.DeviceIP, port: hit.row.Port, mac: null,
+        params: params,
+        expected: { finding: null, lastUsed: state, deviceIp: hit.host.DeviceIP, port: hit.row.Port },
+    };
+}
+
+// A port no LLDP neighbour is seen on. E0 is a direct read that the far end spoke seconds ago, and it
+// outranks every counter-derived state - correctly. A kind that promises an IDLE state therefore has to
+// land where the counters are the only evidence there is.
+const silentPort = (row, host) => ![...(host.Neighbors || []), ...(host.MedNeighbors || [])]
+    .some(n => physical(n.LocalPort) === row.Port);
+
+// A port nothing has ever transmitted on since the epoch - the strongest claim in the model, and the one
+// a reset must never be able to produce. Link down, because on the measured fleet zero input and a dark
+// port are coextensive: no up port there has zero input bytes.
+const injectNeverUsedPort = (rng, fleet) => plantLastUsed('never-used-port', 'NEVER_USED_THIS_EPOCH', rng, fleet,
+    (row) => row.Link === 'down' && row.Admin === 'up' && typeof row.InputBytes === 'number',
+    (row) => { row.InputBytes = 0; row.InputPackets = 0; return { inputBytes: 0 }; });
+
+// Carried traffic once, carries none now. The bound is the epoch, because a single reading of a
+// cumulative counter is a lower bound and nothing more.
+const injectIdlePort = (rng, fleet) => plantLastUsed('idle-port', 'IDLE_SINCE', rng, fleet,
+    (row, host) => row.Link === 'up' && typeof row.InputBytes === 'number' && row.InputBytes > 0
+        && silentPort(row, host),
+    (row) => {
+        // Frozen at a constant, so every snapshot reads the same number and the delta is exactly zero -
+        // which is what "carried traffic once, carries none now" looks like to a cumulative counter.
+        row.InputBps = 0;
+        row.InputBytes = 4e9;
+        row.InputPackets = 6e6;
+        return { frozenAt: row.InputBytes };
+    });
+
+// Section 2.3's case, planted rather than hoped for: ~64 B frames at a tenth of a packet per second, for
+// as long as anyone has been watching. Under a naive byte-delta rule this is the busiest port on the
+// switch, and it is the one an operator is trying to find.
+const injectChatteringPort = (rng, fleet) => plantLastUsed('chattering-port', 'TRANSMITTER_PRESENT', rng, fleet,
+    (row) => row.Link === 'up' && typeof row.InputBytes === 'number' && row.InputBytes > 1e6
+        && !(row.Vlans || []).some(v => v.Mode === 'trunk'),
+    (row, host) => {
+        // Cumulative at 0.1 pps since this device booted, so the delta across the window is real and
+        // below the floor on both halves - 64 B frames at a tenth of a packet per second.
+        const seconds = typeof host.UptimeSeconds === 'number' ? host.UptimeSeconds : 86400;
+        row.InputPackets = Math.max(1, Math.round(0.1 * seconds));
+        row.InputBytes = row.InputPackets * 64;
+        row.InputBps = 40;
+        return { meanFrameBytes: 64, pps: 0.1 };
+    });
+
+// Busy, and demonstrably so across the gap: a frame size and a rate that clear the floor on both halves.
+const injectActivePort = (rng, fleet) => plantLastUsed('active-port', 'ACTIVE_NOW', rng, fleet,
+    (row) => row.Link === 'up' && typeof row.InputBytes === 'number' && row.InputBytes > 1e6,
+    (row, host) => {
+        const seconds = typeof host.UptimeSeconds === 'number' ? host.UptimeSeconds : 86400;
+        row.InputPackets = Math.max(1, Math.round(50 * seconds));
+        row.InputBytes = row.InputPackets * 900;
+        row.InputBps = 8e7;
+        return { meanFrameBytes: 900, pps: 50 };
+    });
+
+// The section 5.2 regression case at fleet scale: the device rebooted between the two snapshots, so this
+// port's counters restarted. It must read idle since the pre-reboot activity, never "never used".
+function injectRebootedDevice(rng, fleet) {
+    const hosts = scanned(fleet).filter(d => (d.SectionsCaptured || []).includes('INTERFACES_EXT')
+        && typeof d.UptimeSeconds === 'number' && d.UptimeSeconds > 4 * 86400
+        && d.Interfaces.some(r => r.Link === 'up' && typeof r.InputBytes === 'number' && r.InputBytes > 0));
+    if (!hosts.length) return null;
+    const host = fPick(rng, hosts);
+    // A port with no LLDP neighbour on it. E0 is a direct read that the far end spoke seconds ago, and
+    // after a reboot that is TRUE - the promise here is about the counters, so the port has to be one
+    // where the counters are the only evidence.
+    const speaks = new Set([...(host.Neighbors || []), ...(host.MedNeighbors || [])]
+        .map(n => physical(n.LocalPort)));
+    const rows = host.Interfaces.filter(r => r.Link === 'up' && typeof r.InputBytes === 'number'
+        && !speaks.has(r.Port) && portIsFree(host.DeviceIP, r.Port));
+    if (!rows.length) return null;
+    const row = fPick(rng, rows);
+    const wasSeconds = host.UptimeSeconds;
+    // Every member, because a chassis reboot is not a linecard reboot - the per-FPC case already has its
+    // own subject in ageFleet, and mixing the two here would make neither testable.
+    host.UptimeSeconds = 900;
+    host.FpcUptimes = (host.FpcUptimes || []).map(r => ({ ...r, UptimeSeconds: 900 }));
+    for (const r of host.Interfaces) {
+        if (typeof r.InputBytes !== 'number') continue;
+        r.InputBytes = r.Link === 'up' ? 120000 : 0;
+        r.InputPackets = r.Link === 'up' ? 200 : 0;
+        r.InputBps = 0;
+    }
+    return {
+        kind: 'rebooted-device', failureModes: [], deviceIp: host.DeviceIP, port: row.Port, mac: null,
+        params: { uptimeWasSeconds: wasSeconds, uptimeNowSeconds: 900 },
+        expected: { finding: null, lastUsed: 'IDLE_SINCE', deviceIp: host.DeviceIP, port: row.Port },
+    };
+}
+
+// A counter cleared by hand, with no reboot behind it: uptime is untouched and the bytes AFTER the clear
+// are higher than the bytes before, so nothing about the numbers alone says a reset happened. Without P2
+// this is indistinguishable from a busy port, and a delta taken across it is fiction.
+const injectStatisticsCleared = (rng, fleet) => plantLastUsed('statistics-cleared', 'IDLE_SINCE', rng, fleet,
+    (row, host) => row.Link === 'up' && typeof row.InputBytes === 'number'
+        && row.StatisticsLastCleared === 'Never' && silentPort(row, host),
+    (row, host) => {
+        // Derived from THIS snapshot's capture instant, so the stamp differs between snapshots. A clear
+        // is an event: planting the same string in every snapshot would be a port that has always been
+        // in the cleared state, which is not a reset and reads as ordinary growth.
+        const clearedMs = Date.parse(host.CaptureTimestamp) - 2 * 86400000;
+        row.StatisticsLastCleared = `${iso(new Date(clearedMs))} (2d 00:00 ago)`;
+        row.InputBytes = row.InputBytes * 3 + 1e9;
+        row.InputPackets = Math.max(1, row.InputPackets) * 3;
+        row.InputBps = 0;
+        return { clearedAt: row.StatisticsLastCleared };
+    });
+
 // Both devices answered and only one of them sees the other: LLDP off at one end, a one-way fibre pair,
 // or a neighbour entry that has not aged out.
 function injectLldpOneSided(rng, fleet) {
@@ -2513,6 +2660,10 @@ const INJECTORS = [
     // G1's fault (item 16). It makes no finding, so it is last: a manifest reader meets the rule-backed
     // kinds first.
     injectMacLearnedOffPath,
+    // port-last-used-spec.md section 9.3. Like the one above, these promise no finding - they promise a
+    // STATE, checked by computeLastUsed rather than by the rule engine.
+    injectNeverUsedPort, injectIdlePort, injectChatteringPort, injectActivePort,
+    injectRebootedDevice, injectStatisticsCleared,
 ];
 
 // G1's evidence, which the fixture did not have. A switch learns every MAC it FORWARDS, so a host three

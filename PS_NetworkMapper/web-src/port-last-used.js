@@ -145,27 +145,48 @@
         return { dynamic: dynamic, total: total };
     }
 
+    // Section 3: on a truncated capture a source is unavailable, and the gate is PER SOURCE rather than
+    // a filter at intake - revision 1's §3 and §5 disagreed about this and §5 won silently. A field the
+    // section never delivered has whatever the parser last left in it, which for a counter is
+    // indistinguishable from a real zero, and a real zero is what produces NEVER_USED_THIS_EPOCH. The
+    // fixture happens to blank these itself; the guarantee has to be this module's, not the fixture's.
+    function sectionPresent(sections, name) {
+        // An empty list is "nothing was recorded about sections", not "no section arrived": snapshots
+        // written before R15 carry no SectionsCaptured at all, and refusing to read them would make
+        // every port in an old snapshot UNKNOWN.
+        return !sections.length || sections.indexOf(name) !== -1;
+    }
+
     function observationFor(device, row, tsMs, sections) {
         var port = String(row.Port);
-        return {
+        var hasExt = sectionPresent(sections, 'INTERFACES_EXT');
+        var obs = {
             tsMs: tsMs,
             port: port,
             scanStatus: String(device.ScanStatus || ''),
             sections: sections,
+            missingSections: [],
+            // From "show interfaces terse", which is not the extensive section: a truncated capture
+            // still knows whether the port is up and whether it is administratively enabled.
             admin: row.Admin === null || row.Admin === undefined ? null : String(row.Admin).toLowerCase(),
             link: row.Link === null || row.Link === undefined ? null : String(row.Link).toLowerCase(),
-            inputBytes: num(row.InputBytes),
-            inputPackets: num(row.InputPackets),
-            outputBytes: num(row.OutputBytes),
-            inputBps: num(row.InputBps),
-            carrierTransitions: num(row.CarrierTransitions),
-            lastFlappedSeconds: num(row.LastFlappedSeconds),
-            statisticsLastCleared: row.StatisticsLastCleared === null || row.StatisticsLastCleared === undefined
-                ? null : String(row.StatisticsLastCleared),
-            uptimeSeconds: uptimeForPort(device, port),
-            lldpAgeSeconds: lldpAgeForPort(device, port),
-            macs: macsForPort(device, port),
+            inputBytes: hasExt ? num(row.InputBytes) : null,
+            inputPackets: hasExt ? num(row.InputPackets) : null,
+            outputBytes: hasExt ? num(row.OutputBytes) : null,
+            inputBps: hasExt ? num(row.InputBps) : null,
+            carrierTransitions: hasExt ? num(row.CarrierTransitions) : null,
+            lastFlappedSeconds: hasExt ? num(row.LastFlappedSeconds) : null,
+            statisticsLastCleared: (hasExt && row.StatisticsLastCleared !== null && row.StatisticsLastCleared !== undefined)
+                ? String(row.StatisticsLastCleared) : null,
+            uptimeSeconds: sectionPresent(sections, 'UPTIME') ? uptimeForPort(device, port) : null,
+            lldpAgeSeconds: sectionPresent(sections, 'LLDP') ? lldpAgeForPort(device, port) : null,
+            macs: sectionPresent(sections, 'MAC_TABLE') ? macsForPort(device, port) : { dynamic: 0, total: 0 },
         };
+        var needed = ['INTERFACES_EXT', 'UPTIME', 'LLDP', 'MAC_TABLE'];
+        for (var i = 0; i < needed.length; i++) {
+            if (!sectionPresent(sections, needed[i])) obs.missingSections.push(needed[i]);
+        }
+        return obs;
     }
 
     // Snapshots in, one history per (device, port) out. Snapshots are `{ ScanTimestamp, Topology }` -
@@ -205,8 +226,11 @@
             for (var n = 0; n < keys.length; n++) {
                 if (found.keys.indexOf(keys[n]) === -1) found.keys.push(keys[n]);
                 byKey[keys[n]] = found;
-                found.keyTypes[String(keys[n]).split(':')[0]] = true;
             }
+            // The BEST key this scan could offer, not every key it carried. Every device answers to an
+            // address and a hostname as well as a serial, so recording all three would flag the whole
+            // fleet; what section 6 is about is a scan that could no longer offer the serial.
+            found.keyTypes[String(preferredKey(keys)).split(':')[0]] = true;
             return found;
         }
 
@@ -419,6 +443,14 @@
         if (dropped.notScanned) caveats.push('observations-from-unscanned-devices-ignored:' + dropped.notScanned);
         if (dropped.noTimestamp) caveats.push('observations-with-no-timestamp-ignored:' + dropped.noTimestamp);
         if (dropped.duplicate) caveats.push('duplicate-snapshots-ignored:' + dropped.duplicate);
+        var lost = {};
+        for (var m = 0; m < obsList.length; m++) {
+            var missing = asList(obsList[m].missingSections);
+            for (var mm = 0; mm < missing.length; mm++) lost[missing[mm]] = true;
+        }
+        for (var name in lost) {
+            if (Object.prototype.hasOwnProperty.call(lost, name)) caveats.push('section-not-captured:' + name);
+        }
         for (var c = 0; c < obsList.length; c++) {
             if (obsList[c].usedScanTimestamp) {
                 caveats.push('per-device-capture-time-missing-interval-widened-by-the-crawl-span');
