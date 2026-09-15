@@ -22,6 +22,12 @@ var L2 = (typeof module !== 'undefined' && module.exports)
     ? require('./l2-graph.js')
     : (typeof window !== 'undefined' ? window.L2Graph : null);
 
+// One MAC normalizer for the whole app: the resolver already owns it, and a second reading of "is this
+// the same address" is how a verifier comes to disagree with the resolver that gave it the address.
+var Resolution = (typeof module !== 'undefined' && module.exports)
+    ? require('./endpoint-resolution.js')
+    : (typeof window !== 'undefined' ? window.EndpointResolution : null);
+
 // Section 2.3's ladder, worst last. A path is as good as its worst hop.
 var CONFIDENCE_ORDER = ['VERIFIED', 'VLAN_ONLY', 'NO_STP_INSTANCE', 'PHYSICAL_ONLY', 'INFERRED', 'UNVERIFIED'];
 
@@ -246,6 +252,107 @@ function spreadOf(instants) {
     return Math.round((Math.max.apply(null, known) - Math.min.apply(null, known)) / 1000);
 }
 
+// ---------------------------------------------------------------------------------------------------
+// G1. Per-hop forwarding-plane evidence.
+//
+// The computation above answers "may a frame cross this hop": both ends carry the VLAN and neither is
+// blocking. That is a statement about CONFIGURATION. The MAC table is a statement about TRAFFIC - a
+// switch learns a MAC on the port it arrived on - so "the destination is learned on the port facing the
+// next hop" is direct evidence that frames really go that way, which is what section 6 computed a path
+// and never checked.
+//
+// Two readings here are easy to undo by accident, and both are deliberate:
+//
+//   - ABSENT IS NOT A FAULT. A switch learns from traffic it has SEEN (section 6.3), so a host that has
+//     not spoken through this switch recently, or whose entry aged out, is simply not in the table. Only
+//     CONTRADICTED - learned, in this VLAN, on a DIFFERENT port - says the forwarding plane disagrees.
+//   - IT DOES NOT MOVE THE CONFIDENCE LADDER. VERIFIED means the spanning tree was read for this VLAN at
+//     both ends (section 2.3); MAC evidence is a different question and demoting on it would make one
+//     word mean two things. Section 6.5: report, do not adjudicate.
+var MAC_EVIDENCE = { CONFIRMED: 'CONFIRMED', CONTRADICTED: 'CONTRADICTED', ABSENT: 'ABSENT', UNMEASURED: 'UNMEASURED' };
+
+var macIndexCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+
+function normalizeMac(value) {
+    return Resolution ? Resolution.normalizeMac(value) : String(value).replace(/-/g, ':').toUpperCase();
+}
+
+// "<VLAN name>|<MAC>" -> the ports it is learned on. Keyed by NAME because that is what the MAC table
+// prints; the tag is resolved per device below, since a tag can wear different names on two switches.
+function macIndexFor(device) {
+    if (macIndexCache && macIndexCache.has(device)) return macIndexCache.get(device);
+    var index = new Map();
+    asList(device && device.MacTable).forEach(function (row) {
+        var port = row.PhysicalPort ? String(row.PhysicalPort) : String(row.Interface || '').replace(/\.\d+$/, '');
+        if (!port) return;
+        var key = String(row.VlanName) + '|' + normalizeMac(row.MacAddress);
+        if (!index.has(key)) index.set(key, new Set());
+        index.get(key).add(port);
+    });
+    if (macIndexCache) macIndexCache.set(device, index);
+    return index;
+}
+
+function vlanNameFor(device, tag) {
+    var found = null;
+    asList(device && device.Vlans).forEach(function (vlan) {
+        if (found === null && vlan && Number(vlan.Tag) === Number(tag)) found = vlan.Name;
+    });
+    return found;
+}
+
+// `port` is the port the frame should leave by; `members` is the bundle's member list, because a MAC
+// learned on an aggregate prints against the member it arrived on and the hop is named for the bundle.
+function macEvidenceAt(device, port, members, tag, mac) {
+    var blank = { state: MAC_EVIDENCE.UNMEASURED, mac: mac || null, learnedOn: [], reason: null };
+    if (!mac) { blank.reason = 'no-mac-given'; return blank; }
+    if (!device) { blank.reason = 'device-not-in-snapshot'; return blank; }
+    if (asList(device.SectionsCaptured).indexOf('MAC_TABLE') === -1) { blank.reason = 'section:MAC_TABLE'; return blank; }
+    var name = vlanNameFor(device, tag);
+    // The hop survived the VLAN filter, so this only happens on a device whose VLAN list and whose port
+    // membership disagree - unmeasurable rather than absent, because the table is keyed by a name we do
+    // not have.
+    if (name === null) { blank.reason = 'vlan-tag-has-no-name-here'; return blank; }
+
+    var learned = macIndexFor(device).get(name + '|' + normalizeMac(mac));
+    var ports = learned ? Array.from(learned).sort() : [];
+    if (!ports.length) {
+        return { state: MAC_EVIDENCE.ABSENT, mac: mac, learnedOn: [], reason: null };
+    }
+    var accepted = [String(port)].concat(asList(members).map(function (member) { return String(member.port); }));
+    var hit = ports.some(function (learnedPort) { return accepted.indexOf(learnedPort) !== -1; });
+    // One MAC on two ports of one switch in one VLAN is R3's ambiguity, reported at `learnedOn`; if the
+    // hop's own port is among them the frame does leave this way, so the evidence confirms.
+    return {
+        state: hit ? MAC_EVIDENCE.CONFIRMED : MAC_EVIDENCE.CONTRADICTED,
+        mac: mac, learnedOn: ports, reason: null,
+    };
+}
+
+// Both directions over one hop. The target should be learned on the near end's port (frames toward B
+// leave that way) and the source on the far end's port (frames back toward A leave that way). Either
+// direction contradicting is a contradiction: they are two independent observations of one wire.
+function macEvidenceForHop(hop, deviceByIp, tag, macs) {
+    return {
+        target: macEvidenceAt(deviceByIp.get(hop.from.ip), hop.from.port, hop.from.members, tag, macs.target),
+        source: macEvidenceAt(deviceByIp.get(hop.to.ip), hop.to.port, hop.to.members, tag, macs.source),
+    };
+}
+
+function macEvidenceSummary(hops) {
+    var counts = { confirmed: 0, contradicted: 0, absent: 0, unmeasured: 0 };
+    hops.forEach(function (hop) {
+        ['target', 'source'].forEach(function (direction) {
+            var state = hop.macEvidence[direction].state;
+            if (state === MAC_EVIDENCE.CONFIRMED) counts.confirmed += 1;
+            else if (state === MAC_EVIDENCE.CONTRADICTED) counts.contradicted += 1;
+            else if (state === MAC_EVIDENCE.ABSENT) counts.absent += 1;
+            else counts.unmeasured += 1;
+        });
+    });
+    return counts;
+}
+
 function hopFor(assessment, fromIp, deviceByIp) {
     var edge = assessment.edge;
     var near = edge.a.ip === fromIp ? edge.a : edge.b;
@@ -423,11 +530,14 @@ function computePath(input, options) {
     var limit = opts.limit === undefined ? DEFAULT_PATH_LIMIT : opts.limit;
     var stepBudget = opts.stepBudget === undefined ? DEFAULT_STEP_BUDGET : opts.stepBudget;
     var agingSeconds = opts.macAgingSeconds === undefined ? DEFAULT_MAC_AGING_SECONDS : opts.macAgingSeconds;
+    // G1's inputs, both optional: the endpoints' own MAC addresses, which the resolver already knows and
+    // the path computer has no way to derive from a (device, port) pair.
+    var macs = { source: opts.sourceMac || null, target: opts.targetMac || null };
 
     var result = {
         from: fromIp, to: toIp, vlanTag: tag,
         status: 'NO_PATH', paths: [], truncated: false, reasons: [], lastReachedHop: null,
-        endpoints: [], notes: [],
+        endpoints: [], notes: [], macs: macs,
     };
     // Without this, a missing tag is NaN, no port matches it, and every hop is pruned with a plausible
     // "VLAN NaN is not on ..." - a wrong answer that reads like a real diagnosis.
@@ -491,6 +601,7 @@ function computePath(input, options) {
         result.paths.push({
             hops: [], confidence: endpointConfidence, notes: ['same-device'],
             captureSpreadSeconds: 0, macCoherent: true,
+            macEvidence: macEvidenceSummary([]),
         });
         return result;
     }
@@ -511,6 +622,7 @@ function computePath(input, options) {
         var instants = [captureInstant(graph.deviceByIp.get(fromIp))];
         trail.forEach(function (entry) {
             var hop = hopFor(entry.assessment, cursor, graph.deviceByIp);
+            hop.macEvidence = macEvidenceForHop(hop, graph.deviceByIp, tag, macs);
             hops.push(hop);
             confidence = worst(confidence, hop.confidence);
             hop.notes.forEach(function (note) { if (notes.indexOf(note) === -1) notes.push(note); });
@@ -521,7 +633,18 @@ function computePath(input, options) {
         // F2's threshold, reported rather than applied to the hop states: see spreadOf.
         var coherent = spread === null ? null : spread <= agingSeconds;
         if (coherent === false) notes.push('capture-spread-exceeds-mac-aging');
-        return { hops: hops, confidence: confidence, notes: notes, captureSpreadSeconds: spread, macCoherent: coherent };
+        var evidence = macEvidenceSummary(hops);
+        // G1, reported and not applied: a contradiction is a note beside the path, never a demotion of it
+        // (see MAC_EVIDENCE). When the capture spans more than one aging interval the table rows on two
+        // hops were not read at comparable times, which weakens the contradiction without excusing it.
+        if (evidence.contradicted > 0) {
+            notes.push('mac-evidence-contradicts-path');
+            if (coherent === false) notes.push('mac-evidence-stale');
+        }
+        return {
+            hops: hops, confidence: confidence, notes: notes,
+            captureSpreadSeconds: spread, macCoherent: coherent, macEvidence: evidence,
+        };
     });
 
     // Status comes from how many paths were FOUND, not from how many are reported: knowing a second path
@@ -638,6 +761,8 @@ var L2Path = {
     computePath: computePath,
     gatewayCandidates: gatewayCandidates,
     assessEndpoint: assessEndpoint,
+    macEvidenceAt: macEvidenceAt,
+    MAC_EVIDENCE: MAC_EVIDENCE,
     bothEndsClaimSegment: bothEndsClaimSegment,
     assessEdge: assessEdge,
     scopeFor: scopeFor,

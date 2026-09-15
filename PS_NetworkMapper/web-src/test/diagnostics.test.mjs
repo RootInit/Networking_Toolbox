@@ -122,7 +122,23 @@ test('a path query needs two settled endpoints and a VLAN, and says which it is 
 
     const ready = pathPanelModel(found('10.30.1.10', 'ge-0/0/1', 10), found('10.30.1.11', 'ge-0/0/2', 10), '');
     assert.equal(ready.ready, true);
-    assert.deepEqual(ready.from, { ip: '10.30.1.10', port: 'ge-0/0/1' });
+    assert.deepEqual(ready.from, { ip: '10.30.1.10', port: 'ge-0/0/1', mac: null },
+        'a match with no MAC gives G1 nothing to verify against, and null says so');
+
+    // G1's input: the endpoint's own MAC, taken from the match at that location and only when the
+    // location has exactly one. Two MACs behind one port is an endpoint question, and verifying a path
+    // against a guess between them is worse than not verifying it.
+    const withMac = (ip, port, tag, macs) => ({
+        query: ip, status: 'FOUND', locations: [`${ip}|${port}`], notes: [], interpretations: ['client-ip'],
+        matches: macs.map(mac => ({ deviceIp: ip, port: port, vlanTag: tag, transit: false, mac: mac })),
+    });
+    assert.equal(pathPanelModel(withMac('10.30.1.10', 'ge-0/0/1', 10, ['aa:bb:00:00:00:01']),
+        found('10.30.1.11', 'ge-0/0/2', 10), '').from.mac, 'aa:bb:00:00:00:01');
+    // The same MAC twice (the MAC table and Clients both naming it) is one MAC, not an ambiguity.
+    assert.equal(pathPanelModel(withMac('10.30.1.10', 'ge-0/0/1', 10, ['aa:bb:00:00:00:01', 'aa:bb:00:00:00:01']),
+        found('10.30.1.11', 'ge-0/0/2', 10), '').from.mac, 'aa:bb:00:00:00:01');
+    assert.equal(pathPanelModel(withMac('10.30.1.10', 'ge-0/0/1', 10, ['aa:bb:00:00:00:01', 'aa:bb:00:00:00:02']),
+        found('10.30.1.11', 'ge-0/0/2', 10), '').from.mac, null);
     assert.equal(ready.vlanTag, 10, 'the tag is taken from the sighting when the operator gave none');
 
     // A typed tag wins over the sighting: an operator asking about VLAN 20 is asking about VLAN 20.

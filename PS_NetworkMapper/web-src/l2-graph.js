@@ -383,16 +383,29 @@ function buildPortGraph(topology, options) {
         return left < right ? -1 : left > right ? 1 : 0;
     });
 
+    // Which ports carry transit rather than endpoints, per device: endpoint resolution needs the
+    // same predicate to tell a client's location from a sighting in passing (R3, F4).
+    var transitPorts = new Map(devices.map(function (device) {
+        var ip = String(device.DeviceIP);
+        return [ip, transitPortsFor(device, indexes.get(ip))];
+    }));
+    // A port the graph knows is an end of a switch-to-switch edge is transit whichever end advertised it.
+    // The device's own neighbour list is not enough: LLDP is one-sided often enough to have its own rule,
+    // and a silent end would otherwise read as an access port holding every MAC behind the link - which
+    // is every client in that subtree reported as duplicated, and the uplink reported as an unmanaged
+    // segment.
+    edges.forEach(function (edge) {
+        [edge.a, edge.b].forEach(function (end) {
+            var set = transitPorts.get(end.ip);
+            if (set) set.add(end.port);
+        });
+    });
+
     return {
         edges: edges,
         terminals: terminals,
         deviceByIp: byIp,
-        // Which ports carry transit rather than endpoints, per device: endpoint resolution needs the
-        // same predicate to tell a client's location from a sighting in passing (R3, F4).
-        transitPorts: new Map(devices.map(function (device) {
-            var ip = String(device.DeviceIP);
-            return [ip, transitPortsFor(device, indexes.get(ip))];
-        })),
+        transitPorts: transitPorts,
     };
 }
 

@@ -296,6 +296,76 @@ test('VSTP and RSTP on one device resolve per VLAN, not per device', () => {
     assert.equal(scopeFor(silent, 10).kind, 'NOT_CAPTURED');
 });
 
+// G1 at fleet scale, and the assertion that the fixture's transit sightings are real. Before item 16 the
+// generator put every MAC only on the access port its owner was plugged into, which is a topology no
+// switch produces - and one in which this whole check has nothing to read.
+test('on the generated fleet a client is confirmed at every hop back to its switch, and a moved row is not', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_macpath_'));
+    execFileSync(process.execPath, [GENERATOR, '--out', out, '--devices', '60', '--seed', '11',
+        '--snapshots', '1', '--faults', '44'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    const mapName = fs.readdirSync(out).find(f => /^NetworkMap_.*\.fixture\.json$/.test(f));
+    const manifestName = fs.readdirSync(out).find(f => /^FaultManifest_.*\.fixture\.json$/.test(f));
+    const snapshot = JSON.parse(fs.readFileSync(path.join(out, mapName), 'utf8'));
+    const manifest = JSON.parse(fs.readFileSync(path.join(out, manifestName), 'utf8'));
+    const config = JSON.parse(fs.readFileSync(path.join(out, 'Configuration.fixture.json'), 'utf8'));
+    const graph = L2Graph.buildPortGraph(snapshot.Topology, { allowedScopes: config.settings.allowedScopes });
+    const byIp = new Map(snapshot.Topology.map(d => [String(d.DeviceIP), d]));
+
+    const moved = manifest.Faults.find(f => f.kind === 'mac-learned-off-path');
+    assert.ok(moved, 'the G1 injector did not place');
+
+    // Every hop from a client's own switch outward must see that client on the port facing back toward
+    // it. The target is reached by asking for a path, so this is the same join the screen makes.
+    const cores = snapshot.Topology.filter(d => d.ScanStatus === 'Ok' && /-core\d/.test(String(d.Hostname)));
+    assert.ok(cores.length, 'the fleet has no core to trace toward');
+    let traced = 0;
+    let confirmed = 0;
+    for (const device of snapshot.Topology) {
+        if (device.ScanStatus !== 'Ok') continue;
+        const client = (device.Clients || []).find(c => c.VLAN_Tag && c.MAC);
+        if (!client) continue;
+        const core = cores.find(c => String(c.DeviceIP) !== String(device.DeviceIP)
+            && (c.Vlans || []).some(v => v.Tag === client.VLAN_Tag));
+        if (!core) continue;
+        const result = computePath(graph, {
+            from: String(device.DeviceIP), to: String(core.DeviceIP), vlanTag: client.VLAN_Tag,
+            sourceMac: client.MAC,
+        });
+        if (result.status !== 'PATH' || !result.paths[0].hops.length) continue;
+        traced++;
+        for (const hop of result.paths[0].hops) {
+            // The one row the injector moved is entitled to disagree - and only for the MAC it moved, on
+            // the switch it moved it on. Exempting the whole trace instead would let a second, unplanted
+            // contradiction hide behind it.
+            const planted = hop.to.ip === String(moved.deviceIp)
+                && String(client.MAC).toUpperCase() === String(moved.mac).toUpperCase();
+            const state = hop.macEvidence.source.state;
+            if (planted) {
+                assert.equal(state, 'CONTRADICTED', 'the planted row should be the contradiction');
+                continue;
+            }
+            assert.equal(state, 'CONFIRMED',
+                `${device.DeviceIP} -> ${core.DeviceIP} in VLAN ${client.VLAN_Tag} at ${hop.to.ip}: ${state}`);
+            confirmed++;
+        }
+    }
+    // The floors guard against the sampling silently emptying; they are not a target.
+    assert.ok(traced >= 8, `only ${traced} client traces ran`);
+    assert.ok(confirmed >= 16, `only ${confirmed} hops confirmed`);
+
+    // And the injected move is a contradiction on exactly the switch the manifest names. The MAC is
+    // learned somewhere real, so this is not an absence dressed up as a disagreement.
+    const host = byIp.get(String(moved.deviceIp));
+    const row = (host.MacTable || []).find(r => r.MacAddress === moved.mac && r.PhysicalPort === moved.port);
+    assert.ok(row, 'the manifest names a row the snapshot does not carry');
+    const evidence = L2Path.macEvidenceAt(host, moved.params.wasLearnedOn, [],
+        (host.Vlans.find(v => v.Name === moved.params.vlanName) || {}).Tag, moved.mac);
+    assert.equal(evidence.state, 'CONTRADICTED');
+    assert.deepEqual(evidence.learnedOn, [moved.port]);
+
+    fs.rmSync(out, { recursive: true, force: true });
+});
+
 // Fixture scale. Item 7 guarantees the forwarding subgraph is a spanning tree, so between any two
 // scanned devices there is exactly one path once pruned - which makes "one path" an assertion about
 // dozens of pairs rather than about one hand-built case.
@@ -482,6 +552,85 @@ test('an endpoint port blocked in the VLAN stops the path with F9s own reason', 
 
 // Section 6.4, as corrected: candidates come from a configured prefix containing the address, and more
 // than one is an ambiguity rather than a pick. G3's VIP detection is reported beside them.
+// ---------------------------------------------------------------------------------------------------
+// G1. Per-hop forwarding-plane evidence (work order item 16)
+
+const macPath = () => byName('mac-path-verification');
+const evidenceOn = (result, direction) => result.paths[0].hops.map(h => h.macEvidence[direction].state);
+const traceMac = (topology, micro, extra) => computePath(topology, {
+    allowedScopes: ALLOWED_SCOPES, vlanTag: micro.vlanTag,
+    from: micro.nearIp, to: micro.farIp, fromPort: micro.nearPort, toPort: micro.farPort,
+    ...extra,
+});
+
+test('a path whose MAC table agrees with it is confirmed at every hop, in both directions', () => {
+    const micro = macPath();
+    const result = traceMac(micro.snapshot.Topology, micro, { sourceMac: micro.nearMac, targetMac: micro.farMac });
+    assert.equal(result.status, 'PATH');
+    assert.deepEqual(evidenceOn(result, 'target'), ['CONFIRMED', 'CONFIRMED']);
+    assert.deepEqual(evidenceOn(result, 'source'), ['CONFIRMED', 'CONFIRMED']);
+    assert.deepEqual(result.paths[0].macEvidence, { confirmed: 4, contradicted: 0, absent: 0, unmeasured: 0 });
+    assert.ok(!result.paths[0].notes.includes('mac-evidence-contradicts-path'));
+    // It is EVIDENCE, not a grade: the ladder is the spanning tree's answer and nothing here touches it.
+    assert.equal(result.paths[0].confidence, 'VERIFIED');
+});
+
+test('a MAC learned out a different port contradicts the hop that uses this one', () => {
+    const micro = macPath();
+    const snapshot = structuredClone(micro.snapshot);
+    // The middle switch says the far client is out the port facing BACK toward the source.
+    const middle = snapshot.Topology.find(d => String(d.DeviceIP) === String(micro.middleIp));
+    const row = middle.MacTable.find(r => r.MacAddress === micro.farMac);
+    row.PhysicalPort = 'xe-0/0/0';
+    row.Interface = 'xe-0/0/0.0';
+    const result = traceMac(snapshot.Topology, micro, { sourceMac: micro.nearMac, targetMac: micro.farMac });
+    // The path still exists - the configuration is unchanged - which is the whole point of checking what
+    // the forwarding plane actually did.
+    assert.equal(result.status, 'PATH');
+    assert.deepEqual(evidenceOn(result, 'target'), ['CONFIRMED', 'CONTRADICTED']);
+    assert.deepEqual(result.paths[0].hops[1].macEvidence.target.learnedOn, ['xe-0/0/0']);
+    assert.ok(result.paths[0].notes.includes('mac-evidence-contradicts-path'));
+    assert.equal(result.paths[0].macEvidence.contradicted, 1);
+    assert.equal(result.paths[0].confidence, 'VERIFIED', 'still not a demotion');
+});
+
+test('a MAC nobody has learned is ABSENT, which is normal and not a contradiction', () => {
+    const micro = macPath();
+    const snapshot = structuredClone(micro.snapshot);
+    // One-way traffic: the far client has spoken and the near one has not, so only its own switch knows
+    // it. Section 6.3 says exactly this shape is normal.
+    for (const device of snapshot.Topology) {
+        if (String(device.DeviceIP) === String(micro.nearIp)) continue;
+        device.MacTable = device.MacTable.filter(r => r.MacAddress !== micro.nearMac);
+    }
+    const result = traceMac(snapshot.Topology, micro, { sourceMac: micro.nearMac, targetMac: micro.farMac });
+    assert.deepEqual(evidenceOn(result, 'source'), ['ABSENT', 'ABSENT']);
+    assert.deepEqual(evidenceOn(result, 'target'), ['CONFIRMED', 'CONFIRMED']);
+    assert.ok(!result.paths[0].notes.includes('mac-evidence-contradicts-path'),
+        'an absent entry is a switch that has not seen the traffic, not a disagreement');
+});
+
+test('no MAC given, and a lost MAC_TABLE section, are both UNMEASURED and say which', () => {
+    const micro = macPath();
+    const bare = traceMac(micro.snapshot.Topology, micro, {});
+    assert.deepEqual(evidenceOn(bare, 'target'), ['UNMEASURED', 'UNMEASURED']);
+    assert.equal(bare.paths[0].hops[0].macEvidence.target.reason, 'no-mac-given');
+    assert.deepEqual(bare.paths[0].macEvidence, { confirmed: 0, contradicted: 0, absent: 0, unmeasured: 4 });
+
+    const snapshot = structuredClone(micro.snapshot);
+    const middle = snapshot.Topology.find(d => String(d.DeviceIP) === String(micro.middleIp));
+    // The truncation shape: the section never arrived, so the rows are gone WITH it. An empty table under
+    // a captured section would be the different claim "this switch has learned nothing".
+    middle.SectionsCaptured = middle.SectionsCaptured.filter(name => name !== 'MAC_TABLE');
+    middle.MacTable = [];
+    const lost = traceMac(snapshot.Topology, micro, { sourceMac: micro.nearMac, targetMac: micro.farMac });
+    const onMiddle = lost.paths[0].hops[1].macEvidence.target;
+    assert.equal(onMiddle.state, 'UNMEASURED');
+    assert.equal(onMiddle.reason, 'section:MAC_TABLE');
+    // And the hop out of the untruncated switch still answers.
+    assert.equal(lost.paths[0].hops[0].macEvidence.target.state, 'CONFIRMED');
+});
+
 test('gateway candidates come from configured prefixes, and two candidates are not a pick', () => {
     const { gatewayCandidates } = L2Path;
     const unit = (parent, unitNumber, address) => ({

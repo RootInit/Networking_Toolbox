@@ -564,11 +564,53 @@ function partialNode() {
     };
 }
 
+// G1. Three switches in a line with one client at the far end, and the transit sightings a real switch
+// would hold: the client's MAC is learned on every port between it and here. This is what makes per-hop
+// path verification testable at all - a topology where a MAC exists only where its owner is plugged in
+// says nothing about which way frames go.
+function macPathVerification() {
+    const a = microNode('10.30.11.10', 'micro-macpath-a.example.net', { ports: ['xe-0/0/0', 'ge-0/0/1'] });
+    const b = microNode('10.30.11.11', 'micro-macpath-b.example.net', { ports: ['xe-0/0/0', 'xe-0/0/1'] });
+    const c = microNode('10.30.11.12', 'micro-macpath-c.example.net', { ports: ['xe-0/0/0', 'ge-0/0/5', 'ge-0/0/6'] });
+    link(a, 'xe-0/0/0', b, 'xe-0/0/0', 'TRUNK');
+    link(b, 'xe-0/0/1', c, 'xe-0/0/0', 'TRUNK');
+    setVlans(a, [vlan('DATA', 10, ['xe-0/0/0.0', 'ge-0/0/1.0'])]);
+    setVlans(b, [vlan('DATA', 10, ['xe-0/0/0.0', 'xe-0/0/1.0'])]);
+    setVlans(c, [vlan('DATA', 10, ['xe-0/0/0.0', 'ge-0/0/5.0', 'ge-0/0/6.0'])]);
+    const fwd = (node, port, role) => setStp(node, port, { 'VLAN 10': { State: 'FWD', Role: role, Cost: 2000 } });
+    fwd(a, 'xe-0/0/0', 'DESG'); fwd(b, 'xe-0/0/0', 'ROOT');
+    fwd(b, 'xe-0/0/1', 'DESG'); fwd(c, 'xe-0/0/0', 'ROOT');
+    fwd(a, 'ge-0/0/1', 'DESG'); fwd(c, 'ge-0/0/5', 'DESG'); fwd(c, 'ge-0/0/6', 'DESG');
+
+    const far = 'aa:bb:00:00:0b:05';
+    const near = 'aa:bb:00:00:0b:01';
+    addClient(c, 'ge-0/0/5', { mac: far, ip: '10.30.211.5', tag: 10, vlanName: 'DATA' });
+    addClient(a, 'ge-0/0/1', { mac: near, ip: '10.30.211.1', tag: 10, vlanName: 'DATA' });
+    const learn = (node, port, mac) => node.MacTable.push({
+        RoutingInstance: 'default-switch', VlanName: 'DATA', MacAddress: mac,
+        Flags: 'D', Age: null, Interface: `${port}.0`, PhysicalPort: port,
+    });
+    // Each switch learns the far client on the port facing it, and the near one on the port facing back.
+    learn(b, 'xe-0/0/1', far); learn(a, 'xe-0/0/0', far);
+    learn(b, 'xe-0/0/0', near); learn(c, 'xe-0/0/0', near);
+
+    return {
+        name: 'mac-path-verification',
+        failureModes: ['F4'],
+        description: 'Three switches in a line, a client at each end, and the transit sightings between '
+            + 'them: the forwarding-plane evidence a computed path can be checked against (G1).',
+        nearIp: a.DeviceIP, nearPort: 'ge-0/0/1', nearMac: near,
+        farIp: c.DeviceIP, farPort: 'ge-0/0/5', farMac: far,
+        middleIp: b.DeviceIP, vlanTag: 10,
+        snapshot: snapshot([a, b, c]),
+    };
+}
+
 export const MICRO_TOPOLOGIES = [
     triangleVstp(), vlanWithoutStpInstance(), diamondTwoPaths(),
     lag(false), lag(true), virtualChassis(), unscannedWaypoint(),
     addresslessBridge(), outOfScopeNeighbor(), partialNode(),
-    transitSighting(), inferredSegment(),
+    transitSighting(), inferredSegment(), macPathVerification(),
 ];
 
 export const byName = (name) => MICRO_TOPOLOGIES.find(t => t.name === name);

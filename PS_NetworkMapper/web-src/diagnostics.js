@@ -261,7 +261,16 @@ function pathPanelModel(fromResolution, toResolution, requestedTag) {
         var resolution = pair[0];
         if (resolution.status === 'FOUND') {
             var parts = resolution.locations[0].split('|');
-            model[pair[1]] = { ip: parts[0], port: parts[1] || null };
+            // G1 needs the endpoint's own MAC, which only the resolver knows. Taken from the match at
+            // this location and only when the location has exactly one: two MACs behind one port is an
+            // endpoint question, and verifying a path against a guess between them is worse than not
+            // verifying it.
+            var here = (resolution.matches || []).filter(function (match) {
+                return match.mac && (match.deviceIp + '|' + match.port) === resolution.locations[0];
+            });
+            var macs = here.map(function (match) { return match.mac; })
+                .filter(function (mac, index, all) { return all.indexOf(mac) === index; });
+            model[pair[1]] = { ip: parts[0], port: parts[1] || null, mac: macs.length === 1 ? macs[0] : null };
             return;
         }
         model.notes.push(pair[1] + '-endpoint-' + resolution.status.toLowerCase().replace(/_/g, '-'));
@@ -275,6 +284,23 @@ function pathPanelModel(fromResolution, toResolution, requestedTag) {
     return model;
 }
 
+// G1 on screen. The symbol carries the state and the title the evidence, because a hop row already has
+// five columns and the common answers - confirmed and absent - need no explaining; a contradiction does.
+var MAC_EVIDENCE_MARK = { CONFIRMED: '&#10003;', CONTRADICTED: '&#10007;', ABSENT: '&ndash;', UNMEASURED: '?' };
+
+function macEvidenceCell(hop) {
+    return ['target', 'source'].map(function (direction) {
+        var evidence = hop.macEvidence ? hop.macEvidence[direction] : null;
+        if (!evidence) return '<span class="diag-dim">?</span>';
+        var detail = direction + ' ' + (evidence.mac || 'no MAC') + ': ' + evidence.state.toLowerCase()
+            + (evidence.learnedOn.length ? ' on ' + evidence.learnedOn.join(', ') : '')
+            + (evidence.reason ? ' (' + evidence.reason + ')' : '');
+        var tier = evidence.state === 'CONTRADICTED' ? 'crit' : evidence.state === 'CONFIRMED' ? 'ok' : '';
+        return '<span class="' + (tier ? 'tier-' + tier : 'diag-dim') + '" title="' + esc(detail) + '">'
+            + MAC_EVIDENCE_MARK[evidence.state] + '</span>';
+    }).join(' ');
+}
+
 function hopRow(hop) {
     var notes = hop.notes.length ? '<div class="diag-notes">' + esc(hop.notes.join(' · ')) + '</div>' : '';
     var scope = function (side) {
@@ -285,7 +311,8 @@ function hopRow(hop) {
         + '<td>' + portLink(hop.to.ip, hop.to.port, (hop.to.hostname || hop.to.ip) + ' ' + hop.to.port) + '</td>'
         + '<td>' + esc(hop.confidence) + notes + '</td>'
         + '<td>' + scope('from') + ' &rarr; ' + scope('to') + '</td>'
-        + '<td>' + (hop.captureSpreadSeconds === null ? '<span class="diag-dim">unknown</span>' : hop.captureSpreadSeconds + ' s') + '</td></tr>';
+        + '<td>' + (hop.captureSpreadSeconds === null ? '<span class="diag-dim">unknown</span>' : hop.captureSpreadSeconds + ' s') + '</td>'
+        + '<td>' + macEvidenceCell(hop) + '</td></tr>';
 }
 
 function endpointRow(endpoint) {
@@ -346,6 +373,7 @@ window.runPathQuery = function() {
         from: model.from.ip, to: model.to.ip,
         fromPort: model.from.port, toPort: model.to.port,
         vlanTag: model.vlanTag,
+        sourceMac: model.from.mac, targetMac: model.to.mac,
         allowedScopes: bundle.allowedScopes.length ? bundle.allowedScopes : null,
     });
 
@@ -361,9 +389,12 @@ window.runPathQuery = function() {
 
     result.paths.forEach(function (candidate, index) {
         html += '<h4 class="diag-subhead">Path ' + (index + 1) + ' &middot; ' + esc(candidate.confidence)
-            + (candidate.macCoherent === false ? ' &middot; capture spread exceeds MAC aging' : '') + '</h4>'
+            + (candidate.macCoherent === false ? ' &middot; capture spread exceeds MAC aging' : '')
+            + (candidate.macEvidence ? ' &middot; MAC evidence ' + candidate.macEvidence.confirmed + ' confirmed, '
+                + candidate.macEvidence.contradicted + ' contradicted' : '') + '</h4>'
             + (candidate.hops.length
-                ? '<table class="diag-table"><thead><tr><th>From</th><th>To</th><th>Confidence</th><th>Scope</th><th>Capture spread</th></tr></thead><tbody>'
+                ? '<table class="diag-table"><thead><tr><th>From</th><th>To</th><th>Confidence</th><th>Scope</th><th>Capture spread</th>'
+                    + '<th title="Forwarding-plane evidence: is the far endpoint\'s MAC learned on the port facing the next hop, and the near one on the port facing back?">MAC</th></tr></thead><tbody>'
                     + candidate.hops.map(hopRow).join('') + '</tbody></table>'
                 : '<p class="diag-note">Both ends are the same device; there is no hop.</p>')
             + (candidate.notes.length ? '<p class="diag-note">' + esc(candidate.notes.join(' · ')) + '</p>' : '');

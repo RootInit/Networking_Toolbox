@@ -937,6 +937,37 @@ l2Path(a, b, T):
   come to different conclusions about one row. `ipToLong` / `cidrContains` / `vridOf` moved there for the
   same reason: §6.4 and the L3 rules now test one implementation of containment.
 
+**Done 2026-09-14 (work order item 16) — G1, per-hop forwarding-plane evidence.** Everything above answers
+*may* a frame cross this hop: both ends carry the VLAN and neither is blocking. That is a statement about
+**configuration**. The MAC table is a statement about **traffic** — a switch learns a MAC on the port it
+arrived on — so "the destination is learned on the port facing the next hop" is direct evidence that
+frames really go this way. `computePath` takes optional `sourceMac`/`targetMac`, every hop gains
+`macEvidence.target` / `.source`, and each path carries the counts. Four decisions, each easy to undo by
+accident:
+
+- **Four states, and `ABSENT` is not a fault.** `CONFIRMED` (learned in this VLAN on this hop's port),
+  `CONTRADICTED` (learned in this VLAN on a *different* port), `ABSENT` (the table arrived and does not
+  hold it), `UNMEASURED` (no MAC given, no `MAC_TABLE` section, or the tag wears no name on this device).
+  §6.3 already settled the reading: a switch learns from traffic it has **seen**, so a host that has not
+  spoken through here, or whose entry aged out, is simply absent. Only `CONTRADICTED` says the forwarding
+  plane disagrees with the computed path.
+- **It does not move the confidence ladder.** `VERIFIED` means the spanning tree was read for this VLAN at
+  both ends (§2.3). MAC evidence answers a different question, and demoting on it would make one word mean
+  two things. A contradiction is a path note (`mac-evidence-contradicts-path`), and §6.5 stands: report,
+  do not adjudicate.
+- **Both directions over one wire.** The target should be learned on the near end's port and the source on
+  the far end's, so a hop carries two independent observations. Either contradicting is a contradiction.
+  A MAC learned on two ports of one device in one VLAN is R3's ambiguity, reported in `learnedOn`; if the
+  hop's own port is among them, the frame does leave this way and the evidence confirms. The bundle's
+  members count as the bundle's port, because an aggregate learns against the member the frame arrived on.
+- **Age is reported, not applied.** When a path's `captureSpreadSeconds` exceeds the aging interval the two
+  tables were not read at comparable times, which weakens a contradiction without excusing it:
+  `mac-evidence-stale` joins the contradiction note rather than suppressing it.
+
+The MAC comes from the resolver — the path computer cannot derive it from a `(device, port)` pair — and
+only when the location has exactly one. Two MACs behind one port is an endpoint question, and verifying a
+path against a guess between them is worse than not verifying it.
+
 ### 6.3 Symmetry
 
 Within one VLAN a correctly pruned topology is a tree *when it is pruned at all* (§6.2), so L2
@@ -1137,6 +1168,21 @@ means anything. This is a larger job than revision 1 budgeted and belongs in the
 > can legitimately forward on two links — one up to the root, one down to a daisy-chained closet. The
 > assertion is about its **upward** links: exactly one Root port, every other path to the root
 > `Alternate` and blocked.
+
+> **A second impossible topology, found 2026-09-14 by item 16.** The generator put every MAC in exactly
+> one place: the access port its owner is plugged into. A switch learns every MAC it **forwards**, so a
+> host three closets away is in every uplink table between it and here — the measured capture holds 1,030
+> entries on one access switch, and §6.1's `TRANSIT_ONLY` exists because of it. The fixture asserted that
+> a frame reaches its destination without any switch in between ever seeing it. `applyTransitLearning`
+> now walks the forwarding tree out from each host and learns its MAC on the port facing back toward it,
+> stopping wherever the VLAN stops and crossing only links **both** ends forward on. Fleet MAC rows go
+> from 528 to 22,339 (a core holds 542, an access switch a handful) and the fixture from 11.9 to 15.5 MiB.
+>
+> It exposed a real defect in the graph, not only in the fixture. `transitPorts` was built from a device's
+> **own** LLDP neighbours, so the silent end of a one-sided link — which has its own rule (§3.6) — read as
+> an access port holding every MAC behind it: every client in that subtree reported duplicated, and the
+> uplink reported as an unmanaged segment. A port the graph knows is an end of a switch-to-switch edge is
+> now transit whichever end advertised it.
 
 *(Revision 1 also complained that `:376` sets `RemotePort` to a real port name "where reality
 supplies a MAC 38 times out of 43". Per §5.2 the fixture is **correct** — it only creates
@@ -1714,10 +1760,12 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
     retained and not read, and the refusal annotation is presentation only. G4 and G5 close with it.
     Every field these rules read is **unverified on hardware** — item 12's hardware capture is still owed,
     and it is what would confirm them.
-16. **G1 — per-hop MAC learning as path verification** (§6, Appendix B). §6 computes a path and never
-    *checks* it: at each hop the destination's MAC should be learned on the port facing the next hop,
-    which is forwarding-plane evidence rather than "both ends report FWD". R3 already retains the
-    sightings and nothing in §6 uses them. Not started; the largest remaining item in the document.
+16. ~~**G1 — per-hop MAC learning as path verification** (§6, Appendix B). §6 computes a path and never
+    *checks* it.~~ **Done 2026-09-14.** `macEvidence` on every hop, both directions, four states, reported
+    beside the confidence rather than folded into it — see §6.2 for the four decisions and §8.2 for the
+    fixture change it needed first. One micro-topology (`mac-path-verification`) and one injector
+    (`mac-learned-off-path`, the only fault kind that promises no finding, because G1 is path verification
+    and not a rule).
 *(There is no config-parsing step. See §4.4 — the configuration is collected and stored for backup
 and manual review, and stays out of the rule engine.)*
 
@@ -1758,7 +1806,7 @@ by today's data.
 
 | # | Gap |
 |---|---|
-| **G1** | **MAC learning as per-hop path verification.** The spec computes a path and never *checks* it. At each hop, the destination's MAC should be learned on the port facing the next hop — direct forwarding-plane evidence, far stronger than "both ends report FWD". The data exists (1030 entries in the capture) and `:674` discards exactly the transit sightings needed. R3 retains them; nothing in §6 uses them. **The largest missed opportunity in the document.** **Placed 2026-09-14 as work order item 16**; not started |
+| ~~G1~~ | ~~**MAC learning as per-hop path verification.** The spec computes a path and never *checks* it. At each hop, the destination's MAC should be learned on the port facing the next hop — direct forwarding-plane evidence, far stronger than "both ends report FWD". The data exists (1030 entries in the capture) and `:674` discards exactly the transit sightings needed. R3 retains them; nothing in §6 uses them. **The largest missed opportunity in the document.**~~ **Closed 2026-09-14 (item 16):** `macEvidence` per hop, in both directions, four states — see §6.2. Closing it needed §8.2's other half first: the fixture put every MAC only on the access port its owner was plugged into, so there was no transit evidence anywhere to read |
 | ~~G2~~ | ~~**Per-VLAN STP scope drift between neighbours.** A link where one end runs an instance for VLAN *T* and the other does not. Detectable today by comparing each end's `StpDetail` scope set against its `Vlans` membership. §6.3 only compares states within a scope both ends have. With 4 of 17 VLANs instance-less on one device, not hypothetical~~ **Closed 2026-09-14 (item 13):** `stp-scope-drift` (§3.6) is the comparison, with an injector that plants it on an already-blocked link so the forwarding tree is untouched |
 | ~~G3~~ | ~~**VRRP is partly detectable** and §6.3 says it is not. The `00:00:5e:00:01:xx` virtual-MAC prefix appears in the capture's MAC table and identifies both VRRP presence and the VRID. It gives no master/backup, but "this VLAN's gateway is a VIP, so the L3 hop is one of N routers" beats §6.4's single pick. **Placed 2026-09-14 (item 13):** not a rule — a VIP on a trunk is how VRRP is meant to look — so the detection ships as `vridOf` for §6.4 to report with its gateway pick, and `duplicate-mac-across-devices` skips those MACs.~~ **Closed 2026-09-14 (item 14):** `gatewayCandidates` reports every VIP and its VRID beside its candidates, filtered by the path's VLAN — see §6.4 |
 | ~~G4~~ | ~~**Topology-change churn, not root ID.** `show spanning-tree bridge` also carries topology-change count and time since last change per scope. For "why is this broken *now*", a VLAN that reconverged 40 seconds ago explains more than which bridge is root. ~~Needs the §4.3 command, so it queues behind item 12~~ **The command landed 2026-09-14 (§4.3.1)**: `StpBridge[].TopologyChangeCount` and `.TimeSinceLastChangeSeconds` are retained and in the fixture, per scope, joinable to `StpDetail` by scope string.~~ **Closed 2026-09-14 (item 15):** `stp-topology-change-recent` (§3.7) reads the AGE, per scope, and joins the ports on; the count stays unread and says why |

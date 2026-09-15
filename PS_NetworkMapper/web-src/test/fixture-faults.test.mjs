@@ -28,7 +28,7 @@ function generate(args) {
 const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
 // More than the injector count, so every injector places once and the cycle wraps: a second instance
 // of a kind has to place as well.
-const faulted = generate([...ARGS, '--faults', '43']);
+const faulted = generate([...ARGS, '--faults', '44']);
 const clean = generate(ARGS);
 
 const byIp = (snapshot) => new Map(snapshot.Topology.map(d => [String(d.DeviceIP), d]));
@@ -64,7 +64,7 @@ test('a manifest is written per snapshot and names the map it describes', () => 
     assert.equal(faulted.manifests.length, faulted.names.length);
     for (const [i, m] of faulted.faults.entries()) {
         assert.equal(m.Map, faulted.names[i], 'the manifest and the map must pair by timestamp');
-        assert.equal(m.Requested, 43);
+        assert.equal(m.Requested, 44);
         assert.ok(m.Faults.length > 0, 'a 60-device fleet is large enough to place every kind');
     }
 });
@@ -86,6 +86,8 @@ test('--faults 0 writes an empty manifest rather than none', () => {
     }
 });
 
+const NO_FINDING = ['mac-learned-off-path'];
+
 test('every fault kind places, and each entry carries an oracle a rule can be checked against', () => {
     const kinds = new Set(entries.map(f => f.kind));
     // The L1 family (item 11) is one injector per rule, so this list grows with the rule table: a kind
@@ -106,6 +108,8 @@ test('every fault kind places, and each entry carries an oracle a rule can be ch
         'stp-scope-drift', 'unrecorded-switch-behind-port',
         // The rules the section 4.3 commands unblocked (item 15), appended for the same reason.
         'dot1x-fallback-vlan', 'native-vlan-mismatch', 'stp-recent-topology-change',
+        // G1's fault (item 16), which no rule reads - see NO_FINDING below.
+        'mac-learned-off-path',
     ].sort());
     const ids = entries.map(f => f.id);
     assert.equal(new Set(ids).size, ids.length, 'ids must be unique across snapshots');
@@ -115,7 +119,11 @@ test('every fault kind places, and each entry carries an oracle a rule can be ch
         // oracle. Every kind that is missing one says why at its injector.
         assert.ok(Array.isArray(f.failureModes), `${f.id} has no failureModes list`);
         assert.ok(f.failureModes.every(m => /^F\d+$/.test(m)), `${f.id}: ${f.failureModes} is not a section 7 label`);
-        assert.ok(f.expected && f.expected.finding, `${f.id} has no expected finding`);
+        assert.ok(f.expected, `${f.id} has no expectation at all`);
+        // One kind deliberately promises no finding: G1's path verification is not a rule, so its oracle
+        // is a computePath call in the path suite. The entry still names where it landed.
+        if (NO_FINDING.includes(f.kind)) assert.equal(f.expected.finding, null, `${f.kind} names a finding now`);
+        else assert.ok(f.expected.finding, `${f.id} has no expected finding`);
         // Usually the device the fault was planted on. A two-ended fault is one finding anchored on the
         // lower end of the wire, which may be the peer - so the expectation has to name an end of the
         // fault, not a third device.

@@ -2214,6 +2214,55 @@ function injectDot1xFallbackVlan(rng, fleet) {
     };
 }
 
+// G1. A transit sighting moved to the wrong port: the switch's forwarding table says the host is out a
+// different interface than the computed path uses. Nothing about either port looks wrong and both ends
+// still forward - only comparing the path against the MAC table finds it. Not a rule, so it carries no
+// expected finding; the path tests are its oracle.
+function injectMacLearnedOffPath(rng, fleet) {
+    // The row moved is the sighting of a real client on the switch DIRECTLY ABOVE the one it is plugged
+    // into. Anything else is a contradiction no traced path would cross - and a fault the tool meant to
+    // find it cannot see is not a test of anything.
+    const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
+    const candidates = [];
+    for (const host of scanned(fleet)) {
+        for (const client of host.Clients || []) {
+            if (!client.MAC || !client.VLAN_Name) continue;
+            for (const n of host.Neighbors) {
+                const peer = byIp.get(String(n.ManagementIP));
+                if (!peer || peer.ScanStatus !== 'Ok') continue;
+                const facing = String(n.RemotePort).replace(/\.\d+$/, '');
+                const row = (peer.MacTable || []).find(r => r.VlanName === client.VLAN_Name
+                    && String(r.MacAddress).toUpperCase() === String(client.MAC).toUpperCase()
+                    && r.PhysicalPort === facing);
+                if (!row) continue;
+                // Another port of the peer that genuinely carries the VLAN, or the moved row would be one
+                // no switch prints.
+                const elsewhere = (peer.Interfaces || []).find(r => r.Port !== facing
+                    && peer.Neighbors.some(x => String(x.LocalPort).replace(/\.\d+$/, '') === r.Port)
+                    && (r.Vlans || []).some(v => v.Name === client.VLAN_Name));
+                if (elsewhere) candidates.push({ peer: peer, row: row, to: elsewhere.Port, host: host, client: client });
+            }
+        }
+    }
+    if (!candidates.length) return null;
+    const hit = fPick(rng, candidates);
+    const was = hit.row.PhysicalPort;
+    hit.row.PhysicalPort = hit.to;
+    hit.row.Interface = `${hit.to}.0`;
+    return {
+        kind: 'mac-learned-off-path', failureModes: ['F4'],
+        deviceIp: hit.peer.DeviceIP, port: hit.to, mac: hit.row.MacAddress,
+        params: {
+            wasLearnedOn: was, vlanName: hit.row.VlanName,
+            ownerIp: hit.host.DeviceIP, ownerPort: String(hit.client.Port).replace(/\.\d+$/, ''),
+            vlanTag: hit.client.VLAN_Tag,
+        },
+        // No rule reads this: G1 is path verification, not a fleet sweep, so the oracle is a computePath
+        // call in the path suite rather than a finding in the manifest's delta.
+        expected: { finding: null, deviceIp: hit.peer.DeviceIP, port: hit.to },
+    };
+}
+
 // Both devices answered and only one of them sees the other: LLDP off at one end, a one-way fibre pair,
 // or a neighbour entry that has not aged out.
 function injectLldpOneSided(rng, fleet) {
@@ -2366,7 +2415,82 @@ const INJECTORS = [
     injectUnscannedNeighbour, injectAddresslessBridge, injectInferredSegment,
     // The rules the section 4.3 commands unblocked, appended for the same reason.
     injectNativeVlanMismatch, injectRecentTopologyChange, injectDot1xFallbackVlan,
+    // G1's fault (item 16). It makes no finding, so it is last: a manifest reader meets the rule-backed
+    // kinds first.
+    injectMacLearnedOffPath,
 ];
+
+// G1's evidence, which the fixture did not have. A switch learns every MAC it FORWARDS, so a host three
+// closets away is in every uplink's table between it and here - the measured capture holds 1,030 entries
+// on one access switch. Without these rows the fixture asserted that a MAC exists only where its owner is
+// plugged in, which is the same class of impossible topology as section 8.2's spanning tree: a path
+// verifier reading it would find no evidence anywhere and could not be tested at fleet scale.
+//
+// Two constraints make a row real rather than decorative. It only propagates over a link BOTH ends
+// forward on - a blocked leg carries no traffic and learns nothing - and only while both ends carry the
+// MAC's VLAN, because a trunk that prunes the VLAN never sees the frame.
+function applyTransitLearning(fleet) {
+    const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
+    const rowsOf = new Map(fleet.map(d => [d, new Map((d.Interfaces || []).map(r => [r.Port, r]))]));
+    const learns = (device) => Array.isArray(device.MacTable)
+        && (device.SectionsCaptured || []).includes('MAC_TABLE');
+    const carries = (device, port, vlanName) => {
+        const row = rowsOf.get(device).get(port);
+        return !!row && (row.Vlans || []).some(v => v.Name === vlanName);
+    };
+    const forwarding = (device, port) => {
+        const row = rowsOf.get(device).get(port);
+        return !!row && row.STP === 'FWD' && String(row.Link).toLowerCase() === 'up';
+    };
+
+    // Forwarding adjacency, built once: ip -> [{ peer, localPort, peerPort }] over links both ends forward.
+    const adjacency = new Map(fleet.map(d => [String(d.DeviceIP), []]));
+    for (const l of switchLinksOf(fleet)) {
+        if (!forwarding(l.a, l.aPort) || !forwarding(l.b, l.bPort)) continue;
+        adjacency.get(String(l.a.DeviceIP)).push({ peer: l.b, localPort: l.aPort, peerPort: l.bPort });
+        adjacency.get(String(l.b.DeviceIP)).push({ peer: l.a, localPort: l.bPort, peerPort: l.aPort });
+    }
+
+    // The rows each device already holds, so a MAC that is genuinely learned twice here is not doubled.
+    const held = new Map(fleet.map(d => [d, new Set((d.MacTable || []).map(r => `${r.VlanName}|${String(r.MacAddress).toUpperCase()}`))]));
+    const added = [];
+    for (const origin of fleet) {
+        if (!learns(origin)) continue;
+        for (const seed of origin.MacTable.slice()) {
+            const key = `${seed.VlanName}|${String(seed.MacAddress).toUpperCase()}`;
+            // Breadth-first from the switch the host is plugged into, along the forwarding tree, stopping
+            // wherever the VLAN stops. The port the row lands on is the one facing back toward the host,
+            // which is what makes it evidence about DIRECTION rather than only about presence.
+            const queue = [origin];
+            const seen = new Set([String(origin.DeviceIP)]);
+            while (queue.length) {
+                const here = queue.shift();
+                for (const step of adjacency.get(String(here.DeviceIP))) {
+                    const peerIp = String(step.peer.DeviceIP);
+                    if (seen.has(peerIp)) continue;
+                    if (!carries(here, step.localPort, seed.VlanName)) continue;
+                    if (!carries(step.peer, step.peerPort, seed.VlanName)) continue;
+                    seen.add(peerIp);
+                    if (!learns(step.peer)) continue;
+                    if (!held.get(step.peer).has(key)) {
+                        held.get(step.peer).add(key);
+                        added.push([step.peer, {
+                            RoutingInstance: 'default-switch',
+                            VlanName: seed.VlanName, MacAddress: seed.MacAddress,
+                            Flags: 'D', Age: null,
+                            Interface: `${step.peerPort}.0`, PhysicalPort: step.peerPort,
+                        }]);
+                    }
+                    queue.push(step.peer);
+                }
+            }
+        }
+    }
+    // Appended after the walk so a row learned this pass cannot seed another: every sighting is derived
+    // from a host's own access-port row, never from a transit copy of one.
+    for (const [device, row] of added) device.MacTable.push(row);
+    return added.length;
+}
 
 function injectFaults(fleet, snapshotIndex, count) {
     // Derived from the seed rather than taken from it, so two snapshots of one run do not inject the
@@ -2401,6 +2525,9 @@ for (let i = 0; i < SNAPSHOT_COUNT; i++) {
     applyVlanMembership(topology);
     applyPortDetail(topology, i);
     const fleet = withFailures(topology, i, scanTime);
+    // After withFailures, because it is the pass that blanks a truncated device's MAC table: learning
+    // into one and then blanking it would be the same fiction the other way round.
+    applyTransitLearning(fleet);
     const manifest = injectFaults(fleet, i, FAULT_COUNT);
     fs.writeFileSync(mapPath, JSON.stringify({ Topology: fleet, ScanTimestamp: scanTime.toISOString() }));
     // Not NetworkMap_*: both loaders match /^NetworkMap_.*\.json$/, so a manifest named after its map
