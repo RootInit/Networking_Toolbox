@@ -1680,7 +1680,20 @@ same mistake §9.1 found in `lib/TopologyCrypto.ps1` — was kept because it is 
 allocation, but it **did not measurably move the peak** (3,058 -> 3,038 MiB). The peak is set by how
 far GC falls behind across each snapshot's envelope text, its base64 `ciphertext` string, `atob`'s
 binary string and the decoded buffer, not by any single copy. Bringing it down needs a streaming
-base64 decode, which is a separate piece of work and is not required by any measurement here.
+base64 decode.
+
+**Accepted, with a revisit trigger — decided 2026-09-16.** The two numbers above settle what kind of
+peak it is. Lazy loading moved plaintext 3,499 -> 1,948 MiB and left enveloped where it was
+(3,058 -> 3,038 MiB). If the enveloped peak were *cumulative* across the archive, releasing each body
+before fetching the next would have moved it the same way it moved plaintext. It did not, so the peak
+scales with the **largest single snapshot**, not with how many there are: roughly 16x one snapshot's
+enveloped size at the measured scale (3,038 MiB against 190 MiB), against a tab heap capped near 4 GB
+independently of host RAM.
+
+That is a bound rather than a hope, and it says where the streaming decode becomes owed: a fleet whose
+largest single enveloped snapshot passes **~250 MiB** — on current per-device size, somewhere past 450
+devices — is the point at which 16x no longer fits. Below it, nothing here is required. The number to
+watch is one snapshot's size on disk, not the archive's.
 
 ### 9.3 The build hazard
 
@@ -1726,7 +1739,9 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    showed 20 snapshots retain only 725 MiB, so nothing was bounded and no feature was given up. The
    autoload now streams lazily instead of triple-buffering every body (peak RSS 3,499 -> 1,948 MiB
    plaintext), decrypts the first snapshot once instead of twice, and derives the PBKDF2 key once per
-   archive instead of once per snapshot. The enveloped path still peaks near 3 GB - see §9.2.
+   archive instead of once per snapshot. The enveloped path still peaks near 3 GB - **accepted
+   2026-09-16** with a revisit trigger at ~250 MiB for a single snapshot, because the peak scales with
+   the largest snapshot rather than with the archive. See §9.2.
 3. ~~**Test runner with host recording** (§8.6).~~ **Done 2026-09-13** — `Run-AllTests.ps1`. Records
    host and edition, marks non-5.1 runs SECONDARY, and because no single host runs both suites,
    keeps a per-commit ledger that reports 5.1 verification and web-src separately. Also fails on a
@@ -1839,6 +1854,38 @@ audit's counts are one rule per field where the data supports one rule per compa
 The "not attempted" column is the §4.4 decision — those 5 rules are out of scope, not pending. The
 buildable target is therefore **~106 of 117**, and §3.1 scopes the *first* build to the ~44 supported
 by today's data.
+
+### "Blocked on retention" is closed — audited 2026-09-16
+
+The ~36 rules in that column were blocked on data the crawler read and threw away. That is no longer
+true of anything: Phase 1 plus items 12–15 landed R1–R15 and §4.3's commands, and the audit below was
+done against the two places that can be checked rather than against the count, which enumerates nothing.
+
+**Ground truth.** `lib/Get-JunosNodeData.ps1`'s interface initializer is what the crawler retains;
+`rules.js`'s `FIELD_SECTION` is what the engine reads. §8.3's coupling test already ties the two
+together in one direction — a field the fixture's section-blanker touches must name its section — so
+the audit is the other direction: retained fields no rule reads.
+
+**Port level: none.** Every field in the interface initializer is read by at least one §3.5/§3.6 rule.
+The list of exceptions is the test's own `UNREAD_BY_RULES`, and it holds six names, four of which are
+client fields and two of which are P1's, read by `port-last-used.js` rather than by the engine.
+
+**Device level: seven, and none of them is blocked on retention.** This is the list the next work order
+comes from, not a gap list:
+
+| Retained | Since | The rule it would support | Why it is not built |
+|---|---|---|---|
+| `Alarms` | R14 | The chassis is reporting an alarm | One rule, unblocked, unwritten. `FIELD_SECTION` already gates it on the `ALARMS` section and nothing reads it — the closest thing in the tree to a free rule |
+| `ChassisInventory`, `StackMembers[].Status`/`.Role`/`.MasterPriority` | R11 | A configured VC member that is not `Prsnt`; a stack with no master | Unblocked. §3.5 is port-scoped; this is a device-scope L1 family that does not exist yet |
+| `MasterCpuUtilization`, `MasterMemoryUtilization` | crawler | A threshold | Health, not reachability (§1). Out of scope rather than pending |
+| `UptimeSeconds`, `FpcUptimes` | P1 | Appendix A's "+6 needing a delta" | §3.1 excludes counter deltas: the engine evaluates one snapshot. `port-last-used.js` is what reads them, over the loaded window |
+| `LastConfigured`, `LastConfiguredBy` | R15 | "Changed 40 minutes ago, and this broke 35 minutes ago" | A correlation rather than a rule; the Diagnostics view already reports it |
+| `JunosVersion` | crawler | Version-matched known issues | Needs a table this tree does not have and cannot derive |
+| `CaptureTimestamp` | R12 | — | Not a subject. It is the clock every other answer is measured against |
+
+So the column's successor question is not "what is still discarded" but "what is enumerated": §3.5 and
+§3.6 are the catalogues, they hold 39 rules against the audit's ~44 "supported today", and the seven
+rows above are what a fourth catalogue section would be built from.
 
 ---
 

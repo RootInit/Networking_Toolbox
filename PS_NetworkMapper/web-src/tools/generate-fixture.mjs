@@ -2705,8 +2705,12 @@ function injectLagMemberDown(rng, fleet) {
             if (members.length < 2) continue;
             if (!members.every(m => String((rows.get(m) || {}).Link).toLowerCase() === 'up')) continue;
             if (!portIsFree(device.DeviceIP, bundle.Port)) continue;
+            // The member is what gets darkened, so it has to be free too - this injector is last in
+            // INJECTORS, and an earlier plant on a member would otherwise go dark under it.
+            const member0 = members.slice().sort()[0];
+            if (!portIsFree(device.DeviceIP, member0)) continue;
             // The member to take down, and the far end of that member's own wire.
-            const member = members.slice().sort()[0];
+            const member = member0;
             const neighbor = device.Neighbors.find(n => physical(n.LocalPort) === member);
             const peer = neighbor ? byIp.get(String(neighbor.ManagementIP)) : null;
             if (!peer || peer.ScanStatus !== 'Ok') continue;
@@ -2716,6 +2720,7 @@ function injectLagMemberDown(rng, fleet) {
             if (!peerMemberRow || !peerMemberRow.Bundle) continue;
             const peerBundle = peerRows.get(peerMemberRow.Bundle);
             if (!peerBundle || !portIsFree(peer.DeviceIP, peerBundle.Port)) continue;
+            if (!portIsFree(peer.DeviceIP, peerMember)) continue;
             candidates.push({ device, rows, bundle, member, peer, peerRows, peerMember, peerBundle });
         }
     }
