@@ -286,6 +286,46 @@ test('an edge half carries the tagged/untagged annotation, and absent is null ra
         'an unannotated member must read as unmeasured, not as the untagged one');
 });
 
+// Section 5.3 at fleet scale. The micro-topology proves a two-member bundle collapses to one edge; this
+// proves it on the fixture's own aggregates, which is where a consumer that keyed an edge on the member
+// port - or read the spanning tree off it - would show up.
+test('a fleet aggregate is one edge carrying both its members', () => {
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_l2lag_'));
+    execFileSync(process.execPath, [GENERATOR, '--out', out, '--devices', '60', '--seed', '5', '--snapshots', '1'],
+        { stdio: ['ignore', 'ignore', 'ignore'] });
+    const name = fs.readdirSync(out).find(f => /^NetworkMap_.*\.fixture\.json$/.test(f));
+    const snapshot = JSON.parse(fs.readFileSync(path.join(out, name), 'utf8'));
+    const config = JSON.parse(fs.readFileSync(path.join(out, 'Configuration.fixture.json'), 'utf8'));
+    const graph = buildPortGraph(snapshot.Topology, { allowedScopes: config.settings.allowedScopes });
+
+    const bundles = [];
+    for (const device of snapshot.Topology) {
+        for (const row of device.Interfaces) {
+            if ((row.BundleMembers || []).length) bundles.push({ ip: String(device.DeviceIP), row, device });
+        }
+    }
+    assert.ok(bundles.length >= 4, `only ${bundles.length} aggregates in the fleet`);
+
+    for (const { ip, row, device } of bundles) {
+        const ends = graph.edges.flatMap(e => [e.a, e.b]).filter(end => end.ip === ip && end.port === row.Port);
+        // One edge per bundle, not one per member: two LLDP rows, one link.
+        assert.equal(ends.length, 1, `${ip} ${row.Port} is on ${ends.length} edges`);
+        assert.deepEqual(ends[0].members.map(m => m.port).sort(), row.BundleMembers.slice().sort(),
+            'the edge end must report the configured members, down ones included');
+        // The state comes off the aggregate, which is the only row that has one.
+        assert.equal(ends[0].stp.collapsed, row.STP);
+        assert.deepEqual(ends[0].stp.scopes, row.StpDetail);
+        for (const member of row.BundleMembers) {
+            const memberRow = device.Interfaces.find(r => r.Port === member);
+            assert.equal(memberRow.Bundle, row.Port);
+            assert.deepEqual(memberRow.StpDetail, {});
+            // No edge is keyed on a member port anywhere in the graph.
+            assert.equal(graph.edges.flatMap(e => [e.a, e.b]).filter(e => e.ip === ip && e.port === member).length, 0);
+        }
+    }
+    fs.rmSync(out, { recursive: true, force: true });
+});
+
 test('the generated fixture builds a graph consistent with its own neighbour list', () => {
     const out = fs.mkdtempSync(path.join(os.tmpdir(), 'pnm_l2_'));
     execFileSync(process.execPath, [GENERATOR, '--out', out, '--devices', '60', '--seed', '7', '--snapshots', '1'],

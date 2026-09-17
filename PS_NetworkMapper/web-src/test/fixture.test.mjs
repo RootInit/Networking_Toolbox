@@ -67,13 +67,25 @@ test('port counts match the real hardware, not a token handful', () => {
         `${fortyEightPort.StackMembers[0].Model} reported only ${fortyEightPort.Interfaces.length} ports`);
 });
 
+// Section 5.3. LLDP runs on a bundle's members and the spanning tree runs on the bundle, so the
+// forwarding state of a link that arrived on a member is read off its aggregate. Every consumer has to
+// make this collapse; the fixture's own assertions are consumers too.
+const bundlePortOf = (device, port) => {
+    const physical = String(port).replace(/\.\d+$/, '');
+    const row = device.Interfaces.find(r => r.Port === physical);
+    return (row && row.Bundle) || physical;
+};
+
 test('LLDP is reported from both ends of every link', () => {
     const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
     for (const device of topology) {
         for (const neighbor of device.Neighbors) {
             const peer = byIp.get(String(neighbor.ManagementIP));
             if (!peer || peer.ScanStatus !== 'Ok') continue;
-            const back = peer.Neighbors.find(n => String(n.ManagementIP) === String(device.DeviceIP));
+            // On the port pair, not on the peer alone: an aggregate's members are several links to the
+            // same device, and matching on the address finds whichever member comes first.
+            const back = peer.Neighbors.find(n => String(n.ManagementIP) === String(device.DeviceIP)
+                && String(n.LocalPort) === String(neighbor.RemotePort));
             assert.ok(back, `${peer.Hostname} does not report ${device.Hostname} back`);
             assert.equal(back.RemotePort, neighbor.LocalPort);
             assert.equal(back.LocalPort, neighbor.RemotePort);
@@ -768,7 +780,7 @@ test('item 7: the forwarding subgraph is a spanning tree, not a loop stamped FWD
     const bridges = topology;
     const byIp = new Map(bridges.map(d => [String(d.DeviceIP), d]));
     const stpOf = (d, port) => {
-        const row = d.Interfaces.find(r => r.Port === String(port).replace(/\.\d+$/, ''));
+        const row = d.Interfaces.find(r => r.Port === bundlePortOf(d, port));
         return row ? row.STP : null;
     };
     const linkForwards = (a, aPort, b, bPort) => {
@@ -868,7 +880,7 @@ test('item 7: every blocked port faces a designated one, and no link has two of 
     const bridges = topology.filter(d => d.ScanStatus === 'Ok');
     const byIp = new Map(bridges.map(d => [String(d.DeviceIP), d]));
     const detailOf = (d, port) => {
-        const row = d.Interfaces.find(r => r.Port === String(port).replace(/\.\d+$/, ''));
+        const row = d.Interfaces.find(r => r.Port === bundlePortOf(d, port));
         return row && row.StpDetail ? row.StpDetail['instance 0'] : null;
     };
     let blocked = 0;
@@ -903,7 +915,7 @@ test('item 7: a dual-homed access switch has one root port and blocks its other 
     const byIp = new Map(topology.map(d => [String(d.DeviceIP), d]));
     const isAccess = (d) => typeof d.Configuration === 'string' && !/bridge-priority (4k|8k)/.test(d.Configuration);
     const detailOf = (d, port) => {
-        const row = d.Interfaces.find(r => r.Port === String(port).replace(/\.\d+$/, ''));
+        const row = d.Interfaces.find(r => r.Port === bundlePortOf(d, port));
         return row && row.StpDetail ? row.StpDetail['instance 0'] : null;
     };
 
@@ -949,18 +961,35 @@ test('item 7: STP detail is keyed by the scope the config implies, with the fiel
     const rows = topology.filter(d => d.ScanStatus === 'Ok').flatMap(d => d.Interfaces);
     const FIELDS = ['State', 'Role', 'Cost', 'PortId', 'DesignatedPortId', 'DesignatedBridge'];
     let checked = 0;
+    let members = 0;
     for (const r of rows) {
         assert.ok(r.StpDetail && typeof r.StpDetail === 'object', `${r.Port} has no StpDetail`);
+        // A bundle member is not in "show spanning-tree interface" - its aggregate is - so it carries no
+        // detail and no collapsed state either. That absence is the shape, not an omission.
+        if (r.Bundle) {
+            assert.deepEqual(r.StpDetail, {}, `${r.Port} is a member of ${r.Bundle} and carries STP detail`);
+            assert.equal(r.STP, 'Unknown');
+            members++;
+            continue;
+        }
         assert.deepEqual(Object.keys(r.StpDetail), ['instance 0'], `${r.Port} scopes: ${Object.keys(r.StpDetail)}`);
         const d = r.StpDetail['instance 0'];
         for (const f of FIELDS) assert.ok(f in d, `${r.Port} detail is missing ${f}`);
         // The state string and the collapsed STP field must agree, or the drawer badge contradicts the tab.
         assert.equal(d.State, r.STP, `${r.Port} says ${r.STP} but its detail says ${d.State}`);
-        assert.ok([2000, 20000].includes(d.Cost), `${r.Port} cost ${d.Cost} is neither a 10G nor a 1G RSTP cost`);
-        assert.equal(d.Cost, /^(xe|et)/.test(r.Port) ? 2000 : 20000, `${r.Port} cost does not match its media`);
+        if (r.BundleMembers.length) {
+            // An aggregate's cost comes from its summed bandwidth, so it is a member's cost divided by
+            // the member count - the reason a two-member 10G bundle beats a single 10G uplink.
+            assert.equal(d.Cost, Math.round((/^(xe|et)/.test(r.BundleMembers[0]) ? 2000 : 20000) / r.BundleMembers.length),
+                `${r.Port} cost ${d.Cost} does not match ${r.BundleMembers.length} members of ${r.BundleMembers[0]}`);
+        } else {
+            assert.ok([2000, 20000].includes(d.Cost), `${r.Port} cost ${d.Cost} is neither a 10G nor a 1G RSTP cost`);
+            assert.equal(d.Cost, /^(xe|et)/.test(r.Port) ? 2000 : 20000, `${r.Port} cost does not match its media`);
+        }
         checked++;
     }
     assert.ok(checked > 5000, `only ${checked} rows carried STP detail`);
+    assert.ok(members > 0, 'no bundle member in the fleet, so the aggregate case above never ran');
 });
 
 // C3. @{} serialized as {} and window.asArray turned that into a one-element array holding an empty

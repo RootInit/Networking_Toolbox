@@ -592,7 +592,10 @@ function makeDevice({ deviceIp, bldg, seq, models, role, gateway }) {
     node.MasterCpuUtilization = cpuValue();
     node.MasterMemoryUtilization = memValue();
     // A handful of recent boots so the reboot badge has something to flag; the rest span years.
-    node.Uptime = iso(chance(0.04) ? daysAgo(rnd() * 0.02) : daysAgo(int(3, 1100)));
+    // The recent band starts BEYOND the capture spread: stampCapture reads a device up to 14 minutes
+    // before the snapshot, and a boot drawn inside that window is a device that booted after it was
+    // read - a negative uptime, which stampCapture can only clamp to zero.
+    node.Uptime = iso(chance(0.04) ? daysAgo(0.02 + rnd() * 0.02) : daysAgo(int(3, 1100)));
     // Members boot together and finish ifd init a few seconds apart - the measured spread in
     // port-last-used-spec.md section 1.2 is 4 s per member. ageFleet is what makes one of them differ.
     node._fpcBooted = Object.fromEntries(node.StackMembers.map((m, i) => [String(m.FPC), Date.parse(node.Uptime) + i * 4000]));
@@ -703,12 +706,7 @@ function lldpCommon({ reachable = true, med = null, link = null } = {}) {
 }
 
 // LLDP is symmetric; an asymmetric fixture hides every edge-dedup and primary-tree bug.
-function linkDevices(a, b, descPrefix) {
-    const pa = freeUplinks(a).shift();
-    const pb = freeUplinks(b).shift();
-    if (!pa || !pb) return false;
-    // Both ends of an uplink are the same media, and the uplink cages are optical.
-    const wire = attachment(isFibre(pa) || isFibre(pb));
+function stampWire(a, b, pa, pb, descPrefix, wire) {
     const stamp = (from, to, localPort, remotePort) => {
         from.Neighbors.push({
             LocalPort: localPort, RemotePort: remotePort, Hostname: to.Hostname,
@@ -728,7 +726,88 @@ function linkDevices(a, b, descPrefix) {
     };
     stamp(a, b, pa, pb);
     stamp(b, a, pb, pa);
+}
+
+function linkDevices(a, b, descPrefix) {
+    const pa = freeUplinks(a).shift();
+    const pb = freeUplinks(b).shift();
+    if (!pa || !pb) return false;
+    // Both ends of an uplink are the same media, and the uplink cages are optical.
+    stampWire(a, b, pa, pb, descPrefix, attachment(isFibre(pa) || isFibre(pb)));
     return true;
+}
+
+// Section 5.3. An aggregate, which until now the fixture had none of: `count` physical members under
+// one aeN. LLDP runs on the members and never on the bundle, so the snapshot shows two links where the
+// fleet has one and every consumer has to collapse them - the shape `lag-two-members-up` asserts at
+// micro scale and nothing exercised at fleet scale.
+//
+// The members share ONE wire. They are patched between the same pair of line cards, and a bundle whose
+// legs disagreed about MTU or autonegotiation would be a fault on every member at once rather than the
+// ordinary topology this is meant to be.
+const nextAe = (node) => `ae${(node._aeCount = (node._aeCount || 0) + 1) - 1}`;
+
+function bundleDevices(a, b, descPrefix, count = 2) {
+    // A frame short of cages gets an ordinary link rather than a narrower bundle: a one-member
+    // aggregate is a shape no installer builds, and it would make lag-member-down unfireable there.
+    if (freeUplinks(a).length < count || freeUplinks(b).length < count) return linkDevices(a, b, descPrefix);
+    const ports = [nextAe(a), nextAe(b)];
+    const members = [[], []];
+    const wire = attachment(true);
+    for (let i = 0; i < count; i++) {
+        const pa = freeUplinks(a).shift();
+        const pb = freeUplinks(b).shift();
+        stampWire(a, b, pa, pb, `${descPrefix} ${ports[0]}`, wire);
+        members[0].push(pa);
+        members[1].push(pb);
+    }
+    [a, b].forEach((node, side) => {
+        const far = side === 0 ? b : a;
+        for (const member of members[side]) byPort(node).get(member).Bundle = ports[side];
+        addBundleRow(node, ports[side], members[side], wire, `${descPrefix} to ${far.Hostname.replace('.local', '')}`);
+        (node._bundleConfig ||= []).push(
+            ...members[side].map(m => `set interfaces ${m} ether-options 802.3ad ${ports[side]}`));
+    });
+    return true;
+}
+
+// The aeN row itself. Built through accessRow so there is one definition of "every key a port row
+// carries" - a bundle row missing a key is the section 2.5 absent-versus-null trap, on the one port
+// type no other code path produces.
+function addBundleRow(node, port, members, wire, desc) {
+    const row = accessRow(port, false, false);
+    row.Admin = 'up';
+    row.Link = 'up';
+    row.Desc = desc;
+    row.PoE = 'Unknown';
+    setFlap(row, int(3600, 90 * 86400));
+    row.BundleMembers = members.slice();
+    row.LogicalUnits = [{
+        Parent: port, Unit: 0, Family: 'eth-switch',
+        LocalAddress: null, Remote: null, Admin: 'up', Link: 'up',
+    }];
+    row._wire = wire;
+    node.Interfaces.push(row);
+    node.Interfaces.sort((x, y) => x.Port.localeCompare(y.Port));
+    // byPort memoizes, and freeUplinks caches a list the new row is not in: both have to see it.
+    delete node._byPort;
+}
+
+// The logical port the spanning tree runs on: a member's aggregate, or the port itself. Junos lists
+// aeN in "show spanning-tree interface" and its members nowhere, which is why l2-graph keys a LAG edge
+// on the bundle - an edge keyed on a member would carry no StpDetail at all.
+// The cache is off to the side rather than on the node: this is called on the CLONED fleet too, and a
+// `_byPort` re-created there after withFailures dropped it would serialize into the snapshot.
+const BUNDLE_OF = new WeakMap();
+function stpPortOf(device, port) {
+    const physicalPort = String(port).replace(/\.\d+$/, '');
+    let map = BUNDLE_OF.get(device);
+    if (!map) {
+        map = new Map();
+        for (const row of device.Interfaces || []) if (row.Bundle) map.set(row.Port, row.Bundle);
+        BUNDLE_OF.set(device, map);
+    }
+    return map.get(physicalPort) || physicalPort;
 }
 
 // The MAC-table half and the ARP half sit on different devices, which is what exercises the backfill.
@@ -832,7 +911,9 @@ const cores = coreBuildings.map((bldg, i) => place(
     [i === 1 ? MODULAR_MODEL : CORE_MODELS[i % CORE_MODELS.length]],
     ipFor(coreBuildings[0], 1),
 ));
-linkDevices(cores[0], cores[1], 'ICL');
+// The inter-core link is an aggregate, as it is on every campus that has two cores: the one wire the
+// whole fleet hangs off is the link nobody builds single.
+bundleDevices(cores[0], cores[1], 'ICL');
 
 // A frame that runs out of uplink cages leaves the next closet unpatched, so the count follows fleet
 // size - well under the ~44 cages on the smallest frame model, leaving trunk/dual-home headroom.
@@ -857,7 +938,13 @@ for (const zone of CAMPUS) {
         inThisZone.push(d);
         // Two core switches can't terminate every building frame, which is why there is a zone tier.
         if (inThisZone.length === 1) {
-            for (const core of cores) linkDevices(d, core, 'TRUNK');
+            // The zone's first frame is bundled to the primary core and single-linked to the second:
+            // the redundant leg is there for survival, not capacity. That spreads aggregates over
+            // several devices, so a failed scan on one core cannot leave the fleet without one.
+            for (const core of cores) {
+                if (core === cores[0]) bundleDevices(d, core, 'TRUNK');
+                else linkDevices(d, core, 'TRUNK');
+            }
         } else {
             const upstream = nearestWithPort(bldg, inThisZone.slice(0, -1));
             if (!upstream) throw new Error(`No frame left in ${zone.name} to home ${d.Hostname} to - lower UPLINKS_PER_FRAME (currently ${UPLINKS_PER_FRAME}).`);
@@ -940,8 +1027,16 @@ for (const node of [...cores, ...dists, ...access]) topology.push(node);
 //
 // One RSTP instance, matching the "set protocols rstp" the config text writes. Per-VLAN divergence
 // (a port FWD in one VLAN and BLK in another) needs VSTP config generation and is not faked here.
-const RSTP_COST = { xe: 2000, et: 2000, ge: 20000, mge: 20000, ae: 20000 };
-const portCost = (port) => RSTP_COST[String(port).match(/^[a-z]+/)[0]] ?? 20000;
+const RSTP_COST = { xe: 2000, et: 2000, ge: 20000, mge: 20000 };
+// Junos derives a port's cost from its bandwidth, and an aggregate's bandwidth is its members' summed:
+// two 10G members cost 1000, not the 20000 a flat "ae" entry gave them. With the flat value the core
+// ICL was the most expensive link on the campus and would block in favour of a path through a frame.
+function portCost(port, device) {
+    const row = device ? byPort(device).get(String(port)) : null;
+    const members = row ? row.BundleMembers || [] : [];
+    if (members.length) return Math.max(1, Math.round(portCost(members[0]) / members.length));
+    return RSTP_COST[String(port).match(/^[a-z]+/)[0]] ?? 20000;
+}
 const bridgeId = (node) => `${node.bridgePriority}.${node.bridgeMac}`;
 
 // RSTP compares (priority, MAC) as one number; comparing the printed string would order 4096 after
@@ -970,7 +1065,9 @@ function computeSpanningTree(fleet) {
             if (n.Reachable === false) continue;
             const peer = byIp.get(String(n.ManagementIP));
             if (!peer) continue;
-            links.get(String(d.DeviceIP)).push({ localPort: n.LocalPort.replace(/\.\d+$/, ''), peer, peerPort: String(n.RemotePort).replace(/\.\d+$/, '') });
+            // Section 5.3: RSTP runs on the aggregate, so a bundle's members are one link here. Both
+            // members produce the same entry, and the `claimed` key below collapses the pair.
+            links.get(String(d.DeviceIP)).push({ localPort: stpPortOf(d, n.LocalPort), peer, peerPort: stpPortOf(peer, n.RemotePort) });
         }
     }
 
@@ -996,7 +1093,7 @@ function computeSpanningTree(fleet) {
         for (const l of links.get(curIp)) {
             const peerIp = String(l.peer.DeviceIP);
             if (settled.has(peerIp)) continue;
-            const cost = rootCost.get(curIp) + portCost(l.peerPort);
+            const cost = rootCost.get(curIp) + portCost(l.peerPort, l.peer);
             const known = rootCost.has(peerIp) ? rootCost.get(peerIp) : Infinity;
             // Tie-break on the sender's bridge ID, as RSTP does, so the tree is deterministic.
             const incumbent = rootPort.get(peerIp);
@@ -1025,7 +1122,7 @@ function computeSpanningTree(fleet) {
             'instance 0': {
                 State: state,
                 Role: role,
-                Cost: portCost(port),
+                Cost: portCost(port, device),
                 PortId: portIdOf.get(String(device.DeviceIP)).get(port) || null,
                 DesignatedPortId: designatedPortId,
                 DesignatedBridge: designatedBridge,
@@ -1079,6 +1176,9 @@ function computeSpanningTree(fleet) {
             // "has any detail" left a port that went down still reporting the FWD DESG it held while
             // it was up - a state no switch prints.
             if (assigned.has(`${d.DeviceIP}|${row.Port}`)) continue;
+            // A bundle member is not in "show spanning-tree interface" at all - the aggregate above it
+            // is. Stamping one here would give a LAG two forwarding states that could disagree.
+            if (row.Bundle) continue;
             const up = String(row.Link).toLowerCase() === 'up';
             assign(d, row.Port, up ? 'DESG' : 'DIS', up ? 'FWD' : 'BLK', bridgeId(d),
                 portIdOf.get(String(d.DeviceIP)).get(row.Port) || null);
@@ -1124,7 +1224,7 @@ function assertNothingOrphaned(fleet) {
 function assertForwardingIsSpanningTree(fleet) {
     const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
     const stpOf = (d, port) => {
-        const row = byPort(d).get(String(port).replace(/\.\d+$/, ''));
+        const row = byPort(d).get(stpPortOf(d, port));
         return row ? row.STP : null;
     };
     const fwd = new Set();
@@ -1171,7 +1271,9 @@ const ALL_VLAN_TAGS = VLANS.map(v => v.tag);
 const accessTags = (drawn) => (drawn.includes(VOICE_TAG) ? drawn : [...drawn, VOICE_TAG]);
 
 // One entry per switch-to-switch link, deduplicated on the port pair so a symmetric LLDP pair is one
-// link and a LAG's members stay separate (each member is its own row and carries its own membership).
+// link - and a LAG is ONE link on its aeN, not one per member. "show vlans" lists ae0.0 and never its
+// members, so collapsing here is what puts the membership where the switch prints it and where
+// l2-graph, which keys a LAG edge on the bundle, goes looking for it.
 function switchLinksOf(fleet) {
     const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
     const links = [];
@@ -1180,8 +1282,8 @@ function switchLinksOf(fleet) {
         for (const n of d.Neighbors) {
             const peer = byIp.get(String(n.ManagementIP));
             if (!peer || peer === d) continue;
-            const aPort = String(n.LocalPort).replace(/\.\d+$/, '');
-            const bPort = String(n.RemotePort).replace(/\.\d+$/, '');
+            const aPort = stpPortOf(d, n.LocalPort);
+            const bPort = stpPortOf(peer, n.RemotePort);
             const key = [`${d.DeviceIP}|${aPort}`, `${peer.DeviceIP}|${bPort}`].sort().join('~');
             if (seen.has(key)) continue;
             seen.add(key);
@@ -1352,31 +1454,38 @@ function applyPortDetail(fleet, snapshotIndex, scanTime) {
             if (!clientsByPort.has(port)) clientsByPort.set(port, []);
             clientsByPort.get(port).push(client);
         }
+        const masterFpc = String((node.StackMembers || []).find(m => m.IsMaster)?.FPC ?? '0');
         for (const row of node.Interfaces) {
             const h = detailHash(`${node.DeviceIP}|${row.Port}|${snapshotIndex}`);
             const live = String(row.Link).toLowerCase() === 'up';
             const wire = row._wire || null;
+            // An aggregate has no PHY: Junos prints no media type, no duplex, no autonegotiation and no
+            // PCS/FEC tables on aeN, and the speed it prints is the members' summed. Filling those in
+            // would let a copper-only rule pass here and report NOT_EVALUATED on real hardware.
+            const bundle = (row.BundleMembers || []).length ? row.BundleMembers : null;
             // The wire knows its own media; a port with no wire falls back to what its cage implies.
             const fibre = wire ? wire.fibre : isFibre(row.Port);
 
             row.LinkLevelType = 'Ethernet';
-            row.MediaType = fibre ? 'Fiber' : 'Copper';
+            row.MediaType = bundle ? null : fibre ? 'Fiber' : 'Copper';
             row.Mtu = wire ? wire.mtu : 1514;
             // A fibre port's link-level line carries no Link-mode, no Auto-negotiation and no Remote
             // fault, and no autonegotiation stanza follows it: on optics these four fields are absent,
             // not zero. Every one of the capture's fibre ports is shaped this way, and a fixture that
             // fills them lets a rule pass here that reports NOT_EVALUATED on real hardware.
-            row.AutoNegotiation = fibre ? null : wire && wire.autoneg === 'disabled' ? 'Disabled' : 'Enabled';
+            row.AutoNegotiation = fibre || bundle ? null : wire && wire.autoneg === 'disabled' ? 'Disabled' : 'Enabled';
             // Section 3.4's second trap, reproduced rather than described: every DOWN copper port prints
             // Half-duplex, so a duplex rule that does not hard-gate on Link fires across the estate.
-            row.Duplex = fibre ? null : live ? 'Full-duplex' : 'Half-duplex';
-            row.DuplexNegotiated = !fibre && live ? 'Full-duplex' : null;
+            row.Duplex = fibre || bundle ? null : live ? 'Full-duplex' : 'Half-duplex';
+            row.DuplexNegotiated = !fibre && !bundle && live ? 'Full-duplex' : null;
             // Incomplete is what all 25 of the capture's down ports print; it is the link being down,
             // not a negotiation that failed on a live wire.
-            row.NegotiationStatus = fibre ? null : live ? 'Complete' : 'Incomplete';
+            row.NegotiationStatus = fibre || bundle ? null : live ? 'Complete' : 'Incomplete';
             // The `Speed:` field the parser reads: "Auto" on copper, the rate itself on optics.
-            row.SpeedConfigured = fibre ? '10Gbps' : 'Auto';
-            row.SpeedNegotiated = !fibre && live ? (isFibre(row.Port) ? '10 Gbps' : '1000 Mbps') : null;
+            row.SpeedConfigured = bundle ? null : fibre ? '10Gbps' : 'Auto';
+            row.SpeedNegotiated = bundle
+                ? `${bundle.length * (isFibre(bundle[0]) ? 10 : 1)}Gbps`
+                : !fibre && live ? (isFibre(row.Port) ? '10 Gbps' : '1000 Mbps') : null;
             row.MacAddress = ['02', 'ab', ((h >>> 24) & 0xff), ((h >>> 16) & 0xff), ((h >>> 8) & 0xff), (h & 0xff)]
                 .map(x => (typeof x === 'string' ? x : x.toString(16).padStart(2, '0'))).join(':');
             row.InterfaceFlags = live ? 'SNMP-Traps Internal: 0x4000' : 'Hardware-Down SNMP-Traps Internal: 0x4000';
@@ -1385,7 +1494,7 @@ function applyPortDetail(fleet, snapshotIndex, scanTime) {
             row.ActiveAlarms = live ? 'None' : 'LINK';
             row.ActiveDefects = live ? 'None' : 'LINK';
             row.StatisticsLastCleared = 'Never';
-            row.RemoteFault = fibre ? null : 'Online';
+            row.RemoteFault = fibre || bundle ? null : 'Online';
             row.BpduError = 'None';
             row.LoopDetectPduError = 'None';
             row.EthernetSwitchingError = 'None';
@@ -1401,7 +1510,9 @@ function applyPortDetail(fleet, snapshotIndex, scanTime) {
             // as rose: a decrease is a counter reset, so the fixture asserted a fleet resetting its
             // counters on every crawl, and no delta computed across it meant anything.
             const profile = trafficProfile(node.DeviceIP, row.Port);
-            const bootedMs = (node._fpcBooted || {})[fpcOfPort(row.Port)];
+            // An aggregate spans members and has no FPC of its own, so its counter epoch is the
+            // chassis master's - the same fallback uptimeForPort makes on the reading side.
+            const bootedMs = (node._fpcBooted || {})[fpcOfPort(row.Port) ?? masterFpc];
             const epochSeconds = isFinite(bootedMs) && scanTime
                 ? Math.max(0, (scanTime.getTime() - bootedMs) / 1000) : 0;
             const packets = live ? Math.round(profile.pps * epochSeconds) : 0;
@@ -1438,8 +1549,8 @@ function applyPortDetail(fleet, snapshotIndex, scanTime) {
                 row.MacStatistics[label] = stat;
             }
             // Only the optical ports report these tables at all.
-            row.PcsStatistics = fibre ? { 'Bit errors': { Seconds: 0 }, 'Errored blocks': { Seconds: 0 } } : {};
-            row.FecStatistics = fibre ? { 'FEC Corrected Errors': { Errors: 0 }, 'FEC Uncorrected Errors': { Errors: 0 } } : {};
+            row.PcsStatistics = fibre && !bundle ? { 'Bit errors': { Seconds: 0 }, 'Errored blocks': { Seconds: 0 } } : {};
+            row.FecStatistics = fibre && !bundle ? { 'FEC Corrected Errors': { Errors: 0 }, 'FEC Uncorrected Errors': { Errors: 0 } } : {};
 
             // R7. The PoE row behind the display string, which has to agree with it.
             if (row.PoE === 'Unknown') {
@@ -1501,6 +1612,8 @@ for (const node of topology) {
     if (node.role !== 'ACC') extra.push(`set protocols rstp bridge-priority ${node.role === 'CORE' ? '4k' : '8k'}`);
     if (chance(0.3)) extra.push('set system services netconf ssh');
     if (chance(0.2)) extra.push(`set interfaces ${node.Interfaces[0].Port} description "${node.bldg.abbr} patch"`);
+    // A bundle the configuration does not mention is a bundle that appeared by itself.
+    extra.push(...(node._bundleConfig || []));
     node._extraConfig = extra;
 }
 // Written after the propagation below, not in the loop above: an access switch that trunks a downstream
@@ -1590,7 +1703,8 @@ function ageFleet(days) {
     }
     // Reboots are detected from boot timestamps, so a fleet whose Uptime never moves reports none.
     for (const node of shuffled(topology).slice(0, int(2, 5))) {
-        node.Uptime = iso(daysAgo(rnd() * days));
+        // Never inside the capture spread, for the reason makeDevice's draw explains.
+        node.Uptime = iso(daysAgo(0.02 + rnd() * days));
         // P1's rows come from the same event, so they move with it: a device whose Uptime says it
         // rebooted while its members' uptimes still span years is a state no chassis can be in.
         const bootedMs = Date.parse(node.Uptime);
@@ -1650,7 +1764,8 @@ function withFailures(fleet, snapshotIndex, scanTime) {
     }
     // Dropped before the clone: bldg.zone.buildings points back at bldg, so a clone would recurse.
     const SCRATCH = ['zone', 'bldg', 'role', 'bridgeMac', 'bridgePriority', '_freeUplinks', '_byPort',
-        '_ownTags', '_extraConfig', 'vlanTags', '_wire', '_uplinkIp', '_fpcBooted'];
+        '_ownTags', '_extraConfig', 'vlanTags', '_wire', '_uplinkIp', '_fpcBooted',
+        '_aeCount', '_bundleConfig'];
     return fleet.map(node => {
         const copy = JSON.parse(JSON.stringify(node, (key, value) => (SCRATCH.includes(key) ? undefined : value)));
         if (failing.has(node.DeviceIP)) {
@@ -1701,6 +1816,10 @@ function claimEntry(entry) {
     const p = entry.params || {};
     if (p.peerIp && p.peerPort) CLAIMED_PORTS.add(portKey(p.peerIp, p.peerPort));
     if (p.ownerIp && p.ownerPort) CLAIMED_PORTS.add(portKey(p.ownerIp, p.ownerPort));
+    // An aggregate's fault is on the bundle, but it is the MEMBER that was touched - and a second
+    // injector landing on that member would change what the first one's finding reports.
+    if (p.memberPort) CLAIMED_PORTS.add(portKey(entry.deviceIp, p.memberPort));
+    if (p.peerIp && p.peerMemberPort) CLAIMED_PORTS.add(portKey(p.peerIp, p.peerMemberPort));
 }
 const fHexByte = (rng) => fInt(rng, 0, 255).toString(16).padStart(2, '0');
 const faultClientMac = (rng) => ['aa', 'bb', fHexByte(rng), fHexByte(rng), fHexByte(rng), fHexByte(rng)].join(':');
@@ -1721,6 +1840,15 @@ function faultLldpCommon(rng, { reachable = true, autoneg = 'enabled' } = {}) {
 }
 
 const scanned = (fleet) => fleet.filter(d => d.ScanStatus === 'Ok');
+// Every L1 counter rule is suppressed by `recently-rebooted`, and rightly: a counter on a box that came
+// up twenty minutes ago is history, not a symptom. A defect planted there is a manifest entry promising
+// a finding the engine is correct to withhold, so the device is not a candidate at all.
+const RECENT_BOOT_SECONDS = 3600;
+const bootedWithinTheHour = (node) => {
+    const booted = Date.parse(node.Uptime);
+    const captured = Date.parse(node.CaptureTimestamp);
+    return isFinite(booted) && isFinite(captured) && (captured - booted) / 1000 < RECENT_BOOT_SECONDS;
+};
 // A live port with no LLDP neighbour on it: where a client hangs, and never where a trunk does.
 const clientPorts = (node) => node.Interfaces.filter(r =>
     String(r.Link).toLowerCase() === 'up' &&
@@ -1905,6 +2033,10 @@ function pickReciprocalLink(rng, fleet, eligible) {
             const farRow = peer.Interfaces.find(r => r.Port === farPort);
             if (!nearRow || !farRow) continue;
             if (String(nearRow.Link).toLowerCase() !== 'up' || String(farRow.Link).toLowerCase() !== 'up') continue;
+            // Never a bundle member. The edge those rules compare is keyed on the aggregate, so a TLV
+            // planted on one member is read against the bundle's own fields and the finding lands
+            // somewhere the manifest entry does not name.
+            if (nearRow.Bundle || farRow.Bundle) continue;
             // Neither end may already carry a fault: a second injector writing over the first leaves the
             // first's manifest entry promising a finding that is no longer there.
             if (!portIsFree(device.DeviceIP, nearPort) || !portIsFree(peer.DeviceIP, farPort)) continue;
@@ -2062,9 +2194,9 @@ function injectVlanMissingFromTrunk(rng, fleet) {
 // the PoE fields, a duplex change carries the negotiated value with it - because a fault that contradicts
 // itself teaches a rule to fire on a state no switch produces (section 8.2).
 //
-// `lag-member-down` has no entry: the fixture holds no aggregate at all, and an aggregate is ordinary
-// topology rather than a fault, so inventing one here would put a normal shape behind a fault manifest.
-// It is covered by the `lag-two-members-one-down` micro-topology instead.
+// `lag-member-down` is not here either, for a different reason from the rest: its fault is a member
+// link going down, which is a two-ended mutation rather than a field rewrite. It has its own injector
+// below, now that the base topology builds real aggregates for it to land on.
 const L1_PORT_DEFECTS = [
     {
         finding: 'duplex-half-on-up-link',
@@ -2156,7 +2288,8 @@ function injectPortDefect(defect) {
         return defect.where ? rows.filter(defect.where) : rows;
     };
     const injector = (rng, fleet) => {
-        const hosts = scanned(fleet).filter(d => (!defect.host || defect.host(d)) && portsOf(d).length);
+        const hosts = scanned(fleet).filter(d => (!defect.host || defect.host(d)) && portsOf(d).length
+            && !bootedWithinTheHour(d));
         if (!hosts.length) return null;
         const host = fPick(rng, hosts);
         const row = fPick(rng, portsOf(host));
@@ -2554,6 +2687,60 @@ function injectLldpOneSided(rng, fleet) {
     };
 }
 
+// Section 5.3. One member of an aggregate goes down: the bundle still forwards and the spanning tree
+// does not move, so nothing at device level says anything happened while half the capacity is gone.
+// It is a property of the WIRE, so it lands on both ends - which is why the rule fires twice and the
+// manifest names the far bundle as well.
+//
+// The predicate reads shape only - an aggregate whose members are all up, at both ends - so the same
+// bundle is chosen in every snapshot of a run. A plant that moved between snapshots would be
+// indistinguishable from a member that flapped on its own.
+function injectLagMemberDown(rng, fleet) {
+    const byIp = new Map(fleet.map(d => [String(d.DeviceIP), d]));
+    const candidates = [];
+    for (const device of scanned(fleet)) {
+        const rows = new Map(device.Interfaces.map(r => [r.Port, r]));
+        for (const bundle of device.Interfaces) {
+            const members = bundle.BundleMembers || [];
+            if (members.length < 2) continue;
+            if (!members.every(m => String((rows.get(m) || {}).Link).toLowerCase() === 'up')) continue;
+            if (!portIsFree(device.DeviceIP, bundle.Port)) continue;
+            // The member to take down, and the far end of that member's own wire.
+            const member = members.slice().sort()[0];
+            const neighbor = device.Neighbors.find(n => physical(n.LocalPort) === member);
+            const peer = neighbor ? byIp.get(String(neighbor.ManagementIP)) : null;
+            if (!peer || peer.ScanStatus !== 'Ok') continue;
+            const peerMember = physical(neighbor.RemotePort);
+            const peerRows = new Map(peer.Interfaces.map(r => [r.Port, r]));
+            const peerMemberRow = peerRows.get(peerMember);
+            if (!peerMemberRow || !peerMemberRow.Bundle) continue;
+            const peerBundle = peerRows.get(peerMemberRow.Bundle);
+            if (!peerBundle || !portIsFree(peer.DeviceIP, peerBundle.Port)) continue;
+            candidates.push({ device, rows, bundle, member, peer, peerRows, peerMember, peerBundle });
+        }
+    }
+    if (!candidates.length) return null;
+    const hit = fPick(rng, candidates);
+    for (const [node, rowMap, memberPort] of [[hit.device, hit.rows, hit.member], [hit.peer, hit.peerRows, hit.peerMember]]) {
+        const row = rowMap.get(memberPort);
+        row.Link = 'down';
+        row.LastFlappedSeconds = 900;
+        row.LastFlappedState = 'Parsed';
+        // A down member carries no neighbour, exactly as `lag-two-members-one-down` has it: LLDP needs
+        // the link. The bundle keeps its member list - the configuration has not changed.
+        node.Neighbors = node.Neighbors.filter(n => physical(n.LocalPort) !== memberPort);
+    }
+    return {
+        kind: 'lag-member-down', failureModes: [],
+        deviceIp: String(hit.device.DeviceIP), port: hit.bundle.Port, mac: null,
+        params: {
+            memberPort: hit.member,
+            peerIp: String(hit.peer.DeviceIP), peerPort: hit.peerBundle.Port, peerMemberPort: hit.peerMember,
+        },
+        expected: { finding: 'lag-member-down', deviceIp: String(hit.device.DeviceIP), port: hit.bundle.Port },
+    };
+}
+
 // R9's sentinel: the switch answered the route query and nothing came out of the parser.
 function injectRouteUnparsed(rng, fleet) {
     const hosts = scanned(fleet).filter(d => d.SectionsCaptured.includes('ROUTE') && d.DefaultRoute.NextHop);
@@ -2698,6 +2885,9 @@ const INJECTORS = [
     // STATE, checked by computeLastUsed rather than by the rule engine.
     injectNeverUsedPort, injectIdlePort, injectChatteringPort, injectActivePort,
     injectRebootedDevice, injectStatisticsCleared,
+    // The last rule to get an injector: the fixture had no aggregate at all until the base topology
+    // grew one, and there was nothing for this to land on.
+    injectLagMemberDown,
 ];
 
 // G1's evidence, which the fixture did not have. A switch learns every MAC it FORWARDS, so a host three

@@ -226,7 +226,7 @@ by the 23 below; the estimate was not wrong so much as unattributable.
 | `link-alarm-on-up-port` | `ActiveAlarms` | §3.4's third trap, the one revision 1 had backwards |
 | `bpdu-error`, `loop-detect-pdu-error`, `ethernet-switching-error`, `mac-rewrite-error` | R10's four error fields | They print on every port's link-level line and none was parsed before Phase 1 |
 | `port-flapped-recently` | `LastFlappedSeconds` + `LastFlappedState` | C5's reason for two fields: `Never` is the healthy case, not a missing duration |
-| `lag-member-down` | `BundleMembers` + each member's `Link` | §5.3. The one rule with no fixture injector — see below |
+| `lag-member-down` | `BundleMembers` + each member's `Link` | §5.3. ~~The one rule with no fixture injector~~ — **closed 2026-09-16**, see below |
 | `poe-admin-disabled-with-endpoint` | `PoeAdminStatus` + `MedNeighbors` | R7's own purpose: without `AdminStatus` this reads the same as a phone drawing nothing |
 | `poe-denied` | `PoeOperStatus` | |
 | `dot1x-held`, `dot1x-auth-failed`, `dot1x-unauthenticated-traffic` | `Dot1x[].State` (+ `MacTable`) | R6. The third is the state the MAC-keyed parse structurally could not represent |
@@ -264,10 +264,14 @@ G-BASELINE's reset detection. No rule reads the configuration (§4.4).
   recently is unknown when `Uptime` (fifth-from-last in the batch) is missing. A finding records
   `{by, evaluated, unevaluated}`, because "not suppressed" and "cannot tell whether it is suppressed" are
   different facts and the second one is what a `Partial` node produces.
-- **`lag-member-down` has no fault injector, deliberately.** The fixture contains no aggregate at all, and
-  an aggregate is ordinary topology rather than a fault — inventing one inside `injectFaults` would put a
-  normal shape behind a fault manifest and make the delta oracle describe the generator's own gap. The
-  `lag-two-members-one-down` micro-topology covers the rule; the fixture-side gap is recorded at §8.2.
+- ~~**`lag-member-down` has no fault injector, deliberately.**~~ **Closed 2026-09-16.** The reasoning
+  held and the conclusion was the wrong half of it: an aggregate is ordinary topology, so it belongs in
+  the *base topology*, not in `injectFaults`. `bundleDevices` now builds one — the core ICL, and each
+  zone's first frame to the primary core — with LLDP on the members, the member list, the VLANs and the
+  spanning tree on `aeN`, and the members carrying no STP row of their own. The fault injected on top is
+  the one thing that *is* a fault: a member link down at both ends. Five consumers had to learn the
+  collapse that `l2-graph` already made (the tree, its own assertion, `switchLinksOf`, and two fixture
+  tests), which is the coverage this was missing.
 
 **A fourth trap, found in the capture while writing these rules and not in revision 2's list.** A fibre
 port's link-level line carries **no `Link-mode`, no `Auto-negotiation` and no `Remote fault`**, and no
@@ -375,9 +379,12 @@ the rule imports it instead of restating it, and the role vocabulary is the swit
 correction).
 
 **Three rules have no subject on a healthy fleet** — `shared-segment-not-a-link`, `neighbour-never-scanned`
-and `lag-member-down`. Each is a defect or a coverage gap rather than a shape, so the fixture contains
-none until one is injected; the first two have injectors, and the third is §5.3's documented exception.
-The fleet test names all three, so a fourth appearing there is a subject shape that exists nowhere.
+and `unmanaged-segment-inferred`. Each is a defect or a coverage gap rather than a shape, so the fixture
+contains none until one is injected, and each has an injector. The fleet test names all three, so a
+fourth appearing there is a subject shape that exists nowhere. **Revised 2026-09-16:** `lag-member-down`
+left this list when the base topology grew aggregates, and `unmanaged-segment-inferred` joined it — seed
+5's fleet used to grow one by chance, which also meant the clean fleet reported two warnings with no
+fault behind them. It is a chance shape either way: seed 7 still grows one.
 
 Measured on the same clean 60-device fleet (`--seed 5`, 60 devices / 4,816 ports / 136 edges): **76
 findings across 39 rules** — the 72 L1 findings unchanged, plus four true statements about the fixture's
@@ -787,11 +794,11 @@ its acceptance tests. `computeNeighborEdges` is untouched; the diagram keeps it.
   switch/router LLDP neighbour plus the bundle it belongs to. It is returned as `transitPorts` so
   endpoint resolution uses the same definition — a MAC on one of those ports is a sighting in passing,
   not a location (F4).
-- **The generated fixture has no LAG at all**, so bundle collapse is covered only by the micros. That is
-  an `accessRow` gap, not a graph gap; ~~it lands with the interface-field work.~~ **Still open after that
-  work (item 11).** Filling the interface rows did not create an aggregate: a LAG is a topology shape the
-  generator would have to build in `linkDevices`, and the fault injector is the wrong place for it (§3.5).
-  It is why `lag-member-down` is the one L1 rule the fixture-scale suite cannot exercise.
+- ~~**The generated fixture has no LAG at all**, so bundle collapse is covered only by the micros.~~
+  **Closed 2026-09-16.** It was a topology gap, as this entry said, and it was filled where the entry
+  said it had to be: `bundleDevices` beside `linkDevices`, not in the fault injector. Twelve aggregates
+  in a 60-device fleet, and `lag-member-down` is no longer the rule the fixture-scale suite cannot
+  exercise.
 - Two micro-topologies were added for this item: `transit-sighting` (F4) and
   `inferred-unmanaged-segment` (F14, §5.3's fourth case), taking the set to twelve.
 
@@ -1327,6 +1334,22 @@ less than a clean fleet. Deviations from the plan above:
   oracle survives a fault it cannot place; it cannot survive one the manifest lies about. Found by a
   fixture change that shifted the PRNG, which is to say: it was always reachable, and which ports
   collide is a property of the seed.
+- **An aggregate is topology, its member going down is the fault — added 2026-09-16.** `bundleDevices`
+  builds the bundles in the base topology; `injectLagMemberDown` takes one member down **at both ends**,
+  because a member is a wire and a fixture where one end is dark and the other is not is a state no
+  patch panel produces. The manifest names the bundle at each end plus both member ports, and the delta
+  oracle treats all four as locations the fault owns. The predicate reads shape only — an aggregate whose
+  members are all up, at both ends — so the same bundle is chosen in every snapshot of a run.
+- **A defect planted on a device that just rebooted is a promise the engine will not keep — added
+  2026-09-16.** Every L1 counter rule is suppressed by `recently-rebooted`, and correctly: a counter on a
+  box that came up twenty minutes ago is history rather than a symptom. `injectPortDefect` now skips
+  those devices. Found the same way as the collision above — a PRNG shift put an `input-errors-present`
+  plant on a freshly rebooted switch, and the engine was right to withhold the finding the manifest
+  promised.
+- **A boot stamp inside the capture spread — added 2026-09-16.** `makeDevice` drew its "recently booted"
+  band from zero, and a device is read up to 14 minutes before the snapshot is written: a device could
+  boot *after* it was captured, which `stampCapture` can only clamp to a zero uptime. Both draws now
+  start beyond the spread.
 
 **Extended 2026-09-13 (work order item 11).** Twenty more kinds, one per L1 rule, so §3.5's table has an
 oracle per row: `mtu-mismatch`, `duplex-mismatch`, `dot1x-auth-failed`, `dot1x-connecting`, and sixteen
@@ -1743,9 +1766,9 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
     `web-src/rules.js`: the engine, 23 L1 rules, one fault injector per rule and the delta oracle. See
     §3.5 for the catalogue and the five deviations, §8.3 for the injectors. Two deviations matter beyond
     this item: there was no rule catalogue in the tree to build from, so §3.5's table is now it and
-    Appendix A's L1 column is superseded; and `lag-member-down` has no fixture injector, because the
-    fixture holds no aggregate at all and one invented inside `injectFaults` would put ordinary topology
-    behind a fault manifest.
+    Appendix A's L1 column is superseded; and `lag-member-down` had no fixture injector, because the
+    fixture held no aggregate at all. ~~That deviation stands.~~ **Closed 2026-09-16**: the base topology
+    builds aggregates and the injector takes a member down. Every rule in §3.5 now has one.
 12. ~~**Phase 3 command changes** (§4.3): verify the two upgrades on real hardware, then land the three
     in-place replacements and `show spanning-tree bridge`, measuring session time against the 120 s
     cap each time.~~ **Landed 2026-09-14 from published output; UNVERIFIED on hardware.** Blocked

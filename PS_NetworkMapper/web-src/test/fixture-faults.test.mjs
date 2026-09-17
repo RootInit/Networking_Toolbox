@@ -28,7 +28,7 @@ function generate(args) {
 const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
 // More than the injector count, so every injector places once and the cycle wraps: a second instance
 // of a kind has to place as well.
-const faulted = generate([...ARGS, '--faults', '50']);
+const faulted = generate([...ARGS, '--faults', '51']);
 const clean = generate(ARGS);
 
 const byIp = (snapshot) => new Map(snapshot.Topology.map(d => [String(d.DeviceIP), d]));
@@ -64,7 +64,7 @@ test('a manifest is written per snapshot and names the map it describes', () => 
     assert.equal(faulted.manifests.length, faulted.names.length);
     for (const [i, m] of faulted.faults.entries()) {
         assert.equal(m.Map, faulted.names[i], 'the manifest and the map must pair by timestamp');
-        assert.equal(m.Requested, 50);
+        assert.equal(m.Requested, 51);
         assert.ok(m.Faults.length > 0, 'a 60-device fleet is large enough to place every kind');
     }
 });
@@ -116,6 +116,9 @@ test('every fault kind places, and each entry carries an oracle a rule can be ch
         // port-last-used-spec.md section 9.3 (Tier 1 item 3). These promise a STATE, not a finding.
         'active-port', 'chattering-port', 'idle-port', 'never-used-port',
         'rebooted-device', 'statistics-cleared',
+        // Section 5.3, and the last kind to exist: the fixture had no aggregate to break until its base
+        // topology grew one.
+        'lag-member-down',
     ].sort());
     const ids = entries.map(f => f.id);
     assert.equal(new Set(ids).size, ids.length, 'ids must be unique across snapshots');

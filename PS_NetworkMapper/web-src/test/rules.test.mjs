@@ -376,7 +376,7 @@ const ARGS = ['--devices', '60', '--seed', '5', '--snapshots', '2'];
 const FLEET = { allowedScopes: ['10.'] };
 const clean = generate(ARGS);
 // One fault per injector plus a wrap, so every injector places at least once in every snapshot.
-const faulted = generate([...ARGS, '--faults', '50']);
+const faulted = generate([...ARGS, '--faults', '51']);
 
 test('the clean fleet holds no disagreement between two ends of one wire', () => {
     for (const snap of clean.snapshots) {
@@ -408,11 +408,17 @@ test('every rule reaches the fleet, and the counts add up per subject', () => {
         const stats = result.stats[rule.id];
         return stats.evaluated === 0 && stats.notEvaluated === 0;
     }).map(rule => rule.id);
-    // Three subject shapes a healthy fleet does not contain: no aggregate exists at all (spec 8.2), and
-    // an unmanaged bridge between two switches or a neighbour nobody scanned is a defect rather than a
-    // shape - each is injected, and each is covered by the delta oracle below. Any OTHER rule appearing
-    // here means a subject shape that does not exist anywhere.
-    assert.deepEqual(idle, ['lag-member-down', 'shared-segment-not-a-link', 'neighbour-never-scanned']);
+    // Subject shapes this fleet does not contain: an unmanaged bridge between two switches, a neighbour
+    // nobody scanned, and several MACs behind a port with no neighbour of any kind. Each is a defect
+    // rather than a shape - each is injected, and each is covered by the delta oracle below. Any OTHER
+    // rule appearing here means a subject shape that does not exist anywhere.
+    //
+    // `lag-member-down` left this list when the base topology grew aggregates: it now has a subject on
+    // every frame, and only the down member is injected. `unmanaged-segment-inferred` joined it going
+    // the other way - seed 5's fleet used to grow one by chance and now does not (seed 7 still does),
+    // which also means the clean fleet no longer reports two warnings with no fault behind them.
+    assert.deepEqual(idle,
+        ['shared-segment-not-a-link', 'unmanaged-segment-inferred', 'neighbour-never-scanned']);
 
     for (const rule of RULES) {
         const stats = result.stats[rule.id];
@@ -748,9 +754,9 @@ test('a supplicant authenticated into the guest VLAN is reported, and one in its
 const RULE_IDS = RULES.map(r => r.id);
 const located = (finding) => `${finding.ruleId} ${finding.deviceIp} ${finding.port}`;
 
-// The one rule with no fixture injector: the fixture holds no aggregate at all, and inventing one inside
-// injectFaults would put ordinary topology behind a fault manifest. The micro-topology covers it.
-const NO_INJECTOR = ['lag-member-down'];
+// Every rule has one now: `lag-member-down` was the last, and it got one when the fixture's base
+// topology grew a real aggregate for the fault to land on.
+const NO_INJECTOR = [];
 
 test('one injector per rule, and the manifest says which rule each fault is for', () => {
     const promised = new Set(faulted.faults.flatMap(m => m.Faults)
@@ -781,6 +787,9 @@ test('the findings a faulted fleet grows are exactly the faults the manifest nam
             if (params.silentIp && params.silentPort) touched.add(`${params.silentIp} ${params.silentPort}`);
             // A shared segment is two ports facing one bridge: both of them are the fault.
             if (params.otherIp && params.otherPort) touched.add(`${params.otherIp} ${params.otherPort}`);
+            // An aggregate's fault is reported on the bundle and applied to a member, at both ends.
+            if (params.memberPort) touched.add(`${fault.deviceIp} ${params.memberPort}`);
+            if (params.peerIp && params.peerMemberPort) touched.add(`${params.peerIp} ${params.peerMemberPort}`);
         }
         for (const fault of manifest) {
             if (!fault.expected || !RULE_IDS.includes(fault.expected.finding)) continue;
@@ -797,7 +806,10 @@ test('the findings a faulted fleet grows are exactly the faults the manifest nam
         // is correctly suppressed. Only that kind gets the licence, and only on the device it names.
         const wholeDevice = new Set(manifest.filter(f => f.kind === 'rebooted-device').map(f => f.deviceIp));
         const vanished = [...before].filter(key => !afterKeys.has(key))
-            .filter(key => !wholeDevice.has(key.split(' ')[1]));
+            .filter(key => !wholeDevice.has(key.split(' ')[1]))
+            // A location the manifest names is the fault's own: taking a member down is entitled to
+            // silence what that member used to report. Anywhere else is collateral.
+            .filter(key => !touched.has(key.split(' ').slice(1).join(' ')));
         assert.deepEqual(vanished, [], 'an injected fault took an unrelated finding away with it');
         assert.ok(delta.length >= 16, `only ${delta.length} findings changed; the oracle is going soft`);
     }
