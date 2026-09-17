@@ -1682,18 +1682,21 @@ far GC falls behind across each snapshot's envelope text, its base64 `ciphertext
 binary string and the decoded buffer, not by any single copy. Bringing it down needs a streaming
 base64 decode.
 
-**Accepted, with a revisit trigger — decided 2026-09-16.** The two numbers above settle what kind of
-peak it is. Lazy loading moved plaintext 3,499 -> 1,948 MiB and left enveloped where it was
-(3,058 -> 3,038 MiB). If the enveloped peak were *cumulative* across the archive, releasing each body
-before fetching the next would have moved it the same way it moved plaintext. It did not, so the peak
-scales with the **largest single snapshot**, not with how many there are: roughly 16x one snapshot's
-enveloped size at the measured scale (3,038 MiB against 190 MiB), against a tab heap capped near 4 GB
-independently of host RAM.
+**Accepted at the measured scale, with a revisit trigger — decided 2026-09-16.** What the peak is *not*
+is the live set: 3,038 MiB of peak against 725 MiB retained means four fifths of it is garbage the
+collector had not reached. It is a GC high-water mark, and the two measurements do not establish how it
+scales — lazy loading moved plaintext (3,499 -> 1,948 MiB) and left enveloped alone, which says the
+plaintext peak was triple-buffering and the enveloped one is decode churn, but not whether that churn
+accumulates across the archive or resets per snapshot. Deriving a coefficient from one point would be
+inventing a law; the measurement that would settle it is peak RSS at 5 snapshots against 20, which is
+an afternoon with the same CDP harness and is **not** owed by anything here.
 
-That is a bound rather than a hope, and it says where the streaming decode becomes owed: a fleet whose
-largest single enveloped snapshot passes **~250 MiB** — on current per-device size, somewhere past 450
-devices — is the point at which 16x no longer fits. Below it, nothing here is required. The number to
-watch is one snapshot's size on disk, not the archive's.
+What is decided: at the measured scale — 20 snapshots, 350 devices x 48 ports, 58.6 MiB enveloped each
+— the peak sits about 1 GB under a tab heap capped near 4 GB independently of host RAM, and that is
+accepted. The revisit trigger is the scale itself, not a derived byte count: **a fleet materially past
+350 devices x 48 ports, or a single enveloped snapshot materially past ~60 MiB, re-runs the §9.2
+measurement before it ships.** If the peak has moved with it, the streaming base64 decode is the fix
+and it becomes owed then.
 
 ### 9.3 The build hazard
 
@@ -1740,8 +1743,8 @@ notes. R1 is filed as retention but was, in revision 1's form, a redefinition �
    autoload now streams lazily instead of triple-buffering every body (peak RSS 3,499 -> 1,948 MiB
    plaintext), decrypts the first snapshot once instead of twice, and derives the PBKDF2 key once per
    archive instead of once per snapshot. The enveloped path still peaks near 3 GB - **accepted
-   2026-09-16** with a revisit trigger at ~250 MiB for a single snapshot, because the peak scales with
-   the largest snapshot rather than with the archive. See §9.2.
+   2026-09-16** at the measured scale, with a revisit trigger on the scale itself: four fifths of that
+   peak is uncollected garbage rather than live data, and it sits ~1 GB under the tab cap. See §9.2.
 3. ~~**Test runner with host recording** (§8.6).~~ **Done 2026-09-13** — `Run-AllTests.ps1`. Records
    host and edition, marks non-5.1 runs SECONDARY, and because no single host runs both suites,
    keeps a per-commit ledger that reports 5.1 verification and web-src separately. Also fails on a
@@ -1858,34 +1861,52 @@ by today's data.
 ### "Blocked on retention" is closed — audited 2026-09-16
 
 The ~36 rules in that column were blocked on data the crawler read and threw away. That is no longer
-true of anything: Phase 1 plus items 12–15 landed R1–R15 and §4.3's commands, and the audit below was
-done against the two places that can be checked rather than against the count, which enumerates nothing.
+true of anything: Phase 1 plus items 12–15 landed R1–R15 and §4.3's commands. The audit below is
+against the two things in the tree that can be checked, because the count itself enumerates nothing.
 
-**Ground truth.** `lib/Get-JunosNodeData.ps1`'s interface initializer is what the crawler retains;
-`rules.js`'s `FIELD_SECTION` is what the engine reads. §8.3's coupling test already ties the two
-together in one direction — a field the fixture's section-blanker touches must name its section — so
-the audit is the other direction: retained fields no rule reads.
+**Ground truth.** `lib/Get-JunosNodeData.ps1`'s initializer is what the crawler retains; `rules.js`'s
+`FIELD_SECTION` is what the engine declares it reads. §8.3's coupling test ties them together in one
+direction — a field the fixture's section-blanker touches must name its section. This audit is the
+other direction: **which declared fields no rule actually reads.**
 
-**Port level: none.** Every field in the interface initializer is read by at least one §3.5/§3.6 rule.
-The list of exceptions is the test's own `UNREAD_BY_RULES`, and it holds six names, four of which are
-client fields and two of which are P1's, read by `port-last-used.js` rather than by the engine.
+**27 of `FIELD_SECTION`'s 62 keys are declared and never mentioned again in `rules.js`.** That is the
+real state of the "blocked on retention" column: the data is retained, the gate is declared, and the
+rule was never written. Ten of the 27 have a consumer elsewhere and are only unread *by the engine*:
 
-**Device level: seven, and none of them is blocked on retention.** This is the list the next work order
-comes from, not a gap list:
+| Field | Its consumer |
+|---|---|
+| `InputBytes`, `InputPackets`, `InputBps`, `OutputBytes`, `CarrierTransitions`, `StatisticsLastCleared` | `port-last-used.js` — §2 of `port-last-used-spec.md`, which is where the counter family went instead of into a rule |
+| `Alarms` | `chassis.js`, `drawer.js`, `dashboard.js` — shown, never evaluated |
+| `Bundle` | `l2-graph.js`, for §5.3's collapse |
+| `Desc` | `chassis.js`, `drawer.js`, `endpoint-resolution.js` |
+| `Gateway` | `diagnostics.js`, `drawer.js` |
+
+**The other seventeen have no consumer anywhere in `web-src/`:** `ActiveDefects`, `DeviceFlags`,
+`InterfaceFlags`, `LinkLevelType`, `MediaType`, `DuplexNegotiated`, `SpeedConfigured`,
+`SpeedNegotiated`, `OutputBps`, `OutputPackets`, `PcsStatistics`, `FecStatistics`, and the five PoE
+detail fields (`PoePairMode`, `PoeMaxPower`, `PoePriority`, `PoePowerConsumption`, `PoeClass`). They
+were retained by R7/R10 and the rules that followed read the neighbouring fields instead — `Duplex`
+rather than `DuplexNegotiated`, `PoeAdminStatus`/`PoeOperStatus` rather than the five details. Each is
+a rule that could be written today against data already in every snapshot; none is blocked on anything.
+Several are comparisons rather than thresholds and would pair with an LLDP TLV the way `mtu-mismatch`
+does.
+
+**Device level.** Seven fields the engine does not read, for reasons that are not retention:
 
 | Retained | Since | The rule it would support | Why it is not built |
 |---|---|---|---|
-| `Alarms` | R14 | The chassis is reporting an alarm | One rule, unblocked, unwritten. `FIELD_SECTION` already gates it on the `ALARMS` section and nothing reads it — the closest thing in the tree to a free rule |
-| `ChassisInventory`, `StackMembers[].Status`/`.Role`/`.MasterPriority` | R11 | A configured VC member that is not `Prsnt`; a stack with no master | Unblocked. §3.5 is port-scoped; this is a device-scope L1 family that does not exist yet |
-| `MasterCpuUtilization`, `MasterMemoryUtilization` | crawler | A threshold | Health, not reachability (§1). Out of scope rather than pending |
-| `UptimeSeconds`, `FpcUptimes` | P1 | Appendix A's "+6 needing a delta" | §3.1 excludes counter deltas: the engine evaluates one snapshot. `port-last-used.js` is what reads them, over the loaded window |
+| `Alarms` | the crawler, before Phase 1 | The chassis is reporting an alarm | One rule, unblocked, unwritten. `FIELD_SECTION` gates it on the `ALARMS` section and nothing reads it; three views already display it |
+| `ChassisInventory`, `StackMembers[].Status`/`.Role`/`.MasterPriority` | R11 | A configured VC member that is not `Prsnt`; a stack with no master | Unblocked. §3.5 is port-scoped and this is a device-scope L1 family that does not exist yet |
+| `MasterCpuUtilization`, `MasterMemoryUtilization` | the crawler | A threshold | Health, not reachability (§1). Out of scope rather than pending |
+| `UptimeSeconds`, `FpcUptimes` | P1 | Appendix A's "+6 needing a delta" | §3.1 excludes counter deltas: the engine evaluates one snapshot. `port-last-used.js` reads them over the loaded window instead |
 | `LastConfigured`, `LastConfiguredBy` | R15 | "Changed 40 minutes ago, and this broke 35 minutes ago" | A correlation rather than a rule; the Diagnostics view already reports it |
-| `JunosVersion` | crawler | Version-matched known issues | Needs a table this tree does not have and cannot derive |
+| `JunosVersion` | the crawler | Version-matched known issues | Needs a table this tree does not have and cannot derive |
 | `CaptureTimestamp` | R12 | — | Not a subject. It is the clock every other answer is measured against |
 
-So the column's successor question is not "what is still discarded" but "what is enumerated": §3.5 and
-§3.6 are the catalogues, they hold 39 rules against the audit's ~44 "supported today", and the seven
-rows above are what a fourth catalogue section would be built from.
+The engine holds **42 rules** (`RULES.length`), against the audit's "~44 supported today" — so the
+catalogues have reached that column and the successor question is no longer "what is still discarded"
+but "which of the 17 + 2 above is worth writing". That list is the next work order, and this appendix
+is not it.
 
 ---
 
